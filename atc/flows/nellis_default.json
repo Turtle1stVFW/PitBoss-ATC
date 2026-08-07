@@ -1,0 +1,170 @@
+{
+  "name": "Nellis Default",
+  "airport": "nellis",
+  "steps": [
+    {
+      "id": "del_clearance",
+      "phase": "delivery",
+      "label": "Clearance delivery",
+      "channel": "delivery",
+      "mode": "tts",
+      "template": "clearance",
+      "file": null,
+      "enabled": true,
+      "text": null
+    },
+    {
+      "id": "del_readback",
+      "phase": "delivery",
+      "label": "Readback correct",
+      "channel": "delivery",
+      "mode": "tts",
+      "template": "clearance_readback",
+      "file": null,
+      "enabled": true,
+      "text": null
+    },
+    {
+      "id": "gnd_taxi",
+      "phase": "ground",
+      "label": "Taxi",
+      "channel": "ground",
+      "mode": "tts",
+      "template": "taxi",
+      "file": null,
+      "enabled": true
+    },
+    {
+      "id": "gnd_hold_short",
+      "phase": "ground",
+      "label": "Hold short",
+      "channel": "ground",
+      "mode": "tts",
+      "template": "hold_short",
+      "file": null,
+      "enabled": true
+    },
+    {
+      "id": "gnd_contact_tower",
+      "phase": "ground",
+      "label": "Contact tower",
+      "channel": "ground",
+      "mode": "tts",
+      "template": "contact_tower",
+      "file": null,
+      "enabled": true
+    },
+    {
+      "id": "twr_lineup",
+      "phase": "tower",
+      "label": "Line up and wait",
+      "channel": "tower",
+      "mode": "tts",
+      "template": "lineup",
+      "file": null,
+      "enabled": true
+    },
+    {
+      "id": "twr_clear_takeoff",
+      "phase": "tower",
+      "label": "Cleared takeoff",
+      "channel": "tower",
+      "mode": "tts",
+      "template": "clear_takeoff",
+      "file": null,
+      "enabled": true
+    },
+    {
+      "id": "dep_contact",
+      "phase": "departure",
+      "label": "Contact departure",
+      "channel": "departure",
+      "mode": "tts",
+      "template": "contact_departure",
+      "file": null,
+      "enabled": true
+    },
+    {
+      "id": "ops_checkin",
+      "phase": "ops",
+      "label": "Ops check-in",
+      "channel": "ops",
+      "mode": "tts",
+      "template": "ops_check_in",
+      "file": null,
+      "enabled": true
+    },
+    {
+      "id": "bj_checkin",
+      "phase": "blackjack",
+      "label": "Blackjack check-in",
+      "channel": "blackjack",
+      "mode": "tts",
+      "template": "bj_check_in",
+      "file": null,
+      "enabled": true,
+      "text": null
+    },
+    {
+      "id": "bj_alpha",
+      "phase": "blackjack",
+      "label": "Alpha check",
+      "channel": "blackjack",
+      "mode": "tts",
+      "template": "bj_alpha_check",
+      "file": null,
+      "enabled": true,
+      "text": null
+    },
+    {
+      "id": "bj_range_in",
+      "phase": "blackjack",
+      "label": "Range entry",
+      "channel": "blackjack",
+      "mode": "tts",
+      "template": "bj_range_entry",
+      "file": null,
+      "enabled": true
+    },
+    {
+      "id": "bj_range_out",
+      "phase": "blackjack",
+      "label": "Range exit",
+      "channel": "blackjack",
+      "mode": "tts",
+      "template": "bj_range_exit",
+      "file": null,
+      "enabled": true
+    },
+    {
+      "id": "app_checkin",
+      "phase": "approach",
+      "label": "Approach check-in",
+      "channel": "approach",
+      "mode": "tts",
+      "template": "approach_check_in",
+      "file": null,
+      "enabled": true
+    },
+    {
+      "id": "twr_clear_land",
+      "phase": "tower",
+      "label": "Cleared to land",
+      "channel": "tower",
+      "mode": "tts",
+      "template": "clear_land",
+      "file": null,
+      "enabled": true
+    },
+    {
+      "id": "gnd_taxi_in",
+      "phase": "ground",
+      "label": "Taxi in",
+      "channel": "ground",
+      "mode": "tts",
+      "template": "taxi_in",
+      "file": null,
+      "enabled": true
+    }
+  ]
+}

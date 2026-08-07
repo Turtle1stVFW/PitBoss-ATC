@@ -1,0 +1,64 @@
+{
+  "_comment": "Nellis (KLSV) departures. Instrument SIDs (DREAM7/FYTTR7/MMM8) are spoken ONLY when explicitly filed in the route. Visual Flex + transitions may be inferred from fixes. Otherwise clearance stays plain 'as filed'.",
+  "instrument": [
+    {
+      "id": "DREAM7",
+      "aliases": ["DREAM7", "DREAMSEVEN"],
+      "say": "Dream seven",
+      "kind": "instrument",
+      "transitions": {
+        "MINTT": "Mintt",
+        "JUNNO": "Junno"
+      }
+    },
+    {
+      "id": "FYTTR7",
+      "aliases": ["FYTTR7", "FYTTRSEVEN"],
+      "say": "Fitter seven",
+      "kind": "instrument",
+      "transitions": {
+        "FYTTR": "Fitter"
+      }
+    },
+    {
+      "id": "MMM8",
+      "aliases": ["MMM8", "MORMONMESA8", "MORMONMESAEIGHT"],
+      "say": "Mormon Mesa eight",
+      "kind": "instrument",
+      "transitions": {
+        "MMM": "Mormon Mesa"
+      }
+    }
+  ],
+  "visual": [
+    {
+      "id": "FLEX_NORTH",
+      "aliases": ["FLEXN", "FLEXNORTH", "FLEX.NORTH", "FLEX_NORTH"],
+      "say": "Flex north",
+      "kind": "visual",
+      "route_prefixes": [
+        ["FLEX", "MINTT"],
+        ["FLEX", "JUNNO"],
+        ["FLEX", "NORTH"]
+      ],
+      "default_transition": "MINTT"
+    },
+    {
+      "id": "FLEX_WEST",
+      "aliases": ["FLEXW", "FLEXWEST", "FLEX.WEST", "FLEX_WEST"],
+      "say": "Flex west",
+      "kind": "visual",
+      "route_prefixes": [
+        ["FLEX", "FYTTR"],
+        ["FLEX", "WEST"]
+      ],
+      "default_transition": "FYTTR"
+    }
+  ],
+  "transitions": {
+    "MINTT": "Mintt",
+    "JUNNO": "Junno",
+    "FYTTR": "Fitter",
+    "MMM": "Mormon Mesa"
+  }
+}

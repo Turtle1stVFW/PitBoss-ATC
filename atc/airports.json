@@ -1,0 +1,57 @@
+{
+  "nellis": {
+    "name": "Nellis",
+    "icao": "KLSV",
+    "coalition": 2,
+    "srs_host": "showtime.455aew.com",
+    "srs_port": 5002,
+    "runways": [
+      "21R",
+      "03L"
+    ],
+    "taxi_via": "Alpha",
+    "expect_minutes": 10,
+    "departures_file": "departures/nellis.json",
+    "known_sids": [],
+    "delivery": {
+      "freq_mhz": 289.4,
+      "mod": "AM",
+      "source": "opus"
+    },
+    "ground": {
+      "freq_mhz": 275.8,
+      "mod": "AM",
+      "source": "opus"
+    },
+    "tower": {
+      "freq_mhz": 327.0,
+      "mod": "AM",
+      "source": "opus"
+    },
+    "departure": {
+      "freq_mhz": 350.225,
+      "mod": "AM",
+      "source": "opus"
+    },
+    "approach": {
+      "freq_mhz": 273.55,
+      "mod": "AM",
+      "source": "opus"
+    },
+    "blackjack": {
+      "freq_mhz": 377.8,
+      "mod": "AM",
+      "source": "opus"
+    },
+    "ops": {
+      "freq_mhz": 255.0,
+      "mod": "AM",
+      "source": "local"
+    },
+    "other": {
+      "freq_mhz": 251.0,
+      "mod": "AM",
+      "source": "local"
+    }
+  }
+}

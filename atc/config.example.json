@@ -1,0 +1,31 @@
+{
+  "opus_metar_url": "https://opus.example.com/api/metar?icao={icao}",
+  "opus_backend_url": "https://opus.example.com/backend",
+  "opus_user_name": "",
+  "callsign_override": "",
+  "opus_theater_id": 1,
+  "external_audio_exe": "../DCS-SR-ExternalAudio.exe",
+  "user_agent": "DCS-ATC-Phrase/1.0",
+  "dry_run": false,
+  "default_airport": "nellis",
+  "tts_provider": "windows",
+  "google_credentials": "",
+  "tts_voice": "Microsoft Zira Desktop",
+  "tts_gender": "female",
+  "tts_include_seat": false,
+  "tts_voices": {
+    "default": "Microsoft Zira Desktop",
+    "delivery": "Microsoft Zira Desktop",
+    "ground": "Microsoft Zira Desktop",
+    "tower": "Microsoft Zira Desktop",
+    "departure": "Microsoft Zira Desktop",
+    "approach": "Microsoft Zira Desktop",
+    "blackjack": "Microsoft Zira Desktop",
+    "ops": "Microsoft Zira Desktop",
+    "other": "Microsoft Zira Desktop"
+  },
+  "tts_volume": 0.8,
+  "tts_speed": 1,
+  "flow_file": "flows/nellis_default.json",
+  "flow_http_port": 8765
+}

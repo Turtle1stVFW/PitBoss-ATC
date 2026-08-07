@@ -1,0 +1,23 @@
+# Local ATC config / runtime state (use config.example.json)
+atc/config.json
+atc/flow_state.json
+atc/state.json
+atc/__pycache__/
+atc/**/__pycache__/
+*.pyc
+
+# Google / Azure credentials
+atc/secrets/*
+!atc/secrets/.gitignore
+!atc/secrets/README.txt
+
+# Generated kneeboard output (source generator stays)
+atc/kneeboard/*.pdf
+
+# Logs / editor junk
+*.log
+.DS_Store
+Thumbs.db
+.vs/
+.idea/
+*.user
