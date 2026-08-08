@@ -7,11 +7,12 @@
       "phase": "delivery",
       "label": "Clearance delivery",
       "channel": "delivery",
-      "mode": "tts",
+      "mode": "file",
       "template": "clearance",
-      "file": null,
+      "file": "C:/ATCSounds/1.mp3",
       "enabled": true,
-      "text": null
+      "text": null,
+      "initial_climb_ft": 15000
     },
     {
       "id": "del_readback",
@@ -27,32 +28,24 @@
     {
       "id": "gnd_taxi",
       "phase": "ground",
-      "label": "Taxi",
+      "label": "Taxi to EOR",
       "channel": "ground",
       "mode": "tts",
       "template": "taxi",
       "file": null,
-      "enabled": true
+      "enabled": true,
+      "text": null
     },
     {
-      "id": "gnd_hold_short",
+      "id": "gnd_monitor_tower",
       "phase": "ground",
-      "label": "Hold short",
+      "label": "Monitor tower",
       "channel": "ground",
       "mode": "tts",
-      "template": "hold_short",
+      "template": "monitor_tower",
       "file": null,
-      "enabled": true
-    },
-    {
-      "id": "gnd_contact_tower",
-      "phase": "ground",
-      "label": "Contact tower",
-      "channel": "ground",
-      "mode": "tts",
-      "template": "contact_tower",
-      "file": null,
-      "enabled": true
+      "enabled": true,
+      "text": null
     },
     {
       "id": "twr_lineup",
@@ -62,7 +55,8 @@
       "mode": "tts",
       "template": "lineup",
       "file": null,
-      "enabled": true
+      "enabled": true,
+      "text": null
     },
     {
       "id": "twr_clear_takeoff",
@@ -72,17 +66,19 @@
       "mode": "tts",
       "template": "clear_takeoff",
       "file": null,
-      "enabled": true
+      "enabled": true,
+      "text": null
     },
     {
-      "id": "dep_contact",
+      "id": "dep_radar",
       "phase": "departure",
-      "label": "Contact departure",
+      "label": "Departure radar contact",
       "channel": "departure",
       "mode": "tts",
-      "template": "contact_departure",
+      "template": "radar_contact",
       "file": null,
-      "enabled": true
+      "enabled": true,
+      "text": null
     },
     {
       "id": "ops_checkin",
@@ -92,7 +88,8 @@
       "mode": "tts",
       "template": "ops_check_in",
       "file": null,
-      "enabled": true
+      "enabled": true,
+      "text": null
     },
     {
       "id": "bj_checkin",
@@ -119,12 +116,13 @@
     {
       "id": "bj_range_in",
       "phase": "blackjack",
-      "label": "Range entry",
+      "label": "Alpha approved / hot",
       "channel": "blackjack",
       "mode": "tts",
       "template": "bj_range_entry",
       "file": null,
-      "enabled": true
+      "enabled": true,
+      "text": null
     },
     {
       "id": "bj_range_out",
@@ -134,17 +132,41 @@
       "mode": "tts",
       "template": "bj_range_exit",
       "file": null,
-      "enabled": true
+      "enabled": true,
+      "text": null
     },
     {
-      "id": "app_checkin",
+      "id": "app_stryk",
       "phase": "approach",
-      "label": "Approach check-in",
+      "label": "STRYK recovery",
       "channel": "approach",
       "mode": "tts",
       "template": "approach_check_in",
       "file": null,
-      "enabled": true
+      "enabled": true,
+      "text": null
+    },
+    {
+      "id": "app_overhead",
+      "phase": "approach",
+      "label": "Cleared tactical overhead",
+      "channel": "approach",
+      "mode": "tts",
+      "template": "cleared_approach",
+      "file": null,
+      "enabled": true,
+      "text": null
+    },
+    {
+      "id": "twr_right_break",
+      "phase": "tower",
+      "label": "Right break",
+      "channel": "tower",
+      "mode": "tts",
+      "template": "right_break",
+      "file": null,
+      "enabled": true,
+      "text": null
     },
     {
       "id": "twr_clear_land",
@@ -154,7 +176,19 @@
       "mode": "tts",
       "template": "clear_land",
       "file": null,
-      "enabled": true
+      "enabled": true,
+      "text": null
+    },
+    {
+      "id": "twr_exit",
+      "phase": "tower",
+      "label": "Exit runway",
+      "channel": "tower",
+      "mode": "tts",
+      "template": "exit_runway",
+      "file": null,
+      "enabled": true,
+      "text": null
     },
     {
       "id": "gnd_taxi_in",
@@ -164,7 +198,8 @@
       "mode": "tts",
       "template": "taxi_in",
       "file": null,
-      "enabled": true
+      "enabled": true,
+      "text": null
     }
   ]
 }

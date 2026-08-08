@@ -14,10 +14,10 @@
     {
       "id": "FYTTR7",
       "aliases": ["FYTTR7", "FYTTRSEVEN"],
-      "say": "Fitter seven",
+      "say": "Fighter seven",
       "kind": "instrument",
       "transitions": {
-        "FYTTR": "Fitter"
+        "FYTTR": "Fighter"
       }
     },
     {
@@ -58,7 +58,7 @@
   "transitions": {
     "MINTT": "Mintt",
     "JUNNO": "Junno",
-    "FYTTR": "Fitter",
+    "FYTTR": "Fighter",
     "MMM": "Mormon Mesa"
   }
 }

@@ -1,8 +1,9 @@
 {
-  "opus_metar_url": "https://opus.example.com/api/metar?icao={icao}",
-  "opus_backend_url": "https://opus.example.com/backend",
+  "opus_metar_url": "https://opus.455aew.com/api/metar?icao={icao}",
+  "opus_backend_url": "https://opus.455aew.com/backend",
   "opus_user_name": "",
   "callsign_override": "",
+  "runway_override": "",
   "opus_theater_id": 1,
   "external_audio_exe": "../DCS-SR-ExternalAudio.exe",
   "user_agent": "DCS-ATC-Phrase/1.0",
@@ -25,7 +26,7 @@
     "other": "Microsoft Zira Desktop"
   },
   "tts_volume": 0.8,
-  "tts_speed": 1,
+  "tts_speed": 7,
   "flow_file": "flows/nellis_default.json",
   "flow_http_port": 8765
 }

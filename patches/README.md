@@ -8,6 +8,9 @@ Stock SRS ExternalAudio connects only to loopback. These two files restore a con
 |------|----------------------------|
 | `Program.cs` | `DCS-SR-ExternalAudio/Client/Program.cs` |
 | `ExternalAudioClient.cs` | `DCS-SR-ExternalAudio/Client/ExternalAudioClient.cs` |
+| `Audio/AudioGenerator.cs` | `DCS-SR-ExternalAudio/Audio/AudioGenerator.cs` (WAV `--file` support) |
+
+`ExternalAudioClient` also generates Opus **before** connecting to SRS (avoids ghost clients when TTS hangs), uses an STA thread for System.Speech, and times out if UDP VoIP never becomes ready.
 
 ## Rebuild (Windows)
 

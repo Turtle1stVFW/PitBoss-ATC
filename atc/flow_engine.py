@@ -175,12 +175,21 @@ class FlowEngine:
 
     def play_step(self, step: dict[str, Any]) -> dict[str, Any]:
         airport = self.airport()
-        opus = atc_phrase.resolve_active_opus_flight(self.config)
+        opus, weather = atc_phrase.resolve_opus_and_metar(self.config, airport["icao"])
         if not opus:
-            raise RuntimeError("Could not resolve Opus callsign (check opus_user_name / signup)")
+            # Opus configured but lookup failed — allow TX with manual/fallback callsign.
+            override = atc_phrase.callsign_override(self.config)
+            label = override or "CALLSIGN"
+            print(
+                f"WARNING: Opus lookup failed; using {label} "
+                f"(set Manual callsign or fix Opus signup)",
+                file=sys.stderr,
+            )
+            opus = atc_phrase.synthetic_flight_context(label)
         callsign = opus.radio_callsign
-        weather = atc_phrase.fetch_metar(self.config, airport["icao"])
-        runway = atc_phrase.pick_departure_runway(airport, weather, opus)
+        runway = atc_phrase.pick_departure_runway(
+            airport, weather, opus, self.config, step=step
+        )
         channel = step.get("channel") or step.get("phase") or "other"
         freq, mod, tx_name = atc_phrase.step_radio(airport, channel, step)
         mode = (step.get("mode") or "tts").lower()
@@ -218,6 +227,7 @@ class FlowEngine:
                 runway,
                 custom_text=str(custom_text) if custom_text else None,
                 opus=opus,
+                step=step,
             )
             # Prefer per-step freq/mod (e.g. unique "other" freqs) over airport defaults
             code = atc_phrase.transmit(

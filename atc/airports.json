@@ -9,7 +9,25 @@
       "21R",
       "03L"
     ],
-    "taxi_via": "Alpha",
+    "parking": "Row 18",
+    "taxi_via": "Foxtrot",
+    "clearance_consolidated_with_ground": true,
+    "taxi_routes": {
+      "21R": {
+        "eor": "NW EOR",
+        "outbound_via": "Foxtrot",
+        "inbound_via": "Foxtrot",
+        "exit": "right at Alpha",
+        "intersection": "Delta"
+      },
+      "03L": {
+        "eor": "Alpha South",
+        "outbound_via": "Foxtrot",
+        "inbound_via": "Foxtrot",
+        "exit": "left at Alpha",
+        "intersection": "Bravo"
+      }
+    },
     "expect_minutes": 10,
     "departures_file": "departures/nellis.json",
     "known_sids": [],

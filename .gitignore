@@ -2,6 +2,7 @@
 atc/config.json
 atc/flow_state.json
 atc/state.json
+atc/tts_usage.json
 atc/__pycache__/
 atc/**/__pycache__/
 *.pyc

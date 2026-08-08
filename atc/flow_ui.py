@@ -86,6 +86,7 @@ class MissionPlanner(tk.Tk):
         self.airports = self.engine.airports
         self.selected_index: int | None = None
         self._loading = False
+        self._setup_fields_loaded = False
 
         self.http = None
         try:
@@ -382,7 +383,7 @@ class MissionPlanner(tk.Tk):
         ttk.Label(prev_hdr, text="Preview", style="Header.TLabel").pack(side=tk.LEFT)
         tk.Label(
             prev_hdr,
-            text="updates when you select a step",
+            text="edit phrase then Apply to save on this step",
             bg=C_PANEL,
             fg=C_MUTED,
             font=("Segoe UI", 8),
@@ -447,6 +448,7 @@ class MissionPlanner(tk.Tk):
         self.var_freq_mhz = tk.StringVar()
         self.var_step_voice = tk.StringVar()
         self.var_step_voice_display = tk.StringVar(value="(agency default)")
+        self.var_step_runway = tk.StringVar()
 
         def row(r: int, label: str, widget: tk.Widget, *, pady: int = 4) -> None:
             tk.Label(form, text=label, bg=C_PANEL, fg=C_LABEL, font=("Segoe UI", 9)).grid(
@@ -517,6 +519,21 @@ class MissionPlanner(tk.Tk):
         )
         row(3, "Voice", voice_fr)
 
+        self._row_runway_lbl = tk.Label(form, text="Runway", bg=C_PANEL, fg=C_LABEL, font=("Segoe UI", 9))
+        rwy_fr = tk.Frame(form, bg=C_PANEL)
+        self.cmb_step_runway = ttk.Combobox(rwy_fr, textvariable=self.var_step_runway, width=12)
+        self.cmb_step_runway.pack(side=tk.LEFT)
+        tk.Label(
+            rwy_fr,
+            text="Blank = Setup / flight plan / wind",
+            bg=C_PANEL,
+            fg=C_MUTED,
+            font=("Segoe UI", 8),
+        ).pack(side=tk.LEFT, padx=(8, 0))
+        self._rwy_fr = rwy_fr
+        self._row_runway_lbl.grid(row=4, column=0, sticky="nw", pady=4, padx=(10, 6))
+        rwy_fr.grid(row=4, column=1, sticky="we", pady=4, padx=(0, 10))
+
         mode_fr = tk.Frame(form, bg=C_PANEL)
         ttk.Radiobutton(
             mode_fr,
@@ -542,7 +559,7 @@ class MissionPlanner(tk.Tk):
             command=self._mode_ui,
             style="Panel.TRadiobutton",
         ).pack(side=tk.LEFT)
-        row(4, "Action", mode_fr)
+        row(5, "Action", mode_fr)
 
         tmpl_labels = [lab for _, lab in atc_phrase.TEMPLATE_CHOICES]
         self._tmpl_by_label = {lab: key for key, lab in atc_phrase.TEMPLATE_CHOICES}
@@ -559,8 +576,9 @@ class MissionPlanner(tk.Tk):
         self.cmb_template.configure(
             postcommand=lambda: self.cmb_template.configure(values=tuple(tmpl_labels))
         )
-        self._row_template_lbl.grid(row=5, column=0, sticky="nw", pady=4, padx=(10, 6))
-        self.cmb_template.grid(row=5, column=1, sticky="we", pady=4, padx=(0, 10))
+        self.cmb_template.bind("<<ComboboxSelected>>", lambda _e: self._update_step_runway_ui())
+        self._row_template_lbl.grid(row=6, column=0, sticky="nw", pady=4, padx=(10, 6))
+        self.cmb_template.grid(row=6, column=1, sticky="we", pady=4, padx=(0, 10))
 
         self._row_custom_lbl = tk.Label(form, text="Custom", bg=C_PANEL, fg=C_LABEL, font=("Segoe UI", 9))
         self.txt_custom = tk.Text(
@@ -580,16 +598,16 @@ class MissionPlanner(tk.Tk):
             fg=C_MUTED,
             font=("Segoe UI", 8),
         )
-        self._row_custom_lbl.grid(row=6, column=0, sticky="nw", pady=4, padx=(10, 6))
-        self.txt_custom.grid(row=6, column=1, sticky="we", pady=4, padx=(0, 10))
-        self._row_custom_hint.grid(row=7, column=1, sticky="w", padx=(0, 10))
+        self._row_custom_lbl.grid(row=7, column=0, sticky="nw", pady=4, padx=(10, 6))
+        self.txt_custom.grid(row=7, column=1, sticky="we", pady=4, padx=(0, 10))
+        self._row_custom_hint.grid(row=8, column=1, sticky="w", padx=(0, 10))
 
         self._row_file_lbl = tk.Label(form, text="Audio file", bg=C_PANEL, fg=C_LABEL, font=("Segoe UI", 9))
         file_fr = tk.Frame(form, bg=C_PANEL)
         ttk.Entry(file_fr, textvariable=self.var_file).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(file_fr, text="Browse…", command=self._browse_file).pack(side=tk.LEFT, padx=4)
-        self._row_file_lbl.grid(row=8, column=0, sticky="nw", pady=4, padx=(10, 6))
-        file_fr.grid(row=8, column=1, sticky="we", pady=4, padx=(0, 10))
+        self._row_file_lbl.grid(row=9, column=0, sticky="nw", pady=4, padx=(10, 6))
+        file_fr.grid(row=9, column=1, sticky="we", pady=4, padx=(0, 10))
         self._file_fr = file_fr
 
         ttk.Checkbutton(
@@ -597,13 +615,76 @@ class MissionPlanner(tk.Tk):
             text="Include in flight (enabled)",
             variable=self.var_enabled,
             style="Panel.TCheckbutton",
-        ).grid(row=9, column=1, sticky="w", pady=6, padx=(0, 10))
+        ).grid(row=10, column=1, sticky="w", pady=6, padx=(0, 10))
 
         self._last_preview_phrase = ""
+        self._preview_base_phrase = ""  # last auto-filled phrase (detect Preview edits)
         self._last_preview_channel = "other"
         self._last_preview_file: str | None = None
         self._update_freq_ui()
         self._mode_ui()
+
+    def _phrase_from_preview_box(self) -> str | None:
+        """Editable radio phrase from the Preview box (strips Spoken/metadata footers)."""
+        raw = self.preview_box.get("1.0", tk.END)
+        if not raw.strip():
+            return None
+        for marker in (
+            "\n\nSpoken / Hear / SRS:",
+            "\n\nSpoken (Hear / SRS):",
+            "\n\n→ ",
+            "\n\n→",
+        ):
+            if marker in raw:
+                raw = raw.split(marker, 1)[0]
+                break
+        phrase = raw.strip()
+        if not phrase:
+            return None
+        if phrase.startswith("Select a step") or phrase.startswith("(preview unavailable)"):
+            return None
+        if phrase.startswith("[FILE]"):
+            return None
+        return phrase
+
+    def _set_preview_display(self, body: str, *, base_phrase: str | None = None) -> None:
+        """Write Preview box; track base phrase used to detect user edits."""
+        self.preview_box.delete("1.0", tk.END)
+        self.preview_box.insert(tk.END, body)
+        if base_phrase is not None:
+            self._preview_base_phrase = base_phrase
+            self._last_preview_phrase = base_phrase
+
+    def _step_uses_runway(self) -> bool:
+        """True when this step's spoken phrase can include a runway."""
+        mode = self.var_mode.get()
+        if mode == "file":
+            return False
+        if mode == "custom":
+            return True
+        lab = self.var_template.get()
+        tmpl = self._tmpl_by_label.get(lab, "")
+        return tmpl in atc_phrase.TEMPLATES_USING_RUNWAY
+
+    def _refresh_step_runway_choices(self) -> None:
+        ap = self._airport()
+        choices = [""] + [str(r) for r in (ap.get("runways") or [])]
+        current = self.var_step_runway.get().strip()
+        if current and current not in choices:
+            choices.append(current)
+        self.cmb_step_runway.configure(values=tuple(choices))
+
+    def _update_step_runway_ui(self) -> None:
+        show = self._step_uses_runway()
+        if show:
+            self._refresh_step_runway_choices()
+            self._row_runway_lbl.grid(row=4, column=0, sticky="nw", pady=4, padx=(10, 6))
+            self._rwy_fr.grid(row=4, column=1, sticky="we", pady=4, padx=(0, 10))
+        else:
+            self._row_runway_lbl.grid_remove()
+            self._rwy_fr.grid_remove()
+        if hasattr(self, "_plan_canvas"):
+            self.after(30, lambda: self._plan_canvas.configure(scrollregion=self._plan_canvas.bbox("all")))
 
     def _mode_ui(self) -> None:
         mode = self.var_mode.get()
@@ -618,21 +699,23 @@ class MissionPlanner(tk.Tk):
             else:
                 widget.grid_remove()
 
-        _set(self._row_template_lbl, show_tmpl, row=5, column=0, sticky="nw", pady=4, padx=(10, 6))
-        _set(self.cmb_template, show_tmpl, row=5, column=1, sticky="we", pady=4, padx=(0, 10))
+        _set(self._row_template_lbl, show_tmpl, row=6, column=0, sticky="nw", pady=4, padx=(10, 6))
+        _set(self.cmb_template, show_tmpl, row=6, column=1, sticky="we", pady=4, padx=(0, 10))
         if show_tmpl:
             self.cmb_template.configure(state="readonly")
 
-        _set(self._row_custom_lbl, show_custom, row=6, column=0, sticky="nw", pady=4, padx=(10, 6))
-        _set(self.txt_custom, show_custom, row=6, column=1, sticky="we", pady=4, padx=(0, 10))
-        _set(self._row_custom_hint, show_custom, row=7, column=1, sticky="w", padx=(0, 10))
+        _set(self._row_custom_lbl, show_custom, row=7, column=0, sticky="nw", pady=4, padx=(10, 6))
+        _set(self.txt_custom, show_custom, row=7, column=1, sticky="we", pady=4, padx=(0, 10))
+        _set(self._row_custom_hint, show_custom, row=8, column=1, sticky="w", padx=(0, 10))
         if show_custom:
             self.txt_custom.configure(state=tk.NORMAL)
         else:
             self.txt_custom.configure(state=tk.DISABLED)
 
-        _set(self._row_file_lbl, show_file, row=8, column=0, sticky="nw", pady=4, padx=(10, 6))
-        _set(self._file_fr, show_file, row=8, column=1, sticky="we", pady=4, padx=(0, 10))
+        _set(self._row_file_lbl, show_file, row=9, column=0, sticky="nw", pady=4, padx=(10, 6))
+        _set(self._file_fr, show_file, row=9, column=1, sticky="we", pady=4, padx=(0, 10))
+
+        self._update_step_runway_ui()
 
         if hasattr(self, "_plan_canvas"):
             self.after(30, lambda: self._plan_canvas.configure(scrollregion=self._plan_canvas.bbox("all")))
@@ -760,25 +843,31 @@ class MissionPlanner(tk.Tk):
             tk.Label(cf, text="Or type Google voice id:", bg=C_BG, fg=C_MUTED).pack(anchor="w")
             ttk.Entry(cf, textvariable=custom_var).pack(fill=tk.X, pady=4)
 
-        def on_ok() -> None:
+        def resolve_voice() -> str:
             typed = custom_var.get().strip()
             picked = self._selected_voice_from_listbox(lb)
             if typed and atc_phrase.tts_provider(self.config_data) == "google":
-                pick = typed
-            elif picked:
-                pick = picked
-            elif typed:
-                pick = typed
-            else:
+                return typed
+            if picked:
+                return picked
+            return typed
+
+        def on_ok() -> None:
+            pick = resolve_voice()
+            if not pick:
                 return
             self.var_step_voice.set(pick)
             self._refresh_step_voice_display()
             dlg.destroy()
 
+        def on_preview() -> None:
+            self._preview_voice_sample(resolve_voice())
+
         btns = tk.Frame(dlg, bg=C_BG)
         btns.pack(fill=tk.X, padx=12, pady=(4, 12))
         ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side=tk.RIGHT)
         ttk.Button(btns, text="Select", style="Accent.TButton", command=on_ok).pack(side=tk.RIGHT, padx=8)
+        ttk.Button(btns, text="Preview", command=on_preview).pack(side=tk.LEFT)
         lb.bind("<Double-Button-1>", lambda _e: on_ok())
         dlg.bind("<Return>", lambda _e: on_ok())
         dlg.bind("<Escape>", lambda _e: dlg.destroy())
@@ -804,6 +893,9 @@ class MissionPlanner(tk.Tk):
                     extra = f" @{mhz:g}"
             if step.get("voice"):
                 extra += " [v]"
+            step_rwy = atc_phrase.normalize_runway(step.get("runway"))
+            if step_rwy:
+                extra += f" [rwy {step_rwy}]"
             line = f" {i + 1:>2}  {en}  {ch:<4}  {kind:<4}  {label}{extra}"
             self.timeline.insert(tk.END, line)
         if self.selected_index is not None and self.selected_index < len(steps):
@@ -831,6 +923,7 @@ class MissionPlanner(tk.Tk):
         self.var_file.set(step.get("file") or "")
         self.var_enabled.set(bool(step.get("enabled", True)))
         self.var_step_voice.set(str(step.get("voice") or "").strip())
+        self.var_step_runway.set(str(step.get("runway") or "").strip())
         mhz = atc_phrase._parse_mhz(step.get("freq_mhz"))
         if mhz is not None:
             self.var_freq_mhz.set(f"{mhz:g}")
@@ -850,6 +943,7 @@ class MissionPlanner(tk.Tk):
         self._mode_ui()
         self._update_freq_ui()
         self._refresh_step_voice_display()
+        self._update_step_runway_ui()
         self._loading = False
         # Show preview immediately for the selected step
         self.after(60, lambda: self.preview_step(apply=False))
@@ -872,6 +966,16 @@ class MissionPlanner(tk.Tk):
         else:
             step.pop("voice", None)
 
+        # Keep a stored runway even if the field is hidden for this template type,
+        # unless the user cleared it while the field was visible.
+        if self._step_uses_runway():
+            rwy = atc_phrase.normalize_runway(self.var_step_runway.get())
+            if rwy:
+                step["runway"] = rwy
+                self.var_step_runway.set(rwy)
+            else:
+                step.pop("runway", None)
+
         if step["channel"].lower() == "other":
             mhz = atc_phrase._parse_mhz(self.var_freq_mhz.get())
             if mhz is None:
@@ -883,21 +987,40 @@ class MissionPlanner(tk.Tk):
             step.pop("freq_mhz", None)
             step.pop("mod", None)
 
+        # Lock the Preview phrase on Apply so random climb / phrasing cannot
+        # re-roll between Preview text and Hear / Fly.
+        preview_phrase = self._phrase_from_preview_box()
+        custom_box = self.txt_custom.get("1.0", tk.END).strip()
+        lab = self.var_template.get()
+        tmpl = self._tmpl_by_label.get(lab, "radio_check")
+
         if mode == "file":
             step["mode"] = "file"
             step["file"] = self.var_file.get().strip() or None
             step["text"] = None
-        elif mode == "custom":
-            step["mode"] = "tts"
-            step["text"] = self.txt_custom.get("1.0", tk.END).strip() or None
-            step["file"] = None
-            step["template"] = "radio_check"
         else:
+            if preview_phrase:
+                custom = preview_phrase.strip()
+            elif mode == "custom":
+                custom = custom_box or None
+            else:
+                custom = None
             step["mode"] = "tts"
-            step["text"] = None
             step["file"] = None
-            lab = self.var_template.get()
-            step["template"] = self._tmpl_by_label.get(lab, "radio_check")
+            step["template"] = tmpl
+            if custom:
+                step["text"] = custom
+                self._loading = True
+                self.var_mode.set("custom")
+                self.txt_custom.configure(state=tk.NORMAL)
+                self.txt_custom.delete("1.0", tk.END)
+                self.txt_custom.insert(tk.END, custom)
+                self._mode_ui()
+                self._loading = False
+                self._preview_base_phrase = custom
+                self._last_preview_phrase = custom
+            else:
+                step["text"] = None
         self.refresh_timeline()
         self.timeline.selection_set(self.selected_index)
         self.after(40, lambda: self.preview_step(apply=False))
@@ -1043,20 +1166,33 @@ class MissionPlanner(tk.Tk):
         self._set_active_flow_path(path)
         messagebox.showinfo("Saved", f"Mission saved.\n{path}\n\nThis is now the active mission for Fly.")
 
-    def _sync_identity_to_config(self) -> None:
-        """Push Setup identity / TTS fields into runtime config (even before Save)."""
+    def _sync_identity_to_config(self, *, allow_clear_opus: bool = False) -> None:
+        """Push Setup identity / TTS fields into runtime config (even before Save).
+
+        Never overwrite a saved Opus username/backend (or Google credentials path) with a
+        blank UI value unless allow_clear_opus=True. Empty StringVars during early UI
+        build used to wipe config.json on the next preview/TX save.
+        """
         if hasattr(self, "var_user"):
-            self.config_data["opus_user_name"] = self.var_user.get().strip()
+            user = self.var_user.get().strip()
+            if user or allow_clear_opus:
+                self.config_data["opus_user_name"] = user
         if hasattr(self, "var_backend"):
-            self.config_data["opus_backend_url"] = self.var_backend.get().strip()
+            backend = self.var_backend.get().strip()
+            if backend or allow_clear_opus:
+                self.config_data["opus_backend_url"] = backend
         if hasattr(self, "var_callsign_override"):
             self.config_data["callsign_override"] = self.var_callsign_override.get().strip()
+        if hasattr(self, "var_runway_override"):
+            self.config_data["runway_override"] = self.var_runway_override.get().strip()
         if hasattr(self, "var_tts_provider"):
             self.config_data["tts_provider"] = atc_phrase.tts_provider(
                 {"tts_provider": self.var_tts_provider.get()}
             )
         if hasattr(self, "var_google_credentials"):
-            self.config_data["google_credentials"] = self.var_google_credentials.get().strip()
+            creds = self.var_google_credentials.get().strip()
+            if creds or allow_clear_opus:
+                self.config_data["google_credentials"] = creds
         if hasattr(self, "voice_vars"):
             voices = {ch: var.get().strip() for ch, var in self.voice_vars.items()}
             self.config_data["tts_voices"] = voices
@@ -1083,10 +1219,13 @@ class MissionPlanner(tk.Tk):
         def work() -> None:
             try:
                 ap = self._airport()
-                opus = atc_phrase.resolve_active_opus_flight(self.config_data)
+                opus, wx = atc_phrase.resolve_opus_and_metar(
+                    self.config_data, ap["icao"]
+                )
                 cs = opus.radio_callsign if opus else "CALLSIGN"
-                wx = atc_phrase.fetch_metar(self.config_data, ap["icao"])
-                rwy = atc_phrase.pick_departure_runway(ap, wx, opus)
+                rwy = atc_phrase.pick_departure_runway(
+                    ap, wx, opus, self.config_data, step=step
+                )
                 channel = step.get("channel") or "other"
                 freq, mod, _ = atc_phrase.step_radio(ap, channel, step)
                 voice, _ = atc_phrase.voice_for_step(self.config_data, channel, step)
@@ -1105,23 +1244,24 @@ class MissionPlanner(tk.Tk):
                         rwy,
                         custom_text=step.get("text"),
                         opus=opus,
+                        step=step,
                     )
+                    spoken_footer = atc_phrase.spoken_radio_footer(phrase, voice=voice)
                     fp = ""
                     if opus and opus.fp_route_string:
                         fp = f" · FP {opus.fp_route_string}"
                     text = (
                         f"{phrase}\n\n"
+                        f"{spoken_footer}\n\n"
                         f"→ {freq} {mod} · {cs} · rwy {rwy} · voice {voice}{fp}"
                     )
 
                 def done() -> None:
                     if getattr(self, "_preview_req_id", 0) != req_id:
                         return
-                    self._last_preview_phrase = phrase
                     self._last_preview_channel = channel
                     self._last_preview_file = str(file_path) if file_path else None
-                    self.preview_box.delete("1.0", tk.END)
-                    self.preview_box.insert(tk.END, text)
+                    self._set_preview_display(text, base_phrase=phrase or None)
 
                 self.after(0, done)
             except Exception as exc:  # noqa: BLE001
@@ -1133,8 +1273,9 @@ class MissionPlanner(tk.Tk):
                     if apply:
                         messagebox.showerror("Preview", err)
                     else:
-                        self.preview_box.delete("1.0", tk.END)
-                        self.preview_box.insert(tk.END, f"(preview unavailable)\n{err}")
+                        self._set_preview_display(
+                            f"(preview unavailable)\n{err}", base_phrase=""
+                        )
 
                 self.after(0, fail)
 
@@ -1160,10 +1301,13 @@ class MissionPlanner(tk.Tk):
                     atc_phrase.preview_file_local(str(path))
                     return
 
-                opus = atc_phrase.resolve_active_opus_flight(self.config_data)
+                opus, wx = atc_phrase.resolve_opus_and_metar(
+                    self.config_data, ap["icao"]
+                )
                 cs = opus.radio_callsign if opus else "CALLSIGN"
-                wx = atc_phrase.fetch_metar(self.config_data, ap["icao"])
-                rwy = atc_phrase.pick_departure_runway(ap, wx, opus)
+                rwy = atc_phrase.pick_departure_runway(
+                    ap, wx, opus, self.config_data, step=step
+                )
                 phrase, _, _, _ = atc_phrase.build_flow_step_phrase(
                     ap,
                     channel,
@@ -1173,38 +1317,36 @@ class MissionPlanner(tk.Tk):
                     rwy,
                     custom_text=step.get("text"),
                     opus=opus,
+                    step=step,
                 )
                 voice, _ = atc_phrase.voice_for_step(self.config_data, channel, step)
                 freq, mod, _ = atc_phrase.step_radio(ap, channel, step)
                 vol = float(self.config_data.get("tts_volume", 0.8))
                 speed = atc_phrase.tts_speed(self.config_data)
                 provider = atc_phrase.tts_provider(self.config_data)
+                google_creds = atc_phrase.google_credentials_path(self.config_data)
 
                 def show() -> None:
-                    self._last_preview_phrase = phrase
                     self._last_preview_channel = channel
-                    self.preview_box.delete("1.0", tk.END)
-                    if provider == "google":
-                        note = (
-                            f"{phrase}\n\n→ Google TTS cannot preview on local speakers here.\n"
-                            f"Use “Hear on SRS” to test {freq} {mod} · voice {voice}."
-                        )
-                    else:
-                        note = f"{phrase}\n\n→ local speakers · {freq} {mod} · {voice} · speed {speed}"
-                    self.preview_box.insert(tk.END, note)
+                    eng = "Google" if provider == "google" else "Windows"
+                    spoken_footer = atc_phrase.spoken_radio_footer(phrase, voice=voice)
+                    note = (
+                        f"{phrase}\n\n"
+                        f"{spoken_footer}\n\n"
+                        f"→ local speakers · {eng} · {freq} {mod} · {voice} · speed {speed}"
+                    )
+                    self._set_preview_display(note, base_phrase=phrase)
 
                 self.after(0, show)
+                atc_phrase.preview_voice_local(
+                    voice,
+                    phrase,
+                    vol,
+                    speed=speed,
+                    google_credentials=google_creds if provider == "google" else None,
+                )
                 if provider == "google":
-                    self.after(
-                        0,
-                        lambda: messagebox.showinfo(
-                            "Google TTS",
-                            "Local speaker preview is Windows-only.\n\n"
-                            "Use “Hear on SRS” to hear your Google voice on the radio.",
-                        ),
-                    )
-                    return
-                atc_phrase.preview_voice_local(voice, phrase, vol, speed=speed)
+                    self.after(0, self._refresh_tts_usage)
             except Exception as exc:  # noqa: BLE001
                 self.after(0, lambda: messagebox.showerror("Hear locally", str(exc)))
 
@@ -1222,19 +1364,27 @@ class MissionPlanner(tk.Tk):
 
         def work() -> None:
             try:
-                eng = flow_engine.FlowEngine()
-                detail = eng.play_step(step)
+                # Reuse live engine (unsaved mission + caches) — avoid cold FlowEngine()
+                self.engine.config = self.config_data
+                self.engine.airports = self.airports
+                self.engine.mission = self.mission
+                detail = self.engine.play_step(step)
 
                 def done() -> None:
-                    phrase = detail.get("text") or detail.get("file") or ""
-                    self.preview_box.delete("1.0", tk.END)
-                    self.preview_box.insert(
-                        tk.END,
-                        f"{phrase}\n\n→ TX {detail.get('freq')} · {detail.get('callsign')} · "
-                        f"voice {detail.get('voice') or ''}",
-                    )
+                    phrase = str(detail.get("text") or detail.get("file") or "")
+                    voice = str(detail.get("voice") or "")
+                    body = f"{phrase}\n\n"
                     if detail.get("text"):
-                        self._last_preview_phrase = str(detail["text"])
+                        body += (
+                            atc_phrase.spoken_radio_footer(str(detail["text"]), voice=voice)
+                            + "\n\n"
+                        )
+                    body += (
+                        f"→ TX {detail.get('freq')} · {detail.get('callsign')} · "
+                        f"voice {voice}"
+                    )
+                    base = str(detail["text"]) if detail.get("text") else ""
+                    self._set_preview_display(body, base_phrase=base)
                     self._last_preview_channel = step.get("channel") or "other"
 
                 self.after(0, done)
@@ -1505,6 +1655,7 @@ class MissionPlanner(tk.Tk):
                     ("bullet", "1. Setup → Identity & TTS — set your Opus username (e.g. Turtle)."),
                     ("bullet", "2. Click Refresh from Opus, confirm callsign, then Save setup."),
                     ("bullet", "3. Setup → Airport & radios — confirm SRS host and freqs (or Pull from Opus)."),
+                    ("bullet", "   Optional: Manual runway overrides flight-plan / wind selection."),
                     ("bullet", "4. Plan Flight — build or load a mission timeline, then Save mission."),
                     ("bullet", "5. Fly — use Play Next through the sortie (or Stream Deck later)."),
                     ("heading", "Voice quality"),
@@ -1540,12 +1691,15 @@ class MissionPlanner(tk.Tk):
                     ("heading", "4. Wire it in this app"),
                     ("bullet", "• Setup → Identity & TTS → choose Google Cloud TTS."),
                     ("bullet", "• Browse… to the .json file, OR Paste JSON… if you have the text."),
-                    ("bullet", "• Save setup → Voices tab → pick Neural2 voices."),
-                    ("bullet", "• Plan Flight → Hear on SRS to test (local speakers are Windows-only)."),
-                    ("heading", "Free tier"),
-                    ("body", "Google includes a monthly free character allowance for WaveNet / Neural2."),
-                    ("body", "ATC phrase use is tiny — most people never leave the free tier."),
-                    ("muted", "Pricing: cloud.google.com/text-to-speech/pricing"),
+                    ("bullet", "• Save setup → Voices tab → pick Neural2 / Chirp 3: HD voices."),
+                    ("bullet", "• Plan Flight → Hear locally to audition on speakers (no SRS)."),
+                    ("bullet", "• Voices picker → Preview for a short sample before assigning."),
+                    ("bullet", "• TX → SRS / Fly to hear it on the radio."),
+                    ("heading", "Free tier / usage"),
+                    ("body", "Setup → Voices shows a local monthly character counter (resets each calendar month)."),
+                    ("body", "Chirp / Neural2: 1M free chars/mo. WaveNet: 4M. ATC use is usually tiny."),
+                    ("body", "At 90% of a free tier: red warning + auto-fallback Chirp→Neural2→WaveNet→Windows."),
+                    ("muted", "Pricing: cloud.google.com/text-to-speech/pricing — Cloud Billing is authoritative."),
                 ],
             ),
             (
@@ -1554,14 +1708,15 @@ class MissionPlanner(tk.Tk):
                     ("heading", "Windows (default)"),
                     ("bullet", "• No API key."),
                     ("bullet", "• Uses voices installed on this PC (David, Zira, …)."),
-                    ("bullet", "• Hear locally works on speakers."),
+                    ("bullet", "• Hear locally and Voices → Preview play on speakers."),
                     ("heading", "Google (optional)"),
                     ("bullet", "• Needs your own service-account JSON."),
                     ("bullet", "• Hundreds of Neural2 / WaveNet voices."),
-                    ("bullet", "• Test with Hear on SRS / Fly — not local speaker preview."),
+                    ("bullet", "• Hear locally / Voices → Preview play Google audio on speakers (uses API quota)."),
+                    ("bullet", "• TX → SRS / Fly still used for radio transmit."),
                     ("heading", "Setup → Voices"),
                     ("body", "Assign a default voice per agency (delivery, ground, tower, …)."),
-                    ("body", "Randomize unique fills agencies with different voices when the catalog is large enough."),
+                    ("body", "Randomize ▾ can fill all agencies from all voices, or Chirp / Neural2 / WaveNet only."),
                 ],
             ),
             (
@@ -1579,6 +1734,10 @@ class MissionPlanner(tk.Tk):
                     ("body", "Choose sets a voice for that step only."),
                     ("body", "Agency default clears the override and uses Setup → Voices for that channel."),
                     ("body", "Timeline marks a custom step voice with [v]."),
+                    ("heading", "Runway per step"),
+                    ("body", "Shown on taxi / tower / approach templates (and custom text)."),
+                    ("body", "Blank = Setup Manual runway, else flight plan / wind."),
+                    ("body", "Timeline marks a step runway like [rwy 21R]."),
                 ],
             ),
             (
@@ -1640,9 +1799,9 @@ class MissionPlanner(tk.Tk):
         self.var_callsign_override = tk.StringVar()
         self.var_callsign = tk.StringVar(value="(refresh to resolve)")
         self.var_volume = tk.DoubleVar(value=0.8)
-        self.var_speed = tk.DoubleVar(value=3)
+        self.var_speed = tk.DoubleVar(value=7)
         self.var_volume_lbl = tk.StringVar(value="0.80")
-        self.var_speed_lbl = tk.StringVar(value="3")
+        self.var_speed_lbl = tk.StringVar(value="7")
         self.var_freq_status = tk.StringVar(value="")
         self.var_tts_provider = tk.StringVar(value="windows")
         self.var_google_credentials = tk.StringVar()
@@ -1679,7 +1838,7 @@ class MissionPlanner(tk.Tk):
         self._setup_field(lf, 2, "Manual callsign", self.var_callsign_override)
         tk.Label(
             lf,
-            text="Blank = Opus flight name (e.g. BRUISER 5)",
+            text="Optional. Use alone for offline TTS (no Opus). Blank = Opus flight name.",
             bg=C_PANEL,
             fg=C_MUTED,
             font=("Segoe UI", 8),
@@ -1784,7 +1943,27 @@ class MissionPlanner(tk.Tk):
         hdr = tk.Frame(panel, bg=C_PANEL)
         hdr.pack(fill=tk.X, padx=14, pady=(12, 6))
         ttk.Label(hdr, text="Voice per agency", style="Header.TLabel").pack(side=tk.LEFT)
-        ttk.Button(hdr, text="Randomize unique", command=self._randomize_agency_voices).pack(side=tk.RIGHT)
+        rand_menu_btn = ttk.Menubutton(hdr, text="Randomize ▾")
+        rand_menu = tk.Menu(rand_menu_btn, tearoff=0)
+        rand_menu.add_command(
+            label="All voices (unique)",
+            command=lambda: self._randomize_agency_voices(family=None),
+        )
+        rand_menu.add_separator()
+        rand_menu.add_command(
+            label="Chirp 3: HD only",
+            command=lambda: self._randomize_agency_voices(family="chirp"),
+        )
+        rand_menu.add_command(
+            label="Neural2 only",
+            command=lambda: self._randomize_agency_voices(family="neural2"),
+        )
+        rand_menu.add_command(
+            label="WaveNet only",
+            command=lambda: self._randomize_agency_voices(family="wavenet"),
+        )
+        rand_menu_btn["menu"] = rand_menu
+        rand_menu_btn.pack(side=tk.RIGHT)
         ttk.Button(hdr, text="Refresh list", command=self._refresh_voice_list).pack(side=tk.RIGHT, padx=8)
         tk.Label(
             panel,
@@ -1793,6 +1972,42 @@ class MissionPlanner(tk.Tk):
             fg=C_MUTED,
             font=("Segoe UI", 8),
         ).pack(anchor="w", padx=14, pady=(0, 6))
+
+        usage_fr = tk.Frame(panel, bg=C_CARD, highlightbackground=C_BORDER, highlightthickness=1)
+        usage_fr.pack(fill=tk.X, padx=14, pady=(0, 10))
+        usage_hdr = tk.Frame(usage_fr, bg=C_CARD)
+        usage_hdr.pack(fill=tk.X, padx=10, pady=(8, 4))
+        tk.Label(
+            usage_hdr,
+            text="Google TTS usage (this PC)",
+            bg=C_CARD,
+            fg=C_TEXT,
+            font=("Segoe UI Semibold", 10),
+        ).pack(side=tk.LEFT)
+        ttk.Button(usage_hdr, text="Refresh", command=self._refresh_tts_usage).pack(side=tk.RIGHT)
+        self.var_tts_usage = tk.StringVar(value="")
+        tk.Label(
+            usage_fr,
+            textvariable=self.var_tts_usage,
+            bg=C_CARD,
+            fg=C_MUTED,
+            font=("Consolas", 9),
+            justify="left",
+            anchor="w",
+        ).pack(fill=tk.X, padx=10, pady=(0, 4))
+        self.var_tts_usage_warn = tk.StringVar(value="")
+        self.lbl_tts_usage_warn = tk.Label(
+            usage_fr,
+            textvariable=self.var_tts_usage_warn,
+            bg=C_CARD,
+            fg="#ff6b6b",
+            font=("Segoe UI Semibold", 9),
+            justify="left",
+            anchor="w",
+            wraplength=640,
+        )
+        self.lbl_tts_usage_warn.pack(fill=tk.X, padx=10, pady=(0, 8))
+        self._refresh_tts_usage()
 
         grid = tk.Frame(panel, bg=C_PANEL)
         grid.pack(fill=tk.BOTH, expand=True, padx=14, pady=(0, 14))
@@ -1844,6 +2059,7 @@ class MissionPlanner(tk.Tk):
         self.var_port = tk.StringVar()
         self.var_coalition = tk.StringVar()
         self.var_runways = tk.StringVar()
+        self.var_runway_override = tk.StringVar()
         self.var_expect_minutes = tk.StringVar()
         self.var_known_sids = tk.StringVar()
         self.freq_vars = {ch: tk.StringVar() for ch in atc_phrase.CHANNELS}
@@ -1863,8 +2079,16 @@ class MissionPlanner(tk.Tk):
         self._setup_field(lf, 3, "SRS port", self.var_port, width=28)
         self._setup_field(lf, 4, "Coalition (2=blue)", self.var_coalition, width=28)
         self._setup_field(lf, 5, "Runways", self.var_runways, width=28)
-        self._setup_field(lf, 6, "Expect FL (min)", self.var_expect_minutes, width=28)
-        self._setup_field(lf, 7, "Known SIDs", self.var_known_sids, width=28)
+        self._setup_field(lf, 6, "Manual runway", self.var_runway_override, width=28)
+        tk.Label(
+            lf,
+            text="Blank = flight plan / wind  (e.g. 21R or 03L)",
+            bg=C_PANEL,
+            fg=C_MUTED,
+            font=("Segoe UI", 8),
+        ).grid(row=7, column=1, sticky="w")
+        self._setup_field(lf, 8, "Expect FL (min)", self.var_expect_minutes, width=28)
+        self._setup_field(lf, 9, "Known SIDs", self.var_known_sids, width=28)
         lf.columnconfigure(1, weight=1)
 
         tk.Label(right, text="Frequencies (MHz)", bg=C_PANEL, fg=C_LABEL, font=("Segoe UI Semibold", 10)).pack(
@@ -2120,7 +2344,7 @@ $s.GetInstalledVoices() | ForEach-Object { if ($_.Enabled) { $_.VoiceInfo.Name }
             else:
                 path = Path(os.path.expandvars(os.path.expanduser(raw)))
                 if path.is_file():
-                    self.var_tts_status.set(f"OK · {path.name} · test with Hear on SRS")
+                    self.var_tts_status.set(f"OK · {path.name} · preview with Hear locally")
                 else:
                     self.var_tts_status.set(f"File not found: {path}")
         else:
@@ -2129,7 +2353,7 @@ $s.GetInstalledVoices() | ForEach-Object { if ($_.Enabled) { $_.VoiceInfo.Name }
                 self._tts_status_windows.pack(anchor="w", pady=(0, 4))
         n = len(self.voice_labels or self._list_voices())
         self.var_voice_status.set(
-            f"{provider.title()} mode · {n} voice(s) available · Choose per agency or Randomize unique"
+            f"{provider.title()} mode · {n} voice(s) available · Choose per agency or Randomize ▾"
         )
 
     def _refresh_voice_list(self) -> None:
@@ -2138,6 +2362,47 @@ $s.GetInstalledVoices() | ForEach-Object { if ($_.Enabled) { $_.VoiceInfo.Name }
             f"Refreshed · {len(self.voice_labels)} voice(s) for "
             f"{atc_phrase.tts_provider({'tts_provider': self.var_tts_provider.get()})} mode"
         )
+        self._refresh_tts_usage()
+
+    def _refresh_tts_usage(self) -> None:
+        """Update local monthly Google TTS usage / free-tier estimator."""
+        if not hasattr(self, "var_tts_usage"):
+            return
+        try:
+            # Only sync UI → config after Setup fields are loaded; early refresh during
+            # panel build would otherwise push empty Opus StringVars into config_data.
+            if getattr(self, "_setup_fields_loaded", False):
+                self._sync_identity_to_config()
+            before_provider = atc_phrase.tts_provider(self.config_data)
+            before_voices = dict(self.config_data.get("tts_voices") or {})
+            guard_msgs = atc_phrase.apply_free_tier_guard_to_config(self.config_data)
+            after_provider = atc_phrase.tts_provider(self.config_data)
+            after_voices = dict(self.config_data.get("tts_voices") or {})
+            if guard_msgs and (
+                before_provider != after_provider or before_voices != after_voices
+            ):
+                self.var_tts_provider.set(after_provider)
+                if hasattr(self, "voice_vars") and isinstance(after_voices, dict):
+                    for ch in self.voice_vars:
+                        if ch in after_voices and after_voices[ch]:
+                            self._set_agency_voice(ch, str(after_voices[ch]))
+                self._on_tts_provider_change()
+
+            summary = atc_phrase.tts_usage_summary()
+            self.var_tts_usage.set("\n".join(atc_phrase.format_tts_usage_lines(summary)))
+            warn_lines = atc_phrase.free_tier_warning_lines(summary) + list(guard_msgs or [])
+            seen: set[str] = set()
+            uniq: list[str] = []
+            for line in warn_lines:
+                if line not in seen:
+                    seen.add(line)
+                    uniq.append(line)
+            if hasattr(self, "var_tts_usage_warn"):
+                self.var_tts_usage_warn.set("\n".join(uniq))
+        except Exception as exc:  # noqa: BLE001
+            self.var_tts_usage.set(f"Usage unavailable: {exc}")
+            if hasattr(self, "var_tts_usage_warn"):
+                self.var_tts_usage_warn.set("")
 
     def _choose_voice(self, channel: str) -> None:
         """Listbox picker — more reliable than ttk.Combobox popdowns on this dark UI."""
@@ -2185,6 +2450,15 @@ $s.GetInstalledVoices() | ForEach-Object { if ($_.Enabled) { $_.VoiceInfo.Name }
             tk.Label(custom_fr, text="Or type Google voice id:", bg=C_BG, fg=C_MUTED).pack(anchor="w")
             ttk.Entry(custom_fr, textvariable=custom_var).pack(fill=tk.X, pady=4)
 
+        def resolve_voice() -> str:
+            typed = custom_var.get().strip()
+            picked = self._selected_voice_from_listbox(lb)
+            if typed and atc_phrase.tts_provider({"tts_provider": self.var_tts_provider.get()}) == "google":
+                return typed
+            if picked:
+                return picked
+            return typed
+
         def apply_choice(voice: str) -> None:
             voice = voice.strip()
             if not voice:
@@ -2193,35 +2467,87 @@ $s.GetInstalledVoices() | ForEach-Object { if ($_.Enabled) { $_.VoiceInfo.Name }
             dlg.destroy()
 
         def on_ok() -> None:
-            typed = custom_var.get().strip()
-            picked = self._selected_voice_from_listbox(lb)
-            if typed and atc_phrase.tts_provider({"tts_provider": self.var_tts_provider.get()}) == "google":
-                apply_choice(typed)
-            elif picked:
-                apply_choice(picked)
-            elif typed:
-                apply_choice(typed)
+            pick = resolve_voice()
+            if pick:
+                apply_choice(pick)
+
+        def on_preview() -> None:
+            self._preview_voice_sample(resolve_voice())
 
         btns = tk.Frame(dlg, bg=C_BG)
         btns.pack(fill=tk.X, padx=12, pady=(4, 12))
         ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side=tk.RIGHT)
         ttk.Button(btns, text="Select", style="Accent.TButton", command=on_ok).pack(side=tk.RIGHT, padx=8)
+        ttk.Button(btns, text="Preview", command=on_preview).pack(side=tk.LEFT)
         lb.bind("<Double-Button-1>", lambda _e: on_ok())
         dlg.bind("<Return>", lambda _e: on_ok())
         dlg.bind("<Escape>", lambda _e: dlg.destroy())
 
-    def _randomize_agency_voices(self) -> None:
-        """Assign voices randomly; prefer unique voices when the catalog is large enough."""
+    def _preview_voice_sample(self, voice: str) -> None:
+        """Play a short local sample for a voice id (Windows or Google)."""
+        voice = (voice or "").strip()
+        if not voice:
+            messagebox.showinfo("Preview", "Select or type a voice first.")
+            return
+        self._sync_identity_to_config()
+        vol = float(self.config_data.get("tts_volume", 0.8))
+        speed = atc_phrase.tts_speed(self.config_data)
+        provider = atc_phrase.tts_provider(self.config_data)
+        google_creds = atc_phrase.google_credentials_path(self.config_data)
+        sample = atc_phrase.VOICE_PREVIEW_SAMPLE
+
+        def work() -> None:
+            try:
+                atc_phrase.preview_voice_local(
+                    voice,
+                    sample,
+                    vol,
+                    speed=speed,
+                    google_credentials=google_creds
+                    if provider == "google" or atc_phrase.is_google_voice_name(voice)
+                    else None,
+                )
+                self.after(0, self._refresh_tts_usage)
+            except Exception as exc:  # noqa: BLE001
+                self.after(0, lambda: messagebox.showerror("Preview", str(exc)))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _randomize_agency_voices(self, family: str | None = None) -> None:
+        """
+        Assign voices randomly; prefer unique voices when the catalog is large enough.
+        family: None = full catalog, or 'chirp' / 'neural2' / 'wavenet'.
+        """
         voices = self._list_voices()
         self.voice_labels = voices
         if not voices:
             messagebox.showwarning("Voices", "No voices available for the current TTS provider.")
             return
 
+        provider = atc_phrase.tts_provider({"tts_provider": self.var_tts_provider.get()})
+        if family and provider != "google":
+            messagebox.showinfo(
+                "Randomize",
+                "Chirp / Neural2 / WaveNet filters need Google Cloud TTS mode.",
+            )
+            return
+
+        if family:
+            pool = [v for v in voices if atc_phrase.voice_billing_family(v) == family]
+            label = {"chirp": "Chirp 3: HD", "neural2": "Neural2", "wavenet": "WaveNet"}.get(
+                family, family
+            )
+            if not pool:
+                messagebox.showwarning("Randomize", f"No {label} voices in the current list.")
+                return
+        else:
+            pool = list(voices)
+            label = "all"
+
         channels = list(self.voice_vars.keys())
         order = list(channels)
         random.shuffle(order)
-        pool = list(voices)
+        pool = list(pool)
         random.shuffle(pool)
 
         assigned: dict[str, str] = {}
@@ -2241,10 +2567,13 @@ $s.GetInstalledVoices() | ForEach-Object { if ($_.Enabled) { $_.VoiceInfo.Name }
         unique_n = len(set(assigned.values()))
         if unique_n < len(channels):
             self.var_voice_status.set(
-                f"Randomized · {unique_n}/{len(channels)} unique (only {len(voices)} voice(s) installed)"
+                f"Randomized ({label}) · {unique_n}/{len(channels)} unique "
+                f"(pool {len(pool)}) · Save setup to keep"
             )
         else:
-            self.var_voice_status.set(f"Randomized · {unique_n} unique voices · Save setup to keep")
+            self.var_voice_status.set(
+                f"Randomized ({label}) · {unique_n} unique · Save setup to keep"
+            )
 
     def _on_tts_provider_change(self) -> None:
         provider = atc_phrase.tts_provider({"tts_provider": self.var_tts_provider.get()})
@@ -2278,8 +2607,9 @@ $s.GetInstalledVoices() | ForEach-Object { if ($_.Enabled) { $_.VoiceInfo.Name }
         self.var_user.set(c.get("opus_user_name", ""))
         self.var_backend.set(c.get("opus_backend_url", ""))
         self.var_callsign_override.set(c.get("callsign_override", "") or "")
+        self.var_runway_override.set(c.get("runway_override", "") or "")
         self.var_volume.set(float(c.get("tts_volume", 0.8)))
-        self.var_speed.set(float(c.get("tts_speed", 3)))
+        self.var_speed.set(float(c.get("tts_speed", 7)))
         provider = atc_phrase.tts_provider(c)
         self.var_tts_provider.set(provider)
         self.var_google_credentials.set(c.get("google_credentials", "") or "")
@@ -2292,6 +2622,7 @@ $s.GetInstalledVoices() | ForEach-Object { if ($_.Enabled) { $_.VoiceInfo.Name }
             voices_cfg = {}
         for ch in self.voice_vars:
             self._set_agency_voice(ch, str(voices_cfg.get(ch) or default_voice))
+        self._setup_fields_loaded = True
         self._on_tts_provider_change()
         ap = self._airport()
         self.var_ap_name.set(ap.get("name", ""))
@@ -2305,11 +2636,13 @@ $s.GetInstalledVoices() | ForEach-Object { if ($_.Enabled) { $_.VoiceInfo.Name }
         for ch in atc_phrase.CHANNELS:
             block = ap.get(ch) or {}
             self.freq_vars[ch].set(str(block.get("freq_mhz", "")))
+        self._refresh_tts_usage()
 
     def save_setup(self) -> None:
         self.config_data["opus_user_name"] = self.var_user.get().strip()
         self.config_data["opus_backend_url"] = self.var_backend.get().strip()
         self.config_data["callsign_override"] = self.var_callsign_override.get().strip()
+        self.config_data["runway_override"] = self.var_runway_override.get().strip()
         provider = atc_phrase.tts_provider({"tts_provider": self.var_tts_provider.get()})
         self.config_data["tts_provider"] = provider
         self.config_data["google_credentials"] = self.var_google_credentials.get().strip()
@@ -2380,9 +2713,21 @@ $s.GetInstalledVoices() | ForEach-Object { if ($_.Enabled) { $_.VoiceInfo.Name }
         self.config_data["callsign_override"] = self.var_callsign_override.get().strip()
 
         def work() -> None:
+            user = (self.config_data.get("opus_user_name") or "").strip()
+            backend = (self.config_data.get("opus_backend_url") or "").strip()
             opus = atc_phrase.resolve_active_opus_flight(self.config_data)
             if not opus:
-                self.after(0, lambda: self.var_callsign.set("(not found — set Opus signup or manual callsign)"))
+                self.after(
+                    0,
+                    lambda: self.var_callsign.set(
+                        "(not found — set Opus signup or manual callsign)"
+                    ),
+                )
+                return
+            if not user or not backend:
+                mode = "manual" if atc_phrase.callsign_override(self.config_data) else "offline"
+                label = f"{opus.radio_callsign} · {mode} (no Opus)"
+                self.after(0, lambda: self.var_callsign.set(label))
                 return
             filed = "filed FP" if opus.has_filed_plan else "NO flight plan"
             ov = " · manual" if atc_phrase.callsign_override(self.config_data) else ""

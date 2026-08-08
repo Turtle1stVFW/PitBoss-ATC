@@ -1,6 +1,6 @@
-﻿
 
 using System;
+using System.Collections.Generic;
 using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
@@ -20,6 +20,7 @@ namespace Ciribob.DCS.SimpleRadio.Standalone.ExternalAudioClient.Client;
 public class ExternalAudioClient : IHandle<TCPClientStatusMessage>
 {
     private static readonly Logger Logger = LogManager.GetCurrentClassLogger();
+    private static readonly TimeSpan VoipReadyTimeout = TimeSpan.FromSeconds(20);
 
     private double[] freq;
     private Modulation[] modulation;
@@ -34,6 +35,7 @@ public class ExternalAudioClient : IHandle<TCPClientStatusMessage>
     private IPEndPoint endPoint;
     private readonly byte[] encryptionBytes;
     private uint unitId = 100000;
+    private List<byte[]> opusBytes;
 
     public ExternalAudioClient(double[] freq, Modulation[] modulation, Program.Options opts)
     {
@@ -46,13 +48,13 @@ public class ExternalAudioClient : IHandle<TCPClientStatusMessage>
         {
             modulationBytes[i] = (byte)modulation[i];
         }
-        
+
         encryptionBytes = new byte[modulation.Length];
         for (var i = 0; i < encryptionBytes.Length; i++) encryptionBytes[i] = 0;
 
         endPoint = ResolveEndPoint(opts.IP, opts.Port);
         Logger.Info($"Resolved SRS endpoint: {endPoint}");
-        
+
         EventBus.Instance.SubscribeOnUIThread(this);
     }
 
@@ -93,7 +95,7 @@ public class ExternalAudioClient : IHandle<TCPClientStatusMessage>
 
         return new IPEndPoint(ipv4, resolvedPort);
     }
-    
+
     public async Task HandleAsync(TCPClientStatusMessage message, CancellationToken cancellationToken)
     {
         if (message.Connected)
@@ -104,6 +106,17 @@ public class ExternalAudioClient : IHandle<TCPClientStatusMessage>
 
     public async Task StartAsync()
     {
+        // Generate audio BEFORE connecting so TTS/file failures do not leave ghost SRS clients.
+        Logger.Info("Generating audio before SRS connect...");
+        opusBytes = GenerateOpusOnStaThread();
+        if (opusBytes == null || opusBytes.Count == 0)
+        {
+            Logger.Error("No audio frames generated — not connecting to SRS.");
+            return;
+        }
+
+        Logger.Info($"Generated {opusBytes.Count} Opus frames ({opusBytes.Count * 40} ms)");
+
         var radioInfoBase = new PlayerRadioInfoBase();
         radioInfoBase.radios[1].modulation = modulation[0];
         radioInfoBase.radios[1].freq = freq[0]; // get into Hz
@@ -143,11 +156,42 @@ public class ExternalAudioClient : IHandle<TCPClientStatusMessage>
             //wait for it to end
             await completedTCS.Task;
         }
-       
+
         Logger.Info("Finished - Closing");
 
         udpVoiceHandler?.RequestStop();
         srsClientSyncHandler?.RequestDisconnectAsync();
+    }
+
+    private List<byte[]> GenerateOpusOnStaThread()
+    {
+        List<byte[]> result = null;
+        Exception error = null;
+
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                var audioGenerator = new AudioGenerator(opts);
+                result = audioGenerator.GetOpusBytes();
+            }
+            catch (Exception ex)
+            {
+                error = ex;
+            }
+        });
+        thread.IsBackground = true;
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+
+        if (error != null)
+        {
+            Logger.Error(error, "Audio generation failed");
+            return null;
+        }
+
+        return result;
     }
 
     private async Task ReadyToSendAsync()
@@ -157,46 +201,61 @@ public class ExternalAudioClient : IHandle<TCPClientStatusMessage>
             Logger.Info($"Connecting UDP VoIP {endPoint}");
             udpVoiceHandler = new UDPVoiceHandler(Guid, endPoint);
             udpVoiceHandler.Connect();
-            _ = Task.Run(SendAudioAsync);
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await SendAudioAsync();
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error(ex, "SendAudioAsync failed");
+                    Disconnected();
+                }
+            });
         }
     }
 
     private void Disconnected()
     {
-        completedTCS.SetResult();
+        completedTCS.TrySetResult();
     }
 
     private async Task SendAudioAsync()
     {
         Logger.Info("Sending Audio... Please Wait");
-        var audioGenerator = new AudioGenerator(opts);
-        var opusBytes = audioGenerator.GetOpusBytes();
         var count = 0;
-       
-        //Wait until voip is ready and we're not cancelled
-        while(!udpVoiceHandler.Ready && !finished.IsCancellationRequested)
+        var frames = opusBytes ?? new List<byte[]>();
+
+        var readyDeadline = DateTime.UtcNow + VoipReadyTimeout;
+        while (!udpVoiceHandler.Ready && !finished.IsCancellationRequested)
         {
+            if (DateTime.UtcNow > readyDeadline)
+            {
+                Logger.Error($"UDP VoIP not ready after {VoipReadyTimeout.TotalSeconds:0}s — aborting");
+                Disconnected();
+                return;
+            }
+
             finished.Token.ThrowIfCancellationRequested();
             await Task.Delay(TimeSpan.FromMilliseconds(100), finished.Token);
         }
 
-        var audioSentTCS = new TaskCompletionSource();
-        uint _packetNumber = 1;
-        //get all the audio as Opus frames of 40 ms
-        //send on 40 ms timer 
+        Logger.Info("UDP VoIP ready — transmitting");
 
-        //when empty - disconnect
-        //user timer for accurate sending
+        var audioSentTCS = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        uint _packetNumber = 1;
+
         var _timer = new Timer(() =>
         {
             if (!finished.IsCancellationRequested)
             {
-                if (count < opusBytes.Count)
+                if (count < frames.Count)
                 {
                     var udpVoicePacket = new UDPVoicePacket
                     {
-                        AudioPart1Bytes = opusBytes[count],
-                        AudioPart1Length = (ushort)opusBytes[count].Length,
+                        AudioPart1Bytes = frames[count],
+                        AudioPart1Length = (ushort)frames[count].Length,
                         Frequencies = freq,
                         UnitId = unitId,
                         Encryptions = encryptionBytes,
@@ -210,24 +269,29 @@ public class ExternalAudioClient : IHandle<TCPClientStatusMessage>
 
                     if (count % 50 == 0)
                         Logger.Info(
-                            $"Playing audio - sent {count * 40}ms - {count / (float)opusBytes.Count * 100.0:F0}% ");
+                            $"Playing audio - sent {count * 40}ms - {count / (float)frames.Count * 100.0:F0}% ");
                 }
                 else
                 {
-                    audioSentTCS.SetResult();
+                    audioSentTCS.TrySetResult();
                 }
             }
             else
             {
                 Logger.Error("Client Disconnected");
-                audioSentTCS.SetCanceled();
+                audioSentTCS.TrySetCanceled();
             }
         }, TimeSpan.FromMilliseconds(40));
         _timer.Start();
 
-        await audioSentTCS.Task;
-
-        _timer.Stop();
+        try
+        {
+            await audioSentTCS.Task;
+        }
+        finally
+        {
+            _timer.Stop();
+        }
 
         Logger.Info("Finished Sending Audio");
         Disconnected();

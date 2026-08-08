@@ -405,7 +405,10 @@ class AtcUi(tk.Tk):
                 if not callsign:
                     raise RuntimeError("No Opus callsign for this user")
                 weather = atc_phrase.fetch_metar(self.config_data, airport["icao"])
-                runway = atc_phrase.active_runway(list(airport.get("runways") or []), weather.wind_dir)
+                opus = atc_phrase.resolve_active_opus_flight(self.config_data)
+                runway = atc_phrase.pick_departure_runway(
+                    airport, weather, opus, self.config_data
+                )
                 role, phrase = self._phrase_ids()
                 text, tx_name, freq, mod = atc_phrase.build_phrase(
                     airport, role, phrase, callsign, weather, runway

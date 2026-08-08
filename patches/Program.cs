@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -53,7 +53,7 @@ namespace Ciribob.DCS.SimpleRadio.Standalone.ExternalAudioClient.Client
         {
             [Option('i', "file",
                 SetName = "file",
-                HelpText = "Full path to MP3 or Ogg - File must end .mp3 or .ogg",
+                HelpText = "Full path to MP3, Ogg, or WAV - File must end .mp3, .ogg, or .wav",
                 Required = true)]
             public string File { get; set; }
 

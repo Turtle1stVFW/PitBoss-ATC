@@ -10,7 +10,7 @@ Both open the same polished UI.
 ## Tabs
 1. **Plan Flight** — build the full sortie timeline (TTS template, custom text, or MP3/OGG). No JSON editing.
 2. **Fly** — big Next / Back / Reset / Flip for mid-flight.
-3. **Setup** — Opus username, voice, airport freqs, SRS host, TTS provider.
+3. **Setup** — Opus username, voice, airport freqs, SRS host, TTS provider, optional runway override.
 4. **Help** — in-app how-tos (Getting started, Google JSON setup, Plan Flight tips, troubleshooting). Also the top-right **Help** button.
 
 ## Typical workflow
@@ -60,8 +60,9 @@ Server ATIS is unchanged (still server-side).
 5. **Save setup**
 
 ### 4. Test
-- Use **Hear on SRS** (not “Hear locally”) — Google audio is synthesized by ExternalAudio and transmitted to the radio.
-- Confirm you hear Neural2 audio on the step’s frequency.
+- Use **Hear locally** on Plan Flight to audition a step on speakers (same Google voice, no SRS).
+- On Setup → Voices, open a voice picker and click **Preview** for a short sample.
+- Use **TX → SRS** / Fly when you want to hear it on the radio frequency.
 
 ### Free tier notes
 - Google gives a monthly free character allowance for WaveNet / Neural2 (see current Google TTS pricing).
