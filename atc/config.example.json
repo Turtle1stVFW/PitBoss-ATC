@@ -36,5 +36,14 @@
   "flow_file": "flows/nellis_default.json",
   "flow_http_port": 8765,
   "hotkey_next": "F13",
-  "hotkey_back": "F14"
+  "hotkey_back": "F14",
+  "joy_next": null,
+  "joy_back": null,
+  "voice_enabled": false,
+  "voice_model": "base.en",
+  "voice_mic_device": -1,
+  "voice_min_confidence": 0.6,
+  "voice_require_address": true,
+  "voice_ptt": [],
+  "voice_ptt_key": ""
 }

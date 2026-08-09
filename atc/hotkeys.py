@@ -5,6 +5,18 @@ Config examples:
   "F13"
   "Ctrl+Shift+Right"
   "Alt+Page_Down"
+
+Two ways to read the keyboard, because RegisterHotKey alone is not enough:
+
+  * `GlobalHotkeyListener` — RegisterHotKey. Swallows the keystroke so it never
+    reaches the game, but Windows UIPI will not deliver WM_HOTKEY to a
+    normal-integrity process while an elevated window is focused, and DCS and
+    SRS both run as administrator. Hence `elevation_warning()`.
+  * `KeyWatcher` — polls GetAsyncKeyState. Survives DCS having focus without
+    elevation and reports release as well as press, so it can drive
+    hold-to-talk. Does not consume the keystroke.
+
+Both run at once for Next / Back; the UI debounces so a press fires once.
 """
 
 from __future__ import annotations
@@ -27,6 +39,12 @@ MOD_WIN = 0x0008
 MOD_NOREPEAT = 0x4000
 WM_HOTKEY = 0x0312
 WM_QUIT = 0x0012
+
+ERROR_HOTKEY_ALREADY_REGISTERED = 1409
+QS_ALLINPUT = 0x04FF
+WAIT_OBJECT_0 = 0x00000000
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+ERROR_ACCESS_DENIED = 5
 
 _VK_BY_NAME: dict[str, int] = {
     **{f"f{i}": 0x70 + (i - 1) for i in range(1, 25)},
@@ -163,6 +181,62 @@ def parse_hotkey(raw: str | None) -> tuple[int, int, str] | None:
     return mods, vk, seq
 
 
+def is_elevated() -> bool:
+    """True when this process runs with an administrator token."""
+    if sys.platform != "win32":
+        return False
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def foreground_process() -> tuple[str, bool]:
+    """
+    (executable name, looks_elevated) for the focused window.
+
+    A normal-integrity process cannot even query a higher-integrity one, so
+    ERROR_ACCESS_DENIED from OpenProcess is a reliable signal that the
+    foreground app outranks us.
+    """
+    if sys.platform != "win32":
+        return "", False
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+    try:
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return "", False
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if not pid.value:
+            return "", False
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
+        if not handle:
+            return "", kernel32.GetLastError() == ERROR_ACCESS_DENIED
+        try:
+            buf = ctypes.create_unicode_buffer(1024)
+            size = wintypes.DWORD(len(buf))
+            if kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+                return buf.value.rsplit("\\", 1)[-1], False
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:  # noqa: BLE001
+        pass
+    return "", False
+
+
+def elevation_warning() -> str:
+    """Non-empty when RegisterHotKey alone would be swallowed in-game."""
+    if sys.platform != "win32" or is_elevated():
+        return ""
+    return (
+        "Not elevated, so DCS/SRS (which run as admin) swallow registered hotkeys. "
+        "Key polling covers this — if a key still does nothing in-game, restart as "
+        "administrator or bind a HOTAS button."
+    )
+
+
 def hotkey_from_config(config: dict[str, Any], which: str) -> str:
     if which == "next":
         return normalize_hotkey(config.get("hotkey_next"), default=DEFAULT_HOTKEY_NEXT)
@@ -203,6 +277,128 @@ def format_event(event: Any) -> str:
     return normalize_hotkey("+".join(mods + [ks]))
 
 
+VK_SHIFT = 0x10
+VK_CONTROL = 0x11
+VK_MENU = 0x12
+VK_LWIN = 0x5B
+VK_RWIN = 0x5C
+KEY_POLL_HZ = 100
+_KEY_DOWN = 0x8000
+
+
+def _key_down(vk: int) -> bool:
+    """Current physical state of a key, ignoring the 'pressed since last call' bit."""
+    return bool(ctypes.windll.user32.GetAsyncKeyState(int(vk)) & _KEY_DOWN)
+
+
+def _win_down() -> bool:
+    return _key_down(VK_LWIN) or _key_down(VK_RWIN)
+
+
+class KeyWatcher:
+    """
+    Keyboard triggers by polling key state instead of registering a hotkey.
+
+    Two things RegisterHotKey cannot do. It delivers WM_HOTKEY through the
+    message queue, which UIPI closes off while an elevated window is focused —
+    the reason hotkeys die inside DCS. And it only ever reports a press, so
+    hold-to-talk is impossible. GetAsyncKeyState just reports the state of the
+    keyboard, exactly as joyGetPosEx reports the state of a stick, so it keeps
+    working in-game unelevated and gives both edges.
+
+    The trade-off is that polling does not swallow the keystroke: the key still
+    reaches DCS, so pick a combination DCS does not use.
+
+    Callbacks run on the polling thread — marshal to Tk with `after(0, ...)`.
+    """
+
+    def __init__(self, poll_hz: int = KEY_POLL_HZ) -> None:
+        self._interval = 1.0 / max(10, int(poll_hz))
+        self._thread: threading.Thread | None = None
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        # name -> (mods, vk, on_press, on_release)
+        self._bindings: dict[str, tuple[int, int, Callable[[], None] | None, Callable[[], None] | None]] = {}
+
+    @property
+    def supported(self) -> bool:
+        return sys.platform == "win32"
+
+    def set_binding(
+        self,
+        name: str,
+        hotkey: str | None,
+        *,
+        on_press: Callable[[], None] | None = None,
+        on_release: Callable[[], None] | None = None,
+    ) -> str:
+        """Bind a hotkey string. Returns a warning, or "" when it took."""
+        parsed = parse_hotkey(hotkey)
+        if not parsed:
+            with self._lock:
+                self._bindings.pop(name, None)
+            return f"Could not read the key combination “{hotkey}”." if hotkey else ""
+        mods, vk, _seq = parsed
+        with self._lock:
+            self._bindings[name] = (mods, vk, on_press, on_release)
+        return ""
+
+    def clear_bindings(self) -> None:
+        with self._lock:
+            self._bindings.clear()
+
+    def start(self) -> None:
+        if not self.supported or (self._thread and self._thread.is_alive()):
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, name="atc-keys", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        thread = self._thread
+        if thread and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=1.0)
+        self._thread = None
+
+    def _safe(self, fn: Callable[[], None]) -> None:
+        try:
+            fn()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _combo_down(self, mods: int, vk: int) -> bool:
+        """Exact match, so Ctrl+N does not fire while Ctrl+Shift+N is held."""
+        if not _key_down(vk):
+            return False
+        return (
+            _key_down(VK_CONTROL) == bool(mods & MOD_CONTROL)
+            and _key_down(VK_MENU) == bool(mods & MOD_ALT)
+            and _key_down(VK_SHIFT) == bool(mods & MOD_SHIFT)
+            and _win_down() == bool(mods & MOD_WIN)
+        )
+
+    def _run(self) -> None:
+        previous: dict[str, bool] = {}
+        while not self._stop.is_set():
+            with self._lock:
+                bindings = list(self._bindings.items())
+            if not bindings:
+                self._stop.wait(0.2)
+                continue
+
+            for name, (mods, vk, on_press, on_release) in bindings:
+                now = self._combo_down(mods, vk)
+                was = previous.get(name, False)
+                if now and not was and on_press:
+                    self._safe(on_press)
+                elif was and not now and on_release:
+                    self._safe(on_release)
+                previous[name] = now
+
+            self._stop.wait(self._interval)
+
+
 class GlobalHotkeyListener:
     """
     Windows thread that RegisterHotKey's Next/Back and invokes callbacks.
@@ -213,13 +409,23 @@ class GlobalHotkeyListener:
         self._thread: threading.Thread | None = None
         self._tid: int | None = None
         self._stop = threading.Event()
+        self._ready = threading.Event()
         self._lock = threading.Lock()
         self._bindings: dict[int, Callable[[], None]] = {}
-        self._specs: list[tuple[int, int, int, Callable[[], None]]] = []  # id, mods, vk, cb
+        self._specs: list[tuple[int, int, int, str, Callable[[], None]]] = []
+        self._register_errors: list[str] = []
+        self._registered_labels: list[str] = []
+        self.on_trigger: Callable[[str], None] | None = None
 
     @property
     def supported(self) -> bool:
         return sys.platform == "win32"
+
+    @property
+    def registered(self) -> list[str]:
+        """Labels of hotkeys the OS actually accepted."""
+        with self._lock:
+            return list(self._registered_labels)
 
     def start(
         self,
@@ -236,7 +442,7 @@ class GlobalHotkeyListener:
             warnings.append("Global hotkeys require Windows; using in-app binds only.")
             return warnings
 
-        specs: list[tuple[int, int, int, Callable[[], None]]] = []
+        specs: list[tuple[int, int, int, str, Callable[[], None]]] = []
         for hid, raw, cb, label in (
             (1, next_hotkey, on_next, "Next"),
             (2, back_hotkey, on_back, "Back"),
@@ -246,15 +452,26 @@ class GlobalHotkeyListener:
                 warnings.append(f"Invalid {label} hotkey: {raw!r}")
                 continue
             mods, vk, _seq = parsed
-            specs.append((hid, mods, vk, cb))
+            specs.append((hid, mods, vk, f"{label} {raw}", cb))
 
         if not specs:
             return warnings
 
         self._specs = specs
         self._stop.clear()
+        self._ready.clear()
         self._thread = threading.Thread(target=self._run, name="atc-hotkeys", daemon=True)
         self._thread.start()
+
+        # RegisterHotKey happens on the listener thread; wait for its verdict so
+        # failures reach the UI instead of being silently swallowed.
+        self._ready.wait(timeout=2.0)
+        with self._lock:
+            warnings.extend(self._register_errors)
+
+        note = elevation_warning()
+        if note:
+            warnings.append(note)
         return warnings
 
     def stop(self) -> None:
@@ -276,28 +493,43 @@ class GlobalHotkeyListener:
 
     def _run(self) -> None:
         user32 = ctypes.windll.user32
-        self._tid = threading.get_ident()
+        kernel32 = ctypes.windll.kernel32
+        self._tid = int(kernel32.GetCurrentThreadId())
         registered: list[int] = []
+        errors: list[str] = []
+        labels: list[str] = []
         try:
-            for hid, mods, vk, cb in self._specs:
-                ok = user32.RegisterHotKey(None, hid, mods | MOD_NOREPEAT, vk)
-                if not ok:
+            for hid, mods, vk, label, cb in self._specs:
+                if user32.RegisterHotKey(None, hid, mods | MOD_NOREPEAT, vk):
+                    registered.append(hid)
+                    labels.append(label)
+                    with self._lock:
+                        self._bindings[hid] = cb
                     continue
-                registered.append(hid)
-                with self._lock:
-                    self._bindings[hid] = cb
+                err = kernel32.GetLastError()
+                if err == ERROR_HOTKEY_ALREADY_REGISTERED:
+                    errors.append(f"{label} is already taken by another app")
+                else:
+                    errors.append(f"{label} could not be registered (error {err})")
+            with self._lock:
+                self._register_errors = errors
+                self._registered_labels = labels
+            self._ready.set()
+
             msg = wintypes.MSG()
             while not self._stop.is_set():
-                # Use Peek + sleep so we can exit cleanly; GetMessage blocks forever
-                has = user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 1)  # PM_REMOVE=1
-                if has:
+                # Drain before waiting: MsgWaitForMultipleObjects only signals on
+                # input that arrives after the call, so anything already queued
+                # would otherwise sit there until the next unrelated wake-up.
+                while user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 1):  # PM_REMOVE
                     if msg.message == WM_QUIT:
-                        break
+                        return
                     if msg.message == WM_HOTKEY:
                         hid = int(msg.wParam)
                         with self._lock:
                             cb = self._bindings.get(hid)
                         if cb:
+                            self._notify(hid)
                             try:
                                 cb()
                             except Exception:
@@ -305,9 +537,10 @@ class GlobalHotkeyListener:
                     else:
                         user32.TranslateMessage(ctypes.byref(msg))
                         user32.DispatchMessageW(ctypes.byref(msg))
-                else:
-                    self._stop.wait(0.05)
+                # Block until new input, waking periodically to notice stop().
+                user32.MsgWaitForMultipleObjectsEx(0, None, 250, QS_ALLINPUT, 0)
         finally:
+            self._ready.set()
             for hid in registered:
                 try:
                     user32.UnregisterHotKey(None, hid)
@@ -315,3 +548,13 @@ class GlobalHotkeyListener:
                     pass
             with self._lock:
                 self._bindings.clear()
+                self._registered_labels = []
+
+    def _notify(self, hid: int) -> None:
+        observer = self.on_trigger
+        if not observer:
+            return
+        try:
+            observer("Next" if hid == 1 else "Back")
+        except Exception:  # noqa: BLE001
+            pass

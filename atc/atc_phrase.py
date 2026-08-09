@@ -775,6 +775,21 @@ def resolve_callsign_from_opus(config: dict[str, Any]) -> str | None:
     return None if ctx is None else ctx.radio_callsign
 
 
+def cached_radio_callsign(config: dict[str, Any]) -> str:
+    """
+    Callsign already known for this flight, without touching the network.
+
+    Voice recognition needs the callsign on every transmission to tell "Fleece 1"
+    (us) from "Fleece 2" (a wingman), and cannot afford an Opus round-trip in
+    the middle of a PTT release. Returns "" until something else has resolved it.
+    """
+    override = callsign_override(config)
+    if override:
+        return override
+    ctx = _OPUS_CACHE.get("ctx")
+    return str(getattr(ctx, "radio_callsign", "") or "")
+
+
 def _str_or_none(value: Any) -> str | None:
     if value is None:
         return None
@@ -2746,6 +2761,121 @@ def squawk_clearance_phrase(opus: OpusFlightContext | None) -> str | None:
     return f"squawk {code}"
 
 
+# Templates after which the pilot is expected to read items back — address is
+# optional for the acknowledge intent because the exchange is already open.
+AWAITING_READBACK_TEMPLATES = frozenset(
+    {
+        "clearance",
+        "taxi",
+        "clear_takeoff",
+        "lineup",
+        "line_up_and_wait",
+        "clear_land",
+    }
+)
+
+# ATC confirm steps that close a readback window.
+READBACK_CONFIRM_TEMPLATES = frozenset({"clearance_readback"})
+
+
+def mode3_digits(mode3: str | None) -> str | None:
+    digits = re.sub(r"\D", "", str(mode3 or ""))
+    return digits[:4] if len(digits) >= 4 else None
+
+
+def build_readback_checklist(
+    template: str,
+    airport: dict[str, Any],
+    opus: OpusFlightContext | None,
+    weather: Weather,
+    runway: str,
+    *,
+    climb_ft: int | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Items the pilot should read back after this ATC call.
+
+    Each item: key, label, value (display), spoken (what to say / match),
+    and highlight (draw attention — squawk, runway).
+    """
+    tmpl = (template or "").strip().lower()
+    items: list[dict[str, Any]] = []
+
+    def add(
+        key: str,
+        label: str,
+        value: str,
+        spoken: str = "",
+        *,
+        highlight: bool = False,
+    ) -> None:
+        value = str(value or "").strip()
+        if not value:
+            return
+        items.append(
+            {
+                "key": key,
+                "label": label,
+                "value": value,
+                "spoken": (spoken or value).strip(),
+                "highlight": bool(highlight),
+            }
+        )
+
+    if tmpl == "clearance":
+        if opus and opus.has_filed_plan and opus.arr_icao:
+            dest = speak_icao_or_name(opus.arr_icao, airport)
+            add("destination", "Cleared to", str(opus.arr_icao).upper(), dest)
+        dep_via = speak_departure_clearance(airport, opus.fp_route_string if opus else None)
+        if dep_via:
+            add("departure", "Via", dep_via, dep_via)
+        else:
+            add("departure", "Route", "as filed", "as filed")
+        if climb_ft:
+            spoken_climb = speak_altitude_value(str(climb_ft), prefer_fl_below=1000) or str(climb_ft)
+            add("climb", "Climb / maintain", f"{climb_ft:,} ft", spoken_climb)
+        filed = speak_filed_altitude(opus.fp_altitude if opus else None)
+        if filed:
+            add("expect", "Expect", filed, filed)
+        code = mode3_digits(opus.mode3 if opus else None)
+        if code:
+            spoken = speak_squawk(code) or code
+            # Display may note "in sequence"; the pilot does not have to say it.
+            # Matching listens for "squawk CODE" / "squawking CODE" only.
+            seq = " in sequence" if opus and opus.squawk_in_sequence else ""
+            add(
+                "squawk",
+                "Squawk",
+                f"{code}{seq}",
+                f"squawk {spoken}",
+                highlight=True,
+            )
+        return items
+
+    if tmpl == "taxi":
+        rwy = normalize_runway(runway) or str(runway or "").strip()
+        if rwy:
+            add("runway", "Runway", rwy, f"runway {speak_runway(rwy)}", highlight=True)
+        if weather.altimeter_inhg:
+            alt = speak_altimeter(weather.altimeter_inhg)
+            add("altimeter", "Altimeter", f"{weather.altimeter_inhg:.2f}", alt)
+        return items
+
+    if tmpl in ("clear_takeoff", "lineup", "line_up_and_wait", "clear_land"):
+        rwy = normalize_runway(runway) or str(runway or "").strip()
+        if rwy:
+            add("runway", "Runway", rwy, f"runway {speak_runway(rwy)}", highlight=True)
+        if tmpl == "clear_takeoff":
+            add("clearance", "Clearance", "cleared for takeoff", "cleared for takeoff")
+        elif tmpl == "clear_land":
+            add("clearance", "Clearance", "cleared to land", "cleared to land")
+        else:
+            add("clearance", "Clearance", "line up and wait", "line up and wait")
+        return items
+
+    return items
+
+
 def _runway_number(rwy: str | None) -> int | None:
     digits = re.sub(r"[^0-9]", "", str(rwy or ""))
     if not digits:
@@ -3562,26 +3692,71 @@ _GOOGLE_VOICE_CHOICES_RAW: list[str] = [
     "en-AU-Neural2-D",  # male
     "en-AU-Neural2-A",  # female
     "en-AU-Neural2-C",  # female
-    # Canada (WaveNet — no Neural2 catalog for en-CA in many projects)
-    "en-CA-Wavenet-A",
-    "en-CA-Wavenet-B",
-    "en-CA-Wavenet-C",
-    "en-CA-Wavenet-D",
+    # English (Canada) WaveNet was retired from Google's catalog — only French
+    # Canadian (fr-CA) remains. Old en-CA-* ids are remapped below.
 ]
 
 # Locale display order for picker headers (US → allies)
-_LOCALE_DISPLAY_ORDER: list[str] = ["en-US", "en-GB", "en-AU", "en-CA"]
+_LOCALE_DISPLAY_ORDER: list[str] = ["en-US", "en-GB", "en-AU"]
 
 LOCALE_LABELS: dict[str, str] = {
     "en-US": "United States (primary)",
     "en-GB": "United Kingdom (ally)",
     "en-AU": "Australia (ally)",
-    "en-CA": "Canada (ally)",
     "en-IN": "English (India)",
     "en-IE": "English (Ireland)",
     "en-NZ": "English (New Zealand)",
     "en-ZA": "English (South Africa)",
 }
+
+# Google's synthesize API now rejects these. Same trailing letter → US WaveNet twin
+# so agency gender stays put when an old config is loaded.
+_RETIRED_GOOGLE_VOICES: dict[str, str] = {
+    "en-CA-Wavenet-A": "en-US-Wavenet-A",
+    "en-CA-Wavenet-B": "en-US-Wavenet-B",
+    "en-CA-Wavenet-C": "en-US-Wavenet-C",
+    "en-CA-Wavenet-D": "en-US-Wavenet-D",
+    "en-CA-Standard-A": "en-US-Wavenet-A",
+    "en-CA-Standard-B": "en-US-Wavenet-B",
+    "en-CA-Standard-C": "en-US-Wavenet-C",
+    "en-CA-Standard-D": "en-US-Wavenet-D",
+}
+
+
+def resolve_retired_google_voice(voice: str) -> tuple[str, str | None]:
+    """Map a retired Google voice id to a live one. Returns (voice, note|None)."""
+    name = (voice or "").strip()
+    replacement = _RETIRED_GOOGLE_VOICES.get(name)
+    if not replacement:
+        return name, None
+    return replacement, f"Google retired {name}; using {replacement} instead."
+
+
+def migrate_retired_google_voices(config: dict[str, Any]) -> list[str]:
+    """Rewrite retired Google voice ids in config. Mutates in place; returns notes."""
+    if tts_provider(config) != "google":
+        return []
+    notes: list[str] = []
+    voices = config.get("tts_voices")
+    if isinstance(voices, dict):
+        updated: dict[str, str] = {}
+        for channel, raw in voices.items():
+            voice, note = resolve_retired_google_voice(str(raw or ""))
+            if note and note not in notes:
+                notes.append(note)
+            if voice:
+                updated[str(channel)] = voice
+        if updated:
+            config["tts_voices"] = updated
+    default = str(config.get("tts_voice") or "").strip()
+    if default:
+        safe, note = resolve_retired_google_voice(default)
+        if note and note not in notes:
+            notes.append(note)
+        if safe != default:
+            config["tts_voice"] = safe
+            config["tts_gender"] = voice_gender(safe)
+    return notes
 
 
 def voice_locale(voice_name: str) -> str:
@@ -3759,6 +3934,8 @@ def voice_for_channel(config: dict[str, Any], channel: str | None) -> tuple[str,
         name = str(voices.get(channel) or "").strip()
     if not name:
         name = str(voices.get("default") or default).strip() or default
+    if tts_provider(config) == "google":
+        name, _note = resolve_retired_google_voice(name)
     gender = voice_gender(name)
     return name, gender
 
@@ -3772,6 +3949,8 @@ def voice_for_step(
     if step:
         override = str(step.get("voice") or "").strip()
         if override:
+            if tts_provider(config) == "google":
+                override, _note = resolve_retired_google_voice(override)
             return override, voice_gender(override)
     return voice_for_channel(config, channel)
 
@@ -5035,6 +5214,9 @@ def synthesize_google_tts(
     voice = (voice or "").strip()
     if not voice:
         raise ValueError("Google voice id is empty.")
+    voice, retired_note = resolve_retired_google_voice(voice)
+    if retired_note:
+        print(retired_note, file=sys.stderr)
     safe_voice, guard_notes = resolve_voice_under_free_tier(voice)
     for note in guard_notes:
         print(note, file=sys.stderr)

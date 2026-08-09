@@ -9,10 +9,6 @@
       "21R",
       "03L"
     ],
-    "instrument_runways": [
-      "21L",
-      "03R"
-    ],
     "parking": "Row 18",
     "taxi_via": "Foxtrot",
     "clearance_consolidated_with_ground": false,

@@ -10,6 +10,7 @@ import json
 import random
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -215,6 +216,9 @@ class FlowEngine:
         idx = max(0, min(int(index), len(steps)))  # len(steps) == past end
         self.state["index"] = idx
         self.prepare_takeoff_cursor()
+        # Arrows move the cursor without TX — keep the READ BACK card in sync
+        # with the step ATC would have just said (the one before the cursor).
+        self.sync_readback_for_cursor()
         self.save_state()
         st = self.status()
         st["seeked"] = True
@@ -317,8 +321,133 @@ class FlowEngine:
 
         detail["exit_code"] = code
         self.state["last_step_id"] = step.get("id")
+        self._record_readback_expectation(step, detail, airport, opus, weather, runway)
         self.save_state()
         return detail
+
+    def _record_readback_expectation(
+        self,
+        step: dict[str, Any],
+        detail: dict[str, Any],
+        airport: dict[str, Any],
+        opus: Any,
+        weather: Any,
+        runway: str,
+    ) -> None:
+        """
+        After ATC transmits, remember what the pilot should read back.
+
+        Clearance (and similar) open a short window where the acknowledge intent
+        does not need an agency opener — the exchange is already live.
+        """
+        template = str(step.get("template") or "").strip()
+        climb_ft = atc_phrase.resolve_shared_climb_ft(step=step, mission=self.mission)
+        items = atc_phrase.build_readback_checklist(
+            template,
+            airport,
+            opus,
+            weather,
+            runway,
+            climb_ft=climb_ft,
+        )
+        self.state["last_tx_text"] = str(detail.get("text") or "")
+        self.state["last_tx_template"] = template
+        self.state["last_tx_channel"] = str(detail.get("channel") or "")
+        self.state["last_tx_at"] = time.time()
+        detail["climb_ft"] = climb_ft
+        detail["readback_items"] = items
+
+        if template in atc_phrase.READBACK_CONFIRM_TEMPLATES:
+            self.state["awaiting_readback"] = False
+            self.state["readback_items"] = []
+            self.state["awaiting_confirm_template"] = ""
+            return
+
+        if template in atc_phrase.AWAITING_READBACK_TEMPLATES and items:
+            self.state["readback_items"] = items
+            self.state["awaiting_readback"] = True
+            # Clearance → expect the readback-correct step; others just prompt.
+            confirm = "clearance_readback" if template == "clearance" else ""
+            self.state["awaiting_confirm_template"] = confirm
+        elif not items:
+            # Non-readback call — don't wipe a pending checklist until confirmed.
+            pass
+
+    def clear_readback(self) -> None:
+        """Pilot has read it back: stop Fly asking and close the window."""
+        self._clear_readback_state()
+        self.save_state()
+
+    def _clear_readback_state(self) -> None:
+        self.state["awaiting_readback"] = False
+        self.state["readback_items"] = []
+        self.state["awaiting_confirm_template"] = ""
+
+    def sync_readback_for_cursor(self) -> None:
+        """
+        Align the READ BACK card with the flow cursor (seek / arrows).
+
+        Play advances past the step it just transmitted, so the step *before*
+        the cursor is what ATC would have said. Rebuild that checklist — or
+        clear the card when that step does not open a readback window — so
+        browsing with the arrows never leaves a stale strip on screen.
+        """
+        steps = self.steps
+        idx = int(self.state.get("index") or 0)
+        prev = steps[idx - 1] if steps and 1 <= idx <= len(steps) else None
+        if not prev:
+            self._clear_readback_state()
+            return
+
+        template = str(prev.get("template") or "").strip()
+        if template in atc_phrase.READBACK_CONFIRM_TEMPLATES:
+            self._clear_readback_state()
+            return
+        if template not in atc_phrase.AWAITING_READBACK_TEMPLATES:
+            self._clear_readback_state()
+            return
+
+        try:
+            airport = self.airport()
+        except Exception:  # noqa: BLE001
+            self._clear_readback_state()
+            return
+        opus, weather = atc_phrase.resolve_opus_and_metar(self.config, airport["icao"])
+        if not opus:
+            opus = atc_phrase.synthetic_flight_context(
+                atc_phrase.callsign_override(self.config) or "CALLSIGN"
+            )
+        runway = atc_phrase.pick_departure_runway(
+            airport,
+            weather,
+            opus,
+            self.config,
+            step=prev,
+            mission=self.mission,
+            state=self.state,
+            template=template,
+        )
+        climb_ft = atc_phrase.resolve_shared_climb_ft(step=prev, mission=self.mission)
+        items = atc_phrase.build_readback_checklist(
+            template,
+            airport,
+            opus,
+            weather,
+            runway,
+            climb_ft=climb_ft,
+        )
+        if not items:
+            self._clear_readback_state()
+            return
+        self.state["readback_items"] = items
+        self.state["awaiting_readback"] = True
+        self.state["awaiting_confirm_template"] = (
+            "clearance_readback" if template == "clearance" else ""
+        )
+        self.state["last_tx_template"] = template
+        self.state["last_tx_channel"] = str(
+            prev.get("channel") or prev.get("phase") or ""
+        )
 
     def next(self) -> dict[str, Any]:
         steps = self.steps
@@ -369,6 +498,7 @@ class FlowEngine:
         self.state["active_takeoff_mode"] = None
         self.state["pending_takeoff_offer"] = None
         self.state["takeoff_offer_rolled"] = False
+        self._clear_readback_state()
         if "active_takeoff_mode" in self.mission:
             self.mission["active_takeoff_mode"] = atc_phrase.DEFAULT_TAKEOFF_MODE
         self.save_state()
