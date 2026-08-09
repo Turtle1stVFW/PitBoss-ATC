@@ -1,15 +1,23 @@
 {
   "name": "Nellis Default",
   "airport": "nellis",
+  "initial_climb_ft": 15000,
+  "active_recovery": "tactical_overhead",
+  "recovery_options": [
+    "visual_overhead",
+    "tactical_overhead",
+    "straight_in",
+    "instrument"
+  ],
   "steps": [
     {
       "id": "del_clearance",
       "phase": "delivery",
       "label": "Clearance delivery",
       "channel": "delivery",
-      "mode": "file",
+      "mode": "tts",
       "template": "clearance",
-      "file": "C:/ATCSounds/1.mp3",
+      "file": null,
       "enabled": true,
       "text": null,
       "initial_climb_ft": 15000
@@ -56,7 +64,8 @@
       "template": "lineup",
       "file": null,
       "enabled": true,
-      "text": null
+      "text": null,
+      "tts_speed": 8
     },
     {
       "id": "twr_clear_takeoff",
@@ -67,7 +76,8 @@
       "template": "clear_takeoff",
       "file": null,
       "enabled": true,
-      "text": null
+      "text": null,
+      "tts_speed": 8
     },
     {
       "id": "dep_radar",
@@ -78,15 +88,16 @@
       "template": "radar_contact",
       "file": null,
       "enabled": true,
-      "text": null
+      "text": null,
+      "initial_climb_ft": 15000
     },
     {
-      "id": "ops_checkin",
-      "phase": "ops",
-      "label": "Ops check-in",
-      "channel": "ops",
+      "id": "dep_handoff",
+      "phase": "departure",
+      "label": "Departure handoff",
+      "channel": "departure",
       "mode": "tts",
-      "template": "ops_check_in",
+      "template": "departure_handoff",
       "file": null,
       "enabled": true,
       "text": null
@@ -94,7 +105,7 @@
     {
       "id": "bj_checkin",
       "phase": "blackjack",
-      "label": "Blackjack check-in",
+      "label": "Blackjack check-in / alpha",
       "channel": "blackjack",
       "mode": "tts",
       "template": "bj_check_in",
@@ -103,59 +114,28 @@
       "text": null
     },
     {
-      "id": "bj_alpha",
-      "phase": "blackjack",
-      "label": "Alpha check",
-      "channel": "blackjack",
-      "mode": "tts",
-      "template": "bj_alpha_check",
-      "file": null,
-      "enabled": true,
-      "text": null
-    },
-    {
-      "id": "bj_range_in",
-      "phase": "blackjack",
-      "label": "Alpha approved / hot",
-      "channel": "blackjack",
-      "mode": "tts",
-      "template": "bj_range_entry",
-      "file": null,
-      "enabled": true,
-      "text": null
-    },
-    {
-      "id": "bj_range_out",
-      "phase": "blackjack",
-      "label": "Range exit",
-      "channel": "blackjack",
-      "mode": "tts",
-      "template": "bj_range_exit",
-      "file": null,
-      "enabled": true,
-      "text": null
-    },
-    {
-      "id": "app_stryk",
+      "id": "app_recovery",
       "phase": "approach",
-      "label": "STRYK recovery",
+      "label": "Approach recovery",
       "channel": "approach",
       "mode": "tts",
       "template": "approach_check_in",
       "file": null,
       "enabled": true,
-      "text": null
+      "text": null,
+      "recovery": "tactical_overhead"
     },
     {
       "id": "app_overhead",
       "phase": "approach",
-      "label": "Cleared tactical overhead",
+      "label": "Approach clearance + tower",
       "channel": "approach",
       "mode": "tts",
       "template": "cleared_approach",
       "file": null,
       "enabled": true,
-      "text": null
+      "text": null,
+      "approach_pattern": "tactical_overhead"
     },
     {
       "id": "twr_right_break",
@@ -201,5 +181,6 @@
       "enabled": true,
       "text": null
     }
-  ]
+  ],
+  "active_takeoff_mode": "lineup"
 }

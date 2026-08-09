@@ -14,7 +14,8 @@ Both open the same polished UI.
 4. **Help** — in-app how-tos (Getting started, Google JSON setup, Plan Flight tips, troubleshooting). Also the top-right **Help** button.
 
 ## Typical workflow
-1. Setup → set Opus user (e.g. Turtle) → Refresh callsign → Save setup  
+1. Setup → Choose flight… from Opus → confirm callsign/FP → Save setup  
+   (Opus username is optional — used to auto-pick your seat on that flight.)
 2. Plan Flight → add/reorder steps → Preview → Save mission  
 3. Fly → Play Next through the full timeline (seek/jump to skip)  
 

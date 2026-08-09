@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -88,12 +89,64 @@ class FlowEngine:
                 return load_json(STATE_PATH)
             except json.JSONDecodeError:
                 pass
-        return {"index": 0, "last_step_id": None}
+        return {
+            "index": 0,
+            "last_step_id": None,
+            "active_takeoff_mode": None,
+            "pending_takeoff_offer": None,
+            "takeoff_offer_rolled": False,
+        }
 
     def save_state(self) -> None:
         # Drop legacy direction from state if present
         self.state.pop("direction", None)
         save_json(STATE_PATH, self.state)
+
+    def _advance_past_skippable(self) -> None:
+        """Skip lineup when rolling takeoff is active (no LUAW)."""
+        steps = self.steps
+        if not steps:
+            return
+        idx = int(self.state.get("index") or 0)
+        if idx < 0:
+            idx = 0
+        while idx < len(steps) and atc_phrase.should_skip_takeoff_step(
+            steps[idx], self.mission, self.state
+        ):
+            idx += 1
+        self.state["index"] = idx
+
+    def _maybe_roll_takeoff_offer(self, step: dict[str, Any] | None) -> None:
+        """
+        Once per sortie, when arriving at a tower takeoff step, maybe offer rolling.
+        Sets pending_takeoff_offer=rolling so Fly can Accept/Deny (and Play asks).
+        """
+        if not step or self.state.get("takeoff_offer_rolled"):
+            return
+        if not atc_phrase.is_takeoff_related_template(step.get("template")):
+            return
+        # Already chose rolling (pilot request) — don't re-offer
+        if str(self.state.get("active_takeoff_mode") or "").strip().casefold() == "rolling":
+            self.state["takeoff_offer_rolled"] = True
+            self.save_state()
+            return
+        if atc_phrase.pending_takeoff_offer(self.state):
+            self.state["takeoff_offer_rolled"] = True
+            self.save_state()
+            return
+        chance = atc_phrase.takeoff_offer_chance(self.config, self.mission)
+        self.state["takeoff_offer_rolled"] = True
+        if random.random() < chance:
+            self.state["pending_takeoff_offer"] = "rolling"
+        self.save_state()
+
+    def prepare_takeoff_cursor(self) -> None:
+        """Skip LUAW if needed + maybe arm a rolling offer for the current step."""
+        self._advance_past_skippable()
+        steps = self.steps
+        idx = int(self.state.get("index") or 0)
+        step = steps[idx] if steps and 0 <= idx < len(steps) else None
+        self._maybe_roll_takeoff_offer(step)
 
     def reload(self) -> None:
         self.config = load_json(CONFIG_PATH)
@@ -112,6 +165,7 @@ class FlowEngine:
         steps = self.steps
         if not steps:
             return None
+        self.prepare_takeoff_cursor()
         idx = int(self.state.get("index") or 0)
         if idx < 0:
             idx = 0
@@ -122,11 +176,14 @@ class FlowEngine:
 
     def status(self) -> dict[str, Any]:
         steps = self.steps
+        self.prepare_takeoff_cursor()
         idx = int(self.state.get("index") or 0)
         if idx < 0:
             idx = 0
         at_end = bool(steps) and idx >= len(steps)
         step = None if at_end or not steps else steps[min(idx, len(steps) - 1)]
+        takeoff_mode = atc_phrase.resolve_active_takeoff_mode(self.mission, self.state)
+        pending = atc_phrase.pending_takeoff_offer(self.state)
         return {
             "mission": self.mission.get("name"),
             "index": idx,
@@ -135,6 +192,9 @@ class FlowEngine:
             "at_end": at_end,
             "step": step,
             "label": None if not step else f"{step.get('phase', '').upper()} · {step.get('label')}",
+            "active_takeoff_mode": takeoff_mode,
+            "pending_takeoff_offer": pending,
+            "takeoff_mode_label": atc_phrase.takeoff_mode_label(takeoff_mode),
             "steps": [
                 {
                     "index": i,
@@ -154,6 +214,7 @@ class FlowEngine:
             raise RuntimeError("No enabled steps")
         idx = max(0, min(int(index), len(steps)))  # len(steps) == past end
         self.state["index"] = idx
+        self.prepare_takeoff_cursor()
         self.save_state()
         st = self.status()
         st["seeked"] = True
@@ -187,10 +248,17 @@ class FlowEngine:
             )
             opus = atc_phrase.synthetic_flight_context(label)
         callsign = opus.radio_callsign
-        runway = atc_phrase.pick_departure_runway(
-            airport, weather, opus, self.config, step=step
-        )
         channel = step.get("channel") or step.get("phase") or "other"
+        runway = atc_phrase.pick_departure_runway(
+            airport,
+            weather,
+            opus,
+            self.config,
+            step=step,
+            mission=self.mission,
+            state=self.state,
+            template=step.get("template"),
+        )
         freq, mod, tx_name = atc_phrase.step_radio(airport, channel, step)
         mode = (step.get("mode") or "tts").lower()
         voice_name, _ = atc_phrase.voice_for_step(self.config, channel, step)
@@ -228,6 +296,9 @@ class FlowEngine:
                 custom_text=str(custom_text) if custom_text else None,
                 opus=opus,
                 step=step,
+                mission=self.mission,
+                state=self.state,
+                config=self.config,
             )
             # Prefer per-step freq/mod (e.g. unique "other" freqs) over airport defaults
             code = atc_phrase.transmit(
@@ -239,8 +310,10 @@ class FlowEngine:
                 mod,
                 channel=channel,
                 voice_override=voice_name,
+                step=step,
             )
             detail["text"] = text
+            detail["tts_speed"] = atc_phrase.tts_speed_for_step(self.config, step=step)
 
         detail["exit_code"] = code
         self.state["last_step_id"] = step.get("id")
@@ -251,6 +324,7 @@ class FlowEngine:
         steps = self.steps
         if not steps:
             raise RuntimeError("No enabled steps")
+        self.prepare_takeoff_cursor()
         idx = int(self.state.get("index") or 0)
         if idx < 0:
             idx = 0
@@ -259,8 +333,13 @@ class FlowEngine:
         step = steps[idx]
         result = self.play_step(step)
         self.state["index"] = idx + 1
+        self._advance_past_skippable()
         self.save_state()
         result["advanced_to_index"] = self.state["index"]
+        result["active_takeoff_mode"] = atc_phrase.resolve_active_takeoff_mode(
+            self.mission, self.state
+        )
+        result["pending_takeoff_offer"] = atc_phrase.pending_takeoff_offer(self.state)
         return result
 
     def back(self) -> dict[str, Any]:
@@ -271,17 +350,27 @@ class FlowEngine:
         if idx < 0:
             idx = 0
         self.state["index"] = idx
+        self.prepare_takeoff_cursor()
         self.save_state()
-        step = steps[idx]
+        step = self.current_step()
+        if step is None:
+            raise RuntimeError("No enabled steps")
         result = self.play_step(step)
         # After replaying, leave cursor on next after this step
+        idx = int(self.state.get("index") or 0)
         self.state["index"] = min(idx + 1, len(steps))
+        self._advance_past_skippable()
         self.save_state()
         return result
 
     def reset(self) -> dict[str, Any]:
         self.state["index"] = 0
         self.state["last_step_id"] = None
+        self.state["active_takeoff_mode"] = None
+        self.state["pending_takeoff_offer"] = None
+        self.state["takeoff_offer_rolled"] = False
+        if "active_takeoff_mode" in self.mission:
+            self.mission["active_takeoff_mode"] = atc_phrase.DEFAULT_TAKEOFF_MODE
         self.save_state()
         return self.status()
 
@@ -296,9 +385,14 @@ class FlowEngine:
         for i, step in enumerate(steps):
             if step.get("id") == step_id:
                 self.state["index"] = i
+                self.prepare_takeoff_cursor()
                 self.save_state()
-                result = self.play_step(step)
-                self.state["index"] = i + 1
+                # Cursor may have skipped past this id (rolling → skip lineup)
+                cur = self.current_step()
+                play = cur if cur is not None else step
+                result = self.play_step(play)
+                self.state["index"] = int(self.state.get("index") or 0) + 1
+                self._advance_past_skippable()
                 self.save_state()
                 return result
         raise KeyError(f"Unknown step id: {step_id}")

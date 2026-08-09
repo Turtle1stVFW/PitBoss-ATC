@@ -6,6 +6,7 @@ No JSON editing required.
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import random
@@ -16,6 +17,7 @@ import threading
 import tkinter as tk
 import uuid
 import webbrowser
+from collections.abc import Callable
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Any
@@ -25,6 +27,7 @@ sys.path.insert(0, str(HERE))
 
 import atc_phrase  # noqa: E402
 import flow_engine  # noqa: E402
+import hotkeys  # noqa: E402
 import kneeboard_pdf  # noqa: E402
 
 CONFIG_PATH = HERE / "config.json"
@@ -95,10 +98,14 @@ class MissionPlanner(tk.Tk):
         except OSError:
             pass
 
+        self._hotkey_listener = hotkeys.GlobalHotkeyListener()
+        self._tk_hotkey_binds: list[str] = []
+
         self._style()
         self._build()
         self._load_setup_fields()
         self.refresh_timeline()
+        self._apply_hotkeys()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _style(self) -> None:
@@ -156,11 +163,26 @@ class MissionPlanner(tk.Tk):
         )
         style.configure(
             "Big.TButton",
-            font=("Segoe UI Semibold", 14),
-            padding=(18, 14),
+            font=("Segoe UI Semibold", 16),
+            padding=(22, 18),
             background=C_CARD,
             foreground=C_TEXT,
             bordercolor=C_BORDER,
+        )
+        style.configure(
+            "FlyPlay.TButton",
+            font=("Segoe UI Semibold", 18),
+            padding=(24, 22),
+            background=C_ACCENT,
+            foreground="#061018",
+            bordercolor=C_ACCENT,
+            lightcolor=C_ACCENT,
+            darkcolor=C_ACCENT,
+        )
+        style.map(
+            "FlyPlay.TButton",
+            background=[("active", "#6aafff"), ("pressed", "#3a7fd6")],
+            foreground=[("disabled", C_MUTED)],
         )
 
         style.configure("TNotebook", background=C_BG, borderwidth=0)
@@ -270,12 +292,135 @@ class MissionPlanner(tk.Tk):
         style.map("Vertical.TScrollbar", background=[("active", C_BORDER)])
 
     def _on_close(self) -> None:
+        try:
+            self._clear_tk_hotkeys()
+            self._hotkey_listener.stop()
+        except Exception:
+            pass
         if self.http:
             try:
                 self.http.shutdown()
             except Exception:
                 pass
         self.destroy()
+
+    def _update_fly_hotkey_hint(self) -> None:
+        if not hasattr(self, "fly_hotkey_hint"):
+            return
+        nxt = hotkeys.hotkey_from_config(self.config_data, "next")
+        bak = hotkeys.hotkey_from_config(self.config_data, "back")
+        self.fly_hotkey_hint.set(f"Hotkeys  Next {nxt}  ·  Back {bak}")
+
+    def _clear_tk_hotkeys(self) -> None:
+        for seq in getattr(self, "_tk_hotkey_binds", []) or []:
+            try:
+                self.unbind_all(seq)
+            except tk.TclError:
+                pass
+        self._tk_hotkey_binds = []
+
+    def _apply_hotkeys(self) -> None:
+        """Register global (Windows) + in-app binds for Next / Back."""
+        if hasattr(self, "var_hotkey_next"):
+            nxt = hotkeys.normalize_hotkey(
+                self.var_hotkey_next.get(), default=hotkeys.DEFAULT_HOTKEY_NEXT
+            )
+            bak = hotkeys.normalize_hotkey(
+                self.var_hotkey_back.get(), default=hotkeys.DEFAULT_HOTKEY_BACK
+            )
+            self.var_hotkey_next.set(nxt)
+            self.var_hotkey_back.set(bak)
+        else:
+            nxt = hotkeys.hotkey_from_config(self.config_data, "next")
+            bak = hotkeys.hotkey_from_config(self.config_data, "back")
+        self.config_data["hotkey_next"] = nxt
+        self.config_data["hotkey_back"] = bak
+
+        self._clear_tk_hotkeys()
+
+        def on_next() -> None:
+            self.after(0, lambda: self._fly("next"))
+
+        def on_back() -> None:
+            self.after(0, lambda: self._fly("back"))
+
+        # In-app binds (when this window has focus)
+        for raw, cb in ((nxt, on_next), (bak, on_back)):
+            parsed = hotkeys.parse_hotkey(raw)
+            if not parsed:
+                continue
+            _mods, _vk, seq = parsed
+
+            def _handler(_event: object, fn: Callable[[], None] = cb) -> str:
+                fn()
+                return "break"
+
+            try:
+                self.bind_all(seq, _handler)
+                self._tk_hotkey_binds.append(seq)
+            except tk.TclError:
+                pass
+
+        warnings = self._hotkey_listener.start(
+            next_hotkey=nxt,
+            back_hotkey=bak,
+            on_next=on_next,
+            on_back=on_back,
+        )
+        status = f"Active: Next {nxt}  ·  Back {bak}"
+        if warnings:
+            status += "  —  " + "; ".join(warnings)
+        if hasattr(self, "var_hotkey_status"):
+            self.var_hotkey_status.set(status)
+        self._update_fly_hotkey_hint()
+
+    def _capture_hotkey(self, which: str) -> None:
+        """Modal: press a key combo to set Next or Back."""
+        dlg = tk.Toplevel(self)
+        dlg.title("Capture hotkey")
+        dlg.configure(bg=C_BG)
+        dlg.transient(self)
+        dlg.grab_set()
+        dlg.geometry("420x160")
+        label = "Advance (Next)" if which == "next" else "Previous (Back)"
+        tk.Label(
+            dlg,
+            text=f"Press a key combo for {label}",
+            bg=C_BG,
+            fg=C_TEXT,
+            font=("Segoe UI Semibold", 11),
+        ).pack(anchor="w", padx=16, pady=(16, 6))
+        var_live = tk.StringVar(value="Waiting…")
+        tk.Label(dlg, textvariable=var_live, bg=C_BG, fg=C_GREEN, font=("Consolas", 14)).pack(
+            anchor="w", padx=16, pady=4
+        )
+        tk.Label(
+            dlg,
+            text="Esc cancels  ·  modifiers alone are ignored",
+            bg=C_BG,
+            fg=C_MUTED,
+            font=("Segoe UI", 8),
+        ).pack(anchor="w", padx=16, pady=(4, 8))
+
+        def on_key(event: tk.Event) -> str:  # type: ignore[type-arg]
+            if event.keysym in ("Escape",):
+                dlg.destroy()
+                return "break"
+            combo = hotkeys.format_event(event)
+            if not combo:
+                return "break"
+            var_live.set(combo)
+            if which == "next":
+                self.var_hotkey_next.set(combo)
+            else:
+                self.var_hotkey_back.set(combo)
+            dlg.after(200, dlg.destroy)
+            self.after(250, self._apply_hotkeys)
+            return "break"
+
+        dlg.bind("<KeyPress>", on_key)
+        dlg.focus_set()
+        dlg.wait_window()
 
     def _build(self) -> None:
         top = tk.Frame(self, bg=C_BG)
@@ -284,7 +429,7 @@ class MissionPlanner(tk.Tk):
         self.mission_name_var = tk.StringVar(value=self.mission.get("name") or "Untitled")
         name_entry = ttk.Entry(top, textvariable=self.mission_name_var, width=28)
         name_entry.pack(side=tk.LEFT, padx=16)
-        ttk.Label(top, text="Plan the flight → Fly with Play Next", style="Muted.TLabel").pack(side=tk.LEFT)
+        ttk.Label(top, text="Plan the flight → Fly with Play and Advance", style="Muted.TLabel").pack(side=tk.LEFT)
 
         ttk.Button(top, text="Help", command=self._show_help_tab).pack(side=tk.RIGHT, padx=(8, 0))
 
@@ -303,6 +448,14 @@ class MissionPlanner(tk.Tk):
         self._build_fly()
         self._build_setup()
         self._build_help()
+        self.nb.bind("<<NotebookTabChanged>>", self._on_notebook_tab_changed)
+
+    def _on_notebook_tab_changed(self, _evt: object | None = None) -> None:
+        try:
+            if self.nb.index(self.nb.select()) == self.nb.index(self.tab_fly):
+                self._refresh_fly_status()
+        except tk.TclError:
+            pass
 
     # ---------- Plan tab ----------
     def _build_plan(self) -> None:
@@ -318,6 +471,7 @@ class MissionPlanner(tk.Tk):
             ("Delete", self.delete_step),
             ("↑", lambda: self.move_step(-1)),
             ("↓", lambda: self.move_step(1)),
+            ("New…", self.new_mission),
             ("Load mission", self.load_mission),
             ("Save mission", self.save_mission),
             ("Save mission as…", self.save_mission_as),
@@ -356,18 +510,34 @@ class MissionPlanner(tk.Tk):
         right.pack(side=tk.RIGHT, fill=tk.BOTH)
         right.pack_propagate(False)
 
-        ttk.Label(right, text="Step settings", style="Header.TLabel").pack(anchor="w", padx=12, pady=(10, 4))
+        self.var_locked = tk.BooleanVar(value=False)
+        step_hdr = tk.Frame(right, bg=C_PANEL)
+        step_hdr.pack(fill=tk.X, padx=12, pady=(10, 4))
+        ttk.Label(step_hdr, text="Step settings", style="Header.TLabel").pack(side=tk.LEFT)
+        self._chk_locked = ttk.Checkbutton(
+            step_hdr,
+            text="Lock",
+            variable=self.var_locked,
+            command=self._on_lock_toggle,
+            style="Panel.TCheckbutton",
+        )
+        self._chk_locked.pack(side=tk.RIGHT)
+        self._lock_widgets = [step_hdr, self._chk_locked]
 
         # Always-visible bottom: actions + large preview (pack bottom-first)
         footer = tk.Frame(right, bg=C_PANEL)
         footer.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=(4, 10))
-        ttk.Button(footer, text="Apply changes", style="Accent.TButton", command=self.apply_step).pack(
-            fill=tk.X, pady=(0, 6)
+        self._btn_apply_step = ttk.Button(
+            footer, text="Apply changes", style="Accent.TButton", command=self.apply_step
         )
+        self._btn_apply_step.pack(fill=tk.X, pady=(0, 6))
         prev_btns = tk.Frame(footer, bg=C_PANEL)
         prev_btns.pack(fill=tk.X)
-        ttk.Button(prev_btns, text="Preview text", command=self.preview_step).pack(
+        ttk.Button(prev_btns, text="Regenerate text", command=self.regenerate_step_text).pack(
             side=tk.LEFT, fill=tk.X, expand=True
+        )
+        ttk.Button(prev_btns, text="Phrase helper…", command=self.phrase_helper).pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 0)
         )
         ttk.Button(prev_btns, text="Hear locally", command=self.hear_preview_local).pack(
             side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 0)
@@ -383,7 +553,7 @@ class MissionPlanner(tk.Tk):
         ttk.Label(prev_hdr, text="Preview", style="Header.TLabel").pack(side=tk.LEFT)
         tk.Label(
             prev_hdr,
-            text="edit phrase then Apply to save on this step",
+            text="Apply saves settings · Regenerate re-rolls wording · Custom locks text",
             bg=C_PANEL,
             fg=C_MUTED,
             font=("Segoe UI", 8),
@@ -403,7 +573,7 @@ class MissionPlanner(tk.Tk):
         self.preview_box.insert(
             tk.END,
             "Select a step to preview the radio call here.\n"
-            "Use Preview text / Hear locally / TX → SRS below.",
+            "Use Regenerate text / Hear locally / TX → SRS below.",
         )
 
         # Scrollable form above preview
@@ -449,6 +619,13 @@ class MissionPlanner(tk.Tk):
         self.var_step_voice = tk.StringVar()
         self.var_step_voice_display = tk.StringVar(value="(agency default)")
         self.var_step_runway = tk.StringVar()
+        self.var_step_recovery = tk.StringVar(
+            value=atc_phrase.recovery_label(atc_phrase.DEFAULT_RECOVERY)
+        )
+        self.var_step_speed_custom = tk.BooleanVar(value=False)
+        self.var_step_speed = tk.DoubleVar(value=7)
+        self.var_step_speed_lbl = tk.StringVar(value="(global)")
+        self._step_form = form
 
         def row(r: int, label: str, widget: tk.Widget, *, pady: int = 4) -> None:
             tk.Label(form, text=label, bg=C_PANEL, fg=C_LABEL, font=("Segoe UI", 9)).grid(
@@ -519,6 +696,42 @@ class MissionPlanner(tk.Tk):
         )
         row(3, "Voice", voice_fr)
 
+        speed_fr = tk.Frame(form, bg=C_PANEL)
+        spd_top = tk.Frame(speed_fr, bg=C_PANEL)
+        spd_top.pack(fill=tk.X)
+        self._chk_step_speed = ttk.Checkbutton(
+            spd_top,
+            text="Custom speed",
+            variable=self.var_step_speed_custom,
+            command=self._on_step_speed_custom_toggle,
+            style="Panel.TCheckbutton",
+        )
+        self._chk_step_speed.pack(side=tk.LEFT)
+        tk.Label(
+            spd_top,
+            textvariable=self.var_step_speed_lbl,
+            bg=C_PANEL,
+            fg=C_MUTED,
+            font=("Segoe UI", 8),
+        ).pack(side=tk.LEFT, padx=(10, 0))
+        self._step_speed_scale = ttk.Scale(
+            speed_fr,
+            from_=-5,
+            to=10,
+            variable=self.var_step_speed,
+            orient=tk.HORIZONTAL,
+            command=self._on_step_speed_slide,
+        )
+        self._step_speed_scale.pack(fill=tk.X, pady=(4, 0))
+        tk.Label(
+            speed_fr,
+            text="Off = Setup default talk speed",
+            bg=C_PANEL,
+            fg=C_MUTED,
+            font=("Segoe UI", 8),
+        ).pack(anchor="w", pady=(2, 0))
+        row(4, "Speed", speed_fr)
+
         self._row_runway_lbl = tk.Label(form, text="Runway", bg=C_PANEL, fg=C_LABEL, font=("Segoe UI", 9))
         rwy_fr = tk.Frame(form, bg=C_PANEL)
         self.cmb_step_runway = ttk.Combobox(rwy_fr, textvariable=self.var_step_runway, width=12)
@@ -531,8 +744,40 @@ class MissionPlanner(tk.Tk):
             font=("Segoe UI", 8),
         ).pack(side=tk.LEFT, padx=(8, 0))
         self._rwy_fr = rwy_fr
-        self._row_runway_lbl.grid(row=4, column=0, sticky="nw", pady=4, padx=(10, 6))
-        rwy_fr.grid(row=4, column=1, sticky="we", pady=4, padx=(0, 10))
+        self._row_runway_lbl.grid(row=5, column=0, sticky="nw", pady=4, padx=(10, 6))
+        rwy_fr.grid(row=5, column=1, sticky="we", pady=4, padx=(0, 10))
+
+        self._row_recovery_lbl = tk.Label(form, text="Recovery", bg=C_PANEL, fg=C_LABEL, font=("Segoe UI", 9))
+        rec_fr = tk.Frame(form, bg=C_PANEL)
+        self._recovery_by_label = {lab: key for key, lab in atc_phrase.RECOVERY_CHOICES}
+        self._label_by_recovery = {key: lab for key, lab in atc_phrase.RECOVERY_CHOICES}
+        # Listbox picker (ttk.Combobox popdown fails in this scrolled dark form)
+        tk.Label(
+            rec_fr,
+            textvariable=self.var_step_recovery,
+            bg=C_CARD,
+            fg=C_TEXT,
+            font=("Segoe UI", 10),
+            anchor="w",
+            padx=8,
+            pady=4,
+            highlightbackground=C_BORDER,
+            highlightthickness=1,
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self._btn_step_recovery = ttk.Button(rec_fr, text="Choose…", command=self._choose_step_recovery)
+        self._btn_step_recovery.pack(side=tk.LEFT, padx=(6, 0))
+        tk.Label(
+            rec_fr,
+            text="Plan default — Fly can change mid-sortie",
+            bg=C_PANEL,
+            fg=C_MUTED,
+            font=("Segoe UI", 8),
+        ).pack(side=tk.LEFT, padx=(8, 0))
+        self._rec_fr = rec_fr
+        self._row_recovery_lbl.grid(row=12, column=0, sticky="nw", pady=4, padx=(10, 6))
+        rec_fr.grid(row=12, column=1, sticky="we", pady=4, padx=(0, 10))
+        self._row_recovery_lbl.grid_remove()
+        rec_fr.grid_remove()
 
         mode_fr = tk.Frame(form, bg=C_PANEL)
         ttk.Radiobutton(
@@ -540,7 +785,7 @@ class MissionPlanner(tk.Tk):
             text="Template",
             variable=self.var_mode,
             value="tts",
-            command=self._mode_ui,
+            command=self._on_mode_change,
             style="Panel.TRadiobutton",
         ).pack(side=tk.LEFT)
         ttk.Radiobutton(
@@ -548,7 +793,7 @@ class MissionPlanner(tk.Tk):
             text="Custom",
             variable=self.var_mode,
             value="custom",
-            command=self._mode_ui,
+            command=self._on_mode_change,
             style="Panel.TRadiobutton",
         ).pack(side=tk.LEFT, padx=8)
         ttk.Radiobutton(
@@ -556,10 +801,10 @@ class MissionPlanner(tk.Tk):
             text="File",
             variable=self.var_mode,
             value="file",
-            command=self._mode_ui,
+            command=self._on_mode_change,
             style="Panel.TRadiobutton",
         ).pack(side=tk.LEFT)
-        row(5, "Action", mode_fr)
+        row(6, "Action", mode_fr)
 
         tmpl_labels = [lab for _, lab in atc_phrase.TEMPLATE_CHOICES]
         self._tmpl_by_label = {lab: key for key, lab in atc_phrase.TEMPLATE_CHOICES}
@@ -576,9 +821,12 @@ class MissionPlanner(tk.Tk):
         self.cmb_template.configure(
             postcommand=lambda: self.cmb_template.configure(values=tuple(tmpl_labels))
         )
-        self.cmb_template.bind("<<ComboboxSelected>>", lambda _e: self._update_step_runway_ui())
-        self._row_template_lbl.grid(row=6, column=0, sticky="nw", pady=4, padx=(10, 6))
-        self.cmb_template.grid(row=6, column=1, sticky="we", pady=4, padx=(0, 10))
+        self.cmb_template.bind(
+            "<<ComboboxSelected>>",
+            lambda _e: (self._update_step_runway_ui(), self._update_recovery_ui()),
+        )
+        self._row_template_lbl.grid(row=7, column=0, sticky="nw", pady=4, padx=(10, 6))
+        self.cmb_template.grid(row=7, column=1, sticky="we", pady=4, padx=(0, 10))
 
         self._row_custom_lbl = tk.Label(form, text="Custom", bg=C_PANEL, fg=C_LABEL, font=("Segoe UI", 9))
         self.txt_custom = tk.Text(
@@ -593,21 +841,21 @@ class MissionPlanner(tk.Tk):
         )
         self._row_custom_hint = tk.Label(
             form,
-            text="{callsign} {runway} {altimeter} {wind}",
+            text="{callsign} {runway} {altimeter} {wind} {alpha_bullseye}",
             bg=C_PANEL,
             fg=C_MUTED,
             font=("Segoe UI", 8),
         )
-        self._row_custom_lbl.grid(row=7, column=0, sticky="nw", pady=4, padx=(10, 6))
-        self.txt_custom.grid(row=7, column=1, sticky="we", pady=4, padx=(0, 10))
-        self._row_custom_hint.grid(row=8, column=1, sticky="w", padx=(0, 10))
+        self._row_custom_lbl.grid(row=8, column=0, sticky="nw", pady=4, padx=(10, 6))
+        self.txt_custom.grid(row=8, column=1, sticky="we", pady=4, padx=(0, 10))
+        self._row_custom_hint.grid(row=9, column=1, sticky="w", padx=(0, 10))
 
         self._row_file_lbl = tk.Label(form, text="Audio file", bg=C_PANEL, fg=C_LABEL, font=("Segoe UI", 9))
         file_fr = tk.Frame(form, bg=C_PANEL)
         ttk.Entry(file_fr, textvariable=self.var_file).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(file_fr, text="Browse…", command=self._browse_file).pack(side=tk.LEFT, padx=4)
-        self._row_file_lbl.grid(row=9, column=0, sticky="nw", pady=4, padx=(10, 6))
-        file_fr.grid(row=9, column=1, sticky="we", pady=4, padx=(0, 10))
+        self._row_file_lbl.grid(row=10, column=0, sticky="nw", pady=4, padx=(10, 6))
+        file_fr.grid(row=10, column=1, sticky="we", pady=4, padx=(0, 10))
         self._file_fr = file_fr
 
         ttk.Checkbutton(
@@ -615,14 +863,79 @@ class MissionPlanner(tk.Tk):
             text="Include in flight (enabled)",
             variable=self.var_enabled,
             style="Panel.TCheckbutton",
-        ).grid(row=10, column=1, sticky="w", pady=6, padx=(0, 10))
+        ).grid(row=11, column=1, sticky="w", pady=6, padx=(0, 10))
 
         self._last_preview_phrase = ""
         self._preview_base_phrase = ""  # last auto-filled phrase (detect Preview edits)
         self._last_preview_channel = "other"
         self._last_preview_file: str | None = None
         self._update_freq_ui()
+        self._refresh_step_speed_ui()
         self._mode_ui()
+
+    def _step_is_locked(self, step: dict[str, Any] | None = None) -> bool:
+        if step is None:
+            if self.selected_index is None:
+                return False
+            step = self._steps()[self.selected_index]
+        return bool(step.get("locked"))
+
+    def _on_lock_toggle(self) -> None:
+        """Persist lock immediately so unlock works even when the editor is disabled."""
+        if getattr(self, "_loading", False) or self.selected_index is None:
+            return
+        step = self._steps()[self.selected_index]
+        step["locked"] = bool(self.var_locked.get())
+        self._apply_lock_ui()
+        self.refresh_timeline()
+        if self.selected_index is not None:
+            self.timeline.selection_set(self.selected_index)
+
+    def _apply_lock_ui(self) -> None:
+        """Disable step editors when locked; lock checkbox stays usable."""
+        locked = bool(self.var_locked.get())
+        skip = set(self._lock_widgets)
+
+        def _set_state(widget: tk.Widget) -> None:
+            if widget in skip:
+                return
+            try:
+                cls = widget.winfo_class()
+            except tk.TclError:
+                return
+            try:
+                if cls in ("TEntry", "TCombobox", "TButton", "TCheckbutton", "TRadiobutton", "TScale"):
+                    widget.configure(state=("disabled" if locked else "normal"))
+                elif cls in ("Entry", "Text", "Button", "Listbox", "Radiobutton"):
+                    widget.configure(state=(tk.DISABLED if locked else tk.NORMAL))
+            except tk.TclError:
+                pass
+            for child in widget.winfo_children():
+                _set_state(child)
+
+        if hasattr(self, "_step_form"):
+            _set_state(self._step_form)
+        for btn in getattr(self, "_channel_buttons", {}).values():
+            try:
+                btn.configure(state=(tk.DISABLED if locked else tk.NORMAL))
+            except tk.TclError:
+                pass
+        if hasattr(self, "preview_box"):
+            try:
+                self.preview_box.configure(state=(tk.DISABLED if locked else tk.NORMAL))
+            except tk.TclError:
+                pass
+        if getattr(self, "_btn_apply_step", None) is not None:
+            try:
+                self._btn_apply_step.configure(state=("disabled" if locked else "normal"))
+            except tk.TclError:
+                pass
+        # Restore template/custom field visibility and Combobox states after unlock
+        if not locked:
+            self._mode_ui()
+            self._update_freq_ui()
+            self._update_step_runway_ui()
+            self._refresh_step_speed_ui()
 
     def _phrase_from_preview_box(self) -> str | None:
         """Editable radio phrase from the Preview box (strips Spoken/metadata footers)."""
@@ -649,8 +962,13 @@ class MissionPlanner(tk.Tk):
 
     def _set_preview_display(self, body: str, *, base_phrase: str | None = None) -> None:
         """Write Preview box; track base phrase used to detect user edits."""
+        was_locked = bool(self.var_locked.get()) if hasattr(self, "var_locked") else False
+        if was_locked:
+            self.preview_box.configure(state=tk.NORMAL)
         self.preview_box.delete("1.0", tk.END)
         self.preview_box.insert(tk.END, body)
+        if was_locked:
+            self.preview_box.configure(state=tk.DISABLED)
         if base_phrase is not None:
             self._preview_base_phrase = base_phrase
             self._last_preview_phrase = base_phrase
@@ -668,7 +986,12 @@ class MissionPlanner(tk.Tk):
 
     def _refresh_step_runway_choices(self) -> None:
         ap = self._airport()
-        choices = [""] + [str(r) for r in (ap.get("runways") or [])]
+        # Ops first, then instrument alts (21L) for explicit pilot/step requests.
+        choices: list[str] = [""]
+        for r in list(ap.get("runways") or []) + list(ap.get("instrument_runways") or []):
+            n = atc_phrase.normalize_runway(r) or str(r).strip()
+            if n and n not in choices:
+                choices.append(n)
         current = self.var_step_runway.get().strip()
         if current and current not in choices:
             choices.append(current)
@@ -678,13 +1001,46 @@ class MissionPlanner(tk.Tk):
         show = self._step_uses_runway()
         if show:
             self._refresh_step_runway_choices()
-            self._row_runway_lbl.grid(row=4, column=0, sticky="nw", pady=4, padx=(10, 6))
-            self._rwy_fr.grid(row=4, column=1, sticky="we", pady=4, padx=(0, 10))
+            self._row_runway_lbl.grid(row=5, column=0, sticky="nw", pady=4, padx=(10, 6))
+            self._rwy_fr.grid(row=5, column=1, sticky="we", pady=4, padx=(0, 10))
         else:
             self._row_runway_lbl.grid_remove()
             self._rwy_fr.grid_remove()
+        self._update_recovery_ui()
         if hasattr(self, "_plan_canvas"):
             self.after(30, lambda: self._plan_canvas.configure(scrollregion=self._plan_canvas.bbox("all")))
+
+    def _update_recovery_ui(self) -> None:
+        if not hasattr(self, "_row_recovery_lbl"):
+            return
+        lab = self.var_template.get()
+        tmpl = self._tmpl_by_label.get(lab, "")
+        show = tmpl == "approach_check_in" and self.var_mode.get() == "tts"
+        if show:
+            self._row_recovery_lbl.grid(row=12, column=0, sticky="nw", pady=4, padx=(10, 6))
+            self._rec_fr.grid(row=12, column=1, sticky="we", pady=4, padx=(0, 10))
+        else:
+            self._row_recovery_lbl.grid_remove()
+            self._rec_fr.grid_remove()
+
+    def _on_mode_change(self) -> None:
+        """Radio Template / Custom / File — Template clears locked custom text so Opus refreshes."""
+        if getattr(self, "_loading", False):
+            self._mode_ui()
+            return
+        if self._step_is_locked():
+            return
+        mode = self.var_mode.get()
+        if mode == "tts" and self.selected_index is not None:
+            step = self._steps()[self.selected_index]
+            if step.get("text"):
+                step["text"] = None
+            self.txt_custom.configure(state=tk.NORMAL)
+            self.txt_custom.delete("1.0", tk.END)
+            # Fresh template preview (includes newly selected Opus FP / altitudes)
+            self._preview_base_phrase = ""
+            self.after(20, lambda: self.preview_step(apply=False))
+        self._mode_ui()
 
     def _mode_ui(self) -> None:
         mode = self.var_mode.get()
@@ -699,23 +1055,24 @@ class MissionPlanner(tk.Tk):
             else:
                 widget.grid_remove()
 
-        _set(self._row_template_lbl, show_tmpl, row=6, column=0, sticky="nw", pady=4, padx=(10, 6))
-        _set(self.cmb_template, show_tmpl, row=6, column=1, sticky="we", pady=4, padx=(0, 10))
+        _set(self._row_template_lbl, show_tmpl, row=7, column=0, sticky="nw", pady=4, padx=(10, 6))
+        _set(self.cmb_template, show_tmpl, row=7, column=1, sticky="we", pady=4, padx=(0, 10))
         if show_tmpl:
             self.cmb_template.configure(state="readonly")
 
-        _set(self._row_custom_lbl, show_custom, row=7, column=0, sticky="nw", pady=4, padx=(10, 6))
-        _set(self.txt_custom, show_custom, row=7, column=1, sticky="we", pady=4, padx=(0, 10))
-        _set(self._row_custom_hint, show_custom, row=8, column=1, sticky="w", padx=(0, 10))
+        _set(self._row_custom_lbl, show_custom, row=8, column=0, sticky="nw", pady=4, padx=(10, 6))
+        _set(self.txt_custom, show_custom, row=8, column=1, sticky="we", pady=4, padx=(0, 10))
+        _set(self._row_custom_hint, show_custom, row=9, column=1, sticky="w", padx=(0, 10))
         if show_custom:
             self.txt_custom.configure(state=tk.NORMAL)
         else:
             self.txt_custom.configure(state=tk.DISABLED)
 
-        _set(self._row_file_lbl, show_file, row=9, column=0, sticky="nw", pady=4, padx=(10, 6))
-        _set(self._file_fr, show_file, row=9, column=1, sticky="we", pady=4, padx=(0, 10))
+        _set(self._row_file_lbl, show_file, row=10, column=0, sticky="nw", pady=4, padx=(10, 6))
+        _set(self._file_fr, show_file, row=10, column=1, sticky="we", pady=4, padx=(0, 10))
 
         self._update_step_runway_ui()
+        self._update_recovery_ui()
 
         if hasattr(self, "_plan_canvas"):
             self.after(30, lambda: self._plan_canvas.configure(scrollregion=self._plan_canvas.bbox("all")))
@@ -733,6 +1090,8 @@ class MissionPlanner(tk.Tk):
         return self.airports.get(key) or next(iter(self.airports.values()))
 
     def _set_channel(self, agency: str) -> None:
+        if self._step_is_locked():
+            return
         prev = (self.var_channel.get() or "").strip().lower()
         self.var_channel.set(agency)
         self._paint_channel_buttons()
@@ -800,6 +1159,184 @@ class MissionPlanner(tk.Tk):
     def _clear_step_voice(self) -> None:
         self.var_step_voice.set("")
         self._refresh_step_voice_display()
+
+    def _global_talk_speed(self) -> int:
+        if hasattr(self, "var_speed"):
+            return atc_phrase.tts_speed(speed=self.var_speed.get())
+        return atc_phrase.tts_speed(self.config_data)
+
+    def _refresh_step_speed_ui(self) -> None:
+        global_spd = self._global_talk_speed()
+        custom = bool(self.var_step_speed_custom.get())
+        if custom:
+            n = atc_phrase.tts_speed(speed=self.var_step_speed.get())
+            self.var_step_speed_lbl.set(str(n))
+        else:
+            self.var_step_speed_lbl.set(f"(global: {global_spd})")
+        if hasattr(self, "_step_speed_scale"):
+            try:
+                self._step_speed_scale.configure(state=("normal" if custom else "disabled"))
+            except tk.TclError:
+                pass
+
+    def _on_step_speed_slide(self, _value: str | None = None) -> None:
+        if getattr(self, "_loading", False):
+            return
+        if not self.var_step_speed_custom.get():
+            return
+        self.var_step_speed_lbl.set(str(atc_phrase.tts_speed(speed=self.var_step_speed.get())))
+
+    def _on_step_speed_custom_toggle(self) -> None:
+        if getattr(self, "_loading", False):
+            self._refresh_step_speed_ui()
+            return
+        if self.var_step_speed_custom.get():
+            # Seed from global so the first drag isn't a surprise jump
+            self.var_step_speed.set(float(self._global_talk_speed()))
+        self._refresh_step_speed_ui()
+
+    def _pick_list_value(
+        self,
+        *,
+        title: str,
+        choices: list[str],
+        current: str = "",
+        parent: tk.Misc | None = None,
+        heading: str | None = None,
+    ) -> str | None:
+        """
+        Modal Listbox picker — more reliable than ttk.Combobox popdowns
+        (dark clam theme + scrolled Plan form often breaks click-to-open).
+        """
+        if not choices:
+            return None
+        owner = parent or self
+        result: dict[str, str | None] = {"value": None}
+
+        dlg = tk.Toplevel(owner)
+        dlg.title(title)
+        dlg.configure(bg=C_BG)
+        dlg.transient(owner)
+        dlg.grab_set()
+        # Size from choice count; keep usable on kneeboard laptops
+        height = min(480, 160 + min(len(choices), 14) * 22)
+        dlg.geometry(f"420x{height}")
+
+        tk.Label(
+            dlg,
+            text=heading or title,
+            bg=C_BG,
+            fg=C_TEXT,
+            font=("Segoe UI Semibold", 11),
+        ).pack(anchor="w", padx=12, pady=(12, 6))
+
+        lb = tk.Listbox(
+            dlg,
+            bg=C_CARD,
+            fg=C_TEXT,
+            selectbackground=C_ACCENT,
+            selectforeground="#061018",
+            font=("Segoe UI", 11),
+            activestyle="none",
+            highlightthickness=1,
+            highlightbackground=C_BORDER,
+            relief=tk.FLAT,
+            exportselection=False,
+        )
+        lb.pack(fill=tk.BOTH, expand=True, padx=12, pady=4)
+        select_idx = 0
+        for i, item in enumerate(choices):
+            lb.insert(tk.END, item)
+            if item == current:
+                select_idx = i
+        lb.selection_set(select_idx)
+        lb.activate(select_idx)
+        lb.see(select_idx)
+
+        def accept(_evt: object | None = None) -> None:
+            sel = lb.curselection()
+            if not sel:
+                return
+            result["value"] = lb.get(int(sel[0]))
+            dlg.destroy()
+
+        def cancel(_evt: object | None = None) -> None:
+            result["value"] = None
+            dlg.destroy()
+
+        foot = tk.Frame(dlg, bg=C_BG)
+        foot.pack(fill=tk.X, padx=12, pady=(4, 12))
+        ttk.Button(foot, text="Cancel", command=cancel).pack(side=tk.RIGHT)
+        ttk.Button(foot, text="Select", command=accept).pack(side=tk.RIGHT, padx=(0, 8))
+        lb.bind("<Double-Button-1>", accept)
+        lb.bind("<Return>", accept)
+        dlg.bind("<Escape>", cancel)
+        lb.focus_set()
+        dlg.wait_window()
+        return result["value"]
+
+    def _pick_caoc_track(
+        self,
+        *,
+        query: str = "",
+        current_id: str = "",
+        parent: tk.Misc | None = None,
+    ) -> dict[str, Any] | None:
+        """Pick a live CAOC air track (bullseye) for Phrase helper."""
+        self._sync_identity_to_config()
+        try:
+            rows = atc_phrase.list_caoc_air_bullseyes(
+                self.config_data, query=query.strip() or None, max_age_s=0.0
+            )
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("CAOC tracks", str(exc), parent=parent or self)
+            return None
+        if not rows:
+            messagebox.showinfo(
+                "CAOC tracks",
+                "No matching air tracks.\nTry a different filter or check Opus backend URL in Setup.",
+                parent=parent or self,
+            )
+            return None
+        labels = [
+            f"{r.get('display') or '?'}   —   {r.get('label') or r.get('radio_callsign') or r.get('unit_name')}"
+            for r in rows
+        ]
+        current_lab = ""
+        for i, r in enumerate(rows):
+            if current_id and str(r.get("unit_id") or "") == str(current_id):
+                current_lab = labels[i]
+                break
+        picked = self._pick_list_value(
+            title="CAOC unit",
+            heading="Live server track (bullseye from CAOC)",
+            choices=labels,
+            current=current_lab or labels[0],
+            parent=parent,
+        )
+        if not picked:
+            return None
+        try:
+            idx = labels.index(picked)
+        except ValueError:
+            return None
+        return rows[idx]
+
+    def _choose_step_recovery(self) -> None:
+        """Pick Approach recovery type (Listbox — Combobox popdown is unreliable here)."""
+        if self._step_is_locked():
+            messagebox.showinfo("Locked", "Unlock this step before editing.")
+            return
+        labels = [lab for _, lab in atc_phrase.RECOVERY_CHOICES]
+        cur = self.var_step_recovery.get().strip()
+        picked = self._pick_list_value(
+            title="Recovery type",
+            heading="Visual / Instrument recovery",
+            choices=labels,
+            current=cur if cur in labels else atc_phrase.recovery_label(atc_phrase.DEFAULT_RECOVERY),
+        )
+        if picked:
+            self.var_step_recovery.set(picked)
 
     def _choose_step_voice(self) -> None:
         """Pick a voice for this step only (does not change Setup agency defaults)."""
@@ -877,6 +1414,7 @@ class MissionPlanner(tk.Tk):
         steps = self._steps()
         for i, step in enumerate(steps):
             en = "●" if step.get("enabled", True) else "○"
+            lock = "L" if step.get("locked") else " "
             ch = (step.get("channel") or "?").upper()[:4]
             mode = step.get("mode") or "tts"
             if mode == "file":
@@ -893,10 +1431,15 @@ class MissionPlanner(tk.Tk):
                     extra = f" @{mhz:g}"
             if step.get("voice"):
                 extra += " [v]"
+            if step.get("tts_speed") is not None and str(step.get("tts_speed")).strip() != "":
+                try:
+                    extra += f" [spd {atc_phrase.tts_speed(speed=step.get('tts_speed'))}]"
+                except (TypeError, ValueError):
+                    extra += " [spd]"
             step_rwy = atc_phrase.normalize_runway(step.get("runway"))
             if step_rwy:
                 extra += f" [rwy {step_rwy}]"
-            line = f" {i + 1:>2}  {en}  {ch:<4}  {kind:<4}  {label}{extra}"
+            line = f" {i + 1:>2}  {en}{lock} {ch:<4}  {kind:<4}  {label}{extra}"
             self.timeline.insert(tk.END, line)
         if self.selected_index is not None and self.selected_index < len(steps):
             self.timeline.selection_set(self.selected_index)
@@ -922,8 +1465,19 @@ class MissionPlanner(tk.Tk):
         self.var_template.set(self._label_by_tmpl.get(tmpl, self._label_by_tmpl["radio_check"]))
         self.var_file.set(step.get("file") or "")
         self.var_enabled.set(bool(step.get("enabled", True)))
+        self.var_locked.set(bool(step.get("locked")))
         self.var_step_voice.set(str(step.get("voice") or "").strip())
         self.var_step_runway.set(str(step.get("runway") or "").strip())
+        rec_key = atc_phrase.normalize_recovery_key(
+            step.get("recovery") or step.get("recovery_type")
+        )
+        self.var_step_recovery.set(self._label_by_recovery.get(rec_key, atc_phrase.recovery_label(rec_key)))
+        if step.get("tts_speed") is not None and str(step.get("tts_speed")).strip() != "":
+            self.var_step_speed_custom.set(True)
+            self.var_step_speed.set(float(atc_phrase.tts_speed(speed=step.get("tts_speed"))))
+        else:
+            self.var_step_speed_custom.set(False)
+            self.var_step_speed.set(float(self._global_talk_speed()))
         mhz = atc_phrase._parse_mhz(step.get("freq_mhz"))
         if mhz is not None:
             self.var_freq_mhz.set(f"{mhz:g}")
@@ -943,8 +1497,11 @@ class MissionPlanner(tk.Tk):
         self._mode_ui()
         self._update_freq_ui()
         self._refresh_step_voice_display()
+        self._refresh_step_speed_ui()
         self._update_step_runway_ui()
+        self._update_recovery_ui()
         self._loading = False
+        self._apply_lock_ui()
         # Show preview immediately for the selected step
         self.after(60, lambda: self.preview_step(apply=False))
 
@@ -954,6 +1511,9 @@ class MissionPlanner(tk.Tk):
             return
         steps = self._steps()
         step = steps[self.selected_index]
+        if step.get("locked"):
+            messagebox.showinfo("Locked", "Unlock this step before editing.")
+            return
         step["label"] = self.var_label.get().strip() or "Step"
         step["channel"] = self.var_channel.get().strip() or "other"
         step["phase"] = step["channel"]
@@ -966,6 +1526,11 @@ class MissionPlanner(tk.Tk):
         else:
             step.pop("voice", None)
 
+        if self.var_step_speed_custom.get():
+            step["tts_speed"] = atc_phrase.tts_speed(speed=self.var_step_speed.get())
+        else:
+            step.pop("tts_speed", None)
+
         # Keep a stored runway even if the field is hidden for this template type,
         # unless the user cleared it while the field was visible.
         if self._step_uses_runway():
@@ -975,6 +1540,22 @@ class MissionPlanner(tk.Tk):
                 self.var_step_runway.set(rwy)
             else:
                 step.pop("runway", None)
+
+        lab_tmpl = self.var_template.get()
+        tmpl_key = self._tmpl_by_label.get(lab_tmpl, "radio_check")
+        if tmpl_key == "approach_check_in" and self.var_mode.get() == "tts":
+            rec_ui = self.var_step_recovery.get().strip()
+            rec = atc_phrase.normalize_recovery_key(
+                self._recovery_by_label.get(rec_ui, rec_ui)
+            )
+            step["recovery"] = rec
+            # Mission default when no Fly override yet
+            if not self.mission.get("active_recovery"):
+                self.mission["active_recovery"] = rec
+            self.var_step_recovery.set(atc_phrase.recovery_label(rec))
+        elif tmpl_key != "approach_check_in":
+            # Leave existing recovery on the step if user switches templates
+            pass
 
         if step["channel"].lower() == "other":
             mhz = atc_phrase._parse_mhz(self.var_freq_mhz.get())
@@ -987,24 +1568,52 @@ class MissionPlanner(tk.Tk):
             step.pop("freq_mhz", None)
             step.pop("mod", None)
 
-        # Lock the Preview phrase on Apply so random climb / phrasing cannot
-        # re-roll between Preview text and Hear / Fly.
         preview_phrase = self._phrase_from_preview_box()
         custom_box = self.txt_custom.get("1.0", tk.END).strip()
         lab = self.var_template.get()
         tmpl = self._tmpl_by_label.get(lab, "radio_check")
+        base_preview = (self._preview_base_phrase or "").strip()
 
         if mode == "file":
             step["mode"] = "file"
             step["file"] = self.var_file.get().strip() or None
             step["text"] = None
-        else:
-            if preview_phrase:
+            step["template"] = tmpl
+        elif mode == "tts":
+            # Live template: regenerate from Opus/METAR each Preview/Hear/Fly.
+            # Only lock to custom if the user edited the Preview box.
+            edited = bool(
+                preview_phrase
+                and base_preview
+                and preview_phrase.strip() != base_preview
+            )
+            step["mode"] = "tts"
+            step["file"] = None
+            step["template"] = tmpl
+            if edited:
                 custom = preview_phrase.strip()
-            elif mode == "custom":
-                custom = custom_box or None
+                step["text"] = custom
+                self._loading = True
+                self.var_mode.set("custom")
+                self.txt_custom.configure(state=tk.NORMAL)
+                self.txt_custom.delete("1.0", tk.END)
+                self.txt_custom.insert(tk.END, custom)
+                self._mode_ui()
+                self._loading = False
+                self._preview_base_phrase = custom
+                self._last_preview_phrase = custom
             else:
-                custom = None
+                step["text"] = None
+                self.txt_custom.configure(state=tk.NORMAL)
+                self.txt_custom.delete("1.0", tk.END)
+        else:
+            # Explicit Custom mode — Custom box, or Preview if the user edited it.
+            custom = custom_box or None
+            if preview_phrase:
+                if base_preview and preview_phrase.strip() != base_preview:
+                    custom = preview_phrase.strip()
+                elif not custom:
+                    custom = preview_phrase.strip()
             step["mode"] = "tts"
             step["file"] = None
             step["template"] = tmpl
@@ -1023,7 +1632,426 @@ class MissionPlanner(tk.Tk):
                 step["text"] = None
         self.refresh_timeline()
         self.timeline.selection_set(self.selected_index)
-        self.after(40, lambda: self.preview_step(apply=False))
+        # Do not regenerate phrase here — Apply only saves settings.
+        # Use Regenerate text to re-roll template wording.
+
+    def regenerate_step_text(self) -> None:
+        """Rebuild the spoken phrase (re-rolls random climb / Local vs freq / etc.)."""
+        if self.selected_index is None:
+            messagebox.showinfo("Step", "Select a step in the timeline first.")
+            return
+        if not self._step_is_locked():
+            self.apply_step()
+        self.preview_step(apply=False)
+
+    def phrase_helper(self) -> None:
+        """Modal: pick a situation + fields → auto-generate wording onto the step."""
+        if self.selected_index is None:
+            messagebox.showinfo("Phrase helper", "Select a step in the timeline first.")
+            return
+        if self._step_is_locked():
+            messagebox.showinfo("Locked", "Unlock this step before using Phrase helper.")
+            return
+
+        step = self._steps()[self.selected_index]
+        dlg = tk.Toplevel(self)
+        dlg.title("Phrase helper")
+        dlg.configure(bg=C_BG)
+        dlg.geometry("640x560")
+        dlg.minsize(560, 480)
+        dlg.transient(self)
+        dlg.grab_set()
+
+        hdr = tk.Frame(dlg, bg=C_PANEL, highlightbackground=C_BORDER, highlightthickness=1)
+        hdr.pack(fill=tk.X, padx=12, pady=(12, 6))
+        tk.Label(
+            hdr,
+            text="Generate wording for custom / uncommon situations",
+            bg=C_PANEL,
+            fg=C_TEXT,
+            font=("Segoe UI Semibold", 11),
+        ).pack(anchor="w", padx=12, pady=10)
+
+        body = tk.Frame(dlg, bg=C_BG)
+        body.pack(fill=tk.BOTH, expand=True, padx=12, pady=6)
+
+        sit_labels = [lab for _, lab in atc_phrase.SITUATION_CHOICES]
+        sit_by_label = {lab: key for key, lab in atc_phrase.SITUATION_CHOICES}
+        # Prefer situation matching current template
+        tmpl = step.get("template") or ""
+        default_sit = "freeform"
+        for key, lab in atc_phrase.SITUATION_CHOICES:
+            hint = atc_phrase.situation_applies_to_step(key).get("template")
+            if hint and hint == tmpl:
+                default_sit = key
+                break
+        default_lab = next(lab for k, lab in atc_phrase.SITUATION_CHOICES if k == default_sit)
+
+        top = tk.Frame(body, bg=C_PANEL, highlightbackground=C_BORDER, highlightthickness=1)
+        top.pack(fill=tk.X)
+        top_inner = tk.Frame(top, bg=C_PANEL)
+        top_inner.pack(fill=tk.X, padx=12, pady=10)
+        tk.Label(top_inner, text="Situation", bg=C_PANEL, fg=C_LABEL).pack(side=tk.LEFT)
+        var_sit = tk.StringVar(value=default_lab)
+        sit_lbl = tk.Label(
+            top_inner,
+            textvariable=var_sit,
+            bg=C_CARD,
+            fg=C_TEXT,
+            font=("Segoe UI", 10),
+            anchor="w",
+            padx=8,
+            pady=4,
+            highlightbackground=C_BORDER,
+            highlightthickness=1,
+        )
+        sit_lbl.pack(side=tk.LEFT, padx=(10, 0), fill=tk.X, expand=True)
+
+        def pick_situation() -> None:
+            picked = self._pick_list_value(
+                title="Situation",
+                heading="What kind of call?",
+                choices=sit_labels,
+                current=var_sit.get(),
+                parent=dlg,
+            )
+            if picked:
+                var_sit.set(picked)
+                rebuild_fields()
+
+        ttk.Button(top_inner, text="Choose…", command=pick_situation).pack(side=tk.LEFT, padx=(6, 0))
+
+        fields_host = tk.Frame(body, bg=C_PANEL, highlightbackground=C_BORDER, highlightthickness=1)
+        fields_host.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
+        fields_inner = tk.Frame(fields_host, bg=C_PANEL)
+        fields_inner.pack(fill=tk.BOTH, expand=True, padx=12, pady=10)
+
+        field_vars: dict[str, tk.StringVar] = {}
+        field_widgets: list[tk.Widget] = []
+
+        def clear_fields() -> None:
+            for w in field_widgets:
+                w.destroy()
+            field_widgets.clear()
+            field_vars.clear()
+
+        def rebuild_fields(*_a: object) -> None:
+            clear_fields()
+            sit = sit_by_label.get(var_sit.get(), "freeform")
+            specs = atc_phrase.situation_fields(sit)
+            # Seed from step when relevant
+            seeds: dict[str, str] = {}
+            if sit == "approach_recovery":
+                seeds["recovery"] = atc_phrase.normalize_recovery_key(step.get("recovery"))
+                if step.get("descend_ft"):
+                    seeds["descend_ft"] = str(step.get("descend_ft"))
+                if step.get("speed_kt"):
+                    seeds["speed_kt"] = str(step.get("speed_kt"))
+            elif sit == "bj_range_exit":
+                seeds["handoff_channel"] = str(step.get("handoff_channel") or "approach")
+            elif sit == "approach_clearance":
+                seeds["pattern"] = atc_phrase.normalize_recovery_key(
+                    step.get("approach_pattern") or step.get("pattern") or step.get("recovery")
+                )
+            elif sit == "bj_alpha_check":
+                if step.get("alpha_bullseye") and isinstance(step["alpha_bullseye"], dict):
+                    ab = step["alpha_bullseye"]
+                    if ab.get("unit_id"):
+                        seeds["track_id"] = str(ab["unit_id"])
+                    if ab.get("display") or ab.get("unit_name"):
+                        seeds["track_label"] = (
+                            f"{ab.get('display') or '?'}   —   "
+                            f"{ab.get('label') or ab.get('unit_name') or 'Unit'}"
+                        )
+                    if ab.get("radio_callsign"):
+                        seeds["callsign"] = str(ab["radio_callsign"])
+
+            for spec in specs:
+                key = str(spec["key"])
+                if key in field_vars:
+                    # Already seeded (e.g. custom companion field)
+                    default = field_vars[key].get()
+                else:
+                    default = seeds.get(key, str(spec.get("default") or ""))
+                choices = list(spec.get("choices") or [])
+                labs = [cl for _, cl in choices]
+                key_to_lab = {ck: cl for ck, cl in choices}
+                if spec.get("kind") == "choice":
+                    if default in key_to_lab:
+                        default = key_to_lab[default]
+                    elif default not in labs and default and any(ck == "__custom__" for ck, _ in choices):
+                        custom_key = {
+                            "recovery": "recovery_custom",
+                            "expect": "expect_custom",
+                            "pattern": "pattern_custom",
+                        }.get(key, f"{key}_custom")
+                        field_vars[custom_key] = tk.StringVar(value=default)
+                        default = key_to_lab.get("__custom__", "Custom…")
+                var = field_vars.get(key) or tk.StringVar(value=default)
+                field_vars[key] = var
+                row_f = tk.Frame(fields_inner, bg=C_PANEL)
+                row_f.pack(fill=tk.X, pady=4)
+                field_widgets.append(row_f)
+                tk.Label(
+                    row_f, text=str(spec.get("label") or key), bg=C_PANEL, fg=C_LABEL, width=16, anchor="w"
+                ).pack(side=tk.LEFT)
+                if spec.get("kind") == "choice":
+                    if var.get() not in labs and labs:
+                        for ck, cl in choices:
+                            if ck == var.get() or cl == var.get():
+                                var.set(cl)
+                                break
+                    tk.Label(
+                        row_f,
+                        textvariable=var,
+                        bg=C_CARD,
+                        fg=C_TEXT,
+                        font=("Segoe UI", 10),
+                        anchor="w",
+                        padx=8,
+                        pady=4,
+                        highlightbackground=C_BORDER,
+                        highlightthickness=1,
+                    ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+                    def make_picker(v: tk.StringVar = var, options: list[str] = labs, label: str = str(spec.get("label") or key)) -> Callable[[], None]:
+                        def pick() -> None:
+                            picked = self._pick_list_value(
+                                title=label,
+                                heading=label,
+                                choices=options,
+                                current=v.get(),
+                                parent=dlg,
+                            )
+                            if picked:
+                                v.set(picked)
+                                update_preview()
+
+                        return pick
+
+                    ttk.Button(row_f, text="Choose…", command=make_picker()).pack(side=tk.LEFT, padx=(6, 0))
+                elif spec.get("kind") == "caoc_track":
+                    # Hidden id + visible label
+                    id_var = field_vars.get("track_id") or tk.StringVar(value=seeds.get("track_id", ""))
+                    field_vars["track_id"] = id_var
+                    lab_var = field_vars.get("track_label") or tk.StringVar(
+                        value=seeds.get("track_label") or "(choose a live unit…)"
+                    )
+                    field_vars["track_label"] = lab_var
+                    # Keep `var` (track_id key) pointing at id for collect_params
+                    field_vars[key] = id_var
+                    tk.Label(
+                        row_f,
+                        textvariable=lab_var,
+                        bg=C_CARD,
+                        fg=C_TEXT,
+                        font=("Segoe UI", 10),
+                        anchor="w",
+                        padx=8,
+                        pady=4,
+                        highlightbackground=C_BORDER,
+                        highlightthickness=1,
+                    ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+                    def pick_track(
+                        id_v: tk.StringVar = id_var,
+                        lab_v: tk.StringVar = lab_var,
+                    ) -> None:
+                        q = ""
+                        if "track_query" in field_vars:
+                            q = field_vars["track_query"].get().strip()
+                        row = self._pick_caoc_track(
+                            query=q,
+                            current_id=id_v.get().strip(),
+                            parent=dlg,
+                        )
+                        if not row:
+                            return
+                        id_v.set(str(row.get("unit_id") or ""))
+                        lab_v.set(
+                            f"{row.get('display') or '?'}   —   "
+                            f"{row.get('label') or row.get('radio_callsign') or row.get('unit_name')}"
+                        )
+                        # Seed callsign from track unless user already typed one
+                        if "callsign" in field_vars:
+                            cur_cs = field_vars["callsign"].get().strip()
+                            if not cur_cs:
+                                field_vars["callsign"].set(
+                                    str(row.get("radio_callsign") or row.get("unit_name") or "")
+                                )
+                        update_preview()
+
+                    ttk.Button(row_f, text="Choose…", command=pick_track).pack(side=tk.LEFT, padx=(6, 0))
+                else:
+                    ent = ttk.Entry(row_f, textvariable=var, width=38)
+                    ent.pack(side=tk.LEFT, fill=tk.X, expand=True)
+                    ent.bind("<KeyRelease>", lambda _e: update_preview())
+                hint = str(spec.get("hint") or "")
+                if hint:
+                    tk.Label(row_f, text=hint, bg=C_PANEL, fg=C_MUTED, font=("Segoe UI", 8)).pack(
+                        side=tk.LEFT, padx=(8, 0)
+                    )
+            self.after(10, update_preview)
+
+        preview_fr = tk.Frame(body, bg=C_PANEL, highlightbackground=C_BORDER, highlightthickness=1)
+        preview_fr.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
+        tk.Label(
+            preview_fr, text="Generated phrase", bg=C_PANEL, fg=C_TEXT, font=("Segoe UI Semibold", 10)
+        ).pack(anchor="w", padx=10, pady=(8, 4))
+        preview = tk.Text(
+            preview_fr,
+            height=6,
+            bg="#0a0e14",
+            fg=C_GREEN,
+            font=("Consolas", 10),
+            relief=tk.FLAT,
+            wrap=tk.WORD,
+            padx=8,
+            pady=8,
+        )
+        preview.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+
+        def collect_params() -> dict[str, Any]:
+            sit = sit_by_label.get(var_sit.get(), "freeform")
+            specs = atc_phrase.situation_fields(sit)
+            params: dict[str, Any] = {}
+            for spec in specs:
+                key = str(spec["key"])
+                raw = field_vars[key].get().strip() if key in field_vars else ""
+                if spec.get("kind") == "choice":
+                    # map label → key
+                    lab_to_key = {cl: ck for ck, cl in (spec.get("choices") or [])}
+                    params[key] = lab_to_key.get(raw, raw)
+                elif spec.get("kind") == "caoc_track":
+                    params[key] = field_vars["track_id"].get().strip() if "track_id" in field_vars else raw
+                else:
+                    params[key] = raw
+            return params
+
+        def update_preview(*_a: object) -> None:
+            sit = sit_by_label.get(var_sit.get(), "freeform")
+            try:
+                self._sync_identity_to_config()
+                ap = self._airport()
+                cs = "Flight"
+                if hasattr(self, "var_callsign"):
+                    raw_cs = self.var_callsign.get().strip()
+                    if raw_cs and not raw_cs.startswith("("):
+                        cs = raw_cs
+                if hasattr(self, "var_callsign_override"):
+                    ov = self.var_callsign_override.get().strip()
+                    if ov:
+                        cs = ov
+                params = collect_params()
+                # Alpha check uses selected track callsign when provided
+                if sit == "bj_alpha_check" and params.get("callsign"):
+                    cs = str(params["callsign"])
+                wx = atc_phrase.Weather(270, 10, 29.92, "")
+                rwy = atc_phrase.normalize_runway(step.get("runway")) or ""
+                if not rwy:
+                    try:
+                        rwy = atc_phrase.active_runway(list(ap.get("runways") or ["21R"]), wx.wind_dir)
+                    except Exception:
+                        rwy = "21R"
+                text = atc_phrase.generate_situation_phrase(
+                    sit, ap, cs, wx, rwy, params, config=self.config_data
+                )
+            except Exception as exc:  # noqa: BLE001
+                text = f"(could not generate: {exc})"
+            preview.configure(state=tk.NORMAL)
+            preview.delete("1.0", tk.END)
+            preview.insert(tk.END, text)
+            preview.configure(state=tk.NORMAL)
+
+        foot = tk.Frame(dlg, bg=C_BG)
+        foot.pack(fill=tk.X, padx=12, pady=(8, 12))
+
+        def use_phrase() -> None:
+            sit = sit_by_label.get(var_sit.get(), "freeform")
+            params = collect_params()
+            update_preview()
+            text = preview.get("1.0", tk.END).strip()
+            if not text or text.startswith("(could not"):
+                messagebox.showerror("Phrase helper", "Generate a valid phrase first.", parent=dlg)
+                return
+            apply_meta = atc_phrase.situation_applies_to_step(sit)
+            if apply_meta.get("channel"):
+                step["channel"] = apply_meta["channel"]
+                step["phase"] = apply_meta["channel"]
+            if apply_meta.get("template"):
+                step["template"] = apply_meta["template"]
+            if sit == "approach_recovery":
+                rec = params.get("recovery") or atc_phrase.DEFAULT_RECOVERY
+                if rec == "__custom__":
+                    rec = params.get("recovery_custom") or atc_phrase.DEFAULT_RECOVERY
+                rec = atc_phrase.normalize_recovery_key(rec)
+                step["recovery"] = rec
+                self.mission["active_recovery"] = rec
+                for k in ("descend_ft", "speed_kt"):
+                    if params.get(k):
+                        try:
+                            step[k] = int(str(params[k]).replace(",", ""))
+                        except ValueError:
+                            pass
+            elif sit == "approach_clearance":
+                pat = params.get("pattern") or atc_phrase.DEFAULT_RECOVERY
+                if pat == "__custom__":
+                    pat = params.get("pattern_custom") or pat
+                step["approach_pattern"] = atc_phrase.normalize_recovery_key(pat)
+            elif sit == "bj_range_exit":
+                step["handoff_channel"] = params.get("handoff_channel") or "approach"
+            elif sit == "bj_alpha_check":
+                fix = atc_phrase.resolve_situation_alpha_fix(self.config_data, params)
+                if fix:
+                    step["alpha_bullseye"] = {
+                        "name": fix.get("name"),
+                        "bearing": fix.get("bearing"),
+                        "range_nm": fix.get("range_nm"),
+                        "display": fix.get("display"),
+                        "spoken": fix.get("spoken"),
+                        "unit_name": fix.get("unit_name"),
+                        "unit_id": fix.get("unit_id"),
+                        "radio_callsign": fix.get("radio_callsign"),
+                        "label": fix.get("label"),
+                    }
+            elif sit == "agency_contact":
+                step["handoff_channel"] = params.get("handoff_channel") or "approach"
+                if params.get("from_channel"):
+                    step["channel"] = params["from_channel"]
+                    step["phase"] = params["from_channel"]
+
+            # Lock generated wording as custom text (editable)
+            step["mode"] = "tts"
+            step["text"] = text
+            step["file"] = None
+            self._loading = True
+            self.var_mode.set("custom")
+            self.var_channel.set(step.get("channel") or "other")
+            self._paint_channel_buttons()
+            self.var_template.set(
+                self._label_by_tmpl.get(step.get("template") or "radio_check", "Other — Radio check")
+            )
+            if step.get("recovery"):
+                rk = str(step["recovery"])
+                self.var_step_recovery.set(self._label_by_recovery.get(rk, rk))
+            self.txt_custom.configure(state=tk.NORMAL)
+            self.txt_custom.delete("1.0", tk.END)
+            self.txt_custom.insert(tk.END, text)
+            self._mode_ui()
+            self._loading = False
+            self._set_preview_display(text, base_phrase=text)
+            self.refresh_timeline()
+            self.timeline.selection_set(self.selected_index)
+            dlg.destroy()
+
+        ttk.Button(foot, text="Refresh preview", command=update_preview).pack(side=tk.LEFT)
+        ttk.Button(foot, text="Cancel", command=dlg.destroy).pack(side=tk.RIGHT)
+        ttk.Button(foot, text="Use on this step", command=use_phrase).pack(side=tk.RIGHT, padx=(0, 8))
+
+        rebuild_fields()
+        # Trace field changes — rebuild binds situation; also poll on focus-out via Refresh
+        dlg.bind("<Return>", lambda _e: use_phrase())
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
 
     def add_step(self) -> None:
         steps = self._steps()
@@ -1038,6 +2066,7 @@ class MissionPlanner(tk.Tk):
             "file": None,
             "text": None,
             "enabled": True,
+            "locked": False,
         }
         steps.append(step)
         self.selected_index = len(steps) - 1
@@ -1054,6 +2083,7 @@ class MissionPlanner(tk.Tk):
         step = copy.deepcopy(steps[self.selected_index])
         step["id"] = slug_id(step.get("label") or "step")
         step["label"] = (step.get("label") or "Step") + " copy"
+        step["locked"] = False  # copies start unlocked so you can edit them
         steps.insert(self.selected_index + 1, step)
         self.selected_index += 1
         self.refresh_timeline()
@@ -1061,6 +2091,10 @@ class MissionPlanner(tk.Tk):
 
     def delete_step(self) -> None:
         if self.selected_index is None:
+            return
+        step = self._steps()[self.selected_index]
+        if step.get("locked"):
+            messagebox.showinfo("Locked", "Unlock this step before deleting.")
             return
         if not messagebox.askyesno("Delete", "Delete this step?"):
             return
@@ -1092,6 +2126,314 @@ class MissionPlanner(tk.Tk):
         d = HERE / "flows"
         d.mkdir(parents=True, exist_ok=True)
         return d
+
+    def _mission_file_slug(self, name: str) -> str:
+        return re.sub(r"[^\w\-]+", "_", (name or "").strip()).strip("_").lower() or "mission"
+
+    def _is_base_flow_path(self, path: Path) -> bool:
+        return path.name.endswith("_default.json")
+
+    def _list_base_flows(self) -> list[tuple[str, Path | None]]:
+        """Base templates (*_default.json) plus a blank timeline option."""
+        choices: list[tuple[str, Path | None]] = []
+        for path in sorted(self._flows_dir().glob("*_default.json")):
+            try:
+                data = load_json(path)
+                label = str(data.get("name") or path.stem)
+            except Exception:
+                label = path.stem
+            choices.append((label, path))
+        if not choices:
+            fallback = HERE / "flows" / "nellis_default.json"
+            if fallback.is_file():
+                choices.append(("Nellis Default", fallback))
+        choices.append(("Blank timeline", None))
+        return choices
+
+    def _unique_mission_path(self, slug: str) -> Path:
+        """flows/{slug}.json, or slug_2.json… — never overwrites *_default.json."""
+        flows = self._flows_dir()
+        candidate = flows / f"{slug}.json"
+        if self._is_base_flow_path(candidate):
+            slug = f"{slug}_plan"
+            candidate = flows / f"{slug}.json"
+        if not candidate.exists():
+            return candidate
+        n = 2
+        while True:
+            alt = flows / f"{slug}_{n}.json"
+            if not alt.exists():
+                return alt
+            n += 1
+
+    def new_mission(self) -> None:
+        """Modal: name + airport + base flow + optional Opus import → new active plan."""
+        base_choices = self._list_base_flows()
+        label_to_path = {lab: path for lab, path in base_choices}
+        airport_keys = sorted(self.airports.keys()) or ["nellis"]
+        default_airport = (
+            self.mission.get("airport")
+            or self.config_data.get("default_airport")
+            or airport_keys[0]
+        )
+        if default_airport not in airport_keys:
+            default_airport = airport_keys[0]
+
+        dlg = tk.Toplevel(self)
+        dlg.title("New mission plan")
+        dlg.configure(bg=C_BG)
+        dlg.geometry("640x520")
+        dlg.minsize(560, 460)
+        dlg.transient(self)
+        dlg.grab_set()
+
+        hdr = tk.Frame(dlg, bg=C_PANEL, highlightbackground=C_BORDER, highlightthickness=1)
+        hdr.pack(fill=tk.X, padx=12, pady=(12, 6))
+        tk.Label(
+            hdr,
+            text="Start a new plan from a base flow — optionally import callsign / FP from Opus",
+            bg=C_PANEL,
+            fg=C_TEXT,
+            font=("Segoe UI Semibold", 11),
+        ).pack(anchor="w", padx=12, pady=10)
+
+        body = tk.Frame(dlg, bg=C_BG)
+        body.pack(fill=tk.BOTH, expand=True, padx=12, pady=6)
+
+        form = tk.Frame(body, bg=C_PANEL, highlightbackground=C_BORDER, highlightthickness=1)
+        form.pack(fill=tk.X)
+        inner = tk.Frame(form, bg=C_PANEL)
+        inner.pack(fill=tk.X, padx=14, pady=14)
+
+        var_name = tk.StringVar(value="Untitled")
+        var_airport = tk.StringVar(value=str(default_airport))
+        var_base = tk.StringVar(value=base_choices[0][0])
+        var_file = tk.StringVar(value=self._unique_mission_path("untitled").name)
+
+        def row_label(r: int, text: str) -> None:
+            tk.Label(inner, text=text, bg=C_PANEL, fg=C_LABEL, font=("Segoe UI", 10)).grid(
+                row=r, column=0, sticky="w", pady=6, padx=(0, 12)
+            )
+
+        row_label(0, "Mission name")
+        name_entry = ttk.Entry(inner, textvariable=var_name, width=40)
+        name_entry.grid(row=0, column=1, sticky="we", pady=6)
+        row_label(1, "Airport")
+        ttk.Combobox(
+            inner,
+            textvariable=var_airport,
+            values=airport_keys,
+            state="readonly",
+            width=37,
+        ).grid(row=1, column=1, sticky="we", pady=6)
+        row_label(2, "Base flow")
+        ttk.Combobox(
+            inner,
+            textvariable=var_base,
+            values=[lab for lab, _ in base_choices],
+            state="readonly",
+            width=37,
+        ).grid(row=2, column=1, sticky="we", pady=6)
+        tk.Label(
+            inner,
+            text="Copies the selected template into a new mission file (base templates are never overwritten).",
+            bg=C_PANEL,
+            fg=C_MUTED,
+            font=("Segoe UI", 8),
+            wraplength=420,
+            justify="left",
+        ).grid(row=3, column=1, sticky="w", pady=(0, 4))
+
+        row_label(4, "Save as")
+        file_row = tk.Frame(inner, bg=C_PANEL)
+        file_row.grid(row=4, column=1, sticky="we", pady=6)
+        ttk.Entry(file_row, textvariable=var_file, width=32).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        def browse_save() -> None:
+            slug = self._mission_file_slug(var_name.get())
+            initial = (var_file.get() or f"{slug}.json").strip()
+            initial_name = Path(initial).name
+            path_str = filedialog.asksaveasfilename(
+                parent=dlg,
+                title="Save new mission as",
+                initialdir=str(self._flows_dir()),
+                initialfile=initial_name,
+                defaultextension=".json",
+                filetypes=[("Mission JSON", "*.json"), ("All files", "*.*")],
+            )
+            if path_str:
+                var_file.set(path_str)
+
+        ttk.Button(file_row, text="Browse…", command=browse_save).pack(side=tk.LEFT, padx=(8, 0))
+        inner.columnconfigure(1, weight=1)
+
+        def sync_filename_from_name(*_args: object) -> None:
+            # Only auto-update while the file still looks like a derived slug
+            cur = (var_file.get() or "").strip()
+            stem = Path(cur).stem if cur else ""
+            prev_slug = self._mission_file_slug(getattr(sync_filename_from_name, "_last_name", "Untitled"))
+            if not cur or stem == prev_slug or stem.startswith(prev_slug + "_"):
+                slug = self._mission_file_slug(var_name.get())
+                var_file.set(f"{slug}.json")
+            sync_filename_from_name._last_name = var_name.get()  # type: ignore[attr-defined]
+
+        sync_filename_from_name._last_name = var_name.get()  # type: ignore[attr-defined]
+        var_name.trace_add("write", sync_filename_from_name)
+
+        # Opus import panel
+        opus = tk.Frame(body, bg=C_PANEL, highlightbackground=C_BORDER, highlightthickness=1)
+        opus.pack(fill=tk.X, pady=(10, 0))
+        opus_inner = tk.Frame(opus, bg=C_PANEL)
+        opus_inner.pack(fill=tk.X, padx=14, pady=12)
+        tk.Label(
+            opus_inner,
+            text="Opus flight (optional)",
+            bg=C_PANEL,
+            fg=C_TEXT,
+            font=("Segoe UI Semibold", 11),
+        ).pack(anchor="w")
+        tk.Label(
+            opus_inner,
+            text="Imports callsign, seat, and flight plan into Setup for clearance / squawk / route.",
+            bg=C_PANEL,
+            fg=C_MUTED,
+            font=("Segoe UI", 8),
+            wraplength=560,
+            justify="left",
+        ).pack(anchor="w", pady=(2, 8))
+
+        # Local label so New modal stays in sync without requiring Setup tab focus
+        var_opus_local = tk.StringVar(value=self.var_opus_flight.get() if hasattr(self, "var_opus_flight") else "(choose an Opus flight)")
+
+        def refresh_opus_label() -> None:
+            if hasattr(self, "var_opus_flight"):
+                var_opus_local.set(self.var_opus_flight.get())
+
+        tk.Label(
+            opus_inner,
+            textvariable=var_opus_local,
+            bg=C_PANEL,
+            fg=C_GREEN,
+            font=("Segoe UI Semibold", 10),
+            wraplength=560,
+            justify="left",
+        ).pack(anchor="w", pady=(0, 8))
+        opus_btns = tk.Frame(opus_inner, bg=C_PANEL)
+        opus_btns.pack(anchor="w")
+
+        def choose_opus() -> None:
+            # Sync Setup identity fields if present
+            if hasattr(self, "var_user"):
+                self.config_data["opus_user_name"] = self.var_user.get().strip()
+            if hasattr(self, "var_backend"):
+                self.config_data["opus_backend_url"] = self.var_backend.get().strip()
+            self._choose_opus_flight(parent=dlg, on_done=refresh_opus_label)
+
+        def clear_opus() -> None:
+            self._clear_opus_flight()
+            refresh_opus_label()
+
+        ttk.Button(opus_btns, text="Choose Opus flight…", command=choose_opus).pack(side=tk.LEFT)
+        ttk.Button(opus_btns, text="Clear", command=clear_opus).pack(side=tk.LEFT, padx=(8, 0))
+
+        foot = tk.Frame(dlg, bg=C_BG)
+        foot.pack(fill=tk.X, padx=12, pady=(8, 12))
+
+        def create_plan() -> None:
+            name = var_name.get().strip() or "Untitled"
+            airport = var_airport.get().strip() or "nellis"
+            base_label = var_base.get()
+            base_path = label_to_path.get(base_label)
+
+            file_name = (var_file.get() or "").strip()
+            if not file_name:
+                file_name = f"{self._mission_file_slug(name)}.json"
+            save_path = Path(file_name)
+            if not save_path.is_absolute():
+                if not file_name.lower().endswith(".json"):
+                    file_name += ".json"
+                    save_path = Path(file_name)
+                save_path = self._flows_dir() / save_path.name
+            elif save_path.suffix.lower() != ".json":
+                save_path = save_path.with_suffix(".json")
+
+            if self._is_base_flow_path(save_path):
+                messagebox.showerror(
+                    "New plan",
+                    f"Cannot overwrite base template:\n{save_path.name}\n\n"
+                    "Pick a different file name.",
+                    parent=dlg,
+                )
+                return
+
+            if save_path.exists():
+                if not messagebox.askyesno(
+                    "New plan",
+                    f"{save_path.name} already exists.\nOverwrite it?",
+                    parent=dlg,
+                ):
+                    return
+
+            try:
+                if base_path is not None:
+                    data = load_json(base_path)
+                    if not isinstance(data, dict):
+                        raise ValueError("Base flow is not a mission object.")
+                    mission = flow_engine.normalize_mission_to_steps(copy.deepcopy(data))
+                else:
+                    mission = {"name": name, "airport": airport, "steps": []}
+            except Exception as exc:  # noqa: BLE001
+                messagebox.showerror("New plan", f"Could not load base flow:\n{exc}", parent=dlg)
+                return
+
+            mission["name"] = name
+            mission["airport"] = airport
+
+            try:
+                save_json(save_path, mission)
+            except Exception as exc:  # noqa: BLE001
+                messagebox.showerror("New plan", f"Could not save mission:\n{exc}", parent=dlg)
+                return
+
+            self.mission = mission
+            self.engine.mission = mission
+            self._set_active_flow_path(save_path)
+            self.mission_name_var.set(name)
+            self.selected_index = None
+            try:
+                self.engine.reset()
+            except Exception:
+                pass
+            self.refresh_timeline()
+            self._update_freq_hint()
+            try:
+                self._refresh_fly_status()
+            except Exception:
+                pass
+            # Refresh callsign if Opus was linked
+            if atc_phrase.configured_opus_flight_id(self.config_data) is not None:
+                try:
+                    self._refresh_callsign()
+                except Exception:
+                    pass
+
+            dlg.destroy()
+            steps_n = len(self._steps())
+            opus_note = ""
+            if atc_phrase.configured_opus_flight_id(self.config_data) is not None:
+                opus_note = "\nOpus flight linked in Setup."
+            messagebox.showinfo(
+                "New plan",
+                f"Created “{name}” with {steps_n} step(s).\n{save_path}{opus_note}\n\n"
+                "This is now the active mission for Fly.",
+            )
+
+        ttk.Button(foot, text="Cancel", command=dlg.destroy).pack(side=tk.RIGHT)
+        ttk.Button(foot, text="Create plan", command=create_plan).pack(side=tk.RIGHT, padx=(0, 8))
+        name_entry.focus_set()
+        name_entry.select_range(0, tk.END)
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
+        dlg.bind("<Return>", lambda _e: create_plan())
 
     def _set_active_flow_path(self, path: Path) -> None:
         """Point config at this mission file (prefer path relative to atc/)."""
@@ -1183,6 +2525,7 @@ class MissionPlanner(tk.Tk):
                 self.config_data["opus_backend_url"] = backend
         if hasattr(self, "var_callsign_override"):
             self.config_data["callsign_override"] = self.var_callsign_override.get().strip()
+        # opus_flight_id / opus_seat live only in config_data (set by flight picker)
         if hasattr(self, "var_runway_override"):
             self.config_data["runway_override"] = self.var_runway_override.get().strip()
         if hasattr(self, "var_tts_provider"):
@@ -1206,10 +2549,11 @@ class MissionPlanner(tk.Tk):
             self.config_data["tts_speed"] = atc_phrase.tts_speed(speed=self.var_speed.get())
         self.engine.config = self.config_data
 
-    def preview_step(self, *, apply: bool = True) -> None:
+    def preview_step(self, *, apply: bool = False) -> None:
         if self.selected_index is None:
             return
-        if apply:
+        # Locked steps: preview from saved data only (no Apply)
+        if apply and not self._step_is_locked():
             self.apply_step()
         self._sync_identity_to_config()
         step = self._steps()[self.selected_index]
@@ -1223,10 +2567,17 @@ class MissionPlanner(tk.Tk):
                     self.config_data, ap["icao"]
                 )
                 cs = opus.radio_callsign if opus else "CALLSIGN"
-                rwy = atc_phrase.pick_departure_runway(
-                    ap, wx, opus, self.config_data, step=step
-                )
                 channel = step.get("channel") or "other"
+                rwy = atc_phrase.pick_departure_runway(
+                    ap,
+                    wx,
+                    opus,
+                    self.config_data,
+                    step=step,
+                    mission=self.mission,
+                    state=self.engine.state,
+                    template=step.get("template"),
+                )
                 freq, mod, _ = atc_phrase.step_radio(ap, channel, step)
                 voice, _ = atc_phrase.voice_for_step(self.config_data, channel, step)
                 phrase = ""
@@ -1245,6 +2596,9 @@ class MissionPlanner(tk.Tk):
                         custom_text=step.get("text"),
                         opus=opus,
                         step=step,
+                        mission=self.mission,
+                        state=self.engine.state,
+                        config=self.config_data,
                     )
                     spoken_footer = atc_phrase.spoken_radio_footer(phrase, voice=voice)
                     fp = ""
@@ -1286,9 +2640,12 @@ class MissionPlanner(tk.Tk):
         if self.selected_index is None:
             messagebox.showinfo("Hear", "Select a step first.")
             return
-        self.apply_step()
+        if not self._step_is_locked():
+            self.apply_step()
         self._sync_identity_to_config()
         step = self._steps()[self.selected_index]
+        # Prefer the phrase currently shown so Hear matches Regenerate (no re-roll).
+        shown_phrase = self._phrase_from_preview_box()
 
         def work() -> None:
             try:
@@ -1306,7 +2663,14 @@ class MissionPlanner(tk.Tk):
                 )
                 cs = opus.radio_callsign if opus else "CALLSIGN"
                 rwy = atc_phrase.pick_departure_runway(
-                    ap, wx, opus, self.config_data, step=step
+                    ap,
+                    wx,
+                    opus,
+                    self.config_data,
+                    step=step,
+                    mission=self.mission,
+                    state=self.engine.state,
+                    template=step.get("template"),
                 )
                 phrase, _, _, _ = atc_phrase.build_flow_step_phrase(
                     ap,
@@ -1315,14 +2679,17 @@ class MissionPlanner(tk.Tk):
                     cs,
                     wx,
                     rwy,
-                    custom_text=step.get("text"),
+                    custom_text=shown_phrase or step.get("text"),
                     opus=opus,
                     step=step,
+                    mission=self.mission,
+                    state=self.engine.state,
+                    config=self.config_data,
                 )
                 voice, _ = atc_phrase.voice_for_step(self.config_data, channel, step)
                 freq, mod, _ = atc_phrase.step_radio(ap, channel, step)
                 vol = float(self.config_data.get("tts_volume", 0.8))
-                speed = atc_phrase.tts_speed(self.config_data)
+                speed = atc_phrase.tts_speed_for_step(self.config_data, step=step)
                 provider = atc_phrase.tts_provider(self.config_data)
                 google_creds = atc_phrase.google_credentials_path(self.config_data)
 
@@ -1357,10 +2724,15 @@ class MissionPlanner(tk.Tk):
         if self.selected_index is None:
             messagebox.showinfo("TX preview", "Select a step first.")
             return
-        self.apply_step()
+        if not self._step_is_locked():
+            self.apply_step()
         self._sync_identity_to_config()
         save_json(CONFIG_PATH, self.config_data)
-        step = self._steps()[self.selected_index]
+        step = dict(self._steps()[self.selected_index])
+        # Match on-screen phrase (Regenerate) without forcing Custom mode save.
+        shown = self._phrase_from_preview_box()
+        if shown and not step.get("text"):
+            step["text"] = shown
 
         def work() -> None:
             try:
@@ -1383,6 +2755,8 @@ class MissionPlanner(tk.Tk):
                         f"→ TX {detail.get('freq')} · {detail.get('callsign')} · "
                         f"voice {voice}"
                     )
+                    if detail.get("tts_speed") is not None:
+                        body += f" · speed {detail.get('tts_speed')}"
                     base = str(detail["text"]) if detail.get("text") else ""
                     self._set_preview_display(body, base_phrase=base)
                     self._last_preview_channel = step.get("channel") or "other"
@@ -1395,61 +2769,603 @@ class MissionPlanner(tk.Tk):
 
     # ---------- Fly tab ----------
     def _build_fly(self) -> None:
+        """Kneeboard-friendly Fly view: large step name + next freq, big Play controls."""
         f = self.tab_fly
-        self.fly_status = tk.StringVar(value="…")
-        self.fly_detail = tk.StringVar(value="")
+        self.fly_mission = tk.StringVar(value="")
+        self.fly_step_num = tk.StringVar(value="")
+        self.fly_step_name = tk.StringVar(value="…")
+        self.fly_channel = tk.StringVar(value="")
+        self.fly_freq = tk.StringVar(value="—")
+        self.fly_mod = tk.StringVar(value="")
+        self.fly_tx_name = tk.StringVar(value="")
+        self.fly_say = tk.StringVar(value="")
+        self.fly_hint = tk.StringVar(value="")
+        self.fly_recovery = tk.StringVar(
+            value=atc_phrase.recovery_label(atc_phrase.DEFAULT_RECOVERY)
+        )
         self.always_on_top = tk.BooleanVar(value=False)
+        self._fly_phrase_req_id = 0
+        self._fly_recovery_loading = False
 
-        card = tk.Frame(f, bg=C_PANEL, highlightbackground=C_BORDER, highlightthickness=1)
-        card.pack(fill=tk.BOTH, expand=True, padx=24, pady=24)
-        ttk.Label(card, text="In-flight controls", style="Header.TLabel").pack(pady=(20, 8))
-        tk.Label(card, textvariable=self.fly_status, bg=C_PANEL, fg=C_TEXT, font=("Segoe UI Semibold", 20)).pack(
-            pady=8
-        )
-        tk.Label(card, textvariable=self.fly_detail, bg=C_PANEL, fg=C_MUTED, font=("Segoe UI", 11), wraplength=700).pack(
-            pady=4
-        )
+        # Fill the tab — high contrast for OpenKneeboard overlays
+        shell = tk.Frame(f, bg=C_BG)
+        shell.pack(fill=tk.BOTH, expand=True, padx=16, pady=12)
 
-        btns = tk.Frame(card, bg=C_PANEL)
-        btns.pack(pady=16)
-        ttk.Button(btns, text="PLAY NEXT", style="Big.TButton", command=lambda: self._fly("next")).grid(
-            row=0, column=0, padx=10, pady=8
+        tk.Label(
+            shell,
+            textvariable=self.fly_mission,
+            bg=C_BG,
+            fg=C_MUTED,
+            font=("Segoe UI", 12),
+            anchor="w",
+        ).pack(fill=tk.X, pady=(0, 6))
+
+        # Upcoming step card — step name is primary for in-cockpit glance
+        card = tk.Frame(shell, bg=C_PANEL, highlightbackground=C_BORDER, highlightthickness=1)
+        card.pack(fill=tk.X, pady=(0, 12))
+
+        hdr = tk.Frame(card, bg=C_PANEL)
+        hdr.pack(fill=tk.X, padx=20, pady=(14, 0))
+        tk.Label(
+            hdr,
+            text="NEXT TRANSMIT",
+            bg=C_PANEL,
+            fg=C_AMBER,
+            font=("Segoe UI Semibold", 13),
+        ).pack(side=tk.LEFT)
+        step_nav = tk.Frame(hdr, bg=C_PANEL)
+        step_nav.pack(side=tk.RIGHT)
+        ttk.Button(
+            step_nav,
+            text="◀",
+            width=3,
+            command=lambda: self._fly("seek_prev"),
+        ).pack(side=tk.LEFT, padx=(0, 6))
+        tk.Label(
+            step_nav,
+            textvariable=self.fly_step_num,
+            bg=C_PANEL,
+            fg=C_AMBER,
+            font=("Segoe UI Semibold", 18),
+        ).pack(side=tk.LEFT)
+        ttk.Button(
+            step_nav,
+            text="▶",
+            width=3,
+            command=lambda: self._fly("seek_next"),
+        ).pack(side=tk.LEFT, padx=(6, 0))
+
+        self._fly_step_name_lbl = tk.Label(
+            card,
+            textvariable=self.fly_step_name,
+            bg=C_PANEL,
+            fg=C_TEXT,
+            font=("Segoe UI Semibold", 36),
+            wraplength=960,
+            justify=tk.LEFT,
+            anchor="w",
         )
+        self._fly_step_name_lbl.pack(fill=tk.X, padx=20, pady=(2, 10))
+
+        # Frequency hero
+        freq_box = tk.Frame(card, bg="#0a0e14", highlightbackground=C_GREEN, highlightthickness=2)
+        freq_box.pack(fill=tk.X, padx=20, pady=(0, 8))
+        tk.Label(
+            freq_box,
+            text="FREQUENCY",
+            bg="#0a0e14",
+            fg=C_MUTED,
+            font=("Segoe UI Semibold", 12),
+        ).pack(anchor="w", padx=16, pady=(12, 0))
+        freq_row = tk.Frame(freq_box, bg="#0a0e14")
+        freq_row.pack(fill=tk.X, padx=16, pady=(0, 4))
+        self._fly_freq_lbl = tk.Label(
+            freq_row,
+            textvariable=self.fly_freq,
+            bg="#0a0e14",
+            fg=C_GREEN,
+            font=("Consolas", 44, "bold"),
+            anchor="w",
+        )
+        self._fly_freq_lbl.pack(side=tk.LEFT)
+        self._fly_mod_lbl = tk.Label(
+            freq_row,
+            textvariable=self.fly_mod,
+            bg="#0a0e14",
+            fg=C_TEXT,
+            font=("Segoe UI Semibold", 20),
+            anchor="w",
+        )
+        self._fly_mod_lbl.pack(side=tk.LEFT, padx=(16, 0), pady=(12, 0))
+
+        self._fly_channel_lbl = tk.Label(
+            freq_box,
+            textvariable=self.fly_channel,
+            bg="#0a0e14",
+            fg=C_ACCENT,
+            font=("Segoe UI Semibold", 20),
+            anchor="w",
+        )
+        self._fly_channel_lbl.pack(fill=tk.X, padx=16, pady=(0, 4))
+        tk.Label(
+            freq_box,
+            textvariable=self.fly_tx_name,
+            bg="#0a0e14",
+            fg=C_MUTED,
+            font=("Segoe UI", 13),
+            anchor="w",
+        ).pack(fill=tk.X, padx=16, pady=(0, 14))
+
+        # Compact phrase readout — what will go out on the radio
+        say_box = tk.Frame(card, bg=C_CARD, highlightbackground=C_BORDER, highlightthickness=1)
+        say_box.pack(fill=tk.X, padx=20, pady=(0, 8))
+        tk.Label(
+            say_box,
+            text="WILL SAY",
+            bg=C_CARD,
+            fg=C_MUTED,
+            font=("Segoe UI Semibold", 11),
+        ).pack(anchor="w", padx=12, pady=(8, 0))
+        tk.Label(
+            say_box,
+            textvariable=self.fly_say,
+            bg=C_CARD,
+            fg=C_TEXT,
+            font=("Segoe UI", 13),
+            wraplength=920,
+            justify=tk.LEFT,
+            anchor="nw",
+        ).pack(fill=tk.X, padx=12, pady=(2, 10))
+
+        # Recovery — only shown on Approach (button strip, not modal)
+        self.fly_takeoff_mode = tk.StringVar(value=atc_phrase.takeoff_mode_label("lineup"))
+        self._fly_rec_box = tk.Frame(card, bg=C_PANEL)
+        tk.Label(
+            self._fly_rec_box,
+            text="RECOVERY",
+            bg=C_PANEL,
+            fg=C_AMBER,
+            font=("Segoe UI Semibold", 12),
+        ).pack(side=tk.LEFT, padx=(0, 10))
+        self._fly_rec_btns = tk.Frame(self._fly_rec_box, bg=C_PANEL)
+        self._fly_rec_btns.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tk.Label(
+            self._fly_rec_box,
+            textvariable=self.fly_recovery,
+            bg=C_PANEL,
+            fg=C_MUTED,
+            font=("Segoe UI", 10),
+        ).pack(side=tk.LEFT, padx=(8, 0))
+        # Built later via _sync_fly_recovery_ui; hidden until Approach
+
+        # Tower rolling offer — Accept / Deny buttons when pending
+        self._fly_offer_fr = tk.Frame(card, bg=C_PANEL)
+        tk.Label(
+            self._fly_offer_fr,
+            text="TOWER OFFER",
+            bg=C_PANEL,
+            fg=C_AMBER,
+            font=("Segoe UI Semibold", 12),
+        ).pack(side=tk.LEFT, padx=(0, 10))
+        tk.Label(
+            self._fly_offer_fr,
+            text="Will you accept rolling?",
+            bg=C_PANEL,
+            fg=C_TEXT,
+            font=("Segoe UI Semibold", 12),
+        ).pack(side=tk.LEFT, padx=(0, 12))
+        ttk.Button(
+            self._fly_offer_fr,
+            text="Accept rolling",
+            style="Accent.TButton",
+            command=lambda: self._apply_fly_pilot_request("accept_rolling"),
+        ).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(
+            self._fly_offer_fr,
+            text="Deny",
+            command=lambda: self._apply_fly_pilot_request("deny_rolling"),
+        ).pack(side=tk.LEFT)
+
+        # Pilot requests — frequency-scoped button strip (hidden when empty)
+        self._fly_req_box = tk.Frame(card, bg=C_PANEL)
+        tk.Label(
+            self._fly_req_box,
+            text="PILOT REQUEST",
+            bg=C_PANEL,
+            fg=C_AMBER,
+            font=("Segoe UI Semibold", 12),
+        ).pack(side=tk.LEFT, padx=(0, 10))
+        self._fly_req_btns = tk.Frame(self._fly_req_box, bg=C_PANEL)
+        self._fly_req_btns.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tk.Label(
+            self._fly_req_box,
+            textvariable=self.fly_takeoff_mode,
+            bg=C_PANEL,
+            fg=C_MUTED,
+            font=("Segoe UI", 10),
+        ).pack(side=tk.LEFT, padx=(8, 0))
+
+        tk.Label(
+            card,
+            textvariable=self.fly_hint,
+            bg=C_PANEL,
+            fg=C_MUTED,
+            font=("Segoe UI", 11),
+            wraplength=900,
+            justify=tk.LEFT,
+            anchor="w",
+        ).pack(fill=tk.X, padx=20, pady=(0, 14))
+
+        # Primary controls — large for kneeboard / touch
+        btns = tk.Frame(shell, bg=C_BG)
+        btns.pack(fill=tk.X, pady=(0, 10))
+        btns.columnconfigure(0, weight=3)
+        btns.columnconfigure(1, weight=2)
+        ttk.Button(
+            btns,
+            text="PLAY AND ADVANCE",
+            style="FlyPlay.TButton",
+            command=lambda: self._fly("next"),
+        ).grid(row=0, column=0, sticky="ew", padx=(0, 8), pady=4)
         ttk.Button(btns, text="PLAY PREVIOUS", style="Big.TButton", command=lambda: self._fly("back")).grid(
-            row=0, column=1, padx=10, pady=8
+            row=0, column=1, sticky="ew", padx=(8, 0), pady=4
         )
 
-        nav = tk.Frame(card, bg=C_PANEL)
-        nav.pack(pady=(4, 12))
-        tk.Label(nav, text="Navigate (no TX)", bg=C_PANEL, fg=C_LABEL, font=("Segoe UI", 10)).grid(
-            row=0, column=0, columnspan=3, sticky="w", pady=(0, 6)
-        )
-        ttk.Button(nav, text="◀ Seek prev", command=lambda: self._fly("seek_prev")).grid(
-            row=1, column=0, padx=6, pady=4
-        )
-        ttk.Button(nav, text="Seek next ▶", command=lambda: self._fly("seek_next")).grid(
-            row=1, column=1, padx=6, pady=4
-        )
+        nav = tk.Frame(shell, bg=C_PANEL, highlightbackground=C_BORDER, highlightthickness=1)
+        nav.pack(fill=tk.X, pady=(0, 10))
+        inner = tk.Frame(nav, bg=C_PANEL)
+        inner.pack(fill=tk.X, padx=12, pady=10)
+        tk.Label(
+            inner,
+            text="Jump to step (no transmit)",
+            bg=C_PANEL,
+            fg=C_LABEL,
+            font=("Segoe UI Semibold", 11),
+        ).pack(anchor="w", pady=(0, 6))
+        row = tk.Frame(inner, bg=C_PANEL)
+        row.pack(fill=tk.X)
         self.var_jump = tk.StringVar()
-        self.cmb_jump = ttk.Combobox(nav, textvariable=self.var_jump, state="readonly", width=42)
-        self.cmb_jump.grid(row=1, column=2, padx=6, pady=4)
-        ttk.Button(nav, text="Go to step", command=self._jump_to_selected).grid(row=1, column=3, padx=6, pady=4)
+        self.cmb_jump = ttk.Combobox(row, textvariable=self.var_jump, state="readonly", width=36)
+        self.cmb_jump.pack(side=tk.LEFT, padx=(0, 6), fill=tk.X, expand=True)
+        ttk.Button(row, text="Go", command=self._jump_to_selected).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(row, text="RESET", command=lambda: self._fly("reset")).pack(side=tk.LEFT)
         self._jump_index_by_label: dict[str, int] = {}
 
-        ttk.Button(btns, text="RESET", command=lambda: self._fly("reset")).grid(
-            row=1, column=0, columnspan=2, padx=10, pady=8
-        )
-
+        foot = tk.Frame(shell, bg=C_BG)
+        foot.pack(fill=tk.X, pady=(0, 6))
         ttk.Checkbutton(
-            card,
-            text="Keep window on top while flying",
+            foot,
+            text="Keep window on top (kneeboard)",
             variable=self.always_on_top,
             command=lambda: self.attributes("-topmost", self.always_on_top.get()),
-        ).pack(pady=8)
+        ).pack(side=tk.LEFT)
+        self.fly_hotkey_hint = tk.StringVar(value="")
+        tk.Label(
+            foot,
+            textvariable=self.fly_hotkey_hint,
+            bg=C_BG,
+            fg=C_MUTED,
+            font=("Segoe UI", 9),
+        ).pack(side=tk.RIGHT)
 
-        self.fly_log = tk.Text(card, height=10, bg=C_CARD, fg=C_MUTED, font=("Consolas", 9), relief=tk.FLAT)
-        self.fly_log.pack(fill=tk.BOTH, expand=True, padx=16, pady=16)
+        # Compact last-action log
+        tk.Label(shell, text="Last actions", bg=C_BG, fg=C_MUTED, font=("Segoe UI", 10)).pack(
+            anchor="w", pady=(4, 2)
+        )
+        self.fly_log = tk.Text(
+            shell,
+            height=3,
+            bg=C_CARD,
+            fg=C_MUTED,
+            font=("Consolas", 10),
+            relief=tk.FLAT,
+            wrap=tk.WORD,
+        )
+        self.fly_log.pack(fill=tk.BOTH, expand=True)
         self._refresh_fly_status()
+
+    def _fly_upcoming_radio(self, step: dict[str, Any] | None) -> tuple[str, str, str, str]:
+        """Return (channel_label, freq_display, mod, tx_name) for the next step."""
+        if not step:
+            return ("—", "—", "", "")
+        channel = str(step.get("channel") or step.get("phase") or "other").strip().lower()
+        try:
+            ap = self.engine.airport()
+        except Exception:
+            key = self.mission.get("airport") or self.config_data.get("default_airport") or "nellis"
+            ap = self.airports.get(key) or next(iter(self.airports.values()))
+        freq, mod, tx_name = atc_phrase.step_radio(ap, channel, step)
+        # UHF/VFR style: always three decimals for glanceable kneeboard read
+        freq_disp = f"{float(freq):.3f}"
+        ch_label = channel.upper()
+        return ch_label, freq_disp, str(mod or "AM").upper(), str(tx_name or "")
+
+    def _queue_fly_phrase_preview(self, step: dict[str, Any] | None) -> None:
+        """Fill WILL SAY with the upcoming radio phrase (async; may re-roll templates)."""
+        req_id = getattr(self, "_fly_phrase_req_id", 0) + 1
+        self._fly_phrase_req_id = req_id
+        if not step:
+            self.fly_say.set("")
+            return
+        if (step.get("mode") or "tts").lower() == "file":
+            path = step.get("file") or ""
+            self.fly_say.set(f"[FILE] {path}" if path else "[FILE] (no file set)")
+            return
+        self.fly_say.set("Loading phrase…")
+        step_snapshot = dict(step)
+        cfg = dict(self.config_data)
+
+        def work() -> None:
+            try:
+                try:
+                    ap = self.engine.airport()
+                except Exception:
+                    key = self.mission.get("airport") or cfg.get("default_airport") or "nellis"
+                    ap = self.airports.get(key) or next(iter(self.airports.values()))
+                opus, wx = atc_phrase.resolve_opus_and_metar(cfg, ap["icao"])
+                cs = opus.radio_callsign if opus else "CALLSIGN"
+                channel = step_snapshot.get("channel") or "other"
+                rwy = atc_phrase.pick_departure_runway(
+                    ap,
+                    wx,
+                    opus,
+                    cfg,
+                    step=step_snapshot,
+                    mission=self.mission,
+                    state=self.engine.state,
+                    template=step_snapshot.get("template"),
+                )
+                phrase, _, _, _ = atc_phrase.build_flow_step_phrase(
+                    ap,
+                    channel,
+                    step_snapshot.get("template") or "radio_check",
+                    cs,
+                    wx,
+                    rwy,
+                    custom_text=step_snapshot.get("text"),
+                    opus=opus,
+                    step=step_snapshot,
+                    mission=self.mission,
+                    state=self.engine.state,
+                    config=self.config_data,
+                )
+                text = (phrase or "").strip() or "(empty phrase)"
+            except Exception as exc:  # noqa: BLE001
+                text = f"(phrase unavailable: {exc})"
+
+            def done() -> None:
+                if getattr(self, "_fly_phrase_req_id", 0) != req_id:
+                    return
+                self.fly_say.set(text)
+
+            self.after(0, done)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _fly_recovery_options(self) -> list[tuple[str, str]]:
+        """Recovery choices for Fly — mission.recovery_options or full set."""
+        allowed = self.mission.get("recovery_options")
+        if isinstance(allowed, list) and allowed:
+            keys = [atc_phrase.normalize_recovery_key(x) for x in allowed]
+            out = [(k, lab) for k, lab in atc_phrase.RECOVERY_CHOICES if k in keys]
+            return out or list(atc_phrase.RECOVERY_CHOICES)
+        return list(atc_phrase.RECOVERY_CHOICES)
+
+    _FLY_RECOVERY_BTN_LABELS: dict[str, str] = {
+        "visual_overhead": "Overhead",
+        "tactical_overhead": "Tactical",
+        "straight_in": "Straight-in",
+        "instrument": "Instrument",
+    }
+    _FLY_REQUEST_BTN_LABELS: dict[str, str] = {
+        "accept_rolling": "Accept rolling",
+        "deny_rolling": "Deny rolling",
+        "request_rolling": "Request rolling",
+        "request_lineup": "Request LUAW",
+    }
+
+    def _sync_fly_recovery_ui(self, channel: str | None = None) -> None:
+        """Show recovery buttons only on Approach; rebuild button strip."""
+        if not hasattr(self, "_fly_rec_box"):
+            return
+        ch = (channel if channel is not None else self._fly_current_channel()).strip().lower()
+        active = atc_phrase.resolve_active_recovery(
+            None, self.mission, state=self.engine.state
+        )
+        self._fly_recovery_loading = True
+        self.fly_recovery.set(atc_phrase.recovery_label(active))
+        self._fly_recovery_loading = False
+
+        for child in self._fly_rec_btns.winfo_children():
+            child.destroy()
+
+        if ch != "approach":
+            self._fly_rec_box.pack_forget()
+            return
+
+        opts = self._fly_recovery_options()
+        for key, lab in opts:
+            short = self._FLY_RECOVERY_BTN_LABELS.get(key, lab)
+            style = "Accent.TButton" if key == active else "TButton"
+            ttk.Button(
+                self._fly_rec_btns,
+                text=short,
+                style=style,
+                command=lambda k=key: self._set_fly_recovery(k),
+            ).pack(side=tk.LEFT, padx=(0, 6))
+
+        self._fly_rec_box.pack(fill=tk.X, padx=20, pady=(0, 8))
+
+    def _set_fly_recovery(self, key: str) -> None:
+        key = atc_phrase.normalize_recovery_key(key)
+        self.fly_recovery.set(atc_phrase.recovery_label(key))
+        self.engine.state["active_recovery"] = key
+        self.mission["active_recovery"] = key
+        try:
+            self.engine.save_state()
+        except Exception:
+            pass
+        for step in self._steps():
+            if (step.get("template") or "") == "approach_check_in" and not step.get("text"):
+                step["recovery"] = key
+            if (step.get("template") or "") == "cleared_approach" and not step.get("text"):
+                step["approach_pattern"] = key
+        self._sync_fly_recovery_ui()
+        self._queue_fly_phrase_preview(self.engine.current_step())
+
+    def _choose_fly_recovery(self) -> None:
+        """Legacy entry — recovery is button-driven on Approach now."""
+        opts = self._fly_recovery_options()
+        if not opts:
+            return
+        # Prefer currently active; otherwise first option
+        active = atc_phrase.resolve_active_recovery(None, self.mission, state=self.engine.state)
+        self._set_fly_recovery(active or opts[0][0])
+
+    def _on_fly_recovery_change(self, _evt: object | None = None) -> None:
+        if getattr(self, "_fly_recovery_loading", False):
+            return
+        lab = self.fly_recovery.get().strip()
+        key = next((k for k, l in atc_phrase.RECOVERY_CHOICES if l == lab), None)
+        self._set_fly_recovery(key or lab)
+
+    def _fly_current_channel(self, st: dict[str, Any] | None = None) -> str:
+        st = st or {}
+        if st.get("at_end"):
+            return ""
+        step = st.get("step") if st else None
+        if not step:
+            step = self.engine.current_step() or {}
+        return str(step.get("channel") or step.get("phase") or "other").strip().lower() or "other"
+
+    def _sync_fly_pilot_request_ui(self, channel: str | None = None) -> None:
+        """Show Tower offer + pilot-request buttons only when relevant to current freq."""
+        if not hasattr(self, "_fly_req_box"):
+            return
+        mode = atc_phrase.resolve_active_takeoff_mode(self.mission, self.engine.state)
+        self.fly_takeoff_mode.set(f"Takeoff: {atc_phrase.takeoff_mode_label(mode)}")
+        ch = (channel if channel is not None else self._fly_current_channel()).strip().lower()
+        pending = atc_phrase.pending_takeoff_offer(self.engine.state)
+
+        # Offer bar
+        if pending == "rolling" and ch == "tower":
+            self._fly_offer_fr.pack(fill=tk.X, padx=20, pady=(0, 6))
+        else:
+            self._fly_offer_fr.pack_forget()
+
+        # Request buttons (skip Accept/Deny — those are on the offer bar)
+        for child in self._fly_req_btns.winfo_children():
+            child.destroy()
+        reqs = [
+            (k, lab)
+            for k, lab in atc_phrase.pilot_requests_for_channel(
+                ch, self.engine.state, airport=self._airport()
+            )
+            if k not in ("accept_rolling", "deny_rolling")
+        ]
+        if not reqs:
+            self._fly_req_box.pack_forget()
+            return
+
+        for key, lab in reqs:
+            short = self._FLY_REQUEST_BTN_LABELS.get(key, lab)
+            accent = False
+            if key == "request_rolling" and mode == "rolling":
+                accent = True
+            if key == "request_lineup" and mode == "lineup":
+                accent = True
+            ttk.Button(
+                self._fly_req_btns,
+                text=short,
+                style="Accent.TButton" if accent else "TButton",
+                command=lambda k=key: self._apply_fly_pilot_request(k),
+            ).pack(side=tk.LEFT, padx=(0, 6))
+        self._fly_req_box.pack(fill=tk.X, padx=20, pady=(0, 8))
+
+    def _apply_fly_pilot_request(self, request_key: str, *, tx_ack: bool = True) -> None:
+        """Apply Accept/Deny/Request — update takeoff mode and optionally TX Tower ack."""
+        try:
+            result = atc_phrase.apply_pilot_request(
+                request_key, mission=self.mission, state=self.engine.state
+            )
+        except ValueError as exc:
+            messagebox.showerror("Pilot request", str(exc))
+            return
+        self.engine.mission = self.mission
+        try:
+            self.engine.save_state()
+        except Exception:
+            pass
+        # Persist takeoff mode on the active mission file
+        try:
+            path = flow_engine.resolve_flow_path(self.config_data)
+            self.mission["name"] = self.mission_name_var.get().strip() or self.mission.get("name") or "Untitled"
+            flow_engine.normalize_mission_to_steps(self.mission)
+            save_json(path, self.mission)
+        except Exception:
+            pass
+        self._sync_fly_pilot_request_ui()
+        self.engine.prepare_takeoff_cursor()
+        try:
+            self.engine.save_state()
+        except Exception:
+            pass
+        self._queue_fly_phrase_preview(self.engine.current_step())
+        if not tx_ack:
+            return
+        ack_kind = str(result.get("ack_kind") or "")
+        if not ack_kind:
+            return
+
+        def work() -> None:
+            try:
+                self._sync_identity_to_config()
+                ap = self._airport()
+                opus, _wx = atc_phrase.resolve_opus_and_metar(self.config_data, ap["icao"])
+                cs = opus.radio_callsign if opus else (
+                    self.var_callsign_override.get().strip()
+                    if hasattr(self, "var_callsign_override")
+                    else "CALLSIGN"
+                ) or "CALLSIGN"
+                # Runway requests may be made on Ground / Approach too.
+                req_ch = "tower"
+                try:
+                    cur = self.engine.current_step() or {}
+                    ch_cur = str(cur.get("channel") or "").strip().lower()
+                    if ch_cur in ("ground", "approach", "tower"):
+                        req_ch = ch_cur
+                except Exception:
+                    pass
+                phrase = atc_phrase.build_pilot_request_ack(
+                    ack_kind,
+                    ap,
+                    cs,
+                    runway=result.get("runway"),
+                    channel=req_ch,
+                )
+                freq, mod, tx_name = atc_phrase.step_radio(ap, req_ch, None)
+                code = atc_phrase.transmit(
+                    self.config_data,
+                    ap,
+                    phrase,
+                    tx_name,
+                    freq,
+                    mod,
+                    channel="tower",
+                )
+                if code != 0:
+                    raise RuntimeError(f"Transmit failed (exit {code})")
+
+                def done() -> None:
+                    self.fly_log.insert(tk.END, f"TX  Pilot request ack  ·  {freq}  ·  TOWER\n")
+                    self.fly_log.see(tk.END)
+                    self._refresh_fly_status()
+
+                self.after(0, done)
+            except Exception as exc:  # noqa: BLE001
+                self.after(0, lambda: messagebox.showerror("Pilot request", str(exc)))
+
+        threading.Thread(target=work, daemon=True).start()
 
     def _refresh_fly_status(self) -> None:
         self.engine.mission = self.mission
@@ -1461,18 +3377,64 @@ class MissionPlanner(tk.Tk):
         except Exception:
             self.engine.mission = self.mission
         st = self.engine.status()
+        mission = st.get("mission") or self.mission.get("name") or "Mission"
+        self.fly_mission.set(str(mission))
+
         if st.get("at_end"):
-            self.fly_status.set(f"END / {st.get('total', 0)}\n(end — seek prev or reset)")
-            self.fly_detail.set("Cursor past last step — Seek prev or Reset")
+            total = st.get("total", 0)
+            self.fly_step_num.set(f"STEP — / {total}")
+            self.fly_step_name.set("No next step")
+            self.fly_freq.set("—")
+            self.fly_mod.set("")
+            self.fly_channel.set("NO NEXT TRANSMIT")
+            self.fly_tx_name.set("Seek prev or Reset to continue")
+            self._fly_phrase_req_id = getattr(self, "_fly_phrase_req_id", 0) + 1
+            self.fly_say.set("")
+            self.fly_hint.set("Cursor is past the last enabled step.")
+            if hasattr(self, "_fly_channel_lbl"):
+                self._fly_channel_lbl.configure(fg=C_MUTED)
+            if hasattr(self, "_fly_step_name_lbl"):
+                self._fly_step_name_lbl.configure(fg=C_MUTED)
         else:
             num = st.get("step_number") or 0
             total = st.get("total") or 0
-            self.fly_status.set(f"STEP {num} / {total}\n{st.get('label') or '—'}")
             step = st.get("step") or {}
-            self.fly_detail.set(
-                f"Next to play · {step.get('channel', '')} · {step.get('mode', '')} · "
-                f"{step.get('template') or step.get('file') or ''}"
+            label = str(step.get("label") or step.get("id") or "—").strip() or "—"
+            self.fly_step_num.set(f"STEP {num} / {total}")
+            self.fly_step_name.set(label)
+            ch, freq, mod, tx = self._fly_upcoming_radio(step)
+            self.fly_freq.set(freq)
+            self.fly_mod.set(mod)
+            self.fly_channel.set(ch)
+            self.fly_tx_name.set(f"SRS name: {tx}" if tx else "")
+            mode = step.get("mode") or "tts"
+            tmpl = step.get("template") or step.get("file") or ""
+            eff = atc_phrase.effective_takeoff_template(
+                str(tmpl), self.mission, self.engine.state
             )
+            takeoff = atc_phrase.takeoff_mode_label(
+                atc_phrase.resolve_active_takeoff_mode(self.mission, self.engine.state)
+            )
+            hint = f"{mode.upper()}  ·  {tmpl}"
+            if str(ch).strip().lower() == "approach":
+                rec = atc_phrase.resolve_active_recovery(step, self.mission, state=self.engine.state)
+                hint += f"  ·  recovery {atc_phrase.recovery_label(rec)}"
+            if str(ch).strip().lower() == "tower" or atc_phrase.is_takeoff_related_template(str(tmpl)):
+                hint += f"  ·  takeoff {takeoff}"
+            if eff != tmpl:
+                hint += f"  ·  says {eff}"
+            if atc_phrase.pending_takeoff_offer(self.engine.state) == "rolling":
+                hint += "  ·  rolling offer pending"
+            self.fly_hint.set(hint)
+            color = CHANNEL_COLORS.get(ch.lower(), C_ACCENT)
+            if hasattr(self, "_fly_channel_lbl"):
+                self._fly_channel_lbl.configure(fg=color)
+            if hasattr(self, "_fly_step_name_lbl"):
+                self._fly_step_name_lbl.configure(fg=C_TEXT)
+            self._queue_fly_phrase_preview(step)
+        ch_now = "" if st.get("at_end") else self._fly_current_channel(st)
+        self._sync_fly_recovery_ui(ch_now)
+        self._sync_fly_pilot_request_ui(ch_now)
         self._refresh_jump_list(st)
 
     def _refresh_jump_list(self, st: dict | None = None) -> None:
@@ -1531,10 +3493,23 @@ class MissionPlanner(tk.Tk):
                     r = eng.seek(0 if seek_index is None else seek_index)
                 else:
                     raise RuntimeError(f"Unknown fly action: {action}")
-                msg = json.dumps(r, indent=2)
 
                 def done() -> None:
-                    self.fly_log.insert(tk.END, msg + "\n\n")
+                    if isinstance(r, dict) and r.get("freq") is not None:
+                        try:
+                            freq_s = f"{float(r['freq']):.3f}"
+                        except (TypeError, ValueError):
+                            freq_s = str(r.get("freq"))
+                        line = (
+                            f"TX  {r.get('label') or r.get('step_id') or 'step'}  ·  "
+                            f"{freq_s}  ·  {str(r.get('channel') or '').upper()}\n"
+                        )
+                    elif isinstance(r, dict) and (r.get("seeked") or action.startswith("seek") or action == "reset"):
+                        n = r.get("step_number")
+                        line = f"{action.upper()}  →  {'END' if r.get('at_end') else f'step {n}'}\n"
+                    else:
+                        line = f"{action.upper()}\n"
+                    self.fly_log.insert(tk.END, line)
                     self.fly_log.see(tk.END)
                     self.engine = eng
                     self._refresh_fly_status()
@@ -1653,11 +3628,11 @@ class MissionPlanner(tk.Tk):
                 [
                     ("heading", "Typical first flight"),
                     ("bullet", "1. Setup → Identity & TTS — set your Opus username (e.g. Turtle)."),
-                    ("bullet", "2. Click Refresh from Opus, confirm callsign, then Save setup."),
+                    ("bullet", "2. Choose flight… from the Opus list, confirm callsign/FP, then Save setup."),
                     ("bullet", "3. Setup → Airport & radios — confirm SRS host and freqs (or Pull from Opus)."),
                     ("bullet", "   Optional: Manual runway overrides flight-plan / wind selection."),
-                    ("bullet", "4. Plan Flight — build or load a mission timeline, then Save mission."),
-                    ("bullet", "5. Fly — use Play Next through the sortie (or Stream Deck later)."),
+                    ("bullet", "4. Plan Flight — New… (base flow + optional Opus), or Load / Save mission."),
+                    ("bullet", "5. Fly — use Play and Advance through the sortie (or Stream Deck later)."),
                     ("heading", "Voice quality"),
                     ("body", "Windows voices work with zero setup (robotic)."),
                     ("body", "Google Cloud TTS is optional and sounds much more natural — see the Google topic."),
@@ -1723,8 +3698,15 @@ class MissionPlanner(tk.Tk):
                 "Plan Flight tips",
                 [
                     ("heading", "Building a mission"),
+                    ("bullet", "• New… — pick a base flow, optional Opus flight, save as a new mission file."),
                     ("bullet", "• Add / reorder steps in the timeline."),
                     ("bullet", "• Each step: label, radio channel, TTS template or custom text or audio file."),
+                    ("bullet", "• Approach recovery: Visual Overhead / Tactical overhead / Straight-in / Instrument."),
+                    ("bullet", "• Fly tab Recovery picker changes the type mid-sortie (template steps only)."),
+                    ("bullet", "• Phrase helper… — generate wording for custom situations onto a step."),
+                    ("bullet", "• Phrase helper → Blackjack — Alpha check: pick a live CAOC track (e.g. Damn), verify ELVIS bullseye, apply as custom text; no Opus FP needed."),
+                    ("bullet", "• Template mode regenerates from Opus (altitude, route, squawk) each Preview."),
+                    ("bullet", "• Custom locks the phrase — switch back to Template to unlock / refresh."),
                     ("bullet", "• Apply changes to step, then Save mission."),
                     ("heading", "Other frequencies (per step)"),
                     ("body", "Select channel Other — Freq becomes editable (MHz)."),
@@ -1744,10 +3726,18 @@ class MissionPlanner(tk.Tk):
                 "Fly & Stream Deck",
                 [
                     ("heading", "Fly tab"),
-                    ("bullet", "• Play Next transmits the next enabled step to SRS."),
+                    ("bullet", "• Play and Advance transmits the next enabled step to SRS."),
                     ("bullet", "• Back / Reset / seek jump around the timeline."),
-                    ("heading", "Stream Deck"),
-                    ("body", "streamdeck\\*.cmd files can call the flow engine for Next / Back / Reset."),
+                    ("bullet", "• On Approach: recovery buttons (Overhead / Tactical / Straight-in / Instrument)."),
+                    ("heading", "Takeoff — rolling vs line up and wait"),
+                    ("bullet", "• Tower may offer rolling (~35% by default; config takeoff_offer_chance)."),
+                    ("bullet", "• Accept / Deny on the Tower offer bar; Request rolling / LUAW buttons on Tower."),
+                    ("bullet", "• Rolling skips Line up and wait; clearance becomes cleared for takeoff rolling."),
+                    ("bullet", "• Pilot request buttons only appear on frequencies that support them."),
+                    ("heading", "Stream Deck / hotkeys"),
+                    ("bullet", "• Setup → Airport → Fly hotkeys: set Advance / Previous (default F13 / F14)."),
+                    ("bullet", "• Capture… records a combo; Apply / Save setup registers it globally on Windows."),
+                    ("bullet", "• On Stream Deck: add a Hotkey action that sends the same combo (or run streamdeck\\flow-next.cmd)."),
                     ("body", "Save your mission first so Fly and Stream Deck use the same active flow file."),
                     ("muted", "Kneeboard PDF can be regenerated from Setup when freqs change."),
                 ],
@@ -1797,7 +3787,9 @@ class MissionPlanner(tk.Tk):
         self.var_user = tk.StringVar()
         self.var_backend = tk.StringVar()
         self.var_callsign_override = tk.StringVar()
+        self.var_opus_flight = tk.StringVar(value="(choose an Opus flight)")
         self.var_callsign = tk.StringVar(value="(refresh to resolve)")
+        self._opus_flight_rows: list[dict[str, Any]] = []
         self.var_volume = tk.DoubleVar(value=0.8)
         self.var_speed = tk.DoubleVar(value=7)
         self.var_volume_lbl = tk.StringVar(value="0.80")
@@ -1834,22 +3826,45 @@ class MissionPlanner(tk.Tk):
         lf = tk.Frame(left, bg=C_PANEL)
         lf.pack(fill=tk.X)
         self._setup_field(lf, 0, "Opus username", self.var_user)
-        self._setup_field(lf, 1, "Opus backend URL", self.var_backend)
-        self._setup_field(lf, 2, "Manual callsign", self.var_callsign_override)
         tk.Label(
             lf,
-            text="Optional. Use alone for offline TTS (no Opus). Blank = Opus flight name.",
+            text="Optional. Matches your seat on the selected flight when signed up.",
             bg=C_PANEL,
             fg=C_MUTED,
             font=("Segoe UI", 8),
-        ).grid(row=3, column=1, sticky="w")
-        tk.Label(lf, text="Active callsign", bg=C_PANEL, fg=C_LABEL).grid(row=4, column=0, sticky="w", pady=6)
+        ).grid(row=1, column=1, sticky="w")
+        self._setup_field(lf, 2, "Opus backend URL", self.var_backend)
+        tk.Label(lf, text="Selected flight", bg=C_PANEL, fg=C_LABEL).grid(row=3, column=0, sticky="w", pady=6)
+        flight_row = tk.Frame(lf, bg=C_PANEL)
+        flight_row.grid(row=3, column=1, sticky="we", pady=6)
+        tk.Label(
+            flight_row,
+            textvariable=self.var_opus_flight,
+            bg=C_PANEL,
+            fg=C_GREEN,
+            font=("Segoe UI Semibold", 10),
+            wraplength=320,
+            justify="left",
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(flight_row, text="Choose flight…", command=self._choose_opus_flight).pack(
+            side=tk.RIGHT, padx=(8, 0)
+        )
+        self._setup_field(lf, 4, "Manual callsign", self.var_callsign_override)
+        tk.Label(
+            lf,
+            text="Optional. Use alone for offline TTS (no Opus). Blank = selected flight name.",
+            bg=C_PANEL,
+            fg=C_MUTED,
+            font=("Segoe UI", 8),
+        ).grid(row=5, column=1, sticky="w")
+        tk.Label(lf, text="Active callsign", bg=C_PANEL, fg=C_LABEL).grid(row=6, column=0, sticky="w", pady=6)
         tk.Label(lf, textvariable=self.var_callsign, bg=C_PANEL, fg=C_GREEN, font=("Segoe UI Semibold", 11)).grid(
-            row=4, column=1, sticky="w", pady=6
+            row=6, column=1, sticky="w", pady=6
         )
-        ttk.Button(lf, text="Refresh from Opus", command=self._refresh_callsign).grid(
-            row=5, column=1, sticky="w", pady=6
-        )
+        btns = tk.Frame(lf, bg=C_PANEL)
+        btns.grid(row=7, column=1, sticky="w", pady=6)
+        ttk.Button(btns, text="Refresh from Opus", command=self._refresh_callsign).pack(side=tk.LEFT)
+        ttk.Button(btns, text="Clear flight", command=self._clear_opus_flight).pack(side=tk.LEFT, padx=(8, 0))
         lf.columnconfigure(1, weight=1)
 
         tts_hdr = tk.Frame(right, bg=C_PANEL)
@@ -1927,7 +3942,7 @@ class MissionPlanner(tk.Tk):
         tk.Label(vol_col, textvariable=self.var_volume_lbl, bg=C_PANEL, fg=C_MUTED, font=("Segoe UI", 8)).pack(
             anchor="e"
         )
-        tk.Label(spd_col, text="Talk speed (−10…10)", bg=C_PANEL, fg=C_LABEL, font=("Segoe UI", 10)).pack(
+        tk.Label(spd_col, text="Default talk speed (−10…10)", bg=C_PANEL, fg=C_LABEL, font=("Segoe UI", 10)).pack(
             anchor="w"
         )
         ttk.Scale(spd_col, from_=-5, to=10, variable=self.var_speed, orient=tk.HORIZONTAL).pack(fill=tk.X)
@@ -2113,7 +4128,50 @@ class MissionPlanner(tk.Tk):
             font=("Segoe UI", 8),
             wraplength=900,
             justify="left",
-        ).pack(anchor="w", padx=14, pady=(4, 12))
+        ).pack(anchor="w", padx=14, pady=(4, 8))
+
+        # Fly hotkeys — Stream Deck can send the same combos
+        hk = tk.Frame(panel, bg=C_PANEL, highlightbackground=C_BORDER, highlightthickness=1)
+        hk.pack(fill=tk.X, padx=14, pady=(0, 12))
+        hk_inner = tk.Frame(hk, bg=C_PANEL)
+        hk_inner.pack(fill=tk.X, padx=12, pady=10)
+        ttk.Label(hk_inner, text="Fly hotkeys (Stream Deck)", style="Header.TLabel").pack(anchor="w")
+        tk.Label(
+            hk_inner,
+            text="Global on Windows — works while DCS is focused. Defaults F13 / F14 suit Stream Deck Hotkey actions.",
+            bg=C_PANEL,
+            fg=C_MUTED,
+            font=("Segoe UI", 8),
+            wraplength=880,
+            justify="left",
+        ).pack(anchor="w", pady=(2, 8))
+
+        self.var_hotkey_next = tk.StringVar(value=hotkeys.DEFAULT_HOTKEY_NEXT)
+        self.var_hotkey_back = tk.StringVar(value=hotkeys.DEFAULT_HOTKEY_BACK)
+        self.var_hotkey_status = tk.StringVar(value="")
+
+        row_n = tk.Frame(hk_inner, bg=C_PANEL)
+        row_n.pack(fill=tk.X, pady=3)
+        tk.Label(row_n, text="Advance (Next)", bg=C_PANEL, fg=C_LABEL, width=16, anchor="w").pack(side=tk.LEFT)
+        ttk.Entry(row_n, textvariable=self.var_hotkey_next, width=22).pack(side=tk.LEFT, padx=(8, 6))
+        ttk.Button(row_n, text="Capture…", command=lambda: self._capture_hotkey("next")).pack(side=tk.LEFT)
+
+        row_b = tk.Frame(hk_inner, bg=C_PANEL)
+        row_b.pack(fill=tk.X, pady=3)
+        tk.Label(row_b, text="Previous (Back)", bg=C_PANEL, fg=C_LABEL, width=16, anchor="w").pack(side=tk.LEFT)
+        ttk.Entry(row_b, textvariable=self.var_hotkey_back, width=22).pack(side=tk.LEFT, padx=(8, 6))
+        ttk.Button(row_b, text="Capture…", command=lambda: self._capture_hotkey("back")).pack(side=tk.LEFT)
+
+        ttk.Button(hk_inner, text="Apply hotkeys", command=self._apply_hotkeys).pack(anchor="w", pady=(8, 2))
+        tk.Label(
+            hk_inner,
+            textvariable=self.var_hotkey_status,
+            bg=C_PANEL,
+            fg=C_MUTED,
+            font=("Segoe UI", 8),
+            wraplength=880,
+            justify="left",
+        ).pack(anchor="w")
 
     def _setup_field(
         self,
@@ -2607,6 +4665,7 @@ $s.GetInstalledVoices() | ForEach-Object { if ($_.Enabled) { $_.VoiceInfo.Name }
         self.var_user.set(c.get("opus_user_name", ""))
         self.var_backend.set(c.get("opus_backend_url", ""))
         self.var_callsign_override.set(c.get("callsign_override", "") or "")
+        self._update_opus_flight_label()
         self.var_runway_override.set(c.get("runway_override", "") or "")
         self.var_volume.set(float(c.get("tts_volume", 0.8)))
         self.var_speed.set(float(c.get("tts_speed", 7)))
@@ -2636,7 +4695,11 @@ $s.GetInstalledVoices() | ForEach-Object { if ($_.Enabled) { $_.VoiceInfo.Name }
         for ch in atc_phrase.CHANNELS:
             block = ap.get(ch) or {}
             self.freq_vars[ch].set(str(block.get("freq_mhz", "")))
+        if hasattr(self, "var_hotkey_next"):
+            self.var_hotkey_next.set(hotkeys.hotkey_from_config(c, "next"))
+            self.var_hotkey_back.set(hotkeys.hotkey_from_config(c, "back"))
         self._refresh_tts_usage()
+        self._update_fly_hotkey_hint()
 
     def save_setup(self) -> None:
         self.config_data["opus_user_name"] = self.var_user.get().strip()
@@ -2672,7 +4735,17 @@ $s.GetInstalledVoices() | ForEach-Object { if ($_.Enabled) { $_.VoiceInfo.Name }
         self.config_data["tts_gender"] = atc_phrase.voice_gender(default_voice)
         self.config_data["tts_volume"] = round(float(self.var_volume.get()), 2)
         self.config_data["tts_speed"] = atc_phrase.tts_speed(speed=self.var_speed.get())
+        if hasattr(self, "var_hotkey_next"):
+            self.config_data["hotkey_next"] = hotkeys.normalize_hotkey(
+                self.var_hotkey_next.get(), default=hotkeys.DEFAULT_HOTKEY_NEXT
+            )
+            self.config_data["hotkey_back"] = hotkeys.normalize_hotkey(
+                self.var_hotkey_back.get(), default=hotkeys.DEFAULT_HOTKEY_BACK
+            )
+            self.var_hotkey_next.set(str(self.config_data["hotkey_next"]))
+            self.var_hotkey_back.set(str(self.config_data["hotkey_back"]))
         save_json(CONFIG_PATH, self.config_data)
+        self._apply_hotkeys()
 
         key = self.mission.get("airport") or "nellis"
         ap = self.airports.get(key, {})
@@ -2689,17 +4762,26 @@ $s.GetInstalledVoices() | ForEach-Object { if ($_.Enabled) { $_.VoiceInfo.Name }
         ap.pop("initial_climb", None)
         ap.pop("expect_after", None)
         ap["known_sids"] = [x.strip().upper() for x in self.var_known_sids.get().split(",") if x.strip()]
+        # Delivery is a separate freq at Nellis — speak "Delivery", not "Ground"
+        ap["clearance_consolidated_with_ground"] = False
         for ch in atc_phrase.CHANNELS:
             try:
                 mhz = float(self.freq_vars[ch].get())
             except ValueError:
                 continue
             prev = ap.get(ch) or {}
-            ap[ch] = {
+            block: dict[str, Any] = {
                 "freq_mhz": mhz,
                 "mod": prev.get("mod") or "AM",
                 "source": prev.get("source") or "local",
             }
+            # Keep Opus UHF Local N so clearance says "departure Local five"
+            if prev.get("local_preset") is not None:
+                try:
+                    block["local_preset"] = int(prev["local_preset"])
+                except (TypeError, ValueError):
+                    pass
+            ap[ch] = block
         self.airports[key] = ap
         save_json(AIRPORTS_PATH, self.airports)
         self.engine.config = self.config_data
@@ -2707,32 +4789,362 @@ $s.GetInstalledVoices() | ForEach-Object { if ($_.Enabled) { $_.VoiceInfo.Name }
         messagebox.showinfo("Setup", "Setup saved.")
         self._update_freq_hint()
 
+    def _update_opus_flight_label(self, row: dict[str, Any] | None = None) -> None:
+        """Refresh the Selected flight label from config and optional picker row."""
+        fid = atc_phrase.configured_opus_flight_id(self.config_data)
+        if fid is None:
+            self.var_opus_flight.set("(choose an Opus flight)")
+            return
+        if row and int(row.get("id") or 0) == fid:
+            cs = str(row.get("callsign") or f"#{fid}")
+            route = str(row.get("fp_route_string") or "")
+            route_short = route if len(route) <= 36 else route[:33] + "…"
+            bits = [cs]
+            if row.get("event_date"):
+                bits.append(str(row["event_date"]))
+            if row.get("vul_start"):
+                bits.append(str(row["vul_start"]))
+            if route_short:
+                bits.append(route_short)
+            slots = row.get("crew_slots") or atc_phrase.opus_crew_slots(
+                row.get("signups"), qty=row.get("qty")
+            )
+            crew = [f"{c['seat']}:{c['user_name']}" for c in slots if c.get("user_name")]
+            if crew:
+                bits.append("crew " + ", ".join(crew))
+            seat = atc_phrase.configured_opus_seat(self.config_data)
+            if seat:
+                bits.append(f"using seat {seat}")
+            self.var_opus_flight.set(" · ".join(bits))
+            return
+        # Cached label from config or minimal id
+        cached = str(self.config_data.get("opus_flight_label") or "").strip()
+        self.var_opus_flight.set(cached or f"Flight #{fid}")
+
+    def _clear_opus_flight(self) -> None:
+        self.config_data.pop("opus_flight_id", None)
+        self.config_data.pop("opus_seat", None)
+        self.config_data.pop("opus_flight_label", None)
+        atc_phrase.invalidate_opus_cache()
+        self._update_opus_flight_label()
+        self.var_callsign.set("(refresh to resolve)")
+
+    def _choose_opus_flight(
+        self,
+        *,
+        parent: tk.Misc | None = None,
+        on_done: Callable[[], None] | None = None,
+    ) -> None:
+        """Modal list of Opus flights — select one for callsign + flight plan."""
+        owner = parent or self
+        if hasattr(self, "var_user"):
+            self.config_data["opus_user_name"] = self.var_user.get().strip()
+        if hasattr(self, "var_backend"):
+            self.config_data["opus_backend_url"] = self.var_backend.get().strip()
+        if not (self.config_data.get("opus_backend_url") or "").strip():
+            messagebox.showinfo("Opus flights", "Set the Opus backend URL first (Setup tab).", parent=owner)
+            return
+
+        dlg = tk.Toplevel(owner)
+        dlg.title("Choose Opus flight")
+        dlg.configure(bg=C_BG)
+        dlg.geometry("980x560")
+        dlg.transient(owner)
+        dlg.grab_set()
+
+        hdr = tk.Frame(dlg, bg=C_PANEL, highlightbackground=C_BORDER, highlightthickness=1)
+        hdr.pack(fill=tk.X, padx=12, pady=(12, 6))
+        tk.Label(
+            hdr,
+            text="Flights from Opus — select a flight, then pick a seat / pilot from the crew list",
+            bg=C_PANEL,
+            fg=C_TEXT,
+            font=("Segoe UI Semibold", 11),
+        ).pack(side=tk.LEFT, padx=10, pady=8)
+        status = tk.StringVar(value="Loading…")
+        tk.Label(hdr, textvariable=status, bg=C_PANEL, fg=C_MUTED, font=("Segoe UI", 9)).pack(
+            side=tk.RIGHT, padx=10
+        )
+
+        body = tk.Frame(dlg, bg=C_BG)
+        body.pack(fill=tk.BOTH, expand=True, padx=12, pady=6)
+
+        # Left: flight list
+        left = tk.Frame(body, bg=C_BG)
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        cols = ("callsign", "date", "vul", "mission", "ac", "qty", "fp")
+        tree = ttk.Treeview(left, columns=cols, show="headings", selectmode="browse", height=12)
+        headings = {
+            "callsign": ("Callsign", 110),
+            "date": ("Date", 90),
+            "vul": ("VUL", 90),
+            "mission": ("Mission", 110),
+            "ac": ("A/C", 70),
+            "qty": ("Qty", 40),
+            "fp": ("Flight plan", 280),
+        }
+        for key, (title, width) in headings.items():
+            tree.heading(key, text=title)
+            tree.column(key, width=width, stretch=(key == "fp"))
+        scroll = ttk.Scrollbar(left, orient=tk.VERTICAL, command=tree.yview)
+        tree.configure(yscrollcommand=scroll.set)
+        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Right: full crew / seat list for selected flight
+        right = tk.Frame(body, bg=C_PANEL, highlightbackground=C_BORDER, highlightthickness=1, width=280)
+        right.pack(side=tk.RIGHT, fill=tk.Y, padx=(10, 0))
+        right.pack_propagate(False)
+        tk.Label(
+            right,
+            text="Crew / seats",
+            bg=C_PANEL,
+            fg=C_TEXT,
+            font=("Segoe UI Semibold", 11),
+        ).pack(anchor="w", padx=10, pady=(10, 4))
+        crew_hint = tk.StringVar(value="Select a flight to see all pilots.")
+        tk.Label(
+            right,
+            textvariable=crew_hint,
+            bg=C_PANEL,
+            fg=C_MUTED,
+            font=("Segoe UI", 8),
+            wraplength=250,
+            justify="left",
+        ).pack(anchor="w", padx=10, pady=(0, 6))
+        crew_list = tk.Listbox(
+            right,
+            bg=C_CARD,
+            fg=C_TEXT,
+            selectbackground=C_ACCENT,
+            selectforeground=C_BG,
+            activestyle="none",
+            font=("Segoe UI", 10),
+            highlightthickness=0,
+            borderwidth=0,
+        )
+        crew_list.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+
+        foot = tk.Frame(dlg, bg=C_BG)
+        foot.pack(fill=tk.X, padx=12, pady=(0, 12))
+
+        rows_by_iid: dict[str, dict[str, Any]] = {}
+        crew_slots_by_index: list[dict[str, Any]] = []
+
+        def fill_crew(row: dict[str, Any] | None) -> None:
+            nonlocal crew_slots_by_index
+            crew_list.delete(0, tk.END)
+            crew_slots_by_index = []
+            if not row:
+                crew_hint.set("Select a flight to see all pilots.")
+                return
+            slots = row.get("crew_slots")
+            if not slots:
+                slots = atc_phrase.opus_crew_slots(row.get("signups") or [], qty=row.get("qty"))
+            crew_slots_by_index = list(slots)
+            user = self.var_user.get().strip().casefold()
+            select_idx = 0
+            filled = 0
+            for i, slot in enumerate(crew_slots_by_index):
+                label = atc_phrase.format_crew_slot(slot)
+                crew_list.insert(tk.END, label)
+                if slot.get("user_name"):
+                    filled += 1
+                if user and str(slot.get("user_name") or "").casefold() == user:
+                    select_idx = i
+            # Prefer previously chosen seat for this flight
+            prev_seat = atc_phrase.configured_opus_seat(self.config_data)
+            prev_fid = atc_phrase.configured_opus_flight_id(self.config_data)
+            if prev_fid == int(row.get("id") or 0) and prev_seat:
+                for i, slot in enumerate(crew_slots_by_index):
+                    if int(slot.get("seat") or 0) == prev_seat:
+                        select_idx = i
+                        break
+            if crew_slots_by_index:
+                crew_list.selection_set(select_idx)
+                crew_list.activate(select_idx)
+                crew_list.see(select_idx)
+            qty = row.get("qty")
+            crew_hint.set(
+                f"{filled} signed up"
+                + (f" · qty {qty}" if qty is not None else "")
+                + " — click a seat, then Use selected flight"
+            )
+
+        def on_select(_evt: object | None = None) -> None:
+            sel = tree.selection()
+            if not sel:
+                return
+            fill_crew(rows_by_iid.get(sel[0]))
+
+        tree.bind("<<TreeviewSelect>>", on_select)
+
+        def apply_rows(rows: list[dict[str, Any]]) -> None:
+            tree.delete(*tree.get_children())
+            rows_by_iid.clear()
+            self._opus_flight_rows = rows
+            selected_id = atc_phrase.configured_opus_flight_id(self.config_data)
+            focus_iid = None
+            for row in rows:
+                fid = int(row["id"])
+                vul = ""
+                if row.get("vul_start") or row.get("vul_end"):
+                    vul = f"{row.get('vul_start') or '?'}–{row.get('vul_end') or '?'}"
+                mission = " ".join(
+                    x for x in [str(row.get("mission_number") or ""), str(row.get("mission") or "")] if x
+                ).strip()
+                fp = str(row.get("fp_route_string") or ("(no FP)" if not row.get("has_filed_plan") else ""))
+                iid = str(fid)
+                tree.insert(
+                    "",
+                    tk.END,
+                    iid=iid,
+                    values=(
+                        row.get("callsign") or f"#{fid}",
+                        row.get("event_date") or "",
+                        vul,
+                        mission,
+                        row.get("aircraft") or "",
+                        row.get("qty") if row.get("qty") is not None else "",
+                        fp,
+                    ),
+                )
+                rows_by_iid[iid] = row
+                if selected_id == fid:
+                    focus_iid = iid
+            status.set(f"{len(rows)} flight(s)")
+            if focus_iid:
+                tree.selection_set(focus_iid)
+                tree.focus(focus_iid)
+                tree.see(focus_iid)
+                fill_crew(rows_by_iid.get(focus_iid))
+            elif rows:
+                first = str(rows[0]["id"])
+                tree.selection_set(first)
+                tree.focus(first)
+                fill_crew(rows_by_iid.get(first))
+
+        def load() -> None:
+            status.set("Loading…")
+
+            def work() -> None:
+                try:
+                    rows = atc_phrase.list_opus_flights(self.config_data, include_detail=True)
+                    self.after(0, lambda: apply_rows(rows))
+                except Exception as exc:  # noqa: BLE001
+                    self.after(0, lambda: status.set(f"Failed: {exc}"))
+                    self.after(0, lambda: messagebox.showerror("Opus flights", str(exc), parent=dlg))
+
+            threading.Thread(target=work, daemon=True).start()
+
+        def use_selected() -> None:
+            sel = tree.selection()
+            if not sel:
+                messagebox.showinfo("Opus flights", "Select a flight first.", parent=dlg)
+                return
+            row = rows_by_iid.get(sel[0])
+            if not row:
+                return
+            crew_sel = crew_list.curselection()
+            seat_n = 1
+            if crew_sel and crew_slots_by_index:
+                slot = crew_slots_by_index[int(crew_sel[0])]
+                try:
+                    seat_n = int(slot.get("seat") or 1)
+                except (TypeError, ValueError):
+                    seat_n = 1
+            self.config_data["opus_flight_id"] = int(row["id"])
+            self.config_data["opus_seat"] = seat_n
+            cs = str(row.get("callsign") or f"#{row['id']}")
+            route = str(row.get("fp_route_string") or "")
+            route_short = route if len(route) <= 42 else route[:39] + "…"
+            crew_names = [
+                f"{c['seat']}:{c['user_name']}"
+                for c in (row.get("crew_slots") or atc_phrase.opus_crew_slots(row.get("signups"), qty=row.get("qty")))
+                if c.get("user_name")
+            ]
+            label_bits = [cs]
+            if row.get("event_date"):
+                label_bits.append(str(row["event_date"]))
+            if route_short:
+                label_bits.append(route_short)
+            if crew_names:
+                label_bits.append("crew " + ", ".join(crew_names))
+            self.config_data["opus_flight_label"] = " · ".join(label_bits)
+            atc_phrase.invalidate_opus_cache()
+            self._update_opus_flight_label(row)
+            dlg.destroy()
+            self._refresh_callsign()
+            if on_done is not None:
+                try:
+                    on_done()
+                except Exception:
+                    pass
+            # Regenerate live template previews with the new FP / altitude / squawk
+            elif self.selected_index is not None:
+                step = self._steps()[self.selected_index]
+                if not step.get("text") and (step.get("mode") or "tts") != "file":
+                    self.after(80, lambda: self.preview_step(apply=False))
+
+        ttk.Button(foot, text="Refresh list", command=load).pack(side=tk.LEFT)
+        ttk.Button(foot, text="Cancel", command=dlg.destroy).pack(side=tk.RIGHT)
+        ttk.Button(foot, text="Use selected flight", command=use_selected).pack(side=tk.RIGHT, padx=(0, 8))
+        tree.bind("<Double-1>", lambda _e: use_selected())
+
+        load()
+
+    def _sync_opus_presets_into_airport(self) -> dict[str, int]:
+        """Pull Opus Local N presets into the active airport (departure Local 5, etc.)."""
+        key = self.mission.get("airport") or "nellis"
+        ap = self.airports.get(key) or {}
+        presets = atc_phrase.sync_opus_local_presets(
+            self.config_data, ap, icao=str(ap.get("icao") or self.var_icao.get() if hasattr(self, "var_icao") else "")
+        )
+        self.airports[key] = ap
+        self.engine.airports = self.airports
+        save_json(AIRPORTS_PATH, self.airports)
+        return presets
+
     def _refresh_callsign(self) -> None:
         self.config_data["opus_user_name"] = self.var_user.get().strip()
         self.config_data["opus_backend_url"] = self.var_backend.get().strip()
         self.config_data["callsign_override"] = self.var_callsign_override.get().strip()
+        atc_phrase.invalidate_opus_cache()
 
         def work() -> None:
-            user = (self.config_data.get("opus_user_name") or "").strip()
             backend = (self.config_data.get("opus_backend_url") or "").strip()
+            selected = atc_phrase.configured_opus_flight_id(self.config_data)
             opus = atc_phrase.resolve_active_opus_flight(self.config_data)
+            dep_local = None
+            if backend:
+                try:
+                    presets = self._sync_opus_presets_into_airport()
+                    dep_local = presets.get("departure")
+                except Exception as exc:  # noqa: BLE001
+                    print(f"WARNING: Opus preset sync failed ({exc})", file=sys.stderr)
             if not opus:
                 self.after(
                     0,
                     lambda: self.var_callsign.set(
-                        "(not found — set Opus signup or manual callsign)"
+                        "(not found — choose an Opus flight or set manual callsign)"
                     ),
                 )
                 return
-            if not user or not backend:
+            if not backend or (not selected and not (self.config_data.get("opus_user_name") or "").strip()):
                 mode = "manual" if atc_phrase.callsign_override(self.config_data) else "offline"
-                label = f"{opus.radio_callsign} · {mode} (no Opus)"
+                label = f"{opus.radio_callsign} · {mode}"
                 self.after(0, lambda: self.var_callsign.set(label))
                 return
             filed = "filed FP" if opus.has_filed_plan else "NO flight plan"
+            route = opus.fp_route_string or ""
+            route_bit = f" · {route}" if route else ""
             ov = " · manual" if atc_phrase.callsign_override(self.config_data) else ""
-            label = f"{opus.radio_callsign}{ov} · seat {opus.seat} · {filed}"
+            local_bit = f" · dep Local {dep_local}" if dep_local else ""
+            label = (
+                f"{opus.radio_callsign}{ov} · seat {opus.seat} · {filed}{route_bit}{local_bit}"
+            )
             self.after(0, lambda: self.var_callsign.set(label))
+            self.after(0, self._update_opus_flight_label)
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -2767,26 +5179,29 @@ $s.GetInstalledVoices() | ForEach-Object { if ($_.Enabled) { $_.VoiceInfo.Name }
                     for ch, mhz in freqs.items():
                         if ch in self.freq_vars:
                             self.freq_vars[ch].set(str(mhz))
+                    presets = result.get("presets") or {}
                     lines = [
-                        f"{m['channel']}: {m['name']} = {m['freq_mhz']}"
+                        f"{m['channel']}: Local {m.get('preset')} · {m['name']} = {m['freq_mhz']}"
                         for m in result.get("matched") or []
                     ]
                     self.var_freq_status.set(
                         f"Pulled Opus theater {result.get('theater_id')} UHF defaults "
                         f"({len(freqs)} channels). Save setup to keep.\n" + "\n".join(lines)
                     )
-                    # Mark sources as opus in memory when saving next
                     key = self.mission.get("airport") or "nellis"
                     ap = self.airports.get(key, {})
-                    atc_phrase.apply_opus_freqs_to_airport(
-                        ap, freqs, presets=result.get("presets") or {}
-                    )
+                    atc_phrase.apply_opus_freqs_to_airport(ap, freqs, presets=presets)
                     self.airports[key] = ap
-                    messagebox.showinfo(
-                        "Opus freqs",
+                    self.engine.airports = self.airports
+                    save_json(AIRPORTS_PATH, self.airports)
+                    dep = presets.get("departure")
+                    msg = (
                         f"Loaded {len(freqs)} UHF presets from Opus theater "
-                        f"{result.get('theater_id')}.\nReview values, then Save setup.",
+                        f"{result.get('theater_id')}."
                     )
+                    if dep is not None:
+                        msg += f"\n\nDeparture will speak as Local {dep}."
+                    messagebox.showinfo("Opus freqs", msg)
 
                 self.after(0, apply)
             except Exception as exc:  # noqa: BLE001

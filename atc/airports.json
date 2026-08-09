@@ -9,13 +9,17 @@
       "21R",
       "03L"
     ],
+    "instrument_runways": [
+      "21L",
+      "03R"
+    ],
     "parking": "Row 18",
     "taxi_via": "Foxtrot",
-    "clearance_consolidated_with_ground": true,
+    "clearance_consolidated_with_ground": false,
     "taxi_routes": {
       "21R": {
         "eor": "NW EOR",
-        "outbound_via": "Foxtrot",
+        "outbound_via": "F, E",
         "inbound_via": "Foxtrot",
         "exit": "right at Alpha",
         "intersection": "Delta"
@@ -34,32 +38,38 @@
     "delivery": {
       "freq_mhz": 289.4,
       "mod": "AM",
-      "source": "opus"
+      "source": "opus",
+      "local_preset": 2
     },
     "ground": {
       "freq_mhz": 275.8,
       "mod": "AM",
-      "source": "opus"
+      "source": "opus",
+      "local_preset": 3
     },
     "tower": {
       "freq_mhz": 327.0,
       "mod": "AM",
-      "source": "opus"
+      "source": "opus",
+      "local_preset": 4
     },
     "departure": {
       "freq_mhz": 350.225,
       "mod": "AM",
-      "source": "opus"
+      "source": "opus",
+      "local_preset": 5
     },
     "approach": {
       "freq_mhz": 273.55,
       "mod": "AM",
-      "source": "opus"
+      "source": "opus",
+      "local_preset": 6
     },
     "blackjack": {
       "freq_mhz": 377.8,
       "mod": "AM",
-      "source": "opus"
+      "source": "opus",
+      "local_preset": 14
     },
     "ops": {
       "freq_mhz": 255.0,

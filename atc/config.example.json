@@ -2,9 +2,15 @@
   "opus_metar_url": "https://opus.455aew.com/api/metar?icao={icao}",
   "opus_backend_url": "https://opus.455aew.com/backend",
   "opus_user_name": "",
+  "opus_flight_id": null,
+  "opus_seat": null,
+  "opus_flight_label": "",
   "callsign_override": "",
   "runway_override": "",
   "opus_theater_id": 1,
+  "bullseye_navpoint": "ELVIS",
+  "bullseye_magnetic_declination_deg": 12,
+  "takeoff_offer_chance": 0.35,
   "external_audio_exe": "../DCS-SR-ExternalAudio.exe",
   "user_agent": "DCS-ATC-Phrase/1.0",
   "dry_run": false,
@@ -28,5 +34,7 @@
   "tts_volume": 0.8,
   "tts_speed": 7,
   "flow_file": "flows/nellis_default.json",
-  "flow_http_port": 8765
+  "flow_http_port": 8765,
+  "hotkey_next": "F13",
+  "hotkey_back": "F14"
 }

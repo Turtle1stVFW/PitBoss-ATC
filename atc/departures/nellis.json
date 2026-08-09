@@ -1,5 +1,5 @@
 {
-  "_comment": "Nellis (KLSV) departures. Instrument SIDs (DREAM7/FYTTR7/MMM8) are spoken ONLY when explicitly filed in the route. Visual Flex + transitions may be inferred from fixes. Otherwise clearance stays plain 'as filed'.",
+  "_comment": "Nellis (KLSV) departures. Instrument SIDs (DREAM7/FYTTR7/MMM8) only when explicitly filed. Any FLEX token is a visual DP, including runway-coded forms: FLEX, FLEX21, FLEX21L, FLEX21R, FLEX03, FLEX03L, FLEX03R. North/west inferred from the next fix (DREAM/MINTT/JUNNO vs FYTTR). Otherwise clearance stays plain 'as filed'.",
   "instrument": [
     {
       "id": "DREAM7",
@@ -39,6 +39,7 @@
       "route_prefixes": [
         ["FLEX", "MINTT"],
         ["FLEX", "JUNNO"],
+        ["FLEX", "DREAM"],
         ["FLEX", "NORTH"]
       ],
       "default_transition": "MINTT"
@@ -53,11 +54,19 @@
         ["FLEX", "WEST"]
       ],
       "default_transition": "FYTTR"
+    },
+    {
+      "id": "FLEX_GENERIC",
+      "aliases": [],
+      "say": "Flex",
+      "kind": "visual",
+      "route_prefixes": []
     }
   ],
   "transitions": {
     "MINTT": "Mintt",
     "JUNNO": "Junno",
+    "DREAM": "Dream",
     "FYTTR": "Fighter",
     "MMM": "Mormon Mesa"
   }
