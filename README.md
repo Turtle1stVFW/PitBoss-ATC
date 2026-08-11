@@ -32,6 +32,7 @@ Patched `DCS-SR-ExternalAudio` that can transmit to a **remote** SRS host (`--ip
 | `DCS-SR-ExternalAudio.exe` + DLLs | Slim Windows build with `--ip` / hostname support |
 | `runtimes\win-x64\` | Native Speech / gRPC libs |
 | `atc\` | Flow planner, phrase board, Stream Deck scripts |
+| `atc\Install-DCS-Radio-Export.cmd` | Auto-install DCS Export hook for the freq gate (installer-safe) |
 | `patches\` | Source files + rebuild instructions for the `--ip` patch |
 
 ## Rebuild ExternalAudio

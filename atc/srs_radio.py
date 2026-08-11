@@ -1,0 +1,672 @@
+"""
+Pilot radio tune state for the Advance / TX frequency gate.
+
+Sources (first match wins):
+  1. Fresh DCS Export file from ATC-RadioExport.lua (in-jet)
+  2. Live SRS client UDP CombinedRadioState (EAM / AWACS overlay selected radio)
+  3. Manual in-app EAM radio strip (fallback when SRS UDP is quiet)
+  4. Unknown — caller should allow and warn
+
+SRS SR-ClientRadio.exe already broadcasts CombinedRadioState JSON to
+127.0.0.1:7080 and :7082 (~5 Hz) including RadioInfo.selected + radios[].freq.
+That is how we learn the common-PTT selected frequency without a manual picker.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import socket
+import threading
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Literal
+
+HERE = Path(__file__).resolve().parent
+
+DEFAULT_TOL_MHZ = 0.05
+# Export writes ~1 Hz; allow a little slack so a missed tick is not "unknown".
+DEFAULT_STALE_S = 3.0
+# SRS client UDP is ~5 Hz; treat as stale quickly if the client stops.
+SRS_UDP_STALE_S = 1.5
+MIN_FREQ_HZ = 1_000_000  # ignore intercom / dead radios
+MOD_INTERCOM = 3
+DEFAULT_SRS_UDP_PORTS = (7082, 7080)  # OutgoingDCSUDPOther, OutgoingDCSUDPInfo
+
+# Runtime EAM freqs (MHz) — updated by the Fly UI; also mirrored into config on save.
+# Only the selected (active) radio counts as "tuned" for the frequency gate.
+_eam_freqs_mhz: list[float] = []
+_eam_active_index: int = 0
+_eam_enabled: bool = False
+
+# Live snapshot from SRS client UDP (CombinedRadioState).
+_srs_udp_lock = threading.Lock()
+_srs_udp_selected_mhz: float | None = None
+_srs_udp_selected_index: int = -1
+_srs_udp_radios_mhz: list[float] = []
+_srs_udp_name: str = ""
+_srs_udp_received_at: float = 0.0
+_srs_udp_port: int | None = None
+_srs_udp_error: str = ""
+_srs_udp_thread: threading.Thread | None = None
+_srs_udp_stop = threading.Event()
+
+MatchResult = Literal["match", "mismatch", "unknown"]
+
+
+@dataclass
+class RadioState:
+    source: str  # "dcs" | "srs" | "eam" | "none"
+    freqs_mhz: list[float] = field(default_factory=list)
+    unit: str = ""
+    age_s: float | None = None
+    fresh: bool = False
+    path: Path | None = None
+
+
+def set_eam_enabled(enabled: bool) -> None:
+    global _eam_enabled
+    _eam_enabled = bool(enabled)
+    if _eam_enabled:
+        ensure_srs_udp_listener()
+
+
+def set_eam_freqs_mhz(freqs: list[float]) -> None:
+    global _eam_freqs_mhz, _eam_active_index
+    out: list[float] = []
+    for raw in freqs:
+        try:
+            mhz = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if mhz >= 1.0:
+            out.append(mhz)
+    _eam_freqs_mhz = out
+    if not _eam_freqs_mhz:
+        _eam_active_index = 0
+    else:
+        _eam_active_index = max(0, min(_eam_active_index, len(_eam_freqs_mhz) - 1))
+
+
+def set_eam_active_index(index: int) -> None:
+    """Which EAM radio is the selected TX/RX for the gate (0-based)."""
+    global _eam_active_index
+    if not _eam_freqs_mhz:
+        _eam_active_index = 0
+        return
+    _eam_active_index = max(0, min(int(index), len(_eam_freqs_mhz) - 1))
+
+
+def eam_freqs_mhz() -> list[float]:
+    return list(_eam_freqs_mhz)
+
+
+def eam_active_index() -> int:
+    return int(_eam_active_index)
+
+
+def eam_active_mhz() -> float | None:
+    if not _eam_freqs_mhz:
+        return None
+    idx = max(0, min(_eam_active_index, len(_eam_freqs_mhz) - 1))
+    return float(_eam_freqs_mhz[idx])
+
+
+def eam_enabled() -> bool:
+    return _eam_enabled
+
+
+def srs_client_global_cfg_paths() -> list[Path]:
+    return [
+        Path(r"C:\Program Files\DCS-SimpleRadio-Standalone\Client\global.cfg"),
+        Path(r"C:\Program Files (x86)\DCS-SimpleRadio-Standalone\Client\global.cfg"),
+    ]
+
+
+def srs_udp_ports_from_cfg() -> list[int]:
+    """Prefer ports from the installed SRS client global.cfg when present."""
+    found: list[int] = []
+    for path in srs_client_global_cfg_paths():
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        values: dict[str, int] = {}
+        for line in text.splitlines():
+            if "=" not in line:
+                continue
+            key, raw = line.split("=", 1)
+            key = key.strip()
+            if key not in ("OutgoingDCSUDPOther", "OutgoingDCSUDPInfo"):
+                continue
+            try:
+                values[key] = int(raw.strip())
+            except ValueError:
+                continue
+        for key in ("OutgoingDCSUDPOther", "OutgoingDCSUDPInfo"):
+            if key in values and values[key] not in found:
+                found.append(values[key])
+        if found:
+            break
+    return found or list(DEFAULT_SRS_UDP_PORTS)
+
+
+def ensure_srs_udp_listener() -> None:
+    """Start the background SRS CombinedRadioState listener if needed."""
+    global _srs_udp_thread
+    if _srs_udp_thread is not None and _srs_udp_thread.is_alive():
+        return
+    _srs_udp_stop.clear()
+    _srs_udp_thread = threading.Thread(
+        target=_srs_udp_loop, name="atc-srs-udp", daemon=True
+    )
+    _srs_udp_thread.start()
+
+
+def stop_srs_udp_listener() -> None:
+    _srs_udp_stop.set()
+
+
+def srs_udp_status() -> dict[str, Any]:
+    """Diagnostics for the Fly strip / Setup."""
+    with _srs_udp_lock:
+        age = (time.time() - _srs_udp_received_at) if _srs_udp_received_at else None
+        return {
+            "port": _srs_udp_port,
+            "error": _srs_udp_error,
+            "name": _srs_udp_name,
+            "selected_index": _srs_udp_selected_index,
+            "selected_mhz": _srs_udp_selected_mhz,
+            "radios_mhz": list(_srs_udp_radios_mhz),
+            "age_s": age,
+            "fresh": bool(
+                _srs_udp_selected_mhz is not None
+                and age is not None
+                and age <= SRS_UDP_STALE_S
+            ),
+        }
+
+
+def read_srs_client_selected(*, stale_s: float = SRS_UDP_STALE_S) -> RadioState:
+    """Selected radio from the live SRS client UDP export (EAM common PTT)."""
+    ensure_srs_udp_listener()
+    with _srs_udp_lock:
+        if not _srs_udp_received_at or _srs_udp_selected_mhz is None:
+            return RadioState(
+                source="srs",
+                fresh=False,
+                age_s=None,
+                unit=_srs_udp_error or "SRS UDP quiet",
+            )
+        age = max(0.0, time.time() - _srs_udp_received_at)
+        idx = _srs_udp_selected_index
+        mhz = float(_srs_udp_selected_mhz)
+        name = _srs_udp_name or "SRS"
+    return RadioState(
+        source="srs",
+        freqs_mhz=[mhz],
+        unit=f"{name} R{idx}" if idx >= 0 else name,
+        age_s=age,
+        fresh=age <= float(stale_s),
+    )
+
+
+def _srs_udp_loop() -> None:
+    global _srs_udp_port, _srs_udp_error
+    ports = srs_udp_ports_from_cfg()
+    sock: socket.socket | None = None
+    bound_port: int | None = None
+    last_err = ""
+    for port in ports:
+        candidate = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            candidate.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            candidate.bind(("127.0.0.1", int(port)))
+            candidate.settimeout(0.5)
+            sock = candidate
+            bound_port = int(port)
+            break
+        except OSError as exc:
+            last_err = f"bind {port}: {exc}"
+            try:
+                candidate.close()
+            except OSError:
+                pass
+    with _srs_udp_lock:
+        _srs_udp_port = bound_port
+        _srs_udp_error = "" if sock else last_err or "no UDP port"
+    if sock is None:
+        return
+    try:
+        while not _srs_udp_stop.is_set():
+            try:
+                data, _addr = sock.recvfrom(65535)
+            except socket.timeout:
+                continue
+            except OSError as exc:
+                with _srs_udp_lock:
+                    _srs_udp_error = str(exc)
+                break
+            _ingest_srs_udp_payload(data)
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
+def _ingest_srs_udp_payload(data: bytes) -> None:
+    global _srs_udp_selected_mhz, _srs_udp_selected_index, _srs_udp_radios_mhz
+    global _srs_udp_name, _srs_udp_received_at, _srs_udp_error
+    try:
+        text = data.decode("utf-8", errors="replace").strip()
+        if not text:
+            return
+        payload = json.loads(text)
+    except (UnicodeError, json.JSONDecodeError, TypeError):
+        return
+    if not isinstance(payload, dict):
+        return
+    info = payload.get("RadioInfo") or payload
+    if not isinstance(info, dict):
+        return
+    radios = info.get("radios") or []
+    if not isinstance(radios, list):
+        return
+    try:
+        selected = int(info.get("selected") if info.get("selected") is not None else -1)
+    except (TypeError, ValueError):
+        selected = -1
+    bank: list[float] = []
+    selected_mhz: float | None = None
+    for i, entry in enumerate(radios):
+        if not isinstance(entry, dict):
+            continue
+        try:
+            mod = int(entry.get("modulation") or 0)
+        except (TypeError, ValueError):
+            mod = 0
+        if mod == MOD_INTERCOM:
+            continue
+        try:
+            hz = float(entry.get("freq") or 0)
+        except (TypeError, ValueError):
+            continue
+        mhz = _hz_to_mhz(hz)
+        if mhz is None:
+            continue
+        bank.append(mhz)
+        if i == selected:
+            selected_mhz = mhz
+    # If selected was SATCOM/intercom, fall back to first usable radio.
+    if selected_mhz is None and bank:
+        selected_mhz = bank[0]
+        selected = 0
+    with _srs_udp_lock:
+        _srs_udp_selected_mhz = selected_mhz
+        _srs_udp_selected_index = selected
+        _srs_udp_radios_mhz = bank
+        _srs_udp_name = str(info.get("name") or "").strip()
+        _srs_udp_received_at = time.time()
+        _srs_udp_error = ""
+
+
+def maybe_force_eam_tx_freq(
+    config: dict[str, Any] | None,
+    freq: float,
+    mod: str,
+) -> tuple[float, str]:
+    """
+    Common-PTT EAM mode: ExternalAudio must TX only on the selected radio.
+
+    Prefer the live SRS client selection; fall back to the manual EAM strip.
+    """
+    apply_config(config)
+    if not _eam_enabled:
+        return float(freq), mod
+    srs = read_srs_client_selected()
+    if srs.fresh and srs.freqs_mhz:
+        return float(srs.freqs_mhz[0]), mod
+    active = eam_active_mhz()
+    if active is None:
+        return float(freq), mod
+    return float(active), mod
+
+
+def apply_config(config: dict[str, Any] | None) -> None:
+    """Load EAM flags/freqs from config (call on startup / after Setup save).
+
+    Only keys present in `config` are applied — a partial dict must not wipe
+    the in-memory selected radio / bank used for common-PTT TX.
+    """
+    cfg = config or {}
+    if "freq_gate_eam_enabled" in cfg:
+        set_eam_enabled(bool(cfg.get("freq_gate_eam_enabled")))
+    if "freq_gate_eam_freqs" in cfg and isinstance(cfg.get("freq_gate_eam_freqs"), list):
+        set_eam_freqs_mhz(list(cfg["freq_gate_eam_freqs"]))
+    if "freq_gate_eam_active" in cfg:
+        try:
+            set_eam_active_index(int(cfg.get("freq_gate_eam_active") or 0))
+        except (TypeError, ValueError):
+            set_eam_active_index(0)
+    if _eam_enabled or bool(cfg.get("freq_gate_enabled", True)):
+        ensure_srs_udp_listener()
+
+
+def saved_games_roots() -> list[Path]:
+    home = Path(os.environ.get("USERPROFILE") or Path.home())
+    base = home / "Saved Games"
+    names = ("DCS", "DCS.openbeta", "DCS.openalpha")
+    return [base / n for n in names if (base / n).is_dir()]
+
+
+def radios_json_candidates() -> list[Path]:
+    return [root / "ATC-ExternalAudio" / "radios.json" for root in saved_games_roots()]
+
+
+def _hz_to_mhz(hz: float) -> float | None:
+    if hz < MIN_FREQ_HZ:
+        return None
+    return hz / 1_000_000.0
+
+
+def _parse_dcs_payload(data: dict[str, Any], *, mtime: float) -> RadioState:
+    radios = data.get("radios") or []
+    freqs: list[float] = []
+    if isinstance(radios, list):
+        for entry in radios:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                mod = int(entry.get("modulation") or 0)
+            except (TypeError, ValueError):
+                mod = 0
+            if mod == MOD_INTERCOM:
+                continue
+            for key in ("freq", "secFreq"):
+                try:
+                    hz = float(entry.get(key) or 0)
+                except (TypeError, ValueError):
+                    continue
+                mhz = _hz_to_mhz(hz)
+                if mhz is not None and not any(abs(mhz - x) < 1e-6 for x in freqs):
+                    freqs.append(mhz)
+    age = max(0.0, time.time() - mtime)
+    # Prefer file mtime; fall back to payload t if mtime looks wrong
+    try:
+        payload_t = float(data.get("t") or 0)
+        if payload_t > 1_000_000_000:  # wall-clock seconds
+            age = min(age, max(0.0, time.time() - payload_t))
+    except (TypeError, ValueError):
+        pass
+    unit = str(data.get("unit") or "")
+    return RadioState(
+        source="dcs",
+        freqs_mhz=freqs,
+        unit=unit,
+        age_s=age,
+        fresh=False,  # caller sets with stale threshold
+        path=None,
+    )
+
+
+def read_dcs_radios(*, stale_s: float = DEFAULT_STALE_S) -> RadioState:
+    """Newest readable radios.json, or empty none-state."""
+    best: RadioState | None = None
+    best_mtime = -1.0
+    for path in radios_json_candidates():
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        if st.st_mtime < best_mtime:
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        state = _parse_dcs_payload(data, mtime=st.st_mtime)
+        state.path = path
+        state.fresh = (state.age_s or 999) <= stale_s and bool(state.unit or state.freqs_mhz)
+        best = state
+        best_mtime = st.st_mtime
+    if best is None:
+        return RadioState(source="none", fresh=False, age_s=None)
+    return best
+
+
+def current_radio_state(
+    config: dict[str, Any] | None = None,
+    *,
+    stale_s: float | None = None,
+) -> RadioState:
+    """
+    Resolve tuned radios: fresh DCS export, else live SRS selected radio (EAM),
+    else manual EAM strip, else none.
+    """
+    cfg = config or {}
+    if config is not None:
+        # Keep module EAM flags aligned when callers pass config
+        if "freq_gate_eam_enabled" in cfg:
+            set_eam_enabled(bool(cfg.get("freq_gate_eam_enabled")))
+        if "freq_gate_eam_freqs" in cfg and isinstance(cfg.get("freq_gate_eam_freqs"), list):
+            set_eam_freqs_mhz(list(cfg["freq_gate_eam_freqs"]))
+    limit = float(cfg.get("freq_gate_stale_s") or stale_s or DEFAULT_STALE_S)
+    dcs = read_dcs_radios(stale_s=limit)
+    # In-jet with fresh export wins even if freqs empty (still "known" session)
+    if dcs.fresh and dcs.unit:
+        dcs.fresh = True
+        return dcs
+    if dcs.fresh and dcs.freqs_mhz:
+        return dcs
+    if _eam_enabled:
+        srs = read_srs_client_selected(stale_s=SRS_UDP_STALE_S)
+        if srs.fresh and srs.freqs_mhz:
+            return srs
+        # Manual strip fallback when SRS client is not broadcasting.
+        active = eam_active_mhz()
+        return RadioState(
+            source="eam",
+            freqs_mhz=[active] if active is not None else [],
+            unit=f"EAM R{eam_active_index() + 1} (manual)",
+            age_s=0.0,
+            fresh=True,
+        )
+    if dcs.source == "dcs":
+        dcs.fresh = False
+        return dcs
+    return RadioState(source="none", fresh=False, age_s=None)
+
+
+def on_frequency(
+    target_mhz: float,
+    state: RadioState | None = None,
+    *,
+    tol_mhz: float = DEFAULT_TOL_MHZ,
+    config: dict[str, Any] | None = None,
+) -> MatchResult:
+    """match / mismatch / unknown for a target MHz."""
+    st = state if state is not None else current_radio_state(config)
+    if not st.fresh:
+        return "unknown"
+    if not st.freqs_mhz:
+        # In a unit but no readable radios — treat as unknown (allow)
+        if st.source == "dcs":
+            return "unknown"
+        return "mismatch" if st.source in ("eam", "srs") else "unknown"
+    tol = max(0.001, float(tol_mhz))
+    try:
+        target = float(target_mhz)
+    except (TypeError, ValueError):
+        return "unknown"
+    for freq in st.freqs_mhz:
+        if abs(freq - target) <= tol:
+            return "match"
+    return "mismatch"
+
+
+def format_mhz(mhz: float | None) -> str:
+    """UHF-style display — always three decimals (378.225, not 378.23)."""
+    try:
+        return f"{float(mhz):.3f}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def format_freqs(freqs_mhz: list[float]) -> str:
+    if not freqs_mhz:
+        return "(none)"
+    return ", ".join(format_mhz(f) for f in freqs_mhz)
+
+
+def check_freq_gate(
+    config: dict[str, Any],
+    airport: dict[str, Any],
+    step: dict[str, Any] | None,
+    *,
+    target_mhz: float | None = None,
+    channel: str | None = None,
+) -> tuple[bool, str, MatchResult]:
+    """
+    Returns (allowed, status_message, match_result).
+
+    Unknown / gate disabled → allowed.
+    Mismatch → not allowed.
+    """
+    if not bool(config.get("freq_gate_enabled", True)):
+        return True, "Freq gate off", "unknown"
+
+    import atc_phrase  # local import — avoid circular at module load
+
+    tol = float(config.get("freq_gate_tolerance_mhz") or DEFAULT_TOL_MHZ)
+    stale = float(config.get("freq_gate_stale_s") or DEFAULT_STALE_S)
+    state = current_radio_state(config, stale_s=stale)
+
+    ch = channel or ""
+    freq = target_mhz
+    if freq is None and step is not None:
+        ch = ch or str(step.get("channel") or step.get("phase") or "other")
+        try:
+            freq, _mod, _name = atc_phrase.step_radio(airport, ch, step)
+        except Exception:  # noqa: BLE001
+            freq = None
+    elif freq is None and ch:
+        try:
+            freq, _mod, _name = atc_phrase.channel_radio(airport, ch)
+        except Exception:  # noqa: BLE001
+            freq = None
+
+    if freq is None:
+        return True, "Freq gate: no target freq", "unknown"
+
+    result = on_frequency(float(freq), state, tol_mhz=tol, config=config)
+    label = (ch or "step").upper()
+    target = format_mhz(freq)
+    if result == "match":
+        src = state.source.upper()
+        return True, f"On freq {target} ({label}) [{src}]", result
+    if result == "unknown":
+        return True, "Radio tune unknown — gate open", result
+    return (
+        False,
+        f"Blocked: tune {target} ({label}) — radios {format_freqs(state.freqs_mhz)}",
+        result,
+    )
+
+
+def gate_status_line(
+    config: dict[str, Any],
+    airport: dict[str, Any],
+    step: dict[str, Any] | None,
+) -> str:
+    """Short Fly-tab status for the current step."""
+    _allowed, msg, _result = check_freq_gate(config, airport, step)
+    return msg
+
+
+def seed_eam_from_airport(airport: dict[str, Any]) -> list[float]:
+    """Agency freqs from airports.json for the EAM strip."""
+    import atc_phrase
+
+    freqs: list[float] = []
+    for ch in atc_phrase.CHANNELS:
+        try:
+            mhz, _mod, _name = atc_phrase.channel_radio(airport, ch)
+        except Exception:  # noqa: BLE001
+            continue
+        if mhz and not any(abs(float(mhz) - x) < 1e-6 for x in freqs):
+            freqs.append(float(mhz))
+    return freqs
+
+
+def channel_for_tuned_freq(
+    airport: dict[str, Any],
+    config: dict[str, Any] | None = None,
+    *,
+    tol_mhz: float | None = None,
+) -> str | None:
+    """
+    Agency whose published freq matches the currently tuned radio.
+
+    Used so voice replies (winds, altimeter, …) TX on the active frequency
+    instead of whatever step the flow cursor is on.
+    """
+    import atc_phrase
+
+    cfg = config or {}
+    tol = float(tol_mhz if tol_mhz is not None else cfg.get("freq_gate_tolerance_mhz") or DEFAULT_TOL_MHZ)
+    state = current_radio_state(cfg)
+    if not state.fresh or not state.freqs_mhz:
+        return None
+    for ch in atc_phrase.CHANNELS:
+        try:
+            mhz, _mod, _name = atc_phrase.channel_radio(airport, ch)
+        except Exception:  # noqa: BLE001
+            continue
+        if mhz is None:
+            continue
+        if on_frequency(float(mhz), state, tol_mhz=tol, config=cfg) == "match":
+            return str(ch)
+    return None
+
+
+def try_seed_from_srs_awacs() -> list[float]:
+    """Optional seed from SRS awacs-radios*.json under Client install dirs."""
+    roots = [
+        Path(r"C:\Program Files\DCS-SimpleRadio-Standalone\Client"),
+        Path(r"C:\Program Files (x86)\DCS-SimpleRadio-Standalone\Client"),
+        Path(r"C:\Program Files\DCS-SimpleRadio-Standalone"),
+        Path(r"C:\Program Files (x86)\DCS-SimpleRadio-Standalone"),
+    ]
+    names = ("awacs-radios-custom.json", "awacs-radios.json", "awacs-custom.json", "awacs.json")
+    for root in roots:
+        for name in names:
+            path = root / name
+            if not path.is_file():
+                continue
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError, UnicodeError):
+                continue
+            radios = data if isinstance(data, list) else (data.get("Radios") or data.get("radios") or [])
+            if not isinstance(radios, list):
+                continue
+            freqs: list[float] = []
+            for entry in radios:
+                if not isinstance(entry, dict):
+                    continue
+                try:
+                    hz = float(entry.get("freq") or 0)
+                except (TypeError, ValueError):
+                    continue
+                mhz = _hz_to_mhz(hz)
+                if mhz is not None and not any(abs(mhz - x) < 1e-6 for x in freqs):
+                    freqs.append(mhz)
+            if freqs:
+                return freqs
+    return []

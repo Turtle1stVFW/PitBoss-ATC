@@ -67,6 +67,11 @@
       "source": "opus",
       "local_preset": 14
     },
+    "bandsaw": {
+      "freq_mhz": 378.225,
+      "mod": "AM",
+      "source": "local"
+    },
     "ops": {
       "freq_mhz": 255.0,
       "mod": "AM",
@@ -76,6 +81,268 @@
       "freq_mhz": 251.0,
       "mod": "AM",
       "source": "local"
+    },
+    "geometry": {
+      "calibrated": true,
+      "note": "Drawn on a map with tools/zone_server.py, 2026-08-10. Coordinates are lat/lon.",
+      "field_elev_ft": 1870,
+      "zones": [
+        {
+          "id": "in_position-03l",
+          "trigger": "in_position",
+          "kind": "polygon",
+          "name": "Runway 03L",
+          "runway": "03L",
+          "max_alt_ft": 100.0,
+          "points": [
+            {
+              "lat": 36.227416,
+              "lon": -115.046666
+            },
+            {
+              "lat": 36.226948,
+              "lon": -115.04598
+            },
+            {
+              "lat": 36.228649,
+              "lon": -115.044161
+            },
+            {
+              "lat": 36.229112,
+              "lon": -115.044864
+            }
+          ],
+          "locked": true
+        },
+        {
+          "id": "eor-03l",
+          "trigger": "eor",
+          "kind": "polygon",
+          "name": "AS EOR",
+          "runway": "03L",
+          "max_alt_ft": 100.0,
+          "points": [
+            {
+              "lat": 36.225946,
+              "lon": -115.049672
+            },
+            {
+              "lat": 36.22736,
+              "lon": -115.048196
+            },
+            {
+              "lat": 36.226955,
+              "lon": -115.047641
+            },
+            {
+              "lat": 36.225524,
+              "lon": -115.049106
+            }
+          ],
+          "locked": true
+        },
+        {
+          "id": "eor-03l-2",
+          "trigger": "eor",
+          "kind": "polygon",
+          "name": "AN EOR",
+          "runway": "03L",
+          "max_alt_ft": 100.0,
+          "points": [
+            {
+              "lat": 36.227971,
+              "lon": -115.047518
+            },
+            {
+              "lat": 36.229385,
+              "lon": -115.046042
+            },
+            {
+              "lat": 36.22898,
+              "lon": -115.045487
+            },
+            {
+              "lat": 36.227549,
+              "lon": -115.046952
+            }
+          ],
+          "locked": true
+        },
+        {
+          "id": "eor-21r",
+          "trigger": "eor",
+          "kind": "polygon",
+          "name": "NW EOR",
+          "runway": "21R",
+          "max_alt_ft": 100.0,
+          "points": [
+            {
+              "lat": 36.247358,
+              "lon": -115.030171
+            },
+            {
+              "lat": 36.248011,
+              "lon": -115.029398
+            },
+            {
+              "lat": 36.247955,
+              "lon": -115.028009
+            },
+            {
+              "lat": 36.247219,
+              "lon": -115.027553
+            },
+            {
+              "lat": 36.246454,
+              "lon": -115.028073
+            },
+            {
+              "lat": 36.246462,
+              "lon": -115.029404
+            }
+          ],
+          "locked": true
+        },
+        {
+          "id": "in_position-21r",
+          "trigger": "in_position",
+          "kind": "polygon",
+          "name": "RWY 21R",
+          "runway": "21R",
+          "max_alt_ft": 100.0,
+          "points": [
+            {
+              "lat": 36.243468,
+              "lon": -115.029198
+            },
+            {
+              "lat": 36.243,
+              "lon": -115.028512
+            },
+            {
+              "lat": 36.244701,
+              "lon": -115.026693
+            },
+            {
+              "lat": 36.245164,
+              "lon": -115.027396
+            }
+          ],
+          "locked": true
+        },
+        {
+          "id": "tower",
+          "trigger": "tower",
+          "kind": "circle",
+          "name": "KLSV Tower",
+          "max_alt_ft": 6000.0,
+          "centre": {
+            "lat": 36.2348583,
+            "lon": -115.0385284
+          },
+          "radius_m": 18683.8,
+          "locked": true
+        },
+        {
+          "id": "approach",
+          "trigger": "approach",
+          "kind": "circle",
+          "name": "KLSV APP Departure Zone",
+          "max_alt_ft": 18000.0,
+          "centre": {
+            "lat": 36.2354122,
+            "lon": -115.0350952
+          },
+          "radius_m": 74858.9,
+          "locked": true
+        },
+        {
+          "id": "other",
+          "trigger": "other",
+          "kind": "polygon",
+          "name": "R-2508 Joshua Control",
+          "max_alt_ft": 18000.0,
+          "points": [
+            {
+              "lat": 37.330857,
+              "lon": -118.707275
+            },
+            {
+              "lat": 37.335224,
+              "lon": -118.509521
+            },
+            {
+              "lat": 37.330857,
+              "lon": -117.921753
+            },
+            {
+              "lat": 37.278424,
+              "lon": -117.295532
+            },
+            {
+              "lat": 35.563512,
+              "lon": -115.806885
+            },
+            {
+              "lat": 34.759666,
+              "lon": -116.702271
+            },
+            {
+              "lat": 34.655804,
+              "lon": -118.218384
+            },
+            {
+              "lat": 35.178298,
+              "lon": -118.916016
+            },
+            {
+              "lat": 36.350527,
+              "lon": -119.025879
+            },
+            {
+              "lat": 36.892801,
+              "lon": -118.723755
+            }
+          ],
+          "locked": true
+        }
+      ],
+      "runways": {
+        "03L": {
+          "threshold": {
+            "lat": 36.247527,
+            "lon": -115.024281
+          },
+          "far_end": {
+            "lat": 36.226792,
+            "lon": -115.046639
+          },
+          "width_m": 45,
+          "eor": {
+            "x": -940.0,
+            "z": -1230.0,
+            "radius_m": 250
+          },
+          "length_m": 3055.6
+        },
+        "21R": {
+          "threshold": {
+            "lat": 36.226792,
+            "lon": -115.046639
+          },
+          "far_end": {
+            "lat": 36.247527,
+            "lon": -115.024281
+          },
+          "width_m": 45,
+          "eor": {
+            "x": 940.0,
+            "z": 1230.0,
+            "radius_m": 250
+          },
+          "length_m": 3055.6
+        }
+      }
     }
   }
 }

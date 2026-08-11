@@ -1,0 +1,544 @@
+"""Synthetic checks for runway_position geometry (no live feed needed)."""
+
+from __future__ import annotations
+
+import math
+
+import atc_phrase
+import runway_position as rp
+
+AIRPORT = atc_phrase.load_json(atc_phrase.AIRPORTS_PATH)["nellis"]
+
+
+def show(title: str) -> None:
+    print(f"\n-- {title}")
+
+
+def main() -> int:
+    bad = 0
+    frame = rp.RunwayFrame.build("03L", rp.runway_geometry(AIRPORT, "03L"))
+    assert frame is not None, "03L geometry missing"
+    show("frame")
+    print(
+        f"length {frame.length_m:.0f} m ({frame.length_m * rp.FT_PER_M:.0f} ft), "
+        f"true heading {frame.heading_deg:.1f}°, width {frame.width_m:.0f} m"
+    )
+    if not 2900 <= frame.length_m <= 3300:
+        print("  FAIL runway length is not ~10,100 ft")
+        bad += 1
+    if rp.angle_diff(frame.heading_deg, 32.6) > 1.0:
+        print("  FAIL 03L should run about 032.6° true")
+        bad += 1
+
+    # Reverse direction must be the same strip, opposite heading.
+    rev = rp.RunwayFrame.build("21R", rp.runway_geometry(AIRPORT, "21R"))
+    assert rev is not None
+    if rp.angle_diff(rev.heading_deg, frame.heading_deg + 180.0) > 1.0:
+        print("  FAIL 21R should be the reciprocal of 03L")
+        bad += 1
+
+    show("projection")
+    # A point 500 m down the centreline from the 03L threshold.
+    ux = math.sin(math.radians(frame.heading_deg))
+    uz = math.cos(math.radians(frame.heading_deg))
+    x, z = frame.tx + 500 * ux, frame.tz + 500 * uz
+    along, lateral = frame.project(x, z)
+    print(f"centreline +500 m -> along {along:.1f}, lateral {lateral:.1f}")
+    if abs(along - 500) > 1 or abs(lateral) > 1:
+        print("  FAIL centreline projection is off")
+        bad += 1
+
+    # 100 m right of that point.
+    x2, z2 = x + 100 * uz, z - 100 * ux
+    along2, lateral2 = frame.project(x2, z2)
+    print(f"100 m right       -> along {along2:.1f}, lateral {lateral2:.1f}")
+    if abs(along2 - 500) > 1 or abs(lateral2 - 100) > 1:
+        print("  FAIL lateral offset is off")
+        bad += 1
+
+    show("verdicts")
+    elev = rp.field_elev_m(AIRPORT)
+    print(f"field elevation {elev:.0f} m ({elev * rp.FT_PER_M:.0f} ft)")
+
+    def unit(uid, along, lateral, hdg=None, alt=None, spd=0.0):
+        a_x, a_z = frame.tx + along * ux, frame.tz + along * uz
+        a_x, a_z = a_x + lateral * uz, a_z - lateral * ux
+        return {
+            "id": uid,
+            "type": "air",
+            "name": f"Bruiser {uid}",
+            "flightLabel": "BRUISER 5",
+            "objectName": "F-16C_50",
+            "xMeters": a_x,
+            "zMeters": a_z,
+            "altMeters": elev if alt is None else alt,
+            "headingDeg": frame.heading_deg if hdg is None else hdg,
+            "groundSpeedMps": spd,
+        }
+
+    cfg: dict[str, object] = {}
+    tracker = rp.PositionTracker()
+    geo = rp.runway_geometry(AIRPORT, "03L")
+    half = frame.width_m / 2 + rp.rule(cfg, "position_lateral_margin_m")
+
+    cases = [
+        ("lined up on centreline", unit("1", 120, 0), True),
+        ("lined up, 15 m off centre", unit("2", 200, 15), True),
+        ("on the parallel taxiway (120 m off)", unit("3", 200, 120), False),
+        ("far down the runway (2500 m)", unit("4", 2500, 0), False),
+        ("lined up but facing 90° off", unit("5", 120, 0, hdg=frame.heading_deg + 90), False),
+        ("overflying at 2000 ft agl", unit("6", 120, 0, alt=elev + 610), False),
+    ]
+    for title, u, want in cases:
+        along, lateral = frame.project(u["xMeters"], u["zMeters"])
+        height = float(u["altMeters"]) - elev
+        hdg_err = rp.angle_diff(float(u["headingDeg"]), frame.heading_deg)
+        got = bool(
+            abs(height) <= rp.rule(cfg, "position_alt_tolerance_m")
+            and abs(lateral) <= half
+            and -rp.rule(cfg, "position_behind_threshold_m") <= along <= rp.rule(cfg, "position_box_m")
+            and hdg_err <= rp.rule(cfg, "position_heading_tolerance_deg")
+        )
+        flag = "ok  " if got == want else "FAIL"
+        if got != want:
+            bad += 1
+        print(f"{flag} {title:38} in_position={got}")
+
+    show("flight grouping")
+    units = [unit("1", 120, 0), unit("2", 200, 15), dict(unit("9", 120, 0), flightLabel="VIPER 1")]
+    own = units[0]
+    members = rp.flight_members(units, own)
+    print(f"flight of {len(members)} (other flight excluded: {len(members) == 2})")
+    if len(members) != 2:
+        print("  FAIL flight grouping picked up the wrong tracks")
+        bad += 1
+
+    show("eor")
+    eor = rp.point_xz(geo.get("eor"))
+    print(f"EOR at x={eor[0]:.0f} z={eor[1]:.0f}, radius {geo['eor']['radius_m']} m")
+    d = math.hypot(eor[0] - frame.tx, eor[1] - frame.tz)
+    print(f"EOR is {d:.0f} m from the 03L threshold")
+
+    show("dwell + latch")
+    import time as _t
+
+    t0 = _t.time()
+    print("held at t+0.0s:", tracker.held_for("k", True, 3.0, now=t0))
+    print("held at t+3.1s:", tracker.held_for("k", True, 3.0, now=t0 + 3.1))
+    print("breaks and restarts:", tracker.held_for("k", False, 3.0, now=t0 + 3.2))
+    print("fire_once first:", tracker.fire_once("clr"), "again:", tracker.fire_once("clr"))
+    if not tracker.held_for("k2", True, 0.0, now=t0):
+        print("  FAIL zero dwell should pass immediately")
+        bad += 1
+
+    bad += check_zones()
+    bad += check_zone_admission()
+    bad += check_step_triggers()
+    bad += check_trigger_timing()
+
+    print(f"\n{'all good' if not bad else f'{bad} problem(s)'}")
+    return 1 if bad else 0
+
+
+def check_zones() -> int:
+    """Drawn areas: containment, runway scoping, and priority over the box."""
+    bad = 0
+    show("drawn zones")
+    square = {
+        "id": "z1",
+        "name": "EOR box",
+        "kind": "polygon",
+        "trigger": "eor",
+        "runway": "03L",
+        # 200 m square around x 0..200, z 0..200
+        "points": [
+            {"x": 0, "z": 0},
+            {"x": 200, "z": 0},
+            {"x": 200, "z": 200},
+            {"x": 0, "z": 200},
+        ],
+    }
+    circle = {
+        "id": "z2",
+        "name": "Ramp",
+        "kind": "circle",
+        "trigger": "parking",
+        "centre": {"x": 1000, "z": 1000},
+        "radius_m": 150,
+    }
+    checks = [
+        ("inside the square", square, 100, 100, True),
+        ("outside the square", square, 260, 100, False),
+        ("on a square corner region", square, 199, 199, True),
+        ("inside the circle", circle, 1050, 1050, True),
+        ("just outside the circle", circle, 1000, 1160, False),
+    ]
+    for title, zone, x, z, want in checks:
+        got = rp.point_in_zone(x, z, zone)
+        flag = "ok  " if got == want else "FAIL"
+        if got != want:
+            bad += 1
+        print(f"{flag} {title:30} -> {got}")
+
+    airport = {
+        "runways": ["03L", "21R"],
+        "geometry": {"field_elev_ft": 1870, "zones": [square, circle]},
+    }
+    if len(rp.zones_for(airport, "eor", "03L")) != 1:
+        print("  FAIL 03L should see its own EOR zone")
+        bad += 1
+    if rp.zones_for(airport, "eor", "21R"):
+        print("  FAIL 21R must not inherit an 03L-only zone")
+        bad += 1
+    # A zone with no runway applies everywhere.
+    shared = dict(circle)
+    shared.pop("runway", None)
+    if len(rp.zones_for(airport, "parking", "21R")) != 1:
+        print("  FAIL a zone without a runway should apply to all runways")
+        bad += 1
+    print("runway scoping — ok")
+
+    hit = rp.in_any_zone(100, 100, [square, circle])
+    print(f"in_any_zone picks: {hit and hit['name']}")
+    if not hit or hit["name"] != "EOR box":
+        print("  FAIL in_any_zone returned the wrong area")
+        bad += 1
+
+    show("finding the zone a step asked for")
+    # A tag follows the active runway; an id pins to one area.
+    other = dict(square, id="z3", name="21R EOR box", runway="21R")
+    field = {"geometry": {"zones": [square, other, circle]}}
+    tries = [
+        ("tag 'eor' on 03L", "eor", "03L", "EOR box"),
+        ("tag 'eor' on 21R", "eor", "21R", "21R EOR box"),
+        ("id 'z3' regardless of runway", "z3", "03L", "21R EOR box"),
+        ("tag with nothing drawn", "hold_short", "03L", None),
+        ("id that does not exist", "nope", "03L", None),
+    ]
+    for title, ref, rwy, want in tries:
+        got = rp.zone_by_ref(field, ref, rwy)
+        name = got and got.get("name")
+        flag = "ok  " if name == want else "FAIL"
+        if name != want:
+            bad += 1
+        print(f"{flag} {title:34} -> {name}")
+
+    # A field-wide area is only picked when nothing runway-specific matches.
+    shared_eor = dict(square, id="z4", name="either end")
+    shared_eor.pop("runway", None)
+    picked = rp.zone_by_ref({"geometry": {"zones": [shared_eor, square]}}, "eor", "03L")
+    if not picked or picked.get("name") != "EOR box":
+        print("  FAIL a runway-specific area should beat a field-wide one")
+        bad += 1
+
+    show("tag resolves to every matching area on that runway")
+    # Nellis-style: two EORs on 03L — a tag must arm either box, not just the first.
+    as_eor = dict(square, id="eor-as", name="AS EOR", runway="03L")
+    an_eor = dict(
+        square,
+        id="eor-an",
+        name="AN EOR",
+        runway="03L",
+        points=[{"x": 500.0, "z": 500.0}, {"x": 600.0, "z": 500.0},
+                {"x": 600.0, "z": 600.0}, {"x": 500.0, "z": 600.0}],
+    )
+    multi = {"geometry": {"zones": [as_eor, an_eor, other]}}
+    got_all = rp.zones_by_ref(multi, "eor", "03L")
+    names = sorted(str(z.get("name") or "") for z in got_all)
+    if names != ["AN EOR", "AS EOR"]:
+        print(f"  FAIL tag eor on 03L should return both EORs, got {names}")
+        bad += 1
+    else:
+        print(f"ok   tag 'eor' on 03L -> {names}")
+    got_21 = rp.zones_by_ref(multi, "eor", "21R")
+    if len(got_21) != 1 or got_21[0].get("name") != "21R EOR box":
+        print(f"  FAIL tag eor on 21R should be only 21R EOR, got {got_21}")
+        bad += 1
+    else:
+        print("ok   tag 'eor' on 21R -> ['21R EOR box']")
+    by_id = rp.zones_by_ref(multi, "eor-an", "21R")
+    if len(by_id) != 1 or by_id[0].get("name") != "AN EOR":
+        print("  FAIL id should still pin one area regardless of runway")
+        bad += 1
+    else:
+        print("ok   id 'eor-an' pins AN EOR alone")
+    if rp.zones_ref_label("eor", got_all) != "any eor area":
+        print(f"  FAIL zones_ref_label for a multi tag: {rp.zones_ref_label('eor', got_all)!r}")
+        bad += 1
+    return bad
+
+
+def check_zone_admission() -> int:
+    """Altitude bands, and the difference between inside and settled."""
+    bad = 0
+    show("altitude band")
+    tower = {
+        "id": "tower-area",
+        "name": "Tower area",
+        "trigger": "tower",
+        "kind": "circle",
+        "centre": {"x": 0, "z": 0},
+        "radius_m": 9260.0,
+        "min_alt_ft": 0,
+        "max_alt_ft": 5000,
+    }
+
+    def fix(**kw):
+        base = dict(
+            unit_id="1",
+            label="Bruiser 1",
+            along_m=0.0,
+            lateral_m=0.0,
+            heading_err_deg=0.0,
+            alt_m=None,
+            height_m=0.0,
+            speed_mps=0.0,
+            x_m=0.0,
+            z_m=0.0,
+        )
+        base.update(kw)
+        return rp.UnitFix(**base)
+
+    band = [
+        ("on the deck inside the circle", fix(), True),
+        ("2000 ft agl, inside the band", fix(height_m=610.0), True),
+        ("8000 ft agl, above the band", fix(height_m=2440.0), False),
+        ("inside the band but outside the circle", fix(x_m=12000.0), False),
+        ("altitude unknown, plainly inside", fix(height_m=None), True),
+        # One field elevation for a field that is not flat: parked jets read a
+        # little below the surface and must still be in a surface zone.
+        ("parked, reading 25 ft below field elevation", fix(height_m=-7.6), True),
+    ]
+    for title, f, want in band:
+        got = rp.zone_admits(tower, f, settled=False)
+        flag = "ok  " if got == want else "FAIL"
+        if got != want:
+            bad += 1
+        print(f"{flag} {title:40} -> {got}")
+
+    # A floor someone deliberately put in the air is still enforced.
+    overhead = dict(tower, id="break", min_alt_ft=1500, max_alt_ft=5000)
+    if rp.zone_admits(overhead, fix(), settled=False):
+        print("  FAIL a floor of 1500 ft should exclude a jet on the ground")
+        bad += 1
+    if not rp.zone_admits(overhead, fix(height_m=610.0), settled=False):
+        print("  FAIL 2000 ft agl is inside a 1500-5000 band")
+        bad += 1
+    print("ok   a floor above the surface is enforced as written")
+
+    show("settled versus merely inside")
+    pad = {
+        "id": "pad",
+        "name": "21R hold pad",
+        "trigger": "in_position",
+        "kind": "circle",
+        "centre": {"x": 0, "z": 0},
+        "radius_m": 300.0,
+    }
+    settled_cases = [
+        ("stopped and lined up", fix(), True),
+        ("rolling at 8 kt (4.1 m/s)", fix(speed_mps=4.1), False),
+        ("stopped but 90 degrees off", fix(heading_err_deg=90.0), False),
+        ("airborne over the pad", fix(height_m=300.0), False),
+        ("speed and heading unknown", fix(speed_mps=None, heading_err_deg=None), True),
+    ]
+    for title, f, want in settled_cases:
+        got = rp.zone_admits(pad, f, settled=True)
+        flag = "ok  " if got == want else "FAIL"
+        if got != want:
+            bad += 1
+        print(f"{flag} {title:40} -> {got}")
+    # The looser taxi threshold would let that rolling jet through, which is the
+    # whole reason `settled` has its own limit.
+    if rp.DEFAULTS["position_settled_speed_mps"] >= rp.DEFAULTS["position_max_speed_mps"]:
+        print("  FAIL settled speed must be tighter than the taxi speed")
+        bad += 1
+
+    show("counting the flight in a zone")
+    status = rp.FlightStatus(runway="21R", ok=True, total=2)
+    status.fixes = [
+        fix(unit_id="1", own=True),
+        fix(unit_id="2", speed_mps=6.0),  # inside, still rolling
+    ]
+    count = status.in_zone(pad, settled=True)
+    print(f"{count.describe(need_full=True)}")
+    if count.inside != 2 or count.qualified != 1 or count.ok(need_full=True):
+        print("  FAIL two inside, one settled, so the whole flight is not ready")
+        bad += 1
+    if not count.ok(need_full=False):
+        print("  FAIL 'just me' should pass — the settled one is own aircraft")
+        bad += 1
+    # Own aircraft rolling, wingman parked: "just me" must not fire on the wingman.
+    status.fixes = [fix(unit_id="1", own=True, speed_mps=6.0), fix(unit_id="2")]
+    if status.in_zone(pad, settled=True).ok(need_full=False):
+        print("  FAIL 'just me' fired on a wingman's position")
+        bad += 1
+    print("ok   'just me' means me, not whoever is parked in the right place")
+
+    # Leaving: nobody inside is what a "clear of the runway" step waits for.
+    status.fixes = [fix(unit_id="1", own=True, x_m=5000.0), fix(unit_id="2", x_m=5000.0)]
+    out = status.in_zone(pad, settled=False)
+    if not out.out_ok(need_full=True) or out.inside:
+        print("  FAIL a flight clear of the area should read as out of it")
+        bad += 1
+    print("ok   flight taxied clear reads as out of the area")
+
+    # Tag with two boxes: sitting in the second one still arms the step.
+    other_pad = {
+        "id": "pad-b",
+        "name": "AN EOR",
+        "trigger": "eor",
+        "kind": "circle",
+        "centre": {"x": 800.0, "z": 0.0},
+        "radius_m": 200.0,
+    }
+    status.total = 1
+    status.fixes = [fix(unit_id="1", own=True, x_m=800.0, z_m=0.0)]
+    multi = status.in_zones([pad, other_pad], settled=True, label="any eor area")
+    if not multi.ok(need_full=True) or multi.label != "AN EOR":
+        print(f"  FAIL in_zones should OR across areas, got {multi}")
+        bad += 1
+    else:
+        print("ok   in_zones ORs across every area matching the tag")
+    return bad
+
+
+def check_step_triggers() -> int:
+    """Reading a step's trigger block, and the legacy templates."""
+    bad = 0
+    show("step triggers")
+    step = {
+        "id": "twr_clear_takeoff",
+        "template": "clear_takeoff",
+        "trigger": {
+            "zone": "in_position",
+            "flight": "all",
+            "settled": True,
+            "dwell_s": 15,
+            "gap_s": 8,
+        },
+    }
+    trig = rp.step_trigger(step)
+    assert trig is not None
+    print(f"explicit: {trig.describe()}")
+    if not trig.explicit or trig.zone != "in_position" or trig.when != "inside":
+        print("  FAIL explicit trigger read wrong")
+        bad += 1
+    if trig.dwell({}) != 15.0 or trig.gap_s != 8.0 or not trig.need_full({}):
+        print("  FAIL dwell / gap / flight read wrong")
+        bad += 1
+    if not trig.enabled({"auto_takeoff_clearance": False}):
+        print("  FAIL an explicit trigger should not answer to the legacy toggles")
+        bad += 1
+
+    loose = rp.step_trigger({"trigger": {"zone": "ramp", "when": "leaving", "flight": "me", "settled": False}})
+    assert loose is not None
+    if loose.when != "leaving" or loose.need_full({}) or loose.settled:
+        print("  FAIL leaving / me / unsettled read wrong")
+        bad += 1
+    print(f"leaving:  {loose.describe()}")
+
+    # No dwell of its own falls back to the global setting.
+    plain = rp.step_trigger({"trigger": {"zone": "eor"}})
+    assert plain is not None
+    if plain.dwell({"auto_clearance_dwell_s": 9}) != 9.0:
+        print("  FAIL a trigger with no dwell should use auto_clearance_dwell_s")
+        bad += 1
+    if not plain.settled:
+        print("  FAIL settled should default on")
+        bad += 1
+
+    legacy = rp.step_trigger({"template": "monitor_tower"})
+    assert legacy is not None
+    print(f"legacy:   {legacy.zone} via template, toggle {legacy.enabled_key}")
+    if legacy.explicit or legacy.zone != "eor":
+        print("  FAIL monitor_tower should still arm off the EOR area")
+        bad += 1
+    if legacy.enabled({"auto_monitor_tower": False}):
+        print("  FAIL the legacy toggle should still switch it off")
+        bad += 1
+    for template in ("clear_takeoff", "clear_takeoff_rolling", "clear_takeoff_intersection"):
+        t = rp.step_trigger({"template": template})
+        if t is None or t.zone != "in_position":
+            print(f"  FAIL {template} lost its in-position trigger")
+            bad += 1
+    if rp.step_trigger({"template": "radio_check"}) is not None:
+        print("  FAIL an ordinary step must not fire off position")
+        bad += 1
+    if rp.step_trigger({"trigger": {"zone": "   "}}) is not None:
+        print("  FAIL a blank zone is not a trigger")
+        bad += 1
+    print("ok   plain steps stay manual, legacy templates keep working")
+    return bad
+
+
+def check_trigger_timing() -> int:
+    """Dwell resetting, the radio gap, and firing once per step."""
+    bad = 0
+    show("dwell, radio gap, latch")
+    import time as _t
+
+    tracker = rp.PositionTracker()
+    t0 = _t.time()
+    key = "cond:twr_clear_takeoff:21R"
+    tracker.held_for(key, True, 15.0, now=t0)
+    if tracker.held_for(key, True, 15.0, now=t0 + 14.0):
+        print("  FAIL 15 s dwell passed after 14 s")
+        bad += 1
+    # A member drops out at 14 s: the clock starts again, it does not resume.
+    tracker.held_for(key, False, 15.0, now=t0 + 14.0)
+    if tracker.held_for(key, True, 15.0, now=t0 + 16.0):
+        print("  FAIL dwell resumed instead of restarting after the condition broke")
+        bad += 1
+    if not tracker.held_for(key, True, 15.0, now=t0 + 31.5):
+        print("  FAIL dwell never completed")
+        bad += 1
+    print("ok   dwell restarts when a jet drops out rather than resuming")
+
+    trig = rp.step_trigger({"trigger": {"zone": "in_position", "gap_s": 8}})
+    state = {"last_tx_at": t0}
+    left = rp.gap_remaining(trig, state, now=t0 + 3.0)
+    print(f"3 s after the last call, {left:.0f}s still to wait")
+    if abs(left - 5.0) > 0.01:
+        print("  FAIL radio gap arithmetic is wrong")
+        bad += 1
+    if rp.gap_remaining(trig, state, now=t0 + 9.0) != 0.0:
+        print("  FAIL the gap should be spent after 9 s")
+        bad += 1
+    if rp.gap_remaining(trig, {}, now=t0) != 0.0:
+        print("  FAIL nothing said yet means nothing to wait for")
+        bad += 1
+    if rp.gap_remaining(rp.step_trigger({"trigger": {"zone": "eor"}}), state, now=t0) != 0.0:
+        print("  FAIL no gap asked for, none should be imposed")
+        bad += 1
+
+    if not tracker.fire_once("fire:a:21R") or tracker.fire_once("fire:a:21R"):
+        print("  FAIL a step should fire once per sortie")
+        bad += 1
+    if not tracker.fire_once("fire:b:21R"):
+        print("  FAIL latching one step must not latch another")
+        bad += 1
+    if tracker.armed("fire:a:21R") or not tracker.armed("fire:c:21R"):
+        print("  FAIL armed() disagrees with fire_once()")
+        bad += 1
+    tracker.reset()
+    if not tracker.fire_once("fire:a:21R"):
+        print("  FAIL Reset should re-arm the flow for a new sortie")
+        bad += 1
+    print("ok   fires once per step, re-armed by Reset")
+
+    show("leaving needs to have arrived first")
+    tracker = rp.PositionTracker()
+    if tracker.has_left("k", False):
+        print("  FAIL never been in the area, so it cannot have left")
+        bad += 1
+    tracker.has_left("k", True)
+    if not tracker.has_left("k", False):
+        print("  FAIL was inside, now out — that is leaving")
+        bad += 1
+    print("ok   leaving only counts after arriving")
+    return bad
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

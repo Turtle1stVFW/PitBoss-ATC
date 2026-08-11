@@ -20,6 +20,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import atc_phrase  # noqa: E402
+import srs_radio  # noqa: E402
 
 CONFIG_PATH = HERE / "config.json"
 AIRPORTS_PATH = HERE / "airports.json"
@@ -43,6 +44,11 @@ def resolve_flow_path(config: dict[str, Any]) -> Path:
     if not path.is_absolute():
         path = HERE / path
     return path
+
+
+def is_base_flow_path(path: Path | str) -> bool:
+    """Base templates are flows named *_default.json — not user-saved plans."""
+    return Path(path).name.endswith("_default.json")
 
 
 def mission_steps(mission: dict[str, Any]) -> list[dict[str, Any]]:
@@ -77,12 +83,19 @@ class FlowEngine:
         self.config = dict(config or load_json(CONFIG_PATH))
         if dry_run:
             self.config["dry_run"] = True
+        srs_radio.apply_config(self.config)
         self.airports = load_json(AIRPORTS_PATH)
         self.mission = load_json(resolve_flow_path(self.config))
         # In-memory unify; disk migrates on next UI save
         if "steps" not in self.mission and ("outbound" in self.mission or "inbound" in self.mission):
             self.mission["steps"] = mission_steps(self.mission)
         self.state = self._load_state()
+        self.sync_requested_runway_from_mission()
+        # Persist cleared/restored runway so a stale flow_state.json does not linger.
+        try:
+            self.save_state()
+        except Exception:
+            pass
 
     def _load_state(self) -> dict[str, Any]:
         if STATE_PATH.is_file():
@@ -97,6 +110,22 @@ class FlowEngine:
             "pending_takeoff_offer": None,
             "takeoff_offer_rolled": False,
         }
+
+    def sync_requested_runway_from_mission(self) -> None:
+        """
+        Pilot runway stickiness:
+        - Base / default flow → always clear (wind / ops default).
+        - Saved mission → restore whatever that file has (or clear if none).
+        Prevents flow_state.json from remembering a test request across new flights.
+        """
+        path = resolve_flow_path(self.config)
+        if is_base_flow_path(path):
+            atc_phrase.set_requested_runway(None, mission=self.mission, state=self.state)
+            return
+        req = atc_phrase.normalize_runway(
+            (self.mission or {}).get("requested_runway")
+        )
+        atc_phrase.set_requested_runway(req, mission=self.mission, state=self.state)
 
     def save_state(self) -> None:
         # Drop legacy direction from state if present
@@ -157,6 +186,11 @@ class FlowEngine:
         self.mission = load_json(resolve_flow_path(self.config))
         if "steps" not in self.mission and ("outbound" in self.mission or "inbound" in self.mission):
             self.mission["steps"] = mission_steps(self.mission)
+        self.sync_requested_runway_from_mission()
+        try:
+            self.save_state()
+        except Exception:
+            pass
 
     @property
     def steps(self) -> list[dict[str, Any]]:
@@ -341,7 +375,9 @@ class FlowEngine:
         does not need an agency opener — the exchange is already live.
         """
         template = str(step.get("template") or "").strip()
-        climb_ft = atc_phrase.resolve_shared_climb_ft(step=step, mission=self.mission)
+        climb_ft = atc_phrase.resolve_shared_climb_ft(
+            step=step, mission=self.mission, state=self.state
+        )
         items = atc_phrase.build_readback_checklist(
             template,
             airport,
@@ -427,7 +463,9 @@ class FlowEngine:
             state=self.state,
             template=template,
         )
-        climb_ft = atc_phrase.resolve_shared_climb_ft(step=prev, mission=self.mission)
+        climb_ft = atc_phrase.resolve_shared_climb_ft(
+            step=prev, mission=self.mission, state=self.state
+        )
         items = atc_phrase.build_readback_checklist(
             template,
             airport,
@@ -449,7 +487,16 @@ class FlowEngine:
             prev.get("channel") or prev.get("phase") or ""
         )
 
-    def next(self) -> dict[str, Any]:
+    def _freq_gate_or_raise(self, step: dict[str, Any] | None, *, bypass: bool = False) -> None:
+        """Block external Advance/TX when the pilot is known to be off frequency."""
+        if bypass:
+            return
+        srs_radio.apply_config(self.config)
+        allowed, msg, _result = srs_radio.check_freq_gate(self.config, self.airport(), step)
+        if not allowed:
+            raise RuntimeError(msg)
+
+    def next(self, *, bypass_freq_gate: bool = False) -> dict[str, Any]:
         steps = self.steps
         if not steps:
             raise RuntimeError("No enabled steps")
@@ -460,6 +507,7 @@ class FlowEngine:
         if idx >= len(steps):
             raise RuntimeError("End of flow — seek or reset")
         step = steps[idx]
+        self._freq_gate_or_raise(step, bypass=bypass_freq_gate)
         result = self.play_step(step)
         self.state["index"] = idx + 1
         self._advance_past_skippable()
@@ -471,7 +519,7 @@ class FlowEngine:
         result["pending_takeoff_offer"] = atc_phrase.pending_takeoff_offer(self.state)
         return result
 
-    def back(self) -> dict[str, Any]:
+    def back(self, *, bypass_freq_gate: bool = False) -> dict[str, Any]:
         steps = self.steps
         if not steps:
             raise RuntimeError("No enabled steps")
@@ -484,6 +532,7 @@ class FlowEngine:
         step = self.current_step()
         if step is None:
             raise RuntimeError("No enabled steps")
+        self._freq_gate_or_raise(step, bypass=bypass_freq_gate)
         result = self.play_step(step)
         # After replaying, leave cursor on next after this step
         idx = int(self.state.get("index") or 0)
@@ -501,6 +550,8 @@ class FlowEngine:
         self._clear_readback_state()
         if "active_takeoff_mode" in self.mission:
             self.mission["active_takeoff_mode"] = atc_phrase.DEFAULT_TAKEOFF_MODE
+        # New sortie / replay — drop sticky pilot runway unless re-requested.
+        atc_phrase.set_requested_runway(None, mission=self.mission, state=self.state)
         self.save_state()
         return self.status()
 
@@ -510,7 +561,7 @@ class FlowEngine:
         st["note"] = "Single timeline — flip is unused"
         return st
 
-    def play_id(self, step_id: str) -> dict[str, Any]:
+    def play_id(self, step_id: str, *, bypass_freq_gate: bool = False) -> dict[str, Any]:
         steps = enabled_steps(self.mission)
         for i, step in enumerate(steps):
             if step.get("id") == step_id:
@@ -520,12 +571,27 @@ class FlowEngine:
                 # Cursor may have skipped past this id (rolling → skip lineup)
                 cur = self.current_step()
                 play = cur if cur is not None else step
+                self._freq_gate_or_raise(play, bypass=bypass_freq_gate)
                 result = self.play_step(play)
                 self.state["index"] = int(self.state.get("index") or 0) + 1
                 self._advance_past_skippable()
                 self.save_state()
                 return result
         raise KeyError(f"Unknown step id: {step_id}")
+
+    def play_template(
+        self, template: str, *, bypass_freq_gate: bool = False
+    ) -> dict[str, Any]:
+        """Play the nearest enabled step with this phrase template."""
+        steps = enabled_steps(self.mission)
+        start = int(self.state.get("index") or 0)
+        pool = list(steps[start:]) + list(steps)
+        for step in pool:
+            if str(step.get("template") or "") == str(template):
+                return self.play_id(
+                    str(step.get("id")), bypass_freq_gate=bypass_freq_gate
+                )
+        raise KeyError(f"No enabled step for template: {template}")
 
 
 def _html_ok(title: str, body: str) -> bytes:

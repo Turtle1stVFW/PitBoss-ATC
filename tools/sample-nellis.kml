@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    <name>KLSV zones (sample)</name>
+    <description>
+      Example of the Google Earth route: draw, name the placemarks like this, save
+      as KML, then run tools/import_zones.py. These coordinates are illustrative,
+      not surveyed — draw your own over the imagery.
+    </description>
+
+    <Placemark>
+      <name>Runway 21R</name>
+      <LineString>
+        <coordinates>-115.0247,36.2478,0 -115.0432,36.2245,0</coordinates>
+      </LineString>
+    </Placemark>
+
+    <Placemark>
+      <name>21R in position</name>
+      <Polygon><outerBoundaryIs><LinearRing><coordinates>
+        -115.0250,36.2470,0
+        -115.0240,36.2470,0
+        -115.0240,36.2486,0
+        -115.0250,36.2486,0
+        -115.0250,36.2470,0
+      </coordinates></LinearRing></outerBoundaryIs></Polygon>
+    </Placemark>
+
+    <Placemark>
+      <name>eor:21R:NW EOR</name>
+      <ExtendedData>
+        <Data name="radius_m"><value>250</value></Data>
+      </ExtendedData>
+      <Point><coordinates>-115.0262,36.2489,0</coordinates></Point>
+    </Placemark>
+
+    <!-- An agency area: ExtendedData carries the trigger and the altitude band, so
+         traffic overhead is not counted as being in the tower's patch. -->
+    <Placemark>
+      <name>Nellis tower area</name>
+      <ExtendedData>
+        <Data name="trigger"><value>tower</value></Data>
+        <Data name="radius_m"><value>9260</value></Data>
+        <Data name="min_alt_ft"><value>0</value></Data>
+        <Data name="max_alt_ft"><value>5000</value></Data>
+      </ExtendedData>
+      <Point><coordinates>-115.0343,36.2362,0</coordinates></Point>
+    </Placemark>
+
+    <Placemark>
+      <name>Row 18 parking</name>
+      <Polygon><outerBoundaryIs><LinearRing><coordinates>
+        -115.0330,36.2350,0
+        -115.0310,36.2350,0
+        -115.0310,36.2370,0
+        -115.0330,36.2370,0
+        -115.0330,36.2350,0
+      </coordinates></LinearRing></outerBoundaryIs></Polygon>
+    </Placemark>
+  </Document>
+</kml>

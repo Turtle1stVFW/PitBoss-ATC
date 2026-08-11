@@ -17,6 +17,23 @@ import atc_phrase
 GROUP_RADIUS_NM = 7.0
 GROUP_ALT_BAND_FT = 6000.0
 MAX_GROUPS = 3
+# Only call hostiles inside this range of the requesting flight (overridable).
+PICTURE_MAX_RANGE_NM = 150.0
+
+
+def picture_max_range_nm(config: dict[str, Any] | None = None) -> float:
+    """
+    Max NM from the calling flight for picture groups.
+
+    Config key `picture_max_range_nm` (default 150). Raise it for testing so
+    distant hostiles still show up on the call.
+    """
+    raw = (config or {}).get("picture_max_range_nm", PICTURE_MAX_RANGE_NM)
+    try:
+        n = float(raw)
+    except (TypeError, ValueError):
+        return PICTURE_MAX_RANGE_NM
+    return n if n > 0 else PICTURE_MAX_RANGE_NM
 
 _ORDINALS = ("lead", "second", "third", "fourth")
 
@@ -32,12 +49,14 @@ def _feet(alt_meters: Any) -> int | None:
         return None
 
 
-def _speak_angels(feet: int | None) -> str:
+def _speak_picture_altitude(feet: int | None) -> str:
+    """Picture altitudes in thousands of feet — not angels."""
     if feet is None:
         return ""
     if feet < 1000:
         return "low"
-    return f"angels {atc_phrase.speak_natural_number(int(round(feet / 1000.0)))}"
+    thousands = int(round(feet / 1000.0))
+    return f"{atc_phrase.speak_natural_number(thousands)} thousand"
 
 
 def _hostile_coalition(airport: dict[str, Any]) -> str:
@@ -54,12 +73,11 @@ def build_winds_reply(
     weather: atc_phrase.Weather,
     runway: str | None = None,
 ) -> str:
+    """Wind only — runway is not part of a winds check."""
+    del runway  # kept for call-site compatibility
     agency = str(airport.get("name") or "").strip()
     wind = atc_phrase.speak_wind(weather.wind_dir, weather.wind_speed_kt)
-    bits = [f"{atc_phrase.speak_callsign(callsign)}, {agency}, {wind}"]
-    if runway:
-        bits.append(f"runway {atc_phrase.speak_runway(runway)}")
-    return ", ".join(bits) + "."
+    return f"{atc_phrase.speak_callsign(callsign)}, {agency}, {wind}."
 
 
 def build_altimeter_reply(
@@ -106,8 +124,8 @@ def collect_hostile_groups(
     """
     Hostile air groups from the live CAOC feed, nearest first.
 
-    Returns (groups, own_track). Each group has bearing/range from bullseye,
-    altitude in feet, a contact count, and distance from our own aircraft.
+    Skips always-present fixtures (hostile AWACS / tankers) and groups outside
+    picture_max_range_nm of the calling flight. Returns (groups, own_track).
     """
     radar = atc_phrase.fetch_caoc_radar(config)
     if not radar:
@@ -117,34 +135,13 @@ def collect_hostile_groups(
     if not air:
         return [], None
 
+    max_nm = picture_max_range_nm(config)
     hostile_side = _hostile_coalition(airport)
     own = atc_phrase.match_caoc_unit_for_flight(units, opus=opus, config=config)
     # A match on the hostile side means the callsign heuristics latched onto the
     # wrong track; better to fall back to bullseye ordering than to sort by it.
     if own and str(own.get("coalition") or "").lower() == hostile_side:
         own = None
-
-    tracks: list[dict[str, Any]] = []
-    for unit in air:
-        if str(unit.get("coalition") or "").lower() != hostile_side:
-            continue
-        fix = atc_phrase.bullseye_for_caoc_unit(unit, config, opus=opus)
-        if not fix:
-            continue
-        tracks.append(
-            {
-                "bearing": int(fix["bearing"]),
-                "range_nm": int(fix["range_nm"]),
-                "name": fix.get("name") or "BULLSEYE",
-                "label": fix.get("label") or fix.get("unit_name") or "unknown",
-                "object": fix.get("object_name") or "",
-                "lat": fix.get("lat"),
-                "lon": fix.get("lon"),
-                "feet": _feet(unit.get("altMeters")),
-            }
-        )
-    if not tracks:
-        return [], own
 
     own_ll: tuple[float, float] | None = None
     if own:
@@ -153,16 +150,57 @@ def collect_hostile_groups(
         except (KeyError, TypeError, ValueError):
             own_ll = None
 
+    tracks: list[dict[str, Any]] = []
+    for unit in air:
+        if str(unit.get("coalition") or "").lower() != hostile_side:
+            continue
+        # Red tanker / AWACS fixtures are always on the feed — not picture traffic.
+        if atc_phrase.caoc_unit_is_picture_fixture(unit):
+            continue
+        fix = atc_phrase.bullseye_for_caoc_unit(unit, config, opus=opus)
+        if not fix:
+            continue
+        lat = fix.get("lat")
+        lon = fix.get("lon")
+        distance = None
+        if own_ll is not None and lat is not None and lon is not None:
+            try:
+                distance = atc_phrase._haversine_nm(
+                    own_ll[0], own_ll[1], float(lat), float(lon)
+                )
+            except (TypeError, ValueError):
+                distance = None
+        # Need the caller on radar to gate by range; otherwise skip the track.
+        if own_ll is None or distance is None or float(distance) > max_nm:
+            continue
+        tracks.append(
+            {
+                "bearing": int(fix["bearing"]),
+                "range_nm": int(fix["range_nm"]),
+                "name": fix.get("name") or "BULLSEYE",
+                "label": fix.get("label") or fix.get("unit_name") or "unknown",
+                "object": fix.get("object_name") or "",
+                "lat": lat,
+                "lon": lon,
+                "feet": _feet(unit.get("altMeters")),
+                "distance_nm": float(distance),
+            }
+        )
+    if not tracks:
+        return [], own
+
     groups: list[dict[str, Any]] = []
     for cluster in _cluster(tracks):
         count = len(cluster)
-        lead = min(cluster, key=lambda t: t["range_nm"])
+        # Prefer the contact nearest the caller when ranking the group lead.
+        lead = min(
+            cluster,
+            key=lambda t: (
+                t["distance_nm"] is None,
+                t["distance_nm"] if t["distance_nm"] is not None else t["range_nm"],
+            ),
+        )
         feet = [t["feet"] for t in cluster if t["feet"] is not None]
-        distance = None
-        if own_ll and lead.get("lat") is not None:
-            distance = atc_phrase._haversine_nm(
-                own_ll[0], own_ll[1], float(lead["lat"]), float(lead["lon"])
-            )
         groups.append(
             {
                 "bearing": lead["bearing"],
@@ -172,7 +210,7 @@ def collect_hostile_groups(
                 "count": count,
                 "label": lead["label"],
                 "object": lead["object"],
-                "distance_nm": distance,
+                "distance_nm": lead.get("distance_nm"),
             }
         )
 
@@ -213,13 +251,13 @@ def build_picture_reply(
         label = "group" if len(shown) == 1 else f"{_ORDINALS[min(i, len(_ORDINALS) - 1)]} group"
         parts = [
             label,
-            atc_phrase.speak_alpha_bullseye(
+            atc_phrase.speak_picture_bullseye(
                 group["bullseye_name"], group["bearing"], group["range_nm"]
             ),
         ]
-        angels = _speak_angels(group["feet"])
-        if angels:
-            parts.append(angels)
+        alt = _speak_picture_altitude(group["feet"])
+        if alt:
+            parts.append(alt)
         if group["count"] > 1:
             parts.append(f"{atc_phrase.speak_natural_number(group['count'])} contacts")
         parts.append("hostile")

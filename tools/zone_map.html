@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Runway zones — internal editor</title>
+<link rel="stylesheet" href="/vendor/leaflet.css">
+<link rel="stylesheet" href="/vendor/leaflet-draw.css">
+<link rel="stylesheet" href="/zone_map.css">
+</head>
+<body>
+<aside id="side">
+  <header>
+    <h1>Runway zones</h1>
+    <p class="sub">Internal tool — writes <code id="path">airports.json</code></p>
+  </header>
+
+  <section>
+    <label for="airport">Airport</label>
+    <select id="airport"></select>
+    <p id="calib" class="pill">&nbsp;</p>
+  </section>
+
+  <section>
+    <h2 id="formTitle">Draw</h2>
+    <p class="hint" id="formHint">
+      Set trigger / runway / label, then draw with a tool on the left of the map.
+      Polygon or rectangle for an area, circle for the EOR, line for a runway
+      centreline — threshold first. Use New zone when you want another one.
+    </p>
+    <label for="trigger">Trigger</label>
+    <select id="trigger"></select>
+    <input id="customTrigger" class="hidden" type="text" placeholder="zone name, e.g. tower">
+    <label for="runway">Runway</label>
+    <select id="runway"></select>
+    <label for="name">Label <span class="opt">(optional)</span></label>
+    <input id="name" type="text" placeholder="NW EOR">
+    <p class="hint" id="editHint">
+      Click a zone in the list (or on the map) to select it — then these fields
+      edit that zone. Nothing is written to disk until you press
+      <strong>Save to airports.json</strong>.
+    </p>
+    <label for="minAlt">Altitude band <span class="opt">(optional, ft AGL)</span></label>
+    <div class="row">
+      <input id="minAlt" type="number" min="0" step="100" placeholder="surface">
+      <span class="to">to</span>
+      <input id="maxAlt" type="number" min="0" step="100" placeholder="unlimited">
+    </div>
+    <p class="hint">
+      Blank means the area is infinitely tall, which is right for a ramp you only
+      ever taxi on. A tower area wants surface to about 5000 so traffic overhead
+      does not count as being in it.
+    </p>
+    <div id="rotateRow" class="row rotate-row hidden">
+      <span class="to">Rotate</span>
+      <button type="button" id="rotateLeft" class="nudge" title="Rotate 15° counter-clockwise">↺ 15°</button>
+      <button type="button" id="rotateRight" class="nudge" title="Rotate 15° clockwise">15° ↻</button>
+    </div>
+    <div id="copyRow" class="row rotate-row hidden">
+      <button type="button" id="copyZone" class="nudge" title="Copy this zone (Ctrl+C)">Copy</button>
+      <button type="button" id="pasteZone" class="nudge" title="Paste as a new zone (Ctrl+V)">Paste as new</button>
+    </div>
+    <div id="lockRow" class="row rotate-row hidden">
+      <button type="button" id="lockZone" class="nudge" title="Prevent accidental edit or delete">Lock zone</button>
+      <button type="button" id="unlockZone" class="nudge danger-nudge hidden" title="Allow edit / delete after confirmation">Unlock…</button>
+    </div>
+    <div class="row rotate-row">
+      <button type="button" id="newZone" class="nudge go-nudge" title="Deselect and prepare to draw another zone">New zone</button>
+      <button type="button" id="deleteZone" class="nudge danger-nudge hidden" title="Delete the selected zone only (Delete)">Delete zone</button>
+    </div>
+    <button id="deselect" class="hidden">Finish editing this zone</button>
+  </section>
+
+  <section>
+    <h2>Zones <span id="count" class="opt"></span></h2>
+    <p class="hint">
+      The eye next to each zone shows or hides it on the map (list stays).
+      <kbd>H</kbd> toggles the selected zone.
+    </p>
+    <div class="row rotate-row">
+      <button type="button" id="showAllZones" class="nudge">Show all</button>
+      <button type="button" id="hideAllZones" class="nudge">Hide all</button>
+    </div>
+    <ul id="zones" class="zones"></ul>
+  </section>
+
+  <section>
+    <h2>Reference overlay</h2>
+    <p class="hint">
+      View-only airspace / targets from a KML or KMZ (e.g. NTTR). After loading,
+      use the <strong>Layers</strong> panel on the map (top-right) — nested folders
+      like Opus, with search. These never become zones.
+    </p>
+    <label for="overlayPick">Pack</label>
+    <select id="overlayPick"></select>
+    <div class="row rotate-row">
+      <button type="button" id="overlayLoad" class="nudge">Show on map</button>
+      <button type="button" id="overlayClear" class="nudge">Clear</button>
+    </div>
+    <label class="file">Upload KMZ / KML<input type="file" id="overlayUpload" accept=".kml,.kmz"></label>
+    <p id="overlayStatus" class="hint">&nbsp;</p>
+  </section>
+
+  <section>
+    <h2>Check against DCS</h2>
+    <label class="check"><input type="checkbox" id="tracks"> Show live CAOC tracks</label>
+    <p class="hint">A jet parked on the runway should appear on the runway here.
+      If everything sits at a constant offset, the shapes are the thing to move.</p>
+    <p id="verdict" class="verdict">&nbsp;</p>
+  </section>
+
+  <section class="actions">
+    <button id="save" class="go">Save to airports.json</button>
+    <p class="hint" id="saveHint">
+      Saves every zone for this field (renames, moves, new draws). Do this before
+      you close the editor or switch airport.
+    </p>
+    <button id="export">Download GeoJSON</button>
+    <label class="file">Import GeoJSON / KML<input type="file" id="import" accept=".json,.geojson,.kml,.kmz"></label>
+    <p id="status" class="status">&nbsp;</p>
+  </section>
+</aside>
+
+<div id="map"></div>
+
+<script src="/vendor/leaflet.js"></script>
+<script src="/vendor/leaflet-draw.js"></script>
+<script src="/zone_map.js"></script>
+</body>
+</html>

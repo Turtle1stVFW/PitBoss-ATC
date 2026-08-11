@@ -1,14 +1,19 @@
 """
-HOTAS button input via the legacy winmm joystick API.
+HOTAS + mouse button input for Advance / Previous.
 
-Why not keyboard hotkeys: DCS and SRS run elevated (SRS ships `RequireAdmin=true`).
-Windows UIPI refuses to deliver WM_HOTKEY to a non-elevated process while an
-elevated window is focused, so RegisterHotKey silently does nothing in-game.
-Reading joystick state is a device query rather than an input-stream hook, so it
-is unaffected by focus or integrity level.
+HOTAS uses the legacy winmm joystick API. Mouse buttons use GetAsyncKeyState —
+the same focus-safe poll path as keyboard hotkeys.
 
-joyGetPosEx exposes the first 32 buttons of up to 16 devices and costs ~0.5 us per
-device per poll, so watching a bound device at 100 Hz is ~0.005% of one core.
+Why not keyboard hotkeys alone: DCS and SRS run elevated (SRS ships
+`RequireAdmin=true`). Windows UIPI refuses to deliver WM_HOTKEY to a
+non-elevated process while an elevated window is focused, so RegisterHotKey
+silently does nothing in-game. Reading joystick / mouse state is a device
+query rather than an input-stream hook, so it is unaffected by focus or
+integrity level.
+
+joyGetPosEx exposes the first 32 buttons of up to 16 devices and costs ~0.5 us
+per device per poll, so watching a bound device at 100 Hz is ~0.005% of one
+core. Mouse button polls are equally cheap.
 
 Sharing with SRS: this only ever reads state — no device handle, no DirectInput
 acquisition, nothing exclusive — so SRS keeps transmitting on the same button.
@@ -18,6 +23,7 @@ Only devices with a binding are polled (all of them briefly, while learning).
 from __future__ import annotations
 
 import ctypes
+import sys
 import threading
 import winreg
 from collections.abc import Callable
@@ -33,6 +39,29 @@ JOY_RETURNBUTTONS = 0x00000080
 JOYERR_NOERROR = 0
 
 _OEM_REG_BASE = r"System\CurrentControlSet\Control\MediaProperties\PrivateProperties\Joystick\OEM"
+
+# Mouse buttons via GetAsyncKeyState (same focus-safe poll path as keyboard).
+# Stored 1-based to match Windows / common mouse software numbering.
+VK_LBUTTON = 0x01
+VK_RBUTTON = 0x02
+VK_MBUTTON = 0x04
+VK_XBUTTON1 = 0x05
+VK_XBUTTON2 = 0x06
+_MOUSE_VK: dict[int, int] = {
+    1: VK_LBUTTON,
+    2: VK_RBUTTON,
+    3: VK_MBUTTON,
+    4: VK_XBUTTON1,
+    5: VK_XBUTTON2,
+}
+_MOUSE_LABELS: dict[int, str] = {
+    1: "Left",
+    2: "Right",
+    3: "Middle",
+    4: "Button 4",
+    5: "Button 5",
+}
+_KEY_DOWN = 0x8000
 
 
 class JOYCAPS(ctypes.Structure):
@@ -137,27 +166,57 @@ def read_buttons(device_id: int) -> int | None:
     return int(info.dwButtons)
 
 
+def read_mouse_buttons() -> int:
+    """
+    Bitmask of mouse buttons currently down: bit 0 = button 1 … bit 4 = button 5.
+    Works while another app (DCS) has focus — same GetAsyncKeyState path as keys.
+    """
+    if sys.platform != "win32":
+        return 0
+    mask = 0
+    user32 = ctypes.windll.user32
+    for button, vk in _MOUSE_VK.items():
+        if user32.GetAsyncKeyState(int(vk)) & _KEY_DOWN:
+            mask |= 1 << (button - 1)
+    return mask
+
+
+def is_mouse_binding(binding: dict[str, Any] | None) -> bool:
+    return bool(binding) and str(binding.get("kind") or "").strip().casefold() == "mouse"
+
+
 # ---------- bindings ----------
 
 
 def normalize_binding(raw: Any) -> dict[str, Any] | None:
     """
-    Accepts {"device": name, "id": n, "button": i} or the legacy "id:button" string.
-    `button` is a 0-based bit index; the UI shows it 1-based to match DCS.
+    Accepts HOTAS {"device": name, "id": n, "button": i}, mouse
+    {"kind": "mouse", "button": 1..5}, or the legacy "id:button" string.
+    HOTAS `button` is a 0-based bit index (UI shows 1-based to match DCS).
+    Mouse `button` is 1-based (Left/Right/Middle/4/5).
     """
     if not raw:
         return None
     if isinstance(raw, str):
         parts = raw.replace(" ", "").split(":")
+        if len(parts) == 2 and parts[0].casefold() == "mouse" and parts[1].isdigit():
+            button = int(parts[1])
+            if button in _MOUSE_VK:
+                return {"kind": "mouse", "button": button}
         if len(parts) != 2 or not all(p.lstrip("-").isdigit() for p in parts):
             return None
         return {"device": "", "id": int(parts[0]), "button": int(parts[1])}
     if not isinstance(raw, dict):
         return None
+    kind = str(raw.get("kind") or "").strip().casefold()
     try:
         button = int(raw.get("button"))
     except (TypeError, ValueError):
         return None
+    if kind == "mouse" or str(raw.get("device") or "").strip().casefold() == "mouse":
+        if button not in _MOUSE_VK:
+            return None
+        return {"kind": "mouse", "button": button}
     if not 0 <= button < MAX_BUTTONS:
         return None
     try:
@@ -176,6 +235,8 @@ def resolve_device_id(binding: dict[str, Any]) -> int | None:
     winmm ids shift when devices are unplugged, so prefer matching the saved
     product name and fall back to the saved id.
     """
+    if is_mouse_binding(binding):
+        return None
     devices = list_devices()
     if not devices:
         return None
@@ -195,6 +256,9 @@ def resolve_device_id(binding: dict[str, Any]) -> int | None:
 def describe_binding(binding: dict[str, Any] | None) -> str:
     if not binding:
         return "(none)"
+    if is_mouse_binding(binding):
+        button = int(binding["button"])
+        return f"Mouse · {_MOUSE_LABELS.get(button, f'Button {button}')}"
     name = binding.get("device") or f"Joystick {binding.get('id')}"
     return f"{name} · Btn {int(binding['button']) + 1}"
 
@@ -285,7 +349,7 @@ def discover_srs_ptt() -> list[dict[str, Any]]:
 
 class JoystickWatcher:
     """
-    Polls bound buttons on a daemon thread and fires callbacks on edges.
+    Polls bound HOTAS / mouse buttons on a daemon thread and fires callbacks on edges.
 
     Callbacks run on the polling thread — marshal to Tk with `after(0, ...)`.
     """
@@ -295,14 +359,19 @@ class JoystickWatcher:
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._lock = threading.Lock()
-        # name -> (device_id, button, on_press, on_release)
-        self._bindings: dict[str, tuple[int, int, Callable[[], None] | None, Callable[[], None] | None]] = {}
+        # name -> (kind, device_id_or_-1, button, on_press, on_release)
+        # kind "joy": device_id + 0-based button bit; "mouse": button 1..5
+        self._bindings: dict[
+            str, tuple[str, int, int, Callable[[], None] | None, Callable[[], None] | None]
+        ] = {}
         self._learn: Callable[[dict[str, Any]], None] | None = None
         self._learn_baseline: dict[int, int] = {}
+        self._learn_mouse_baseline: int = 0
 
     @property
     def supported(self) -> bool:
-        return supported()
+        # Mouse polling works on Windows even when no joystick is present.
+        return supported() or sys.platform == "win32"
 
     def set_binding(
         self,
@@ -317,11 +386,17 @@ class JoystickWatcher:
             self._bindings.pop(name, None)
         if not binding:
             return None
+        if is_mouse_binding(binding):
+            if sys.platform != "win32":
+                return f"{describe_binding(binding)} — mouse buttons need Windows"
+            with self._lock:
+                self._bindings[name] = ("mouse", -1, int(binding["button"]), on_press, on_release)
+            return None
         device_id = resolve_device_id(binding)
         if device_id is None:
             return f"{describe_binding(binding)} — device not connected"
         with self._lock:
-            self._bindings[name] = (device_id, int(binding["button"]), on_press, on_release)
+            self._bindings[name] = ("joy", device_id, int(binding["button"]), on_press, on_release)
         return None
 
     def clear_bindings(self) -> None:
@@ -344,13 +419,14 @@ class JoystickWatcher:
 
     def learn_next_press(self, callback: Callable[[dict[str, Any]], None] | None) -> None:
         """
-        Report the next button press on any device as {device, id, button}.
+        Report the next HOTAS or mouse button press.
         Buttons already held when learning starts are ignored.
         """
         with self._lock:
             if callback is None:
                 self._learn = None
                 self._learn_baseline = {}
+                self._learn_mouse_baseline = 0
                 return
             baseline: dict[int, int] = {}
             for dev in list_devices():
@@ -358,22 +434,29 @@ class JoystickWatcher:
                 if mask is not None:
                     baseline[int(dev["id"])] = mask
             self._learn_baseline = baseline
+            self._learn_mouse_baseline = read_mouse_buttons()
             self._learn = callback
         self.start()
 
-    def _devices_to_poll(self) -> tuple[set[int], bool]:
+    def _devices_to_poll(self) -> tuple[set[int], bool, bool]:
         with self._lock:
             learning = self._learn is not None
-            ids = {device_id for device_id, _b, _p, _r in self._bindings.values()}
+            ids = {
+                device_id
+                for kind, device_id, _b, _p, _r in self._bindings.values()
+                if kind == "joy"
+            }
+            need_mouse = learning or any(kind == "mouse" for kind, *_ in self._bindings.values())
         if learning:
             ids |= {int(d["id"]) for d in list_devices()}
-        return ids, learning
+        return ids, learning, need_mouse
 
     def _run(self) -> None:
         previous: dict[int, int] = {}
+        prev_mouse = 0
         while not self._stop.is_set():
-            device_ids, learning = self._devices_to_poll()
-            if not device_ids:
+            device_ids, learning, need_mouse = self._devices_to_poll()
+            if not device_ids and not need_mouse:
                 self._stop.wait(0.2)
                 continue
 
@@ -382,33 +465,52 @@ class JoystickWatcher:
                 mask = read_buttons(device_id)
                 if mask is not None:
                     masks[device_id] = mask
+            mouse_mask = read_mouse_buttons() if need_mouse else 0
 
             if learning:
-                self._check_learn(masks)
+                self._check_learn(masks, mouse_mask)
 
             with self._lock:
                 bindings = list(self._bindings.values())
-            for device_id, button, on_press, on_release in bindings:
-                mask = masks.get(device_id)
-                if mask is None:
-                    continue
-                bit = 1 << button
-                was = bool(previous.get(device_id, 0) & bit)
-                now = bool(mask & bit)
+            for kind, device_id, button, on_press, on_release in bindings:
+                if kind == "mouse":
+                    bit = 1 << (button - 1)
+                    was = bool(prev_mouse & bit)
+                    now = bool(mouse_mask & bit)
+                else:
+                    mask = masks.get(device_id)
+                    if mask is None:
+                        continue
+                    bit = 1 << button
+                    was = bool(previous.get(device_id, 0) & bit)
+                    now = bool(mask & bit)
                 if now and not was and on_press:
                     self._safe(on_press)
                 elif was and not now and on_release:
                     self._safe(on_release)
 
             previous = masks
+            prev_mouse = mouse_mask
             self._stop.wait(self._interval)
 
-    def _check_learn(self, masks: dict[int, int]) -> None:
+    def _check_learn(self, masks: dict[int, int], mouse_mask: int) -> None:
         with self._lock:
             callback = self._learn
             baseline = dict(self._learn_baseline)
+            mouse_baseline = self._learn_mouse_baseline
         if not callback:
             return
+
+        newly_mouse = mouse_mask & ~mouse_baseline
+        if newly_mouse:
+            button = (newly_mouse & -newly_mouse).bit_length()  # 1-based
+            with self._lock:
+                self._learn = None
+                self._learn_baseline = {}
+                self._learn_mouse_baseline = 0
+            self._safe(lambda: callback({"kind": "mouse", "button": button}))
+            return
+
         names = {int(d["id"]): str(d["name"]) for d in list_devices()}
         for device_id, mask in masks.items():
             newly = mask & ~baseline.get(device_id, 0)
@@ -418,6 +520,7 @@ class JoystickWatcher:
             with self._lock:
                 self._learn = None
                 self._learn_baseline = {}
+                self._learn_mouse_baseline = 0
             self._safe(
                 lambda: callback(
                     {
@@ -432,6 +535,7 @@ class JoystickWatcher:
         with self._lock:
             for device_id, mask in masks.items():
                 self._learn_baseline[device_id] = self._learn_baseline.get(device_id, 0) & mask
+            self._learn_mouse_baseline &= mouse_mask
 
     @staticmethod
     def _safe(fn: Callable[[], None]) -> None:

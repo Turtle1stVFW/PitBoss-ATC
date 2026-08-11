@@ -1,0 +1,4 @@
+# Required for ATC voice control — ship these in the end-user installer
+# (bundled venv or frozen app). See installer/README.md.
+numpy>=2.0
+faster-whisper>=1.0

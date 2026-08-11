@@ -19,6 +19,89 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+# Mission timeline phases (not radio agencies). Channel = who you talk to;
+# phase = where you are in the sortie (Departure → Flight/airwork → Approach).
+MISSION_PHASES: tuple[str, ...] = ("departure", "flight", "approach")
+MISSION_PHASE_LABELS: dict[str, str] = {
+    "departure": "Departure",
+    "flight": "Flight / airwork",
+    "approach": "Approach",
+}
+# Agencies that normally belong in each mission phase (tips + scoring).
+CHANNELS_IN_MISSION_PHASE: dict[str, frozenset[str]] = {
+    "departure": frozenset({"delivery", "ground", "tower", "departure"}),
+    "flight": frozenset({"blackjack", "bandsaw", "ops", "other"}),
+    "approach": frozenset({"approach", "tower", "ground"}),
+}
+# Default mission phase when a step's channel is set (tower/ground appear in two).
+DEFAULT_MISSION_PHASE_FOR_CHANNEL: dict[str, str] = {
+    "delivery": "departure",
+    "ground": "departure",
+    "tower": "departure",
+    "departure": "departure",
+    "blackjack": "flight",
+    "bandsaw": "flight",
+    "ops": "flight",
+    "other": "flight",
+    "approach": "approach",
+}
+
+# Legacy agency-as-phase names still seen in older flows / tests.
+_LEGACY_PHASE_AS_CHANNEL = frozenset(DEFAULT_MISSION_PHASE_FOR_CHANNEL)
+
+
+def normalize_mission_phase(phase: str = "", channel: str = "") -> str:
+    """
+    Coerce to departure|flight|approach.
+
+    Accepts the new mission-phase names, or legacy values where `phase` was the
+    radio agency (ground/tower/blackjack/…).
+    """
+    p = (phase or "").strip().lower()
+    if p in MISSION_PHASES:
+        return p
+    if p in _LEGACY_PHASE_AS_CHANNEL:
+        return DEFAULT_MISSION_PHASE_FOR_CHANNEL[p]
+    ch = (channel or "").strip().lower()
+    if ch in DEFAULT_MISSION_PHASE_FOR_CHANNEL:
+        return DEFAULT_MISSION_PHASE_FOR_CHANNEL[ch]
+    return ""
+
+
+def default_mission_phase_for_channel(channel: str) -> str:
+    ch = (channel or "").strip().lower()
+    return DEFAULT_MISSION_PHASE_FOR_CHANNEL.get(ch, "departure")
+
+
+def channel_allowed_in_mission_phase(channel: str, mission_phase: str) -> bool:
+    ch = (channel or "").strip().lower()
+    phase = normalize_mission_phase(mission_phase, channel=ch)
+    allowed = CHANNELS_IN_MISSION_PHASE.get(phase)
+    if not allowed:
+        return True
+    return ch in allowed
+
+
+def resolve_context_channel(
+    *,
+    mission_phase: str,
+    cursor_channel: str,
+    tuned_channel: str | None,
+) -> str:
+    """
+    Agency for tips / voice scoring.
+
+    Prefer the live radio tune when it is an agency that belongs in this mission
+    phase (e.g. Blackjack vs Bandsaw during Flight). Otherwise keep the cursor.
+    """
+    cursor = (cursor_channel or "").strip().lower()
+    tuned = (tuned_channel or "").strip().lower()
+    phase = normalize_mission_phase(mission_phase, channel=cursor)
+    if tuned and channel_allowed_in_mission_phase(tuned, phase):
+        return tuned
+    return cursor
+
+
 # Spoken aviation digits -> characters. Whisper writes words, ATC needs numbers.
 _DIGIT_WORDS = {
     "zero": "0", "nought": "0",
@@ -146,6 +229,7 @@ _AGENCY_TERMS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("approach", ("approach", "arrival")),
     ("departure", ("departure", "dep")),
     ("blackjack", ("blackjack", "black jack", "magic", "darkstar", "awacs")),
+    ("bandsaw", ("bandsaw", "band saw", "band-saw")),
     ("ops", ("ops", "operations", "base ops")),
     ("other", ("center", "centre", "control")),
 )
@@ -296,8 +380,8 @@ class Intent:
     groups: tuple[tuple[str, ...], ...]
     kind: str = "request"  # "request" | "step"
     template: str = ""  # flow step template this answers, for kind="step"
-    channels: tuple[str, ...] = ()  # agencies this makes sense on
-    phases: tuple[str, ...] = ()  # flight phases this makes sense in; () = any
+    channels: tuple[str, ...] = ()  # radio agencies this makes sense on
+    phases: tuple[str, ...] = ()  # mission phases: departure|flight|approach; () = any
     veto: tuple[str, ...] = ()
     weight: float = 1.0
     example: str = ""  # how a pilot would say it, shown as a prompt in Fly
@@ -323,6 +407,8 @@ INTENTS: tuple[Intent, ...] = (
         "request_runway",
         (_ASKING, ("runway",)),
         veto=("cleared for", "cleared to land", "cleared takeoff"),
+        # Ground / Tower — Departure and Approach; not Flight airwork.
+        phases=("departure", "approach"),
         weight=1.2,
         example="request runway two one left",
         does="change the active runway",
@@ -331,13 +417,13 @@ INTENTS: tuple[Intent, ...] = (
         "request_winds",
         (_ASKING + ("how",), ("wind", "winds")),
         example="say winds",
-        does="current wind from the METAR",
+        does="current winds",
     ),
     Intent(
         "request_altimeter",
         (_ASKING, ("altimeter", "qnh")),
         example="say altimeter",
-        does="current altimeter setting",
+        does="current altimeter",
     ),
     Intent(
         "request_picture",
@@ -345,7 +431,8 @@ INTENTS: tuple[Intent, ...] = (
             _ASKING + ("declare",),
             ("picture", "pitcher", "bogey dope"),
         ),
-        channels=("blackjack", "ops", "other"),
+        channels=("blackjack", "bandsaw", "ops", "other"),
+        phases=("flight",),
         weight=1.2,
         example="request picture",
         does="hostile groups off the live radar",
@@ -353,9 +440,24 @@ INTENTS: tuple[Intent, ...] = (
     Intent(
         "request_alpha_check",
         (("alpha check", "alfa check", "position check"),),
-        channels=("blackjack", "ops", "other"),
+        channels=("blackjack", "bandsaw", "ops", "other"),
+        phases=("flight",),
         example="alpha check bullseye",
         does="your position off bullseye",
+    ),
+    Intent(
+        "request_bandsaw",
+        (
+            _ASKING + ("push", "go"),
+            ("bandsaw", "band saw", "band-saw"),
+        ),
+        kind="request",
+        channels=("blackjack",),
+        phases=("flight",),
+        weight=1.15,
+        # Optional push — keep off Blackjack YOU CAN SAY.
+        example="",
+        does="",
     ),
     Intent(
         "say_again",
@@ -369,7 +471,8 @@ INTENTS: tuple[Intent, ...] = (
             ("rolling", "roll"),
             ("take", "accept", "affirm", "affirmative", "roger", "we ll", "will", "ready"),
         ),
-        phases=("ground", "tower"),
+        channels=("tower",),
+        phases=("departure",),
         veto=("unable", "negative", "full length"),
         example="we'll take the rolling",
         does="accept a rolling takeoff",
@@ -377,7 +480,8 @@ INTENTS: tuple[Intent, ...] = (
     Intent(
         "deny_rolling",
         (("rolling", "roll"), ("unable", "negative", "rather not", "full length")),
-        phases=("ground", "tower"),
+        channels=("tower",),
+        phases=("departure",),
         weight=1.1,
         example="unable rolling",
         does="decline the rolling takeoff",
@@ -388,20 +492,38 @@ INTENTS: tuple[Intent, ...] = (
             ("line up", "lineup", "position and hold"),
             ("request", "requesting", "ready", "like"),
         ),
-        phases=("ground", "tower"),
+        channels=("tower",),
+        phases=("departure",),
         example="ready for line up",
         does="line up and wait",
+    ),
+    # Hidden kneeboard call — Tower only, before takeoff clearance.
+    Intent(
+        "request_unrestricted_climb",
+        (
+            _ASKING,
+            ("unrestricted climb", "unrestricted", "unrestricted climb please"),
+        ),
+        channels=("tower",),
+        phases=("departure",),
+        weight=1.2,
+        example="",
+        does="",
+        veto=("unable unrestricted", "unable the unrestricted"),
     ),
     # ---- scripted step triggers -----------------------------------------
     Intent(
         "ready_clearance",
-        (("clearance", "ifr", "copy"), ("request", "requesting", "ready", "like")),
+        (
+            ("clearance", "ifr"),
+            ("request", "requesting", "ready", "like", "copy"),
+        ),
         kind="step",
         template="clearance",
         channels=("delivery",),
-        phases=("delivery",),
-        example="ready to copy IFR clearance",
-        does="get your clearance",
+        phases=("departure",),
+        example="request clearance",
+        does="IFR clearance",
         veto=("readback", "squawk", "as filed"),
     ),
     # After ATC issues a clearance the pilot reads the key items back — no
@@ -443,10 +565,40 @@ INTENTS: tuple[Intent, ...] = (
         kind="step",
         template="taxi",
         channels=("ground",),
-        phases=("delivery", "ground"),
+        phases=("departure",),
         veto=("taxi in", "clear of the", "off the active"),
-        example="ready to taxi",
+        example="request taxi",
         does="taxi clearance",
+    ),
+    Intent(
+        "at_eor",
+        (
+            (
+                "at eor",
+                "at the eor",
+                "ready at eor",
+                "parked eor",
+                "parked at eor",
+                "holding eor",
+                "holding at eor",
+                "holding short",
+                "number 1 holding short",
+                "number one holding short",
+                "at the end",
+                "at the end of the runway",
+                "we re at eor",
+                "we are at eor",
+                "holding short of the runway",
+            ),
+        ),
+        kind="step",
+        template="monitor_tower",
+        channels=("ground",),
+        phases=("departure",),
+        example="at EOR",
+        does="monitor tower",
+        veto=("taxi", "request taxi", "ready to taxi"),
+        weight=1.15,
     ),
     Intent(
         "ready_departure",
@@ -455,12 +607,14 @@ INTENTS: tuple[Intent, ...] = (
             ("departure", "takeoff", "take off", "the active", "to go", "for the go"),
         ),
         kind="step",
-        template="clear_takeoff",
+        # First Tower answer is normally LUAW (or a rolling offer); clearance
+        # comes on a later ready call once the cursor advances.
+        template="lineup",
         channels=("tower",),
-        phases=("ground", "tower"),
+        phases=("departure",),
         veto=("contact departure", "with departure", "rolling"),
         example="ready for departure",
-        does="takeoff clearance",
+        does="line up and wait / takeoff clearance",
     ),
     Intent(
         "inbound_recovery",
@@ -471,7 +625,7 @@ INTENTS: tuple[Intent, ...] = (
         kind="step",
         template="approach_check_in",
         channels=("approach", "departure"),
-        phases=("departure", "blackjack", "approach"),
+        phases=("flight", "approach"),
         example="inbound for the overhead",
         does="recovery instructions",
     ),
@@ -484,7 +638,7 @@ INTENTS: tuple[Intent, ...] = (
         kind="step",
         template="clear_land",
         channels=("tower",),
-        phases=("approach", "tower"),
+        phases=("approach",),
         example="gear down full stop",
         does="landing clearance",
     ),
@@ -494,7 +648,7 @@ INTENTS: tuple[Intent, ...] = (
         kind="step",
         template="go_around",
         channels=("tower",),
-        phases=("approach", "tower"),
+        phases=("approach",),
         example="going around",
         does="go-around instructions",
     ),
@@ -506,20 +660,36 @@ INTENTS: tuple[Intent, ...] = (
         kind="step",
         template="taxi_in",
         channels=("ground", "tower"),
-        phases=("tower", "ground"),
+        phases=("approach",),
         weight=1.1,
         example="clear of the runway",
         does="taxi back to parking",
     ),
     Intent(
         "range_entry",
-        (("range",), ("entry", "enter", "entering", "check in", "checking in", "on station")),
+        (
+            (
+                "checking in",
+                "check in",
+                "checkin",
+                "on station",
+                "range entry",
+                "entering the range",
+                "enter the range",
+                "for the range",
+                "for range entry",
+            ),
+        ),
         kind="step",
         template="bj_check_in",
         channels=("blackjack",),
-        phases=("departure", "blackjack"),
-        example="checking in for range entry",
-        does="range check-in",
+        phases=("departure", "flight"),
+        weight=1.15,
+        # Kneeboard stays short; mission number is optional spoken colour.
+        example="checking in",
+        does="blackjack check-in",
+        # "off station" is one edit from "on station" — do not steal range exit.
+        veto=("off station", "range exit", "range complete", "exiting"),
     ),
     Intent(
         "range_exit",
@@ -527,18 +697,55 @@ INTENTS: tuple[Intent, ...] = (
         kind="step",
         template="bj_range_exit",
         channels=("blackjack",),
-        phases=("blackjack", "approach"),
+        phases=("flight",),
+        weight=1.2,
         example="off station, range complete",
         does="range exit",
     ),
     Intent(
-        "check_in",
-        (("checking in", "check in", "with you", "on frequency", "as fragged", "radio check"),),
+        "bandsaw_check_in",
+        (
+            (
+                "checking in",
+                "check in",
+                "checkin",
+                "with you",
+                "on frequency",
+                "with bandsaw",
+            ),
+        ),
         kind="step",
-        template="",
-        weight=0.9,
+        template="bandsaw_check_in",
+        channels=("bandsaw",),
+        phases=("flight",),
+        weight=1.2,
         example="checking in",
-        does="check in on this frequency",
+        does="bandsaw check-in",
+    ),
+    # Departure radar contact — airborne check-in (not winds / altimeter).
+    Intent(
+        "departure_check_in",
+        (
+            (
+                "with you",
+                "airborne",
+                "we re airborne",
+                "we are airborne",
+                "checking in",
+                "check in",
+                "on frequency",
+                "radar contact",
+                "with departure",
+            ),
+        ),
+        kind="step",
+        template="radar_contact",
+        channels=("departure",),
+        phases=("departure",),
+        weight=1.2,
+        example="with you",
+        does="departure radar contact",
+        veto=("say wind", "say winds", "altimeter", "request wind", "request winds"),
     ),
 )
 
@@ -684,7 +891,20 @@ def _group_hit(text: str, options: tuple[str, ...], *, fuzzy: bool = True) -> st
 
 # Intents that may omit the agency opener while a readback is outstanding —
 # the exchange is already open from ATC's last transmission.
-_ADDRESS_OPTIONAL_INTENTS = frozenset({"acknowledge_readback", "say_again"})
+_ADDRESS_OPTIONAL_INTENTS = frozenset(
+    {"acknowledge_readback", "say_again", "at_eor"}
+)
+
+# Tower steps that "ready for departure" may answer, in order.
+_DEPARTURE_READY_TEMPLATES = frozenset(
+    {
+        "lineup",
+        "rolling_accept",
+        "clear_takeoff",
+        "clear_takeoff_rolling",
+        "clear_takeoff_intersection",
+    }
+)
 
 # Words too common to carry a shortened call on their own. "Ground, Fleece 1,
 # taxi" is a summary of "ready to taxi"; "Ground, Fleece 1, request" is not.
@@ -702,23 +922,34 @@ _SUMMARISED = 0.85
 
 def _expected_now(intent: Intent, *, expected: str, awaiting_readback: bool) -> bool:
     """Is this the call ATC is sitting there waiting for?"""
+    # During a readback window the pilot is answering the last clearance — not
+    # asking for that step again. Otherwise "taxi via … runway 21R" re-fires taxi.
+    if awaiting_readback:
+        return intent.id in _ADDRESS_OPTIONAL_INTENTS and intent.id != "at_eor"
+    if intent.id == "ready_departure" and expected in _DEPARTURE_READY_TEMPLATES:
+        return True
     if expected and intent.template and intent.template == expected:
         return True
-    return awaiting_readback and intent.id in _ADDRESS_OPTIONAL_INTENTS
-
-
-def _readback_value_hit(text: str, items: list[dict[str, Any]] | None) -> bool:
-    """True when the transcript includes a assigned value (squawk digits, runway…)."""
-    if not items:
-        return False
-    for item in items:
-        value = re.sub(r"\D", "", str(item.get("value") or ""))
-        if len(value) >= 3 and re.search(rf"(?<!\w){re.escape(value)}(?!\w)", text):
-            return True
-        spoken = normalize(str(item.get("spoken") or ""))
-        if spoken and re.search(rf"(?<!\w){re.escape(spoken)}(?!\w)", text):
-            return True
+    if expected == "monitor_tower" and intent.id == "at_eor":
+        return True
+    if expected == "radar_contact" and intent.id == "departure_check_in":
+        return True
     return False
+
+
+def _hinge_items(items: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Items that alone close the readback (legacy lists without hinge= still work)."""
+    out: list[dict[str, Any]] = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("hinge"):
+            out.append(item)
+            continue
+        key = str(item.get("key") or "")
+        if item.get("highlight") and key in ("squawk", "runway", "eor"):
+            out.append(item)
+    return out
 
 
 def _squawk_code(items: list[dict[str, Any]] | None) -> str | None:
@@ -730,6 +961,402 @@ def _squawk_code(items: list[dict[str, Any]] | None) -> str | None:
         if len(digits) >= 4:
             return digits[:4]
     return None
+
+
+def _runway_readback_item(items: list[dict[str, Any]] | None) -> dict[str, Any] | None:
+    for item in items or []:
+        if str(item.get("key") or "") == "runway":
+            return item if isinstance(item, dict) else None
+    return None
+
+
+def _eor_readback_item(items: list[dict[str, Any]] | None) -> dict[str, Any] | None:
+    for item in items or []:
+        if str(item.get("key") or "") == "eor":
+            return item if isinstance(item, dict) else None
+    return None
+
+
+def _clearance_phrase_hit(text: str, item: dict[str, Any] | None) -> bool:
+    """'cleared for takeoff' / 'line up and wait' / 'cleared to land'."""
+    if not item:
+        return False
+    spoken = normalize(str(item.get("spoken") or ""))
+    if spoken and spoken in text:
+        return True
+    value = normalize(str(item.get("value") or ""))
+    if value and value in text:
+        return True
+    # Common shortenings while ATC is waiting.
+    key_bits = {
+        "cleared for takeoff": ("cleared for takeoff", "cleared takeoff", "for takeoff"),
+        "cleared to land": ("cleared to land", "cleared land"),
+        "line up and wait": ("line up and wait", "line up", "luaw"),
+    }
+    for full, alts in key_bits.items():
+        if full in spoken or full in value:
+            return any(re.search(rf"(?<!\w){re.escape(a)}(?!\w)", text) for a in alts)
+    return False
+
+
+# Whisper / casual speech for climb altitudes (and bad habits: angels / FL).
+_ALT_CARDINALS = {
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+    "fifteen": 15,
+    "sixteen": 16,
+    "seventeen": 17,
+    "eighteen": 18,
+    "nineteen": 19,
+    "twenty": 20,
+    "twenty one": 21,
+    "twenty two": 22,
+    "twenty three": 23,
+    "twenty four": 24,
+    "twenty five": 25,
+    "twenty six": 26,
+    "twenty seven": 27,
+    "twenty eight": 28,
+    "twenty nine": 29,
+}
+
+
+def _climb_readback_item(items: list[dict[str, Any]] | None) -> dict[str, Any] | None:
+    for item in _hinge_items(items):
+        if str(item.get("key") or "") == "climb":
+            return item
+    for item in items or []:
+        if isinstance(item, dict) and str(item.get("key") or "") == "climb":
+            return item
+    return None
+
+
+def _assigned_climb_ft(item: dict[str, Any] | None) -> int | None:
+    if not item:
+        return None
+    digits = re.sub(r"\D", "", str(item.get("value") or ""))
+    if not digits:
+        return None
+    try:
+        n = int(digits)
+    except ValueError:
+        return None
+    return n if n >= 1000 else n * 100  # rare FL-style leftovers
+
+
+def _add_altitude_ft(out: list[int], feet: int) -> None:
+    if 5000 <= feet <= 60000 and feet not in out:
+        out.append(feet)
+
+
+def _heard_altitudes_ft(text: str) -> list[int]:
+    """
+    Every altitude-like value in a normalized transcript.
+
+    Pilots paraphrase — accept feet, flight levels, and angels:
+      'fifteen thousand', '18 thousand', 'one five thousand',
+      'flight level 150' / 'fl 250' / 'FL250',
+      'angels 15' / 'angel eighteen', bare '15000'.
+    """
+    found: list[int] = []
+    if not text:
+        return found
+
+    # Flight level / FL — digits already collapsed by normalize().
+    for m in re.finditer(r"(?:flight\s+level|fl)\s*(\d{2,3})\b", text):
+        _add_altitude_ft(found, int(m.group(1)) * 100)
+    for m in re.finditer(r"\bfl(\d{2,3})\b", text):
+        _add_altitude_ft(found, int(m.group(1)) * 100)
+
+    # Angels N (tactical habit on ATC freqs — still count it).
+    for m in re.finditer(r"\bangels?\s+(\d{1,2})\b", text):
+        _add_altitude_ft(found, int(m.group(1)) * 1000)
+    for word, n in _ALT_CARDINALS.items():
+        if " " in word:
+            continue
+        if re.search(rf"\bangels?\s+{re.escape(word)}\b", text):
+            _add_altitude_ft(found, n * 1000)
+
+    # N thousand / cardinal thousand
+    for word, n in sorted(_ALT_CARDINALS.items(), key=lambda kv: -len(kv[0])):
+        if re.search(rf"(?<!\w){re.escape(word)}\s+thousand(?!\w)", text):
+            _add_altitude_ft(found, n * 1000)
+    for m in re.finditer(r"(?<!\w)(\d{1,2})\s+thousand(?!\w)", text):
+        _add_altitude_ft(found, int(m.group(1)) * 1000)
+
+    # Bare feet
+    for m in re.finditer(r"(?<!\w)(\d{4,5})(?!\w)", text):
+        _add_altitude_ft(found, int(m.group(1)))
+
+    return found
+
+
+def _heard_altitude_ft(text: str) -> int | None:
+    """First / best altitude heard, or None."""
+    found = _heard_altitudes_ft(text)
+    return found[0] if found else None
+
+
+def _altitudes_equivalent(a: int, b: int) -> bool:
+    """True when two foot values are the same level (tolerate FL rounding)."""
+    if a == b:
+        return True
+    # 15000 vs FL150 (15000), or minor hundred-foot drift from speech.
+    return abs(a - b) < 50
+
+
+def _climb_readback_hit(text: str, item: dict[str, Any] | None) -> bool:
+    """True when the assigned climb altitude was heard (flexible phrasing)."""
+    assigned = _assigned_climb_ft(item)
+    if assigned is None:
+        return False
+    for heard in _heard_altitudes_ft(text):
+        if _altitudes_equivalent(heard, assigned):
+            return True
+    # Spoken cue substring (climb and maintain … / flight level …)
+    spoken = normalize(str(item.get("spoken") or ""))
+    if spoken and spoken in text:
+        return True
+    # Altitude-only spoken form still counts
+    spoken_alt = normalize(
+        re.sub(
+            r"^(climb\s+and\s+maintain|climb\s+unrestricted\s+up\s+to|climb|maintain)\s+",
+            "",
+            spoken,
+        )
+    )
+    if spoken_alt and re.search(rf"(?<!\w){re.escape(spoken_alt)}(?!\w)", text):
+        return True
+    return False
+
+
+def _heard_wrong_climb(
+    text: str, items: list[dict[str, Any]] | None
+) -> tuple[bool, int | None, int | None]:
+    """
+    (wrong, heard_ft, assigned_ft) when the pilot said a climb altitude that
+    is not the one ATC assigned.
+    """
+    item = _climb_readback_item(items)
+    assigned = _assigned_climb_ft(item)
+    if assigned is None:
+        return False, None, None
+    heard_list = _heard_altitudes_ft(text)
+    if not heard_list:
+        return False, None, assigned
+    if any(_altitudes_equivalent(h, assigned) for h in heard_list):
+        return False, assigned, assigned
+    # Any wrong altitude while this hinge is open counts (angels / FL / thousand).
+    return True, heard_list[0], assigned
+
+
+def _hinge_item_hit(text: str, item: dict[str, Any] | None) -> bool:
+    """True when one hinge checklist item was heard."""
+    if not item:
+        return False
+    key = str(item.get("key") or "")
+    if key == "squawk":
+        code = re.sub(r"\D", "", str(item.get("value") or ""))
+        return bool(code and _heard_assigned_squawk(text, code[:4]))
+    if key == "runway":
+        return _runway_readback_hit(text, item)
+    if key == "eor":
+        return _eor_readback_hit(text, item)
+    if key == "clearance":
+        return _clearance_phrase_hit(text, item)
+    if key == "climb":
+        return _climb_readback_hit(text, item)
+    if key == "callsign":
+        return _callsign_readback_hit(text, item)
+    spoken = normalize(str(item.get("spoken") or ""))
+    if spoken and spoken in text:
+        return True
+    return False
+
+
+def _callsign_readback_hit(text: str, item: dict[str, Any] | None) -> bool:
+    """True when the pilot said their own callsign (e.g. 'Bruiser 5')."""
+    if not item:
+        return False
+    raw = str(item.get("value") or "").strip()
+    spoken = normalize(str(item.get("spoken") or ""))
+    if spoken and re.search(rf"(?<!\w){re.escape(spoken)}(?!\w)", text):
+        return True
+    if raw:
+        # Digits form after normalize: 'bruiser fife' → 'bruiser 5'
+        if analyze_address(text, raw).own_callsign:
+            return True
+        raw_n = normalize(raw)
+        if raw_n and re.search(rf"(?<!\w){re.escape(raw_n)}(?!\w)", text):
+            return True
+    return False
+
+
+def _any_hinge_hit(text: str, items: list[dict[str, Any]] | None) -> bool:
+    return any(_hinge_item_hit(text, item) for item in _hinge_items(items))
+
+
+def _readback_value_hit(text: str, items: list[dict[str, Any]] | None) -> bool:
+    """True when the transcript includes a assigned value (squawk digits, runway…)."""
+    if not items:
+        return False
+    if _any_hinge_hit(text, items):
+        return True
+    for item in items:
+        key = str(item.get("key") or "")
+        if key in ("runway", "eor", "squawk", "clearance"):
+            continue
+        value = re.sub(r"\D", "", str(item.get("value") or ""))
+        if len(value) >= 3 and re.search(rf"(?<!\w){re.escape(value)}(?!\w)", text):
+            return True
+        spoken = normalize(str(item.get("spoken") or ""))
+        if spoken and re.search(rf"(?<!\w){re.escape(spoken)}(?!\w)", text):
+            return True
+    return False
+
+
+# Compact compass on airport JSON ("NW EOR") ↔ what pilots / TTS usually say.
+_PLACE_COMPASS = {
+    "nw": "northwest",
+    "ne": "northeast",
+    "sw": "southwest",
+    "se": "southeast",
+}
+# Whisper often writes the long form as two words: "north west EOR".
+_PLACE_COMPASS_PAIRS = {
+    ("north", "west"): "northwest",
+    ("north", "east"): "northeast",
+    ("south", "west"): "southwest",
+    ("south", "east"): "southeast",
+}
+
+
+def _collapse_place_compass(text: str) -> str:
+    """'NW EOR' / 'north west EOR' / 'northwest EOR' → 'northwest eor'."""
+    toks = normalize(text).split()
+    out: list[str] = []
+    i = 0
+    while i < len(toks):
+        pair = (toks[i], toks[i + 1]) if i + 1 < len(toks) else None
+        if pair and pair in _PLACE_COMPASS_PAIRS:
+            out.append(_PLACE_COMPASS_PAIRS[pair])
+            i += 2
+            continue
+        out.append(_PLACE_COMPASS.get(toks[i], toks[i]))
+        i += 1
+    return " ".join(out)
+
+
+def _eor_place_forms(value_raw: str) -> list[str]:
+    """Distinct normalized place labels for matching (nw eor, northwest eor, …)."""
+    forms: list[str] = []
+    for raw in (value_raw, _collapse_place_compass(value_raw)):
+        n = normalize(raw)
+        if n and n not in forms:
+            forms.append(n)
+        collapsed = _collapse_place_compass(n)
+        if collapsed and collapsed not in forms:
+            forms.append(collapsed)
+    return forms
+
+
+def _eor_readback_hit(text: str, item: dict[str, Any] | None) -> bool:
+    """
+    True when the pilot read back the taxi-to-EOR (or equivalent place).
+
+    Accepts the full spoken cue, the place label (NW EOR / northwest EOR /
+    north west EOR / Alpha South), or 'taxi … EOR' when the assigned
+    destination is an EOR. Bare 'at EOR' without taxi/place wording is not
+    enough — that is the later monitor-tower call.
+    """
+    if not item:
+        return False
+    text_n = normalize(text)
+    text_c = _collapse_place_compass(text_n)
+
+    spoken = normalize(str(item.get("spoken") or ""))
+    spoken_c = _collapse_place_compass(spoken)
+    for form in dict.fromkeys([spoken, spoken_c]):
+        if form and (form in text_n or form in text_c):
+            return True
+    # Drop a leading "taxi …" so "northwest eor via foxtrot" still counts.
+    for cue in (spoken, spoken_c):
+        for prefix in ("taxi to the ", "taxi to ", "taxi "):
+            if cue.startswith(prefix):
+                rest = cue[len(prefix) :].strip()
+                if rest and (rest in text_n or rest in text_c):
+                    return True
+
+    value_raw = str(item.get("value") or "").strip()
+    for form in _eor_place_forms(value_raw):
+        if form and re.search(rf"(?<!\w){re.escape(form)}(?!\w)", text_n):
+            return True
+        if form and re.search(rf"(?<!\w){re.escape(form)}(?!\w)", text_c):
+            return True
+
+    forms = _eor_place_forms(value_raw)
+    dest_is_eor = any("eor" in f.split() for f in forms)
+    if dest_is_eor and re.search(r"(?<!\w)taxi\b.{0,48}\beor(?!\w)", text_c):
+        return True
+    return False
+
+
+def _normalize_runway_token(value: str) -> str:
+    """'21R' / '21 right' / 'rwy 21l' → '21R'."""
+    raw = str(value or "").strip().upper()
+    if not raw:
+        return ""
+    m = re.match(r"^(\d{1,3})\s*([LRC])?$", raw.replace(" ", ""))
+    if m:
+        return f"{m.group(1)}{m.group(2) or ''}"
+    m = re.match(r"^(\d{1,3})\s*(LEFT|RIGHT|CENTER|CENTRE)?$", raw)
+    if m:
+        side = {"LEFT": "L", "RIGHT": "R", "CENTER": "C", "CENTRE": "C"}.get(
+            m.group(2) or "", ""
+        )
+        return f"{m.group(1)}{side}"
+    return re.sub(r"[^0-9LRC]", "", raw)
+
+
+def _runway_readback_hit(text: str, item: dict[str, Any] | None) -> bool:
+    """True when the pilot said the assigned runway (digits and/or spoken form)."""
+    if not item:
+        return False
+    assigned = _normalize_runway_token(str(item.get("value") or ""))
+    if not assigned:
+        return False
+    digits = re.sub(r"\D", "", assigned)
+    side_letter = assigned[-1] if assigned[-1:] in "LRC" else ""
+    side_word = {"L": "left", "R": "right", "C": "center"}.get(side_letter, "")
+
+    # Glued STT forms: '21r', '21l' (normalize keeps the letter on the digits).
+    if re.search(rf"(?<!\w){re.escape(assigned.lower())}(?!\w)", text):
+        return True
+    if digits and side_letter and re.search(
+        rf"(?<!\w){re.escape(digits)}{side_letter.lower()}(?!\w)", text
+    ):
+        return True
+    # '21 right' / '21 left'
+    if digits and side_word and re.search(
+        rf"(?<!\w){re.escape(digits)}\s*{side_word}(?!\w)", text
+    ):
+        return True
+    # Bare number only when the assigned runway has no L/R/C side.
+    if digits and not side_letter and re.search(
+        rf"(?<!\w){re.escape(digits)}(?!\w)", text
+    ):
+        return True
+    # extract_runway on 'runway 21r' / 'runway 21 right'
+    heard = extract_runway(text, known=[assigned, digits] if digits else None)
+    if heard and _normalize_runway_token(heard) == assigned:
+        return True
+    spoken = normalize(str(item.get("spoken") or ""))
+    if spoken and spoken in text:
+        return True
+    return False
 
 
 def _heard_assigned_squawk(text: str, code: str) -> bool:
@@ -770,23 +1397,35 @@ def _score_intents(
         # one; the rest of the time "roger" is just talk.
         if intent.id == "acknowledge_readback" and not awaiting_readback:
             continue
+        # Stay on the taxi runway readback — "at EOR" / monitor tower comes after.
+        if awaiting_readback and intent.id == "at_eor":
+            continue
+        if awaiting_readback and intent.template == "monitor_tower":
+            continue
+        # Departure radar contact is an airborne check-in — not weather.
+        if expected == "radar_contact" and intent.id in _DEPARTURE_CHECKIN_SKIP_IDS:
+            continue
         expecting = _expected_now(
             intent, expected=expected, awaiting_readback=awaiting_readback
         )
         heard_exactly = True
         summarised = False
-        # Clearance readback: the assigned squawk is the hinge. A long call that
-        # includes "squawk 0551" / "squawking 0551" fires; "in sequence" and the
-        # rest of the clearance items are optional colour.
-        squawk_code = (
-            _squawk_code(readback_items)
+        # Instruction readbacks: any hinge item closes the window (agency optional).
+        # IFR clearance also accepts a bare roger/copy; taxi/tower need a hinge.
+        hinges = (
+            _hinge_items(readback_items)
             if intent.id == "acknowledge_readback"
-            else None
+            else []
         )
+        squawk_code = _squawk_code(hinges) if hinges else None
+        hinge_hit = bool(hinges and _any_hinge_hit(text, hinges))
         squawk_hit = bool(
             squawk_code and _heard_assigned_squawk(text, squawk_code)
         )
-        if squawk_hit:
+        outstanding_runway = (
+            _runway_readback_item(readback_items) if awaiting_readback else None
+        )
+        if hinge_hit:
             confidence = min(1.0, 0.98 * intent.weight)
             coverage = 1.0
         elif intent.groups:
@@ -799,19 +1438,17 @@ def _score_intents(
                 if not (expecting and any(h not in _FILLER_HITS for h in matched)):
                     continue
                 summarised = True
-            # With a known squawk outstanding, "squawk" alone is not enough —
-            # that word without the digits used to false-fire. Short acks
-            # (roger / copy) and the assigned code still count.
-            if (
-                intent.id == "acknowledge_readback"
-                and squawk_code
-                and not squawk_hit
-                and not any(
-                    h in ("roger", "wilco", "copy", "readback", "read back")
-                    for h in matched
-                )
-            ):
-                continue
+            short_ack = any(
+                h in ("roger", "wilco", "copy", "readback", "read back")
+                for h in matched
+            )
+            # IFR: squawk code or a short ack. Taxi / takeoff / land: need a hinge.
+            if intent.id == "acknowledge_readback" and hinges and not hinge_hit:
+                if squawk_code:
+                    if not squawk_hit and not short_ack:
+                        continue
+                else:
+                    continue
             heard_exactly = all(
                 re.search(rf"(?<!\w){re.escape(h)}(?!\w)", text) for h in matched
             )
@@ -837,11 +1474,11 @@ def _score_intents(
             confidence *= 1.3
         if awaiting_readback and intent.id == "acknowledge_readback":
             confidence *= 1.35
-            if squawk_hit or _readback_value_hit(text, readback_items):
+            if hinge_hit or _readback_value_hit(text, readback_items):
                 confidence *= 1.15
-        # Long clearance readbacks bury one keyword in twenty words — once the
-        # assigned squawk is heard, do not let coverage pull the score under.
-        if squawk_hit:
+        # Long clearance readbacks bury one keyword in twenty words — once a
+        # hinge is heard, do not let coverage pull the score under.
+        if hinge_hit:
             confidence = max(confidence, 0.95)
         confidence = min(1.0, confidence)
 
@@ -851,6 +1488,14 @@ def _score_intents(
             if not runway:
                 continue
             slots["runway"] = runway
+            # During taxi readback, restating the assigned runway is a readback —
+            # not a runway-change request (e.g. "confirm runway 21R").
+            if awaiting_readback and outstanding_runway:
+                assigned = _normalize_runway_token(
+                    str(outstanding_runway.get("value") or "")
+                )
+                if assigned and _normalize_runway_token(runway) == assigned:
+                    continue
         recovery = extract_recovery(text)
         if recovery and intent.id in ("inbound_recovery", "request_landing"):
             slots["recovery"] = recovery
@@ -870,6 +1515,30 @@ def _score_intents(
                 expected=expecting,
                 summarised=summarised,
             )
+
+    # Wrong climb altitude while Departure is waiting on the radar-contact readback.
+    if awaiting_readback:
+        wrong, heard_ft, assigned_ft = _heard_wrong_climb(text, readback_items)
+        if wrong and assigned_ft is not None:
+            # Prefer the correction over a partial acknowledge that did not hinge.
+            if best is None or best.intent == "acknowledge_readback":
+                climb_hit = _climb_readback_hit(text, _climb_readback_item(readback_items))
+                if not climb_hit:
+                    return Match(
+                        intent="correct_climb_readback",
+                        kind="request",
+                        template="",
+                        confidence=0.96,
+                        slots={
+                            "climb_ft": assigned_ft,
+                            "heard_ft": heard_ft,
+                            "channel": addressed,
+                        },
+                        transcript=transcript,
+                        normalized=text,
+                        expected=True,
+                        summarised=False,
+                    )
     return best
 
 
@@ -955,6 +1624,7 @@ def evaluate(
     address = analyze_address(text, callsign)
     # Who the pilot called outranks where the timeline cursor happens to sit.
     channel = address.agency or channel
+    phase = normalize_mission_phase(phase, channel=channel or "")
 
     candidate = _score_intents(
         text,
@@ -1007,8 +1677,18 @@ def evaluate(
 
     # ATC has just spoken and is holding for an answer, so the reply it is
     # waiting on does not have to open with the agency all over again.
-    address_optional = awaiting_readback and (
-        candidate.expected or candidate.intent in _ADDRESS_OPTIONAL_INTENTS
+    # Same for "at EOR" once the timeline is on monitor tower.
+    address_optional = (
+        awaiting_readback
+        and (candidate.expected or candidate.intent in _ADDRESS_OPTIONAL_INTENTS)
+    ) or (
+        candidate.intent == "at_eor"
+        and (candidate.expected or str(expected or "") == "monitor_tower")
+    ) or (
+        # Airborne check-in may omit the agency — but not once climb readback is open.
+        candidate.intent == "departure_check_in"
+        and not awaiting_readback
+        and (candidate.expected or str(expected or "") == "radar_contact")
     )
     if require_address and not address_optional and not (
         address.to_atc or address.own_callsign
@@ -1038,6 +1718,7 @@ _AGENCY_SPOKEN: dict[str, str] = {
     "approach": "{ap} Approach",
     "departure": "{ap} Departure",
     "blackjack": "Blackjack",
+    "bandsaw": "Bandsaw",
     "ops": "{ap} Ops",
     "other": "Control",
 }
@@ -1049,6 +1730,23 @@ def agency_spoken(channel: str, airport_name: str = "") -> str:
     if not template:
         return (channel or "").title()
     return template.format(ap=airport_name.strip() or "").strip()
+
+
+# Takeoff choices belong on Tower — never offer them on Ground taxi cues.
+_TAKEOFF_SUGGESTION_IDS = frozenset(
+    {
+        "accept_rolling",
+        "deny_rolling",
+        "request_lineup",
+        "ready_departure",
+    }
+)
+
+
+# During departure radar contact: check-in only — not weather or approach recovery.
+_DEPARTURE_CHECKIN_SKIP_IDS = frozenset(
+    {"request_winds", "request_altimeter", "inbound_recovery"}
+)
 
 
 def suggestions(
@@ -1064,47 +1762,48 @@ def suggestions(
     steps: list[dict[str, Any]] | None = None,
 ) -> list[tuple[str, str]]:
     """
-    (what to say, what it does) for where the flight is right now.
+    Short (what to say, what it does) cues for the Fly kneeboard.
 
-    Normally written out in full — agency, callsign, request. While a readback
-    is outstanding the lead suggestion is the readback itself, with no agency
-    opener, because that is what ATC is waiting for.
+    Phrases stay brief on purpose — "request clearance", not a full radio call.
+    Agency + callsign still count when spoken; the card teaches the short form.
+    While a readback is outstanding the lead suggestion is the readback itself.
     """
+    _ = (callsign, airport_name)  # kept for call-site compatibility
     out: list[tuple[str, str]] = []
+    channel_l = (channel or "").strip().lower()
+    phase_l = normalize_mission_phase(phase, channel=channel_l)
+    expected_l = (expected or "").strip().lower()
     if awaiting_readback:
-        squawk_item = next(
-            (i for i in (readback_items or []) if i.get("key") == "squawk"),
-            None,
-        )
-        if squawk_item and squawk_item.get("spoken"):
-            # Clearance: the code is the only required piece. Extra route /
-            # climb colour is fine; "in sequence" is never required.
-            out.append(
-                (
-                    str(squawk_item["spoken"]).strip(),
-                    "must hear — squawk / squawking + code (rest optional)",
-                )
-            )
-        else:
-            spoken_bits = [
-                str(item.get("spoken") or "").strip()
-                for item in (readback_items or [])
-                if item.get("spoken")
-            ]
-            if spoken_bits:
+        hinges = _hinge_items(readback_items)
+        hinge_says = [
+            str(i.get("spoken") or "").strip() for i in hinges if i.get("spoken")
+        ]
+        if hinge_says:
+            if len(hinge_says) > 1:
                 out.append(
                     (
-                        ", ".join(spoken_bits[:3]),
-                        "confirm your readback — agency name optional",
+                        "   — or —   ".join(hinge_says),
+                        "either one closes it · agency name optional",
                     )
                 )
             else:
-                out.append(
-                    (
-                        "roger",
-                        "confirm your readback — agency name optional",
-                    )
+                hinge_key = str(hinges[0].get("key") or "") if hinges else ""
+                if hinge_key == "squawk":
+                    tip = "squawk / squawking + code (or roger) · agency optional"
+                elif hinge_key == "climb":
+                    tip = "altitude alone is enough · agency optional"
+                elif hinge_key == "callsign":
+                    tip = "say your callsign · agency optional"
+                else:
+                    tip = "closes the readback · agency name optional"
+                out.append((hinge_says[0], tip))
+        else:
+            out.append(
+                (
+                    "roger",
+                    "confirm your readback · agency name optional",
                 )
+            )
 
     ranked: list[tuple[int, int, Intent]] = []
     # Mission-authored phrases first — they were written for this exact step.
@@ -1115,13 +1814,49 @@ def suggestions(
         if intent.id == "acknowledge_readback":
             # Only ever valid mid-readback, and the lead line above covers it.
             continue
-        if intent.phases and phase and phase not in intent.phases:
+        if intent.phases and phase_l and phase_l not in intent.phases:
+            continue
+        # Keep Delivery free of Ground/Tower-only asks (taxi, runway, …).
+        if intent.channels and channel_l and channel_l not in intent.channels:
+            continue
+        # Taxi / Ground: no rolling or LUAW prompts.
+        if (
+            intent.id in _TAKEOFF_SUGGESTION_IDS
+            and (
+                channel_l == "ground"
+                or phase_l == "ground"
+                or expected_l in ("taxi", "monitor_tower")
+            )
+        ):
+            continue
+        # Taxi-to-EOR is outbound — don't offer taxi-in / clear-of-runway yet.
+        if expected_l == "taxi" and intent.id == "clear_of_runway":
+            continue
+        # Finish the taxi readback before offering "at EOR" / monitor tower.
+        if awaiting_readback and intent.id == "at_eor":
+            continue
+        # After taxi, kneeboard is "at EOR" — not another taxi request.
+        if expected_l == "monitor_tower" and intent.id in (
+            "ready_taxi",
+            "clear_of_runway",
+        ):
+            continue
+        # Departure radar contact: check-in cues only — not winds / altimeter.
+        if expected_l == "radar_contact" and intent.id in _DEPARTURE_CHECKIN_SKIP_IDS:
+            continue
+        # Range checkout ends Flight → Approach; never tip it during the free
+        # window (easy to say "complete" / "off station" by accident).
+        if intent.id == "range_exit" and expected_l != "bj_range_exit":
             continue
         if intent.step_id:
             rank = 0
+        elif intent.id == "ready_departure" and expected_l in _DEPARTURE_READY_TEMPLATES:
+            rank = 0
+        elif intent.id == "departure_check_in" and expected_l == "radar_contact":
+            rank = 0
         elif expected and intent.template and intent.template == expected:
             rank = 0
-        elif intent.phases:
+        elif intent.phases or intent.channels:
             rank = 1
         else:
             rank = 2
@@ -1132,14 +1867,5 @@ def suggestions(
     for _rank, _i, intent in ranked:
         if len(out) >= limit:
             break
-        agency = intent.channels[0] if intent.channels else (channel or "")
-        opener = ", ".join(
-            bit for bit in (agency_spoken(agency, airport_name), callsign.title()) if bit
-        )
-        # Readback replies stay bare; everything else keeps the agency opener.
-        if intent.id in _ADDRESS_OPTIONAL_INTENTS and awaiting_readback:
-            say = intent.example
-        else:
-            say = f"{opener}, {intent.example}" if opener else intent.example
-        out.append((say, intent.does))
+        out.append((intent.example, intent.does))
     return out

@@ -15,6 +15,13 @@ atc/secrets/*
 # Generated kneeboard output (source generator stays)
 atc/kneeboard/*.pdf
 
+# Backups the zone editor leaves next to the file it rewrites
+*.json.bak
+
+# Large reference packs for the zone editor (drop locally under tools/overlays/)
+tools/overlays/*
+!tools/overlays/README.txt
+
 # Logs / editor junk
 *.log
 .DS_Store

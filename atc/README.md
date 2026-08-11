@@ -5,7 +5,8 @@ Double-click either:
 - `Open-ATC-Setup.cmd`
 - `Open-Flight-Flow.cmd`
 
-Both open the same polished UI.
+Both open the same polished UI. `Open-Zone-Editor.cmd` is the separate map for
+drawing the areas that fire steps automatically — the app has a button for it too.
 
 ## Tabs
 1. **Plan Flight** — build the full sortie timeline (TTS template, custom text, or MP3/OGG). No JSON editing.
@@ -33,7 +34,7 @@ privilege, not which keys you picked. Three ways around it:
 
 | Option | Needs admin? | Notes |
 |--------|--------------|-------|
-| **HOTAS button** | No | Reads the stick directly, unaffected by focus. Setup → Controls → **Learn…** |
+| **HOTAS / mouse button** | No | Reads the stick or mouse directly, unaffected by focus. Setup → Controls → **Learn…** (same control — press either) |
 | **Keyboard hotkey** | No | Also polled, so it survives DCS focus. Does not swallow the key, so pick a combo DCS ignores |
 | **Local URL** | No | `http://127.0.0.1:8765/next` and `/back` — a Stream Deck *Website* action, no keystroke involved |
 | **Restart as administrator** | Yes | Belt and braces: makes the registered hotkey work as well |
@@ -42,8 +43,8 @@ Use whichever you prefer, or all of them at once — a press is only acted on on
 matter how many routes it arrives by.
 
 **Show SRS PTT buttons…** lists the HOTAS buttons SRS already transmits on, so you can
-pick something else for Next/Back. The **Last trigger** line confirms a press actually
-reached the app.
+pick something else for Next/Back. Mouse side buttons (4 / 5) are a good spare option.
+The **Last trigger** line confirms a press actually reached the app.
 
 ### Keyboard hotkeys
 
@@ -59,6 +60,113 @@ key also reaching DCS. Running both means the hotkey works everywhere, and the d
 is discarded.
 
 Other endpoints on the same local server: `/reset`, `/flip`, `/seek?n=7`, `/status`.
+
+### Frequency gate
+
+External Advance / Previous (hotkey, HOTAS, mouse, voice, Stream Deck URL) only
+transmit when you are tuned to the step’s frequency. On-screen **Play** is never
+blocked. If radio state is unknown or stale, the gate **allows** and Fly shows
+`Radio tune unknown — gate open`.
+
+**In the jet:** Setup → Controls → **Install DCS radio export…** (or
+`Install-DCS-Radio-Export.cmd`). That copies the Lua script and patches
+`Export.lua` automatically — leave the SRS line alone. Writes
+`Saved Games\DCS\ATC-ExternalAudio\radios.json` for the gate to read.
+
+**External AWACS (testing):** enable **External AWACS radio source** on Setup →
+Controls. Fly shows an EAM radio strip — mirror your SRS AWACS overlay freqs, or
+use **Tune to step** while walking the flow.
+
+### Automatic clearances from live position
+
+Setup → Controls → **Automatic clearances (live position)** watches the Opus CAOC
+radar feed and issues the clearance the flight has physically earned:
+
+* **Cleared for takeoff** once every flight member is lined up on the runway.
+* **Monitor tower** once every flight member has reached the EOR — so you don't
+  have to say "at EOR" at all.
+
+Each fires once per sortie and re-arms on **Reset**. A rolling offer is never
+automatic, and line-up-and-wait still comes from your ready call, since nobody is
+on the runway yet at that point. Fly shows a live line under the frequency gate:
+`21R: in position 1/2 · at EOR 0/2 · need 2`.
+
+Turn off **Require every flight member** if you fly with AI wingmen — AI tracks
+often carry no flight label, so the flight can collapse to just your jet.
+
+These two only work at fields whose runway and EOR areas have been traced. Fly
+says `geometry not calibrated, nothing will fire` when they have not — the shipped
+Nellis numbers are estimated from published field data, close but not tight
+enough to tell the runway from the parallel taxiway, and nothing fires on a
+guess. Trace them once with the zone editor below.
+
+If a jet you know is tracking straight reports about 12° of heading error, the
+feed is sending magnetic — set `position_heading_offset_deg` in `config.json`.
+
+### Drawing the areas (zone editor)
+
+**Setup → Automatic clearances → Draw zones on a map…** opens a satellite map in
+your browser. Pick the field, trace an area, say what it fires, press Save. The
+same button is on **Plan Flight** next to **Fires when** as **Draw one…**, and
+`Open-Zone-Editor.cmd` next to this app opens it without the app running.
+
+It is a separate little program — a local web server on `127.0.0.1:8777`
+(`zone_editor_port` in `config.json` moves it) that serves the map and writes
+`airports.json`. Nothing leaves your machine except the map tiles. Pressing the
+button again just brings the tab back rather than starting a second copy, and
+closing the app stops it.
+
+Saved areas show up on their own: the app re-reads `airports.json` every few
+seconds, so a new zone is in the picker without a restart. Live CAOC tracks are
+drawn on the same map, which is how you check that a jet parked on the runway in
+DCS also sits inside the area you traced. Details of the drawing tools, imports
+from Google Earth KML and the `calibrated` flag are in `tools/README.md`.
+
+### Any step can fire off a zone
+
+The two above are the built-in cases. On **Plan Flight**, any step — including a
+custom one on the `other` channel for a custom agency — can name a drawn area
+under **Fires when**, and it goes off when the flight is in it. The timeline marks
+those steps `[auto: <zone>]`. The Setup master switch still applies: with
+**Watch live position** off, nothing fires off position at all.
+
+| Control | What it does |
+|---------|--------------|
+| Zone | A trigger tag (`eor`, `tower`) or one specific area. A tag follows the active runway, so one flow works off either end; an id pins to the area you picked. The picker shows which tags have nothing drawn yet. |
+| inside / leaving | `leaving` is for arrival steps — "clear of the runway" fires once the flight has been in the area and is out of it again. |
+| settled | Stopped, on the deck and lined up with the runway, not merely inside. On by default; turn it off for an airborne area like a tower zone, where heading means nothing. |
+| Hold for | Seconds the condition must hold *continuously*. Blank uses `auto_clearance_dwell_s`. A jet dropping out restarts the clock rather than pausing it. |
+| Radio gap | Minimum seconds since the last transmission, so the call never treads on the one before it. |
+
+For line-up-and-wait, where everyone should be lined up before the takeoff
+clearance rather than merely on the runway: `settled` on, hold for 15 s, radio gap
+8 s. In `atc/flows/*.json` that step reads:
+
+```json
+{
+  "id": "twr_clear_takeoff",
+  "template": "clear_takeoff",
+  "trigger": {
+    "zone": "in_position",
+    "when": "inside",
+    "flight": "all",
+    "settled": true,
+    "dwell_s": 15,
+    "gap_s": 8
+  }
+}
+```
+
+`flight` is `all` or `me`; leave it out to follow the **Require every flight
+member** setting. `me` means your jet specifically, not whichever wingman happens
+to be parked in the right place. A step with no `trigger` waits to be asked, as
+before.
+
+Zones can carry an altitude band (`min_alt_ft` / `max_alt_ft`, feet AGL), so
+traffic overhead does not count as being on your ramp. A floor of `0` means the
+surface and includes a jet reading slightly below it — field elevation is one
+number for a field that is not flat. Bands are set in the zone editor; the
+shipped Nellis `tower` area is a 5 NM circle, surface to 5000 ft.
 
 ---
 
@@ -154,11 +262,28 @@ Calls it understands:
 | "Ground, ready to taxi" / "request clearance" / "ready for departure" | Fires the matching flow step |
 | "Request runway two one left" | Sets the runway and reads back the approval |
 | "Say winds" / "say altimeter" | Live METAR answer |
-| "Blackjack, request picture" | Group picture from the live CAOC radar feed |
+| "Blackjack, request picture" | Group picture from the live CAOC radar feed (hostiles within `picture_max_range_nm`, default 150) |
+| "Bandsaw, checking in" / "request picture" | Optional C2 check-in / picture on Bandsaw |
+| "Blackjack, request Bandsaw" | Push to Bandsaw (optional; you can also self-tune) |
+| "Blackjack, off station / range complete" | Range checkout → Approach (required after Blackjack check-in) |
 | "Alpha check" | Bullseye position for your aircraft |
 | "We'll take the rolling" / "unable rolling" | Accepts or declines the rolling departure |
 | "Gear down full stop" / "going around" / "clear of the runway" | Fires the matching step |
 | "Say again" | Replays the last transmission |
+
+The mission timeline uses three **mission phases** (separate from the radio agency):
+
+| Phase | Agencies |
+|-------|----------|
+| **Departure** | Delivery, Ground, Tower, Departure |
+| **Flight / airwork** | Blackjack, Bandsaw, Ops, Other (en-route / C2) |
+| **Approach** | Approach, Tower, Ground |
+
+After Blackjack check-in you are in Flight: stay on Blackjack, push or self-tune to
+**Bandsaw** for picture/C2 work, or do other range tasks. **You can say** tips follow
+the frequency you are actually tuned to within that phase (Blackjack tips on 377.8,
+Bandsaw tips on 378.225). Before Approach you must return to Blackjack and check out
+(range exit) — Bandsaw is optional and does not block that handoff.
 
 When a call fires a step, the Fly card moves to the next step on its own — same as if you
 had pressed **Play and advance**. Answers that are not steps (winds, altimeter, picture,
@@ -286,3 +411,30 @@ Server ATIS is unchanged (still server-side).
 | `tts_voices` | `"en-US-Neural2-D"` etc. | Per-agency Google voice ids |
 
 Voice catalog: https://cloud.google.com/text-to-speech/docs/voices
+
+---
+
+## Automatic clearance tuning (`config.json`)
+
+Only needed if the defaults misjudge your field. Distances are metres.
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `auto_clearance_enabled` | `false` | Master switch for position-driven clearances |
+| `auto_takeoff_clearance` | `true` | Cleared for takeoff when in position |
+| `auto_monitor_tower` | `true` | Monitor tower when at the EOR |
+| `auto_clearance_require_full_flight` | `true` | Every member must qualify, not just you |
+| `auto_clearance_dwell_s` | `3.0` | Default hold time, when a step does not set its own |
+| `position_lateral_margin_m` | `20` | Slack either side of the runway edge (fallback box only) |
+| `position_box_m` | `900` | How far past the threshold counts as in position (fallback box only) |
+| `position_heading_tolerance_deg` | `30` | How far off runway heading is tolerated |
+| `position_heading_offset_deg` | `0` | Correction if the feed reports magnetic heading |
+| `position_alt_tolerance_m` | `60` | Height band around field elevation |
+| `position_max_speed_mps` | `12` | Above this you are rolling, not in position |
+| `position_settled_speed_mps` | `2` | Stopped, for a step that asks for **settled** — tighter than the taxi limit above |
+| `eor_radius_m` | `250` | Size of the EOR circle (fallback only; a drawn area wins) |
+| `own_max_distance_m` | `20000` | Ignore a matched track further out than this |
+| `zone_editor_port` | `8777` | Loopback port the zone editor serves the map on |
+
+`check_runway_position.py` exercises the geometry and the zone containment tests
+against synthetic data — worth running after editing any of these.

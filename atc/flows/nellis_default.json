@@ -1,7 +1,7 @@
 {
   "name": "Nellis Default",
   "airport": "nellis",
-  "initial_climb_ft": 15000,
+  "initial_climb_ft": 25000,
   "active_recovery": "tactical_overhead",
   "recovery_options": [
     "visual_overhead",
@@ -12,19 +12,19 @@
   "steps": [
     {
       "id": "del_clearance",
-      "phase": "delivery",
+      "phase": "departure",
       "label": "Clearance delivery",
       "channel": "delivery",
-      "mode": "tts",
+      "mode": "file",
       "template": "clearance",
-      "file": null,
+      "file": "C:/ATCSounds/1.mp3",
       "enabled": true,
       "text": null,
-      "initial_climb_ft": 15000
+      "initial_climb_ft": 25000
     },
     {
       "id": "del_readback",
-      "phase": "delivery",
+      "phase": "departure",
       "label": "Readback correct",
       "channel": "delivery",
       "mode": "tts",
@@ -35,7 +35,7 @@
     },
     {
       "id": "gnd_taxi",
-      "phase": "ground",
+      "phase": "departure",
       "label": "Taxi to EOR",
       "channel": "ground",
       "mode": "tts",
@@ -46,30 +46,34 @@
     },
     {
       "id": "gnd_monitor_tower",
-      "phase": "ground",
+      "phase": "departure",
       "label": "Monitor tower",
       "channel": "ground",
       "mode": "tts",
       "template": "monitor_tower",
       "file": null,
       "enabled": true,
-      "text": null
+      "text": null,
+      "trigger": {
+        "zone": "eor",
+        "when": "inside",
+        "settled": true
+      }
     },
     {
       "id": "twr_lineup",
-      "phase": "tower",
+      "phase": "departure",
       "label": "Line up and wait",
       "channel": "tower",
       "mode": "tts",
       "template": "lineup",
       "file": null,
       "enabled": true,
-      "text": null,
-      "tts_speed": 8
+      "text": null
     },
     {
       "id": "twr_clear_takeoff",
-      "phase": "tower",
+      "phase": "departure",
       "label": "Cleared takeoff",
       "channel": "tower",
       "mode": "tts",
@@ -77,7 +81,13 @@
       "file": null,
       "enabled": true,
       "text": null,
-      "tts_speed": 8
+      "trigger": {
+        "zone": "in_position",
+        "when": "inside",
+        "settled": true,
+        "dwell_s": 15,
+        "gap_s": 8
+      }
     },
     {
       "id": "dep_radar",
@@ -89,7 +99,7 @@
       "file": null,
       "enabled": true,
       "text": null,
-      "initial_climb_ft": 15000
+      "initial_climb_ft": 25000
     },
     {
       "id": "dep_handoff",
@@ -104,7 +114,7 @@
     },
     {
       "id": "bj_checkin",
-      "phase": "blackjack",
+      "phase": "flight",
       "label": "Blackjack check-in / alpha",
       "channel": "blackjack",
       "mode": "tts",
@@ -112,6 +122,29 @@
       "file": null,
       "enabled": true,
       "text": null
+    },
+    {
+      "id": "bs_checkin",
+      "phase": "flight",
+      "label": "Bandsaw check-in (optional)",
+      "channel": "bandsaw",
+      "mode": "tts",
+      "template": "bandsaw_check_in",
+      "file": null,
+      "enabled": true,
+      "text": null
+    },
+    {
+      "id": "bj_range_exit",
+      "phase": "flight",
+      "label": "Blackjack range exit",
+      "channel": "blackjack",
+      "mode": "tts",
+      "template": "bj_range_exit",
+      "file": null,
+      "enabled": true,
+      "text": null,
+      "handoff_channel": "approach"
     },
     {
       "id": "app_recovery",
@@ -139,7 +172,7 @@
     },
     {
       "id": "twr_right_break",
-      "phase": "tower",
+      "phase": "approach",
       "label": "Right break",
       "channel": "tower",
       "mode": "tts",
@@ -150,7 +183,7 @@
     },
     {
       "id": "twr_clear_land",
-      "phase": "tower",
+      "phase": "approach",
       "label": "Cleared to land",
       "channel": "tower",
       "mode": "tts",
@@ -161,7 +194,7 @@
     },
     {
       "id": "twr_exit",
-      "phase": "tower",
+      "phase": "approach",
       "label": "Exit runway",
       "channel": "tower",
       "mode": "tts",
@@ -172,7 +205,7 @@
     },
     {
       "id": "gnd_taxi_in",
-      "phase": "ground",
+      "phase": "approach",
       "label": "Taxi in",
       "channel": "ground",
       "mode": "tts",
