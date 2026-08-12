@@ -3,13 +3,14 @@ Pilot radio tune state for the Advance / TX frequency gate.
 
 Sources (first match wins):
   1. Fresh DCS Export file from ATC-RadioExport.lua (in-jet)
-  2. Live SRS client UDP CombinedRadioState (EAM / AWACS overlay selected radio)
-  3. Manual in-app EAM radio strip (fallback when SRS UDP is quiet)
+  2. Live SRS client UDP CombinedRadioState (selected radio / common PTT)
+  3. Manual in-app EAM radio strip (only when External AWACS mode is enabled)
   4. Unknown — caller should allow and warn
 
 SRS SR-ClientRadio.exe already broadcasts CombinedRadioState JSON to
 127.0.0.1:7080 and :7082 (~5 Hz) including RadioInfo.selected + radios[].freq.
-That is how we learn the common-PTT selected frequency without a manual picker.
+That is how we learn the common-PTT selected frequency without requiring the
+External AWACS checkbox (that flag only enables the manual Fly EAM strip).
 """
 
 from __future__ import annotations
@@ -32,7 +33,9 @@ DEFAULT_STALE_S = 3.0
 SRS_UDP_STALE_S = 1.5
 MIN_FREQ_HZ = 1_000_000  # ignore intercom / dead radios
 MOD_INTERCOM = 3
-DEFAULT_SRS_UDP_PORTS = (7082, 7080)  # OutgoingDCSUDPOther, OutgoingDCSUDPInfo
+# Prefer Info (7080) — that is where CombinedRadioState usually lands; Other (7082)
+# is often quiet. We listen on every bindable port from the list.
+DEFAULT_SRS_UDP_PORTS = (7080, 7082)  # OutgoingDCSUDPInfo, OutgoingDCSUDPOther
 
 # Runtime EAM freqs (MHz) — updated by the Fly UI; also mirrored into config on save.
 # Only the selected (active) radio counts as "tuned" for the frequency gate.
@@ -48,6 +51,7 @@ _srs_udp_radios_mhz: list[float] = []
 _srs_udp_name: str = ""
 _srs_udp_received_at: float = 0.0
 _srs_udp_port: int | None = None
+_srs_udp_ports_bound: list[int] = []
 _srs_udp_error: str = ""
 _srs_udp_thread: threading.Thread | None = None
 _srs_udp_stop = threading.Event()
@@ -146,7 +150,8 @@ def srs_udp_ports_from_cfg() -> list[int]:
                 values[key] = int(raw.strip())
             except ValueError:
                 continue
-        for key in ("OutgoingDCSUDPOther", "OutgoingDCSUDPInfo"):
+        # Info first — CombinedRadioState is typically on OutgoingDCSUDPInfo.
+        for key in ("OutgoingDCSUDPInfo", "OutgoingDCSUDPOther"):
             if key in values and values[key] not in found:
                 found.append(values[key])
         if found:
@@ -176,6 +181,7 @@ def srs_udp_status() -> dict[str, Any]:
         age = (time.time() - _srs_udp_received_at) if _srs_udp_received_at else None
         return {
             "port": _srs_udp_port,
+            "ports_bound": list(_srs_udp_ports_bound),
             "error": _srs_udp_error,
             "name": _srs_udp_name,
             "selected_index": _srs_udp_selected_index,
@@ -215,47 +221,63 @@ def read_srs_client_selected(*, stale_s: float = SRS_UDP_STALE_S) -> RadioState:
 
 
 def _srs_udp_loop() -> None:
-    global _srs_udp_port, _srs_udp_error
+    """Listen on every bindable SRS UDP port (Info + Other)."""
+    global _srs_udp_port, _srs_udp_ports_bound, _srs_udp_error
     ports = srs_udp_ports_from_cfg()
-    sock: socket.socket | None = None
-    bound_port: int | None = None
-    last_err = ""
+    socks: list[socket.socket] = []
+    bound: list[int] = []
+    errors: list[str] = []
     for port in ports:
         candidate = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             candidate.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             candidate.bind(("127.0.0.1", int(port)))
-            candidate.settimeout(0.5)
-            sock = candidate
-            bound_port = int(port)
-            break
+            candidate.settimeout(0.35)
+            socks.append(candidate)
+            bound.append(int(port))
         except OSError as exc:
-            last_err = f"bind {port}: {exc}"
+            errors.append(f"bind {port}: {exc}")
             try:
                 candidate.close()
             except OSError:
                 pass
     with _srs_udp_lock:
-        _srs_udp_port = bound_port
-        _srs_udp_error = "" if sock else last_err or "no UDP port"
-    if sock is None:
+        _srs_udp_ports_bound = list(bound)
+        _srs_udp_port = bound[0] if bound else None
+        _srs_udp_error = "" if socks else ("; ".join(errors) or "no UDP port")
+    if not socks:
         return
     try:
         while not _srs_udp_stop.is_set():
-            try:
-                data, _addr = sock.recvfrom(65535)
-            except socket.timeout:
-                continue
-            except OSError as exc:
-                with _srs_udp_lock:
-                    _srs_udp_error = str(exc)
-                break
-            _ingest_srs_udp_payload(data)
+            got_any = False
+            for sock in socks:
+                try:
+                    data, _addr = sock.recvfrom(65535)
+                except socket.timeout:
+                    continue
+                except OSError as exc:
+                    with _srs_udp_lock:
+                        _srs_udp_error = str(exc)
+                    continue
+                got_any = True
+                # Remember which port last delivered a CombinedRadioState.
+                try:
+                    port_no = int(sock.getsockname()[1])
+                except OSError:
+                    port_no = None
+                if port_no is not None:
+                    with _srs_udp_lock:
+                        _srs_udp_port = port_no
+                _ingest_srs_udp_payload(data)
+            if not got_any:
+                # Brief yield when every socket timed out this pass.
+                time.sleep(0.05)
     finally:
-        try:
-            sock.close()
-        except OSError:
-            pass
+        for sock in socks:
+            try:
+                sock.close()
+            except OSError:
+                pass
 
 
 def _ingest_srs_udp_payload(data: bytes) -> None:
@@ -270,46 +292,53 @@ def _ingest_srs_udp_payload(data: bytes) -> None:
         return
     if not isinstance(payload, dict):
         return
-    info = payload.get("RadioInfo") or payload
+    info = payload.get("RadioInfo") or payload.get("radioInfo") or payload
     if not isinstance(info, dict):
         return
-    radios = info.get("radios") or []
+    radios = info.get("radios") or info.get("Radios") or []
     if not isinstance(radios, list):
         return
+    selected_raw = info.get("selected")
+    if selected_raw is None:
+        selected_raw = info.get("Selected")
     try:
-        selected = int(info.get("selected") if info.get("selected") is not None else -1)
+        selected = int(selected_raw) if selected_raw is not None else -1
     except (TypeError, ValueError):
         selected = -1
     bank: list[float] = []
+    bank_indices: list[int] = []
     selected_mhz: float | None = None
     for i, entry in enumerate(radios):
         if not isinstance(entry, dict):
             continue
         try:
-            mod = int(entry.get("modulation") or 0)
+            mod = int(entry.get("modulation") if entry.get("modulation") is not None else entry.get("Modulation") or 0)
         except (TypeError, ValueError):
             mod = 0
         if mod == MOD_INTERCOM:
             continue
         try:
-            hz = float(entry.get("freq") or 0)
+            hz = float(entry.get("freq") if entry.get("freq") is not None else entry.get("Freq") or 0)
         except (TypeError, ValueError):
             continue
         mhz = _hz_to_mhz(hz)
         if mhz is None:
             continue
         bank.append(mhz)
+        bank_indices.append(i)
         if i == selected:
             selected_mhz = mhz
-    # If selected was SATCOM/intercom, fall back to first usable radio.
+    # If selected was SATCOM/intercom / missing, fall back to first usable radio.
     if selected_mhz is None and bank:
         selected_mhz = bank[0]
-        selected = 0
+        selected = bank_indices[0] if bank_indices else 0
+    # Empty bank still marks receipt so diagnostics show the client is alive.
     with _srs_udp_lock:
-        _srs_udp_selected_mhz = selected_mhz
-        _srs_udp_selected_index = selected
-        _srs_udp_radios_mhz = bank
-        _srs_udp_name = str(info.get("name") or "").strip()
+        if selected_mhz is not None:
+            _srs_udp_selected_mhz = selected_mhz
+            _srs_udp_selected_index = selected
+            _srs_udp_radios_mhz = bank
+        _srs_udp_name = str(info.get("name") or info.get("Name") or "").strip()
         _srs_udp_received_at = time.time()
         _srs_udp_error = ""
 
@@ -352,8 +381,9 @@ def apply_config(config: dict[str, Any] | None) -> None:
             set_eam_active_index(int(cfg.get("freq_gate_eam_active") or 0))
         except (TypeError, ValueError):
             set_eam_active_index(0)
-    if _eam_enabled or bool(cfg.get("freq_gate_enabled", True)):
-        ensure_srs_udp_listener()
+    # Always listen for CombinedRadioState so Fly "YOU ARE ON" works even when
+    # the frequency gate and External AWACS strip are both off.
+    ensure_srs_udp_listener()
 
 
 def saved_games_roots() -> list[Path]:
@@ -446,8 +476,8 @@ def current_radio_state(
     stale_s: float | None = None,
 ) -> RadioState:
     """
-    Resolve tuned radios: fresh DCS export, else live SRS selected radio (EAM),
-    else manual EAM strip, else none.
+    Resolve tuned radios: fresh DCS export, else live SRS selected radio,
+    else (when External AWACS mode is on) the manual EAM strip, else none.
     """
     cfg = config or {}
     if config is not None:
@@ -456,6 +486,11 @@ def current_radio_state(
             set_eam_enabled(bool(cfg.get("freq_gate_eam_enabled")))
         if "freq_gate_eam_freqs" in cfg and isinstance(cfg.get("freq_gate_eam_freqs"), list):
             set_eam_freqs_mhz(list(cfg["freq_gate_eam_freqs"]))
+        if "freq_gate_eam_active" in cfg:
+            try:
+                set_eam_active_index(int(cfg.get("freq_gate_eam_active") or 0))
+            except (TypeError, ValueError):
+                pass
     limit = float(cfg.get("freq_gate_stale_s") or stale_s or DEFAULT_STALE_S)
     dcs = read_dcs_radios(stale_s=limit)
     # In-jet with fresh export wins even if freqs empty (still "known" session)
@@ -464,10 +499,12 @@ def current_radio_state(
         return dcs
     if dcs.fresh and dcs.freqs_mhz:
         return dcs
+    # Live SRS selected radio (common PTT) — works in-jet or EAM without the
+    # External AWACS checkbox; that flag only enables the manual Fly strip.
+    srs = read_srs_client_selected(stale_s=SRS_UDP_STALE_S)
+    if srs.fresh and srs.freqs_mhz:
+        return srs
     if _eam_enabled:
-        srs = read_srs_client_selected(stale_s=SRS_UDP_STALE_S)
-        if srs.fresh and srs.freqs_mhz:
-            return srs
         # Manual strip fallback when SRS client is not broadcasting.
         active = eam_active_mhz()
         return RadioState(

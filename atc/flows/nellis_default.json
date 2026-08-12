@@ -2,7 +2,7 @@
   "name": "Nellis Default",
   "airport": "nellis",
   "initial_climb_ft": 25000,
-  "active_recovery": "tactical_overhead",
+  "active_recovery": "visual_overhead",
   "recovery_options": [
     "visual_overhead",
     "tactical_overhead",
@@ -135,6 +135,17 @@
       "text": null
     },
     {
+      "id": "bs_checkout",
+      "phase": "flight",
+      "label": "Bandsaw check-out \u2192 Blackjack",
+      "channel": "bandsaw",
+      "mode": "tts",
+      "template": "bandsaw_check_out",
+      "file": null,
+      "enabled": true,
+      "text": null
+    },
+    {
       "id": "bj_range_exit",
       "phase": "flight",
       "label": "Blackjack range exit",
@@ -147,28 +158,39 @@
       "handoff_channel": "approach"
     },
     {
-      "id": "app_recovery",
+      "id": "app_checkin",
       "phase": "approach",
-      "label": "Approach recovery",
+      "label": "Approach check-in (expect recovery)",
       "channel": "approach",
       "mode": "tts",
       "template": "approach_check_in",
       "file": null,
       "enabled": true,
       "text": null,
-      "recovery": "tactical_overhead"
+      "recovery": "visual_overhead"
     },
     {
-      "id": "app_overhead",
+      "id": "app_procedure",
       "phase": "approach",
-      "label": "Approach clearance + tower",
+      "label": "Approach clearance (VFR / IAF)",
+      "channel": "approach",
+      "mode": "tts",
+      "template": "approach_procedure",
+      "file": null,
+      "enabled": true,
+      "text": null
+    },
+    {
+      "id": "app_tower",
+      "phase": "approach",
+      "label": "Contact tower",
       "channel": "approach",
       "mode": "tts",
       "template": "cleared_approach",
       "file": null,
       "enabled": true,
       "text": null,
-      "approach_pattern": "tactical_overhead"
+      "approach_pattern": "visual_overhead"
     },
     {
       "id": "twr_right_break",

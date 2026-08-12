@@ -133,15 +133,16 @@ class FlowEngine:
         save_json(STATE_PATH, self.state)
 
     def _advance_past_skippable(self) -> None:
-        """Skip lineup when rolling takeoff is active (no LUAW)."""
+        """Skip lineup when rolling; skip right-break on instrument/straight-in."""
         steps = self.steps
         if not steps:
             return
         idx = int(self.state.get("index") or 0)
         if idx < 0:
             idx = 0
-        while idx < len(steps) and atc_phrase.should_skip_takeoff_step(
-            steps[idx], self.mission, self.state
+        while idx < len(steps) and (
+            atc_phrase.should_skip_takeoff_step(steps[idx], self.mission, self.state)
+            or atc_phrase.should_skip_approach_step(steps[idx], self.mission, self.state)
         ):
             idx += 1
         self.state["index"] = idx
@@ -496,6 +497,12 @@ class FlowEngine:
         if not allowed:
             raise RuntimeError(msg)
 
+    @staticmethod
+    def _hold_cursor_after_play(step: dict[str, Any] | None) -> bool:
+        """Stay on Bandsaw / Approach procedure until a later call advances."""
+        tmpl = str((step or {}).get("template") or "")
+        return tmpl in ("bandsaw_check_in", "approach_check_in", "approach_procedure")
+
     def next(self, *, bypass_freq_gate: bool = False) -> dict[str, Any]:
         steps = self.steps
         if not steps:
@@ -509,8 +516,9 @@ class FlowEngine:
         step = steps[idx]
         self._freq_gate_or_raise(step, bypass=bypass_freq_gate)
         result = self.play_step(step)
-        self.state["index"] = idx + 1
-        self._advance_past_skippable()
+        if not self._hold_cursor_after_play(step):
+            self.state["index"] = idx + 1
+            self._advance_past_skippable()
         self.save_state()
         result["advanced_to_index"] = self.state["index"]
         result["active_takeoff_mode"] = atc_phrase.resolve_active_takeoff_mode(
@@ -573,8 +581,9 @@ class FlowEngine:
                 play = cur if cur is not None else step
                 self._freq_gate_or_raise(play, bypass=bypass_freq_gate)
                 result = self.play_step(play)
-                self.state["index"] = int(self.state.get("index") or 0) + 1
-                self._advance_past_skippable()
+                if not self._hold_cursor_after_play(play):
+                    self.state["index"] = int(self.state.get("index") or 0) + 1
+                    self._advance_past_skippable()
                 self.save_state()
                 return result
         raise KeyError(f"Unknown step id: {step_id}")

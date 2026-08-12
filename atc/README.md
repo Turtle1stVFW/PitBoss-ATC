@@ -262,10 +262,18 @@ Calls it understands:
 | "Ground, ready to taxi" / "request clearance" / "ready for departure" | Fires the matching flow step |
 | "Request runway two one left" | Sets the runway and reads back the approval |
 | "Say winds" / "say altimeter" | Live METAR answer |
-| "Blackjack, request picture" | Group picture from the live CAOC radar feed (hostiles within `picture_max_range_nm`, default 150) |
-| "Bandsaw, checking in" / "request picture" | Optional C2 check-in / picture on Bandsaw |
+| "Blackjack, request picture" | AFTTP picture (RANGE/AZIMUTH/VIC/… from live CAOC hostiles within `picture_max_range_nm`) |
+| "Blackjack, bogey dope" / "BRAA" | BRAA to the closest hostile relative to you |
+| "Blackjack, declare bullseye 056 67" | Short declaration only (`Fleece 1, Blackjack, hostile.`); cue picks the contact |
+| "Bandsaw, checking in" / picture / bogey dope / declare | Optional C2 on Bandsaw |
+| "Bandsaw, checking out / switch Blackjack" | Leave Bandsaw → contact Blackjack (not check-in) |
 | "Blackjack, request Bandsaw" | Push to Bandsaw (optional; you can also self-tune) |
 | "Blackjack, off station / range complete" | Range checkout → Approach (required after Blackjack check-in) |
+| "Approach, checking in" / "inbound" | Approach assigns recovery from METAR (VMC → VFR recovery + TAC overhead; IFR → instrument + IAF). Prefers RWY 21 |
+| "Request ARCOE / TORYE / STRYK / MINTT / overhead / instrument" | Change the assigned recovery / approach |
+| "Request hold" / "cancel hold" | Spoken hold / continue (simple state) |
+| "Request vectors" | Radar vector clearance toward recovery / field |
+| "Airport in sight, request tower" | Cleared approach / contact Tower |
 | "Alpha check" | Bullseye position for your aircraft |
 | "We'll take the rolling" / "unable rolling" | Accepts or declines the rolling departure |
 | "Gear down full stop" / "going around" / "clear of the runway" | Fires the matching step |
@@ -282,8 +290,33 @@ The mission timeline uses three **mission phases** (separate from the radio agen
 After Blackjack check-in you are in Flight: stay on Blackjack, push or self-tune to
 **Bandsaw** for picture/C2 work, or do other range tasks. **You can say** tips follow
 the frequency you are actually tuned to within that phase (Blackjack tips on 377.8,
-Bandsaw tips on 378.225). Before Approach you must return to Blackjack and check out
-(range exit) — Bandsaw is optional and does not block that handoff.
+Bandsaw tips on 378.225). When finished with Bandsaw, **check out** on that net
+(“checking out” / “switch Blackjack”) — that call advances past Bandsaw;
+check-in alone does not. Then return to Blackjack for range exit before Approach.
+Bandsaw is optional and does not block that handoff.
+
+**Approach / recovery (NAFBI 11-250):** Blackjack range exit says **proceed direct**
+to the exit / recovery fix (e.g. Arcoe / Torye / Dudbe) and hands you to Approach.
+Approach **check-in** gives landing south/north and **expect** (e.g. Arcoe recovery
+for the TAC Overhead, or ILS Zulu 21L). The next step is the **clearance** —
+VFR: cleared … recovery; instrument: *cross Dudbe at or above 16000, cleared ILS
+Zulu runway 21L* (one procedure only — ILS **or** LOC, not both). Assignment order:
+
+1. Your spoken / Fly override  
+2. A recovery or IAF named near the **end of the Opus filed route** (e.g. `… STRYK KLSV`)  
+3. METAR: VMC → runway-side VFR default (ARCOE/TORYE/STRYK on 21, MINTT on 03); IFR → instrument + IAF  
+
+Per NellisAFBI 11-250 §4.13.5 the four VFR recoveries are **STRYK, TORYE, ARCOE,
+MINTT** — TORYE and ARCOE are separate initial fixes (Elgin pick-up is TORYE).
+Check-in sounds like: *“Fleece 1, Nellis Approach, Nellis landing south, expect
+TAC Overhead runway two one right, cleared direct Arcoe, …”* (or Torye / Stryk /
+Mintt for that recovery; landing north when the 03s are active; instrument uses
+the plate name + IAF). Descend altitude comes from the VFR recovery or the
+**plate IAF altitude** in `approaches/nellis.json`. Speed is **not** cleared
+unless traffic (or similar) sets a restriction. Recoveries prefer the **21s**;
+the **03s** are used only when headwind on 03 is **11 kt or greater**. You can
+request a different recovery, hold, or vectors. “Airport in sight / request tower”
+clears you to Tower.
 
 When a call fires a step, the Fly card moves to the next step on its own — same as if you
 had pressed **Play and advance**. Answers that are not steps (winds, altimeter, picture,

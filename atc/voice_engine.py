@@ -57,10 +57,11 @@ DEFAULT_MIN_CONFIDENCE = 0.6
 # Steers Whisper towards callsigns and phraseology instead of plain English.
 _BASE_PROMPT = (
     "Radio call to air traffic control. Nellis ground, tower, approach, departure, "
-    "clearance delivery, Blackjack, Magic. Request taxi, ready for departure, "
+    "clearance delivery, Blackjack, Bandsaw, Magic. Request taxi, ready for departure, "
     "cleared for takeoff, request runway two one left, say winds, say altimeter, "
-    "request picture, alpha check, bullseye, angels, rolling departure, "
-    "line up and wait, gear down full stop, tactical overhead, say again."
+    "request picture, bogey dope, declare, alpha check, bullseye, angels, rolling departure, "
+    "line up and wait, gear down full stop, tactical overhead, say again. "
+    "Bandsaw, Bandsaw, band saw."
 )
 
 
@@ -467,12 +468,28 @@ def execute_intent(
             return {"action": "none", "detail": "nothing to repeat"}
         return {"action": "replay", "detail": engine.play_id(last)}
 
-    if intent in ("request_winds", "request_altimeter", "request_picture"):
+    if intent in (
+        "request_winds",
+        "request_altimeter",
+        "request_picture",
+        "request_bogey_dope",
+        "request_declare",
+    ):
         return _speak_reply(intent, engine, airport, callsign, weather, opus, match)
 
     if intent == "request_bandsaw":
         text = atc_phrase.build_contact_bandsaw(airport, callsign)
         return _transmit(engine, airport, text, "blackjack")
+
+    if intent in (
+        "request_approach",
+        "request_hold",
+        "cancel_hold",
+        "request_vectors",
+    ):
+        return _handle_approach_action(
+            intent, engine, airport, callsign, weather, match, opus=opus
+        )
 
     if intent == "request_runway":
         runway = match.slots.get("runway")
@@ -567,6 +584,55 @@ def execute_intent(
             result = _play_step(engine, match)
             if rwy:
                 result["runway"] = rwy
+            return result
+        # Bandsaw check-in: talk to them, but stay on the Bandsaw step until
+        # checkout — picture / declare / dope happen in that window.
+        if intent == "bandsaw_check_in" or match.template == "bandsaw_check_in":
+            alpha_spoken = None
+            fix = atc_phrase.resolve_alpha_bullseye(
+                engine.config, callsign=callsign, opus=opus
+            )
+            if fix and fix.get("spoken"):
+                alpha_spoken = str(fix["spoken"])
+            text = atc_phrase.build_bandsaw_check_in(
+                callsign, alpha_bullseye=alpha_spoken
+            )
+            return _transmit(engine, airport, text, "bandsaw")
+        # Bandsaw checkout advances past the optional Bandsaw steps.
+        if intent == "bandsaw_check_out" or match.template == "bandsaw_check_out":
+            played = _play_step(engine, match)
+            if played.get("action") != "none":
+                return played
+            # No bandsaw_check_out step in this mission — reply and skip ahead
+            # past any remaining Bandsaw cursor (check-in holds until checkout).
+            text = atc_phrase.build_bandsaw_check_out(airport, callsign)
+            result = _transmit(engine, airport, text, "bandsaw")
+            if result.get("action") == "transmit":
+                _advance_past_bandsaw(engine)
+            return result
+        # Approach check-in: METAR / route auto-assign recovery / IAF; hold cursor.
+        if intent == "inbound_recovery" or match.template == "approach_check_in":
+            return _approach_check_in(
+                engine, airport, callsign, weather, match, opus=opus
+            )
+        # Continue to tower / cleared approach — play step and leave hold window.
+        if intent == "approach_continue" or match.template == "cleared_approach":
+            played = _play_step(engine, match)
+            if played.get("action") != "none":
+                return played
+            plan = atc_phrase.assign_approach_plan(
+                airport,
+                weather,
+                mission=engine.mission,
+                state=engine.state,
+                opus=opus,
+            )
+            text = atc_phrase.build_approach_tower_handoff(
+                airport, callsign, plan=plan
+            )
+            result = _transmit(engine, airport, text, "approach")
+            if result.get("action") == "transmit":
+                _advance_to_tower_approach(engine)
             return result
         return _play_step(engine, match)
 
@@ -851,15 +917,33 @@ def _speak_reply(
         if channel not in ("blackjack", "bandsaw", "ops", "other"):
             channel = "blackjack"
         agency = atc_phrase.speak_agency_name(channel)
+        cs = atc_phrase.speak_callsign(callsign)
         try:
-            text, _groups = voice_actions.build_picture_reply(
-                engine.config, airport, callsign, agency=agency, opus=opus
-            )
+            if intent == "request_bogey_dope":
+                text, _groups = voice_actions.build_bogey_dope_reply(
+                    engine.config, airport, callsign, agency=agency, opus=opus
+                )
+            elif intent == "request_declare":
+                text, _groups = voice_actions.build_declare_reply(
+                    engine.config,
+                    airport,
+                    callsign,
+                    agency=agency,
+                    opus=opus,
+                    transcript=match.normalized or match.transcript or "",
+                )
+            else:
+                text, _groups = voice_actions.build_picture_reply(
+                    engine.config, airport, callsign, agency=agency, opus=opus
+                )
         except voice_actions.RadarUnavailable:
-            text = (
-                f"{atc_phrase.speak_callsign(callsign)}, {agency}, "
-                "unable picture, radar is down."
-            )
+            if intent == "request_bogey_dope":
+                what = "bogey dope"
+            elif intent == "request_declare":
+                what = "declare"
+            else:
+                what = "picture"
+            text = f"{cs}, {agency}, unable {what}, radar is down."
     return _transmit(engine, airport, text, channel)
 
 
@@ -898,6 +982,162 @@ def _transmit(engine: Any, airport: dict[str, Any], text: str, channel: str) -> 
         voice_override=voice_name,
     )
     return {"action": "transmit", "text": text, "channel": channel, "exit_code": code}
+
+
+def _advance_past_bandsaw(engine: Any) -> None:
+    """Move the cursor past consecutive Bandsaw steps (check-in / check-out)."""
+    steps = list(engine.steps or [])
+    idx = int(engine.state.get("index") or 0)
+    while idx < len(steps):
+        step = steps[idx]
+        ch = str(step.get("channel") or "").lower()
+        tmpl = str(step.get("template") or "")
+        if ch == "bandsaw" or tmpl.startswith("bandsaw_"):
+            idx += 1
+            continue
+        break
+    engine.state["index"] = idx
+    if hasattr(engine, "_advance_past_skippable"):
+        engine._advance_past_skippable()
+    engine.save_state()
+
+
+def _advance_to_tower_approach(engine: Any) -> None:
+    """Leave Approach hold steps; land on tower / cleared-approach successor."""
+    steps = list(engine.steps or [])
+    idx = int(engine.state.get("index") or 0)
+    while idx < len(steps):
+        tmpl = str(steps[idx].get("template") or "")
+        ch = str(steps[idx].get("channel") or "").lower()
+        if tmpl in ("approach_check_in", "approach_procedure", "approach_iaf") or (
+            ch == "approach" and tmpl != "cleared_approach"
+        ):
+            idx += 1
+            continue
+        break
+    # If still on cleared_approach, play_id path usually advances after TX;
+    # here we only skipped the hold window — leave index on cleared or tower.
+    if idx < len(steps) and str(steps[idx].get("template") or "") == "cleared_approach":
+        idx += 1
+    engine.state["index"] = idx
+    if hasattr(engine, "_advance_past_skippable"):
+        engine._advance_past_skippable()
+    engine.save_state()
+
+
+def _approach_check_in(
+    engine: Any,
+    airport: dict[str, Any],
+    callsign: str,
+    weather: Any,
+    match: voice_intent.Match,
+    *,
+    opus: Any = None,
+) -> dict[str, Any]:
+    """Assign (or refresh from slots / filed route) and transmit Approach check-in."""
+    slots = match.slots or {}
+    plan = atc_phrase.assign_approach_plan(
+        airport,
+        weather,
+        mission=engine.mission,
+        state=engine.state,
+        opus=opus,
+        force=bool(slots.get("recovery") or slots.get("vfr_recovery") or slots.get("iaf")),
+        recovery=slots.get("recovery"),
+        vfr_recovery=slots.get("vfr_recovery"),
+        iaf=slots.get("iaf"),
+        position=atc_phrase.ownship_latlon(
+            engine.config, callsign=callsign, opus=opus, state=engine.state
+        ),
+    )
+    engine.save_state()
+    # Prefer playing the flow step so last_tx / readback state stay consistent.
+    played = _play_step(engine, match)
+    if played.get("action") != "none":
+        return played
+    text = atc_phrase.build_approach_recovery(
+        airport,
+        callsign,
+        weather,
+        str(plan.get("runway") or ""),
+        recovery=str(plan.get("pattern") or ""),
+        plan=plan,
+    )
+    return _transmit(engine, airport, text, "approach")
+
+
+def _handle_approach_action(
+    intent: str,
+    engine: Any,
+    airport: dict[str, Any],
+    callsign: str,
+    weather: Any,
+    match: voice_intent.Match,
+    *,
+    opus: Any = None,
+) -> dict[str, Any]:
+    slots = match.slots or {}
+    if intent == "request_approach":
+        # No fixed plate here — a named IAF selects its own procedure, and a
+        # bare "request instrument" is resolved from the route or position.
+        plan = atc_phrase.assign_approach_plan(
+            airport,
+            weather,
+            mission=engine.mission,
+            state=engine.state,
+            opus=opus,
+            force=True,
+            recovery=slots.get("recovery"),
+            vfr_recovery=slots.get("vfr_recovery"),
+            iaf=slots.get("iaf"),
+            position=atc_phrase.ownship_latlon(
+                engine.config, callsign=callsign, opus=opus, state=engine.state
+            ),
+        )
+        engine.save_state()
+        text = atc_phrase.build_approach_change(
+            airport, callsign, weather, plan=plan
+        )
+        return _transmit(engine, airport, text, "approach")
+
+    plan = atc_phrase.assign_approach_plan(
+        airport,
+        weather,
+        mission=engine.mission,
+        state=engine.state,
+        opus=opus,
+    )
+
+    if intent == "request_hold":
+        catalog = atc_phrase.load_approach_catalog(airport)
+        hold_tok = slots.get("iaf") or slots.get("vfr_recovery") or "IAF"
+        hold = atc_phrase.find_hold(catalog, str(hold_tok))
+        if hold is None and plan.get("iaf"):
+            hold = atc_phrase.find_hold(catalog, "IAF")
+        engine.state["hold_active"] = True
+        engine.save_state()
+        text = atc_phrase.build_hold_clearance(
+            airport, callsign, hold=hold, plan=plan, efc_minutes=5
+        )
+        return _transmit(engine, airport, text, "approach")
+
+    if intent == "cancel_hold":
+        engine.state["hold_active"] = False
+        engine.save_state()
+        text = atc_phrase.build_leave_hold_clearance(
+            airport, callsign, plan=plan
+        )
+        return _transmit(engine, airport, text, "approach")
+
+    if intent == "request_vectors":
+        engine.state["vectors_active"] = True
+        engine.save_state()
+        text = atc_phrase.build_vector_clearance(
+            airport, callsign, plan=plan
+        )
+        return _transmit(engine, airport, text, "approach")
+
+    return {"action": "none", "detail": f"unhandled approach action {intent}"}
 
 
 def _resolve_tx_channel(

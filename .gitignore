@@ -22,6 +22,10 @@ atc/kneeboard/*.pdf
 tools/overlays/*
 !tools/overlays/README.txt
 
+# Scratch downloads / plate probes (never commit)
+atc/_tmp*
+atc/**/_tmp*
+
 # Logs / editor junk
 *.log
 .DS_Store

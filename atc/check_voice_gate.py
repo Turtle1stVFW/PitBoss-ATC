@@ -30,6 +30,8 @@ CASES = [
     ("Nellis Approach, Fleece 1, say winds", "approach", "approach", True, "request_winds"),
     ("Approach, Fleece 1, request altimeter", "approach", "approach", True, "request_altimeter"),
     ("Blackjack, Fleece 1, request picture", "blackjack", "flight", True, "request_picture"),
+    ("Blackjack, Fleece 1, bogey dope", "blackjack", "flight", True, "request_bogey_dope"),
+    ("Blackjack, Fleece 1, declare", "blackjack", "flight", True, "request_declare"),
     ("Blackjack, Fleece 1, alpha check bullseye", "blackjack", "flight", True, "request_alpha_check"),
     # Blackjack check-in — callsign + mission colour; "checking in" is enough.
     ("Blackjack, Fleece 1, checking in", "blackjack", "flight", True, "range_entry"),
@@ -37,11 +39,35 @@ CASES = [
     # Post-check-in range window: optional Bandsaw, then Blackjack checkout.
     ("Bandsaw, Fleece 1, checking in", "bandsaw", "flight", True, "bandsaw_check_in"),
     ("Bandsaw, Fleece 1, with you", "bandsaw", "flight", True, "bandsaw_check_in"),
+    ("Bandsaw, Fleece 1, checking out", "bandsaw", "flight", True, "bandsaw_check_out"),
+    ("Bandsaw, Fleece 1, switch Blackjack", "bandsaw", "flight", True, "bandsaw_check_out"),
+    ("Bandsaw, Fleece 1, checking out, contact Blackjack", "bandsaw", "flight", True, "bandsaw_check_out"),
+    # Whisper often hears Bandsaw as ANSA / and saw / bansaw
+    ("ANSA, Fleece 1, checking in", "bandsaw", "flight", True, "bandsaw_check_in"),
+    ("ANSA, Fleece 1, checking out", "bandsaw", "flight", True, "bandsaw_check_out"),
+    ("And saw, Fleece 1, declare", "bandsaw", "flight", True, "request_declare"),
+    ("Bansaw, Fleece 1, request picture", "bandsaw", "flight", True, "request_picture"),
+    ("BANSAH, Fleece 1, request picture", "bandsaw", "flight", True, "request_picture"),
+    ("Bands off, lease one, request picture", "bandsaw", "flight", True, "request_picture"),
     ("Bandsaw, Fleece 1, request picture", "bandsaw", "flight", True, "request_picture"),
+    ("Bandsaw, Fleece 1, bogey dope", "bandsaw", "flight", True, "request_bogey_dope"),
+    ("Bandsaw, Fleece 1, declare", "bandsaw", "flight", True, "request_declare"),
     ("Blackjack, Fleece 1, request Bandsaw", "blackjack", "flight", True, "request_bandsaw"),
     ("Blackjack, Fleece 1, push Bandsaw", "blackjack", "flight", True, "request_bandsaw"),
+    ("Blackjack, Fleece 1, request ANSA", "blackjack", "flight", True, "request_bandsaw"),
     ("Blackjack, Fleece 1, off station, range complete", "blackjack", "flight", True, "range_exit"),
     ("Blackjack, Fleece 1, range exit", "blackjack", "flight", True, "range_exit"),
+    # Approach / recovery
+    ("Nellis Approach, Fleece 1, checking in", "approach", "approach", True, "inbound_recovery"),
+    ("Approach, Fleece 1, with you", "approach", "approach", True, "inbound_recovery"),
+    ("Approach, Fleece 1, inbound for recovery", "approach", "approach", True, "inbound_recovery"),
+    ("Approach, Fleece 1, request ARCOE recovery", "approach", "approach", True, "request_approach"),
+    ("Approach, Fleece 1, request tactical overhead", "approach", "approach", True, "request_approach"),
+    ("Approach, Fleece 1, request instrument", "approach", "approach", True, "request_approach"),
+    ("Approach, Fleece 1, request hold", "approach", "approach", True, "request_hold"),
+    ("Approach, Fleece 1, cancel hold", "approach", "approach", True, "cancel_hold"),
+    ("Approach, Fleece 1, request vectors", "approach", "approach", True, "request_vectors"),
+    ("Approach, Fleece 1, airport in sight, request tower", "approach", "approach", True, "approach_continue"),
     ("Delivery, Fleece 1, request IFR clearance", "delivery", "departure", True, "ready_clearance"),
     ("Nellis Tower, Fleece 1, gear down full stop", "tower", "approach", True, "request_landing"),
     ("Tower, Fleece 1, going around", "tower", "approach", True, "going_around"),
@@ -104,6 +130,496 @@ CASES = [
 def extras() -> int:
     """Expectation boost, seat-aware callsigns, and the discipline toggle."""
     bad = 0
+
+    # Approach assigner: VMC → VFR recovery on 21; IFR → IAF.
+    import atc_phrase
+
+    airports = atc_phrase.load_json(atc_phrase.AIRPORTS_PATH)
+    nellis = airports["nellis"]
+    vmc = atc_phrase.Weather(210, 8, 29.92, "KLSV 010000Z 21008KT 10SM FEW100 20/05 A2992")
+    plan_vmc = atc_phrase.assign_approach_plan(nellis, vmc, state={}, force=True)
+    if plan_vmc.get("pattern") == "instrument":
+        print(f"  FAIL VMC plan should not be instrument: {plan_vmc}")
+        bad += 1
+    elif not plan_vmc.get("vfr_recovery"):
+        print(f"  FAIL VMC plan missing VFR recovery: {plan_vmc}")
+        bad += 1
+    elif not str(plan_vmc.get("runway") or "").startswith("21"):
+        print(f"  FAIL VMC plan should prefer 21s: {plan_vmc}")
+        bad += 1
+    elif int(plan_vmc.get("descend_ft") or 0) != 12000:
+        # Default ARCOE on 21 uses catalog descend_ft 12000 (not global 10000).
+        print(f"  FAIL ARCOE should use 12000 ft: {plan_vmc}")
+        bad += 1
+    else:
+        print(
+            f"approach assign VMC — {plan_vmc.get('vfr_recovery')} "
+            f"{plan_vmc.get('pattern')} RWY {plan_vmc.get('runway')} "
+            f"desc {plan_vmc.get('descend_ft')} / {plan_vmc.get('speed_kt')}kt"
+        )
+    bj_exit = atc_phrase.build_blackjack_range_exit(nellis, "Fleece 1", plan=plan_vmc)
+    if "expect" in bj_exit.lower():
+        print(f"  FAIL Blackjack range exit must not say expect recovery: {bj_exit}")
+        bad += 1
+    elif "proceed direct arcoe" not in bj_exit.lower():
+        print(f"  FAIL Blackjack range exit should proceed direct the fix: {bj_exit}")
+        bad += 1
+    elif "cleared" in bj_exit.lower():
+        print(f"  FAIL Blackjack range exit should not say cleared: {bj_exit}")
+        bad += 1
+    else:
+        print(f"blackjack range exit — {bj_exit}")
+
+    phrase_vmc = atc_phrase.build_approach_recovery(
+        nellis, "Fleece 1", vmc, str(plan_vmc.get("runway") or "21R"), plan=plan_vmc
+    )
+    need_bits = (
+        "landing south",
+        "expect arcoe recovery for the overhead",
+    )
+    if any(bit.lower() not in phrase_vmc.lower() for bit in need_bits):
+        print(f"  FAIL Approach check-in phrase: {phrase_vmc}")
+        bad += 1
+    elif "radar contact" in phrase_vmc.lower():
+        print(f"  FAIL Approach check-in should not lead with radar contact: {phrase_vmc}")
+        bad += 1
+    else:
+        print(f"approach check-in phrase — {phrase_vmc}")
+    # TORYE is a separate VFR recovery (§4.13.5.2), not an ARCOE gate.
+    plan_torye = atc_phrase.assign_approach_plan(
+        nellis, vmc, state={}, force=True, vfr_recovery="TORYE"
+    )
+    phrase_torye = atc_phrase.build_approach_recovery(
+        nellis, "Fleece 1", vmc, str(plan_torye.get("runway") or "21R"), plan=plan_torye
+    )
+    if plan_torye.get("vfr_recovery") != "TORYE":
+        print(f"  FAIL TORYE is its own recovery: {plan_torye} / {phrase_torye}")
+        bad += 1
+    elif "expect torye recovery for the overhead" not in phrase_torye.lower():
+        print(f"  FAIL TORYE Approach expect: {phrase_torye}")
+        bad += 1
+    elif "tac overhead" in phrase_torye.lower():
+        print(f"  FAIL default VFR is overhead, not TAC: {phrase_torye}")
+        bad += 1
+    else:
+        print(f"approach TORYE recovery — {phrase_torye}")
+
+    ifr = atc_phrase.Weather(
+        210,
+        8,
+        29.92,
+        "KLSV 010000Z 21008KT 1SM FG BKN008 10/10 A2992",
+        ceiling_ft=800,
+        visibility_sm=1.0,
+    )
+    plan_ifr = atc_phrase.assign_approach_plan(nellis, ifr, state={}, force=True)
+    if plan_ifr.get("pattern") != "instrument" or not plan_ifr.get("iaf"):
+        print(f"  FAIL IFR plan needs instrument + IAF: {plan_ifr}")
+        bad += 1
+    elif plan_ifr.get("instrument_id") != "ILS_Z_21L" or plan_ifr.get("iaf") != "ARCOE":
+        print(f"  FAIL default 21 instrument is ILS Z / ARCOE: {plan_ifr}")
+        bad += 1
+    elif int(plan_ifr.get("descend_ft") or 0) != 15000:
+        # ARCOE IAF crossing altitude on ILS Z RWY 21L (CIFP 15000+)
+        print(f"  FAIL ARCOE on ILS Z should be 15000 ft: {plan_ifr}")
+        bad += 1
+    elif plan_ifr.get("speed_kt") is not None:
+        print(f"  FAIL routine speed should be omitted: {plan_ifr}")
+        bad += 1
+    else:
+        print(
+            f"approach assign IFR — {plan_ifr.get('instrument_id')} "
+            f"IAF {plan_ifr.get('iaf')} RWY {plan_ifr.get('runway')} "
+            f"desc {plan_ifr.get('descend_ft')} (no speed)"
+        )
+    expect_ifr = atc_phrase.build_approach_recovery(
+        nellis, "Fleece 1", ifr, str(plan_ifr.get("runway") or "21L"), plan=plan_ifr
+    )
+    clear_ifr = atc_phrase.build_iaf_clearance(nellis, "Fleece 1", plan=plan_ifr)
+    if "or localizer" in (plan_ifr.get("instrument_say") or "").lower():
+        print(f"  FAIL instrument_say must be one procedure: {plan_ifr.get('instrument_say')}")
+        bad += 1
+    elif "expect ils zulu" not in expect_ifr.lower():
+        print(f"  FAIL IFR check-in should expect ILS Z only: {expect_ifr}")
+        bad += 1
+    elif "cleared" in expect_ifr.lower() or "cross " in expect_ifr.lower():
+        print(f"  FAIL IFR check-in is expect-only: {expect_ifr}")
+        bad += 1
+    elif "cross arcoe at or above one fife thousand" not in clear_ifr.lower():
+        print(f"  FAIL IFR clearance needs cross ARCOE at/above 15000: {clear_ifr}")
+        bad += 1
+    elif "cleared ils zulu" not in clear_ifr.lower():
+        print(f"  FAIL IFR clearance should clear ILS Z (not ILS or LOC): {clear_ifr}")
+        bad += 1
+    else:
+        print(f"approach IFR expect — {expect_ifr}")
+        print(f"approach IFR clearance — {clear_ifr}")
+
+    # Each IAF belongs to its own plate (CIFP): DUDBE = HI-TACAN Y 21L,
+    # ARCOE = ILS Z / HI-TACAN Z 21L, LUCIL = TACAN 03R.
+    for iaf_name, want_inst, want_alt in (
+        ("DUDBE", "HI_TACAN_Y_21L", 15000),
+        ("ARCOE", "ILS_Z_21L", 15000),
+        ("KRYSS", "ILS_Z_21L", 8800),
+        ("ZAPVO", "LOC_Y_21L", 7000),
+        ("HULPU", "HI_TACAN_Y_21L", 5500),
+        ("LUCIL", "TACAN_03R", 10300),
+    ):
+        p_iaf = atc_phrase.assign_approach_plan(
+            nellis, ifr, state={}, force=True, recovery="instrument", iaf=iaf_name
+        )
+        if p_iaf.get("iaf") != iaf_name or p_iaf.get("instrument_id") != want_inst:
+            print(
+                f"  FAIL {iaf_name} should be on {want_inst}: "
+                f"{p_iaf.get('iaf')} / {p_iaf.get('instrument_id')}"
+            )
+            bad += 1
+        elif int(p_iaf.get("descend_ft") or 0) != want_alt:
+            print(f"  FAIL {iaf_name} plate altitude {want_alt}: {p_iaf.get('descend_ft')}")
+            bad += 1
+    print("approach IAF/plate pairing — DUDBE/TACAN Y, ARCOE/ILS Z, LUCIL/TACAN 03R")
+
+    # An unrelated fix must not attach itself to the first plate.
+    if atc_phrase.find_instrument_by_iaf(
+        atc_phrase.load_approach_catalog(nellis), "JUNNO"
+    ):
+        print("  FAIL unknown fix must not match an IAF")
+        bad += 1
+
+    # Sticky pre-catalog plan (DUDBE on HI-ILS Z) must be rejected and rebuilt.
+    st_stale_plate = {
+        "approach_assigned": True,
+        "approach_plan": {
+            "pattern": "instrument",
+            "runway": "21L",
+            "instrument_id": "HI_ILS_OR_LOC_Z_21L",
+            "instrument_say": "HI ILS or localizer Zulu runway two one left",
+            "iaf": "DUDBE",
+            "iaf_say": "Dudbe",
+            "descend_ft": 16000,
+            "source": "override",
+        },
+        "active_recovery": "instrument",
+        "active_instrument": "HI_ILS_OR_LOC_Z_21L",
+        "active_iaf": "DUDBE",
+    }
+    if atc_phrase.approach_plan_is_valid(
+        st_stale_plate["approach_plan"], atc_phrase.load_approach_catalog(nellis)
+    ):
+        print("  FAIL old HI-ILS Z + DUDBE plan must be invalid")
+        bad += 1
+    plan_fixed = atc_phrase.assign_approach_plan(
+        nellis, ifr, state=st_stale_plate, force=False
+    )
+    if plan_fixed.get("iaf") == "DUDBE" and "ILS" in str(plan_fixed.get("instrument_id") or ""):
+        print(f"  FAIL rebuilt plan still pairs DUDBE with ILS: {plan_fixed}")
+        bad += 1
+    elif plan_fixed.get("instrument_id") == "HI_ILS_OR_LOC_Z_21L":
+        print(f"  FAIL rebuilt plan kept retired plate id: {plan_fixed}")
+        bad += 1
+    elif not atc_phrase.approach_plan_from_state(st_stale_plate, airport=nellis):
+        # State should have been rewritten with a valid plan.
+        if not atc_phrase.approach_plan_is_valid(
+            plan_fixed, atc_phrase.load_approach_catalog(nellis)
+        ):
+            print(f"  FAIL rebuild did not produce a valid plan: {plan_fixed}")
+            bad += 1
+        else:
+            print(
+                f"approach stale plate rebuild — {plan_fixed.get('instrument_id')} "
+                f"IAF {plan_fixed.get('iaf')}"
+            )
+    else:
+        print(
+            f"approach stale plate rebuild — {plan_fixed.get('instrument_id')} "
+            f"IAF {plan_fixed.get('iaf')}"
+        )
+
+    # Filed ARCOE in IMC must recover via ARCOE, not the catalog's first IAF.
+    class _ArcoeFP:
+        fp_route_string = "KLSV DREAM COYOT ARCOE KLSV"
+        fp_altitude = "FL240"
+
+    plan_arcoe_ifr = atc_phrase.assign_approach_plan(
+        nellis, ifr, state={}, force=True, opus=_ArcoeFP()
+    )
+    if plan_arcoe_ifr.get("pattern") != "instrument":
+        print(f"  FAIL filed ARCOE in IMC stays instrument: {plan_arcoe_ifr}")
+        bad += 1
+    elif plan_arcoe_ifr.get("iaf") != "ARCOE" or plan_arcoe_ifr.get("source") != "route":
+        print(f"  FAIL filed ARCOE should drive the IAF: {plan_arcoe_ifr}")
+        bad += 1
+    else:
+        print(
+            f"approach filed ARCOE (IMC) — {plan_arcoe_ifr.get('instrument_id')} "
+            f"IAF {plan_arcoe_ifr.get('iaf')} source={plan_arcoe_ifr.get('source')}"
+        )
+
+    # Same fix filed in VMC gives the VFR recovery, not an instrument approach.
+    plan_arcoe_vmc = atc_phrase.assign_approach_plan(
+        nellis, vmc, state={}, force=True, opus=_ArcoeFP()
+    )
+    if plan_arcoe_vmc.get("vfr_recovery") != "ARCOE" or plan_arcoe_vmc.get("pattern") == "instrument":
+        print(f"  FAIL filed ARCOE in VMC is a VFR recovery: {plan_arcoe_vmc}")
+        bad += 1
+
+    # A recovery fix filed mid-route (not in the tail) is still found.
+    plan_deep = atc_phrase.assign_approach_plan(
+        nellis,
+        vmc,
+        state={},
+        force=True,
+        opus=type(
+            "O",
+            (),
+            {
+                "fp_route_string": "KLSV STRYK BTY BAM MLF DTA PUC HVE MTU FFU OGD KLSV",
+                "fp_altitude": None,
+            },
+        )(),
+    )
+    if plan_deep.get("vfr_recovery") != "STRYK":
+        print(f"  FAIL mid-route STRYK should still match: {plan_deep}")
+        bad += 1
+
+    # Position decides the plate when nothing is filed or requested.
+    for label, pos, want_inst, want_iaf in (
+        ("north (Arcoe side)", (36.90, -114.90), "ILS_Z_21L", "ARCOE"),
+        ("west (Dudbe side)", (36.40, -115.90), "HI_TACAN_Y_21L", "DUDBE"),
+    ):
+        p_pos = atc_phrase.assign_approach_plan(
+            nellis, ifr, state={}, force=True, position=pos
+        )
+        if p_pos.get("instrument_id") != want_inst or p_pos.get("iaf") != want_iaf:
+            print(
+                f"  FAIL from {label} expect {want_inst}/{want_iaf}: "
+                f"{p_pos.get('instrument_id')}/{p_pos.get('iaf')}"
+            )
+            bad += 1
+        elif p_pos.get("iaf_source") != "position":
+            print(f"  FAIL position-picked IAF should be labelled: {p_pos}")
+            bad += 1
+    print("approach position pick — north gets ARCOE, west gets DUDBE")
+
+    # VMC: the VFR recovery follows the range you are coming home from.
+    vmc_03 = atc_phrase.Weather(30, 12, 29.92, "KLSV 03012KT 10SM", visibility_sm=10)
+    for label, wx, pos, want in (
+        ("western ranges", vmc, (36.45, -116.00), "STRYK"),
+        ("Elgin / northeast", vmc, (36.95, -114.45), "TORYE"),
+        ("due north", vmc, (36.90, -114.95), "ARCOE"),
+        ("north with 03 active", vmc_03, (36.90, -115.05), "MINTT"),
+    ):
+        p_vfr = atc_phrase.assign_approach_plan(
+            nellis, wx, state={}, force=True, position=pos
+        )
+        if p_vfr.get("vfr_recovery") != want:
+            print(
+                f"  FAIL from {label} expect {want}: "
+                f"{p_vfr.get('vfr_recovery')} RWY {p_vfr.get('runway')}"
+            )
+            bad += 1
+    print("approach VFR position pick — STRYK west, TORYE northeast, ARCOE north, MINTT on 03")
+
+    # Filed route still outranks position.
+    p_conflict = atc_phrase.assign_approach_plan(
+        nellis,
+        ifr,
+        state={},
+        force=True,
+        position=(36.90, -114.90),
+        opus=type("O", (), {"fp_route_string": "BTY DUDBE KLSV", "fp_altitude": None})(),
+    )
+    if p_conflict.get("iaf") != "DUDBE" or p_conflict.get("iaf_source") != "route":
+        print(f"  FAIL filed route must outrank position: {p_conflict}")
+        bad += 1
+
+    # Sticky position plan must refresh when the flight plan names another fix.
+    st_pos = {
+        "approach_assigned": True,
+        "approach_plan": {
+            "pattern": "tactical_overhead",
+            "runway": "21R",
+            "vfr_recovery": "STRYK",
+            "vfr_recovery_say": "Stryk",
+            "descend_ft": 10000,
+            "source": "position",
+            "fp_route": None,
+        },
+        "active_recovery": "tactical_overhead",
+        "active_vfr_recovery": "STRYK",
+    }
+    plan_fp_refresh = atc_phrase.assign_approach_plan(
+        nellis,
+        vmc,
+        state=st_pos,
+        force=False,
+        opus=type(
+            "O",
+            (),
+            {"fp_route_string": "KLSV DREAM COYOT ARCOE KLSV", "fp_altitude": "FL240"},
+        )(),
+    )
+    if plan_fp_refresh.get("vfr_recovery") != "ARCOE" or plan_fp_refresh.get("source") != "route":
+        print(f"  FAIL sticky position plan must yield to filed ARCOE: {plan_fp_refresh}")
+        bad += 1
+    else:
+        print(
+            f"approach FP refresh — sticky STRYK -> {plan_fp_refresh.get('vfr_recovery')} "
+            f"source={plan_fp_refresh.get('source')}"
+        )
+
+    # Pattern-only rebuild still reads the filed route (does not suppress FP scan).
+    plan_pattern = atc_phrase.assign_approach_plan(
+        nellis,
+        vmc,
+        state={},
+        force=True,
+        recovery="tactical_overhead",
+        position=(36.45, -116.00),  # would pick STRYK if FP ignored
+        opus=type(
+            "O",
+            (),
+            {"fp_route_string": "JUNNO TORYE KLSV", "fp_altitude": None},
+        )(),
+    )
+    if plan_pattern.get("vfr_recovery") != "TORYE" or plan_pattern.get("source") != "route":
+        print(f"  FAIL pattern rebuild must still honour filed TORYE: {plan_pattern}")
+        bad += 1
+    else:
+        print("approach pattern+FP — TORYE from route, not position STRYK")
+
+    # 03 only with >= 11 kt headwind on 03.
+    light_north = atc_phrase.Weather(30, 8, 29.92, "", visibility_sm=10)
+    plan_light = atc_phrase.assign_approach_plan(
+        nellis, light_north, state={}, force=True
+    )
+    if not str(plan_light.get("runway") or "").startswith("21"):
+        print(f"  FAIL light north wind must stay on 21: {plan_light}")
+        bad += 1
+    else:
+        print(f"approach wind gate light 030/08 — RWY {plan_light.get('runway')}")
+
+    # 081/07 favors 03 by heading but fails the 11 kt gate — stay on 21.
+    east_light = atc_phrase.Weather(81, 7, 29.92, "KLSV 08107KT 10SM", visibility_sm=10)
+    st_stale = {
+        "approach_assigned": True,
+        "approach_plan": {
+            "pattern": "tactical_overhead",
+            "runway": "03L",
+            "vfr_recovery": "MINTT",
+            "vfr_recovery_say": "Mintt",
+        },
+        "active_recovery": "tactical_overhead",
+    }
+    plan_081 = atc_phrase.assign_approach_plan(
+        nellis, east_light, state=st_stale, force=False
+    )
+    if not str(plan_081.get("runway") or "").startswith("21"):
+        print(f"  FAIL 081/07 must leave stale 03 plan: {plan_081}")
+        bad += 1
+    else:
+        print(
+            f"approach wind gate 081/07 stale-03 refresh — RWY {plan_081.get('runway')} "
+            f"{plan_081.get('vfr_recovery')}"
+        )
+    rwy_dep = atc_phrase.pick_departure_runway(
+        nellis,
+        east_light,
+        None,
+        state=st_stale,
+        template="approach_check_in",
+    )
+    if not str(rwy_dep).startswith("21"):
+        print(f"  FAIL pick_departure_runway 081/07 should be 21: {rwy_dep}")
+        bad += 1
+    strong_north = atc_phrase.Weather(30, 12, 29.92, "", visibility_sm=10)
+    plan_strong = atc_phrase.assign_approach_plan(
+        nellis, strong_north, state={}, force=True
+    )
+    if not str(plan_strong.get("runway") or "").startswith("03"):
+        print(f"  FAIL 030/12 should open 03: {plan_strong}")
+        bad += 1
+    else:
+        print(f"approach wind gate 030/12 — RWY {plan_strong.get('runway')}")
+
+    # Reset runway to winds clears sticky request + refreshes Approach plan.
+    st_reset: dict = {}
+    atc_phrase.assign_approach_plan(nellis, strong_north, state=st_reset, force=True)
+    atc_phrase.set_requested_runway("21R", state=st_reset)
+    atc_phrase.assign_approach_plan(
+        nellis, strong_north, state=st_reset, force=True, recovery="tactical_overhead"
+    )
+    if not str((st_reset.get("approach_plan") or {}).get("runway") or "").startswith("21"):
+        print(f"  FAIL sticky request should force 21: {st_reset.get('approach_plan')}")
+        bad += 1
+    cfg_reset = {"runway_override": "21L"}
+    rwy_reset = atc_phrase.reset_runway_to_winds(
+        nellis, strong_north, state=st_reset, config=cfg_reset
+    )
+    if not str(rwy_reset or "").startswith("03"):
+        print(f"  FAIL reset to winds should reopen 03: {rwy_reset} / {st_reset}")
+        bad += 1
+    elif atc_phrase.requested_runway(state=st_reset) or cfg_reset.get("runway_override"):
+        print(f"  FAIL reset should clear overrides: req={atc_phrase.requested_runway(state=st_reset)} cfg={cfg_reset}")
+        bad += 1
+    else:
+        print(f"approach reset to winds — RWY {rwy_reset}")
+
+    tips_app = voice_intent.suggestions(
+        phase="approach",
+        channel="approach",
+        expected="approach_check_in",
+        callsign=CALLSIGN,
+        airport_name="Nellis",
+        limit=4,
+    )
+    if not any("wind" in say.lower() for say, _ in tips_app):
+        print(f"  FAIL approach kneeboard should tip winds: {tips_app}")
+        bad += 1
+    else:
+        print(f"approach kneeboard winds tip — {[s for s, _ in tips_app]}")
+
+    # Filed route tail names the recovery (STRYK near arrival).
+    class _Opus:
+        fp_route_string = "KLSV FLEX21R DREAM JUNNO STRYK KLSV"
+        fp_altitude = "FL250"
+
+    plan_route = atc_phrase.assign_approach_plan(
+        nellis, vmc, state={}, force=True, opus=_Opus()
+    )
+    if plan_route.get("vfr_recovery") != "STRYK" or plan_route.get("source") != "route":
+        print(f"  FAIL route should pick STRYK: {plan_route}")
+        bad += 1
+    elif int(plan_route.get("descend_ft") or 0) != 10000:
+        print(f"  FAIL STRYK descend should be 10000: {plan_route}")
+        bad += 1
+    else:
+        print(
+            f"approach assign route — {plan_route.get('vfr_recovery')} "
+            f"source={plan_route.get('source')} desc {plan_route.get('descend_ft')}"
+        )
+
+    plan_iaf_route = atc_phrase.assign_approach_plan(
+        nellis,
+        vmc,
+        state={},
+        force=True,
+        opus=type("O", (), {"fp_route_string": "BTY FLUSH DUDBE KLSV", "fp_altitude": None})(),
+    )
+    if plan_iaf_route.get("iaf") != "DUDBE" or plan_iaf_route.get("pattern") != "instrument":
+        print(f"  FAIL route IAF should force instrument/DUDBE: {plan_iaf_route}")
+        bad += 1
+    elif plan_iaf_route.get("instrument_id") != "HI_TACAN_Y_21L":
+        print(f"  FAIL route DUDBE belongs to HI-TACAN Y 21L: {plan_iaf_route}")
+        bad += 1
+    elif int(plan_iaf_route.get("descend_ft") or 0) != 15000:
+        print(f"  FAIL route DUDBE altitude should be 15000: {plan_iaf_route}")
+        bad += 1
+    else:
+        print(
+            f"approach assign route IAF — {plan_iaf_route.get('iaf')} "
+            f"{plan_iaf_route.get('instrument_id')} desc {plan_iaf_route.get('descend_ft')}"
+        )
 
     # The call ATC is waiting for should outrank the same call unprompted.
     plain = voice_intent.evaluate(

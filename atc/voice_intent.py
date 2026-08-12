@@ -133,9 +133,32 @@ _SIDE_WORDS = {"left": "L", "right": "R", "center": "C", "centre": "C", "central
 
 _RECOVERY_TERMS = {
     "tactical_overhead": ("tactical overhead", "tac overhead", "tactical"),
-    "overhead": ("overhead", "over head"),
+    "overhead": ("overhead", "over head", "visual overhead"),
     "straight_in": ("straight in", "straight-in", "straight end"),
-    "instrument": ("instrument", "ils", "tacan approach", "precision"),
+    "instrument": ("instrument", "ils", "tacan approach", "precision", "hi ils"),
+}
+
+# NellisAFBI 11-250 §4.13.5 VFR recoveries (Whisper-tolerant).
+# TORYE and ARCOE are separate; ACTON maps to TORYE (legacy / Elgin name).
+_VFR_RECOVERY_TERMS = {
+    "STRYK": ("stryk", "strike", "stryker"),
+    "TORYE": ("torye", "tory", "torie", "acton", "action"),
+    "ARCOE": ("arcoe", "arco", "rco", "our co"),
+    "MINTT": ("mintt", "mint", "minute"),
+}
+
+# Published KLSV IAFs (CIFP) — each belongs to a specific plate.
+_IAF_TERMS = {
+    "DUDBE": ("dudbe", "dud be", "dead bee", "deadbe"),
+    "ARCOE": ("arcoe", "arco"),
+    "KRYSS": ("kryss", "kriss", "chris"),
+    "SHEET": ("sheet", "sheat"),
+    "ZAPVO": ("zapvo", "zap vo"),
+    "JEGET": ("jeget", "jegget"),
+    "HULPU": ("hulpu", "hul pu"),
+    "KUTME": ("kutme", "kut me"),
+    "LUCIL": ("lucil", "lucille"),
+    "HUSTS": ("husts", "hustz"),
 }
 
 
@@ -219,6 +242,33 @@ def extract_runway(text: str, known: list[str] | None = None) -> str | None:
     return candidate
 
 
+# Whisper often mangles Bandsaw (ANSA, and saw, bansaw, …). Keep aliases shared
+# for agency detection and "request Bandsaw" intents.
+_BANDSAW_TERMS: tuple[str, ...] = (
+    "bandsaw",
+    "band saw",
+    "band-saw",
+    "ansa",
+    "and saw",
+    "an saw",
+    "bansaw",
+    "bansah",
+    "ban saw",
+    "ban sah",
+    "bandsa",
+    "bands aw",
+    "bands all",
+    "bands off",
+    "band soft",
+    "bands of",
+    "pantsaw",
+    "pant saw",
+    "mansaw",
+    "van saw",
+    "band sawyer",
+    "band sore",
+)
+
 # Radio discipline puts the agency first ("Nellis Tower, Fleece one, ..."), so
 # only the opening tokens are searched. That keeps "ready for departure" from
 # being read as a call to Departure.
@@ -229,7 +279,7 @@ _AGENCY_TERMS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("approach", ("approach", "arrival")),
     ("departure", ("departure", "dep")),
     ("blackjack", ("blackjack", "black jack", "magic", "darkstar", "awacs")),
-    ("bandsaw", ("bandsaw", "band saw", "band-saw")),
+    ("bandsaw", _BANDSAW_TERMS),
     ("ops", ("ops", "operations", "base ops")),
     ("other", ("center", "centre", "control")),
 )
@@ -238,15 +288,19 @@ _ADDRESS_TOKEN_WINDOW = 6
 
 
 def extract_channel(text: str) -> str | None:
-    """Agency the pilot addressed, from the opening words of the call."""
+    """Agency the pilot addressed — earliest match in the opening words."""
     head = " ".join(text.split()[:_ADDRESS_TOKEN_WINDOW])
     if not head:
         return None
+    best: str | None = None
+    best_pos = len(head) + 1
     for channel, terms in _AGENCY_TERMS:
         for term in terms:
-            if re.search(rf"(?<!\w){re.escape(term)}(?!\w)", head):
-                return channel
-    return None
+            m = re.search(rf"(?<!\w){re.escape(term)}(?!\w)", head)
+            if m and m.start() < best_pos:
+                best_pos = m.start()
+                best = channel
+    return best
 
 
 # ---- who the transmission is actually for -------------------------------
@@ -311,6 +365,18 @@ def _split_callsign(normalized: str) -> tuple[str, str]:
     return word, number
 
 
+def _callsign_word_forms(word: str) -> tuple[str, ...]:
+    """Configured callsign stem plus common Whisper near-misses."""
+    w = (word or "").casefold()
+    if not w:
+        return ()
+    safe = {
+        "fleece": ("lease", "fleese", "fleas", "fleace"),
+        "bruiser": ("browser", "brewer"),
+    }
+    return (w,) + safe.get(w, ())
+
+
 def analyze_address(text: str, callsign: str = "") -> Address:
     """
     Work out who a normalized transmission was addressed to.
@@ -330,14 +396,15 @@ def analyze_address(text: str, callsign: str = "") -> Address:
 
     word, number = _split_callsign(normalize(callsign))
     if word:
-        for hit in re.finditer(rf"(?<!\w){re.escape(word)}(?:\s+(\d+))?(?!\w)", head):
-            said = hit.group(1)
-            if said is None or (number and said == number) or not number:
+        for form in _callsign_word_forms(word):
+            for hit in re.finditer(rf"(?<!\w){re.escape(form)}(?:\s+(\d+))?(?!\w)", head):
+                said = hit.group(1)
+                if said is None or (number and said == number) or not number:
+                    own = True
+                else:
+                    member = True
+            if re.search(rf"(?<!\w){re.escape(form)}\s+(?:flight|formation)(?!\w)", head):
                 own = True
-            else:
-                member = True
-        if re.search(rf"(?<!\w){re.escape(word)}\s+(?:flight|formation)(?!\w)", head):
-            own = True
 
     # "Two, ..." / "Dash three, ..." — a call across the formation.
     if tokens[0] in _POSITION_WORDS:
@@ -365,6 +432,23 @@ def _first_term(text: str, terms: tuple[str, ...]) -> str | None:
 def extract_recovery(text: str) -> str | None:
     for key, terms in _RECOVERY_TERMS.items():
         if any(term in text for term in terms):
+            if key == "overhead":
+                return "visual_overhead"
+            return key
+    return None
+
+
+def extract_vfr_recovery(text: str) -> str | None:
+    """Named VFR recovery (STRYK / TORYE / ARCOE / MINTT)."""
+    for key, terms in _VFR_RECOVERY_TERMS.items():
+        if _group_hit(text, terms, fuzzy=True):
+            return key
+    return None
+
+
+def extract_iaf(text: str) -> str | None:
+    for key, terms in _IAF_TERMS.items():
+        if _group_hit(text, terms, fuzzy=True):
             return key
     return None
 
@@ -427,15 +511,30 @@ INTENTS: tuple[Intent, ...] = (
     ),
     Intent(
         "request_picture",
-        (
-            _ASKING + ("declare",),
-            ("picture", "pitcher", "bogey dope"),
-        ),
+        (("picture", "pitcher"),),
         channels=("blackjack", "bandsaw", "ops", "other"),
         phases=("flight",),
         weight=1.2,
         example="request picture",
         does="hostile groups off the live radar",
+    ),
+    Intent(
+        "request_bogey_dope",
+        (("bogey dope", "bogie dope", "braa", "snaplock"),),
+        channels=("blackjack", "bandsaw", "ops", "other"),
+        phases=("flight",),
+        weight=1.25,
+        example="bogey dope",
+        does="BRAA to the closest hostile",
+    ),
+    Intent(
+        "request_declare",
+        (("declare",),),
+        channels=("blackjack", "bandsaw", "ops", "other"),
+        phases=("flight",),
+        weight=1.25,
+        example="declare bullseye 056 67",
+        does="declaration at that bullseye (ELVIS); bare declare = nearest",
     ),
     Intent(
         "request_alpha_check",
@@ -449,7 +548,7 @@ INTENTS: tuple[Intent, ...] = (
         "request_bandsaw",
         (
             _ASKING + ("push", "go"),
-            ("bandsaw", "band saw", "band-saw"),
+            _BANDSAW_TERMS,
         ),
         kind="request",
         channels=("blackjack",),
@@ -619,15 +718,129 @@ INTENTS: tuple[Intent, ...] = (
     Intent(
         "inbound_recovery",
         (
-            ("inbound", "recovery", "recover", "rtb", "overhead", "straight in"),
-            ("request", "requesting", "for", "with you", "checking in", "inbound"),
+            (
+                "inbound",
+                "recovery",
+                "recover",
+                "rtb",
+                "checking in",
+                "with you",
+                "check in",
+            ),
+            ("request", "requesting", "for", "with you", "checking in", "inbound", "nellis"),
         ),
         kind="step",
         template="approach_check_in",
         channels=("approach", "departure"),
         phases=("flight", "approach"),
-        example="inbound for the overhead",
-        does="recovery instructions",
+        example="Approach, Fleece 1, checking in",
+        does="Approach check-in / recovery assignment",
+        veto=("request hold", "holding", "vectors", "cancel hold"),
+    ),
+    Intent(
+        "request_approach",
+        (
+            (
+                "request",
+                "requesting",
+                "want",
+                "prefer",
+                "change to",
+                "switch to",
+                "able",
+            ),
+            (
+                "overhead",
+                "tactical",
+                "straight in",
+                "instrument",
+                "ils",
+                "stryk",
+                "torye",
+                "acton",
+                "arcoe",
+                "mintt",
+                "dudbe",
+                "recovery",
+            ),
+        ),
+        kind="action",
+        channels=("approach",),
+        phases=("flight", "approach"),
+        weight=1.15,
+        example="request ARCOE recovery",
+        does="request different recovery / approach",
+        veto=(
+            "checking in",
+            "with you",
+            "bogey dope",
+            "picture",
+            "hold",
+            "holding",
+            "vector",
+            "vectors",
+            "altimeter",
+            "winds",
+        ),
+    ),
+    Intent(
+        "request_hold",
+        (
+            ("request hold", "need to hold", "holding at", "hold at"),
+            ("hold", "holding"),
+        ),
+        kind="action",
+        channels=("approach",),
+        phases=("approach", "flight"),
+        weight=1.3,
+        example="request hold",
+        does="hold clearance",
+        veto=("hold short", "cancel hold", "leave hold", "holding short"),
+    ),
+    Intent(
+        "cancel_hold",
+        (
+            ("cancel hold", "leave hold", "leaving hold", "done holding", "outbound"),
+        ),
+        kind="action",
+        channels=("approach",),
+        phases=("approach", "flight"),
+        example="cancel hold",
+        does="leave hold / continue recovery",
+    ),
+    Intent(
+        "request_vectors",
+        (
+            ("request vectors", "need vectors", "vectors to", "vector to"),
+            ("vectors", "vector"),
+        ),
+        kind="action",
+        channels=("approach",),
+        phases=("approach", "flight"),
+        weight=1.3,
+        example="request vectors",
+        does="radar vectors",
+    ),
+    Intent(
+        "approach_continue",
+        (
+            (
+                "airport in sight",
+                "field in sight",
+                "request tower",
+                "for the overhead",
+                "request the break",
+                "ready for the overhead",
+                "proceeding",
+            ),
+        ),
+        kind="step",
+        template="cleared_approach",
+        channels=("approach",),
+        phases=("approach",),
+        example="airport in sight, request tower",
+        does="cleared approach / contact tower",
+        veto=("checking in", "with you"),
     ),
     Intent(
         "request_landing",
@@ -712,6 +925,8 @@ INTENTS: tuple[Intent, ...] = (
                 "with you",
                 "on frequency",
                 "with bandsaw",
+                "with ansa",
+                "with and saw",
             ),
         ),
         kind="step",
@@ -721,6 +936,47 @@ INTENTS: tuple[Intent, ...] = (
         weight=1.2,
         example="checking in",
         does="bandsaw check-in",
+        veto=(
+            "checking out",
+            "check out",
+            "checked out",
+            "off frequency",
+            "switching",
+            "switch blackjack",
+            "push blackjack",
+            "contact blackjack",
+        ),
+    ),
+    Intent(
+        "bandsaw_check_out",
+        (
+            (
+                "checking out",
+                "check out",
+                "checked out",
+                "off frequency",
+                "switching to blackjack",
+                "switch blackjack",
+                "push blackjack",
+                "contact blackjack",
+                "done with bandsaw",
+                "bandsaw complete",
+            ),
+        ),
+        kind="step",
+        template="bandsaw_check_out",
+        channels=("bandsaw",),
+        phases=("flight",),
+        weight=1.25,
+        example="checking out, switch Blackjack",
+        does="bandsaw check-out → Blackjack",
+        veto=(
+            "checking in",
+            "check in",
+            "checkin",
+            "with you",
+            "on station",
+        ),
     ),
     # Departure radar contact — airborne check-in (not winds / altimeter).
     Intent(
@@ -1497,8 +1753,24 @@ def _score_intents(
                 if assigned and _normalize_runway_token(runway) == assigned:
                     continue
         recovery = extract_recovery(text)
-        if recovery and intent.id in ("inbound_recovery", "request_landing"):
+        if recovery and intent.id in (
+            "inbound_recovery",
+            "request_landing",
+            "request_approach",
+        ):
             slots["recovery"] = recovery
+        if intent.id in (
+            "inbound_recovery",
+            "request_approach",
+            "request_hold",
+            "approach_continue",
+        ):
+            vfr = extract_vfr_recovery(text)
+            if vfr:
+                slots["vfr_recovery"] = vfr
+            iaf = extract_iaf(text)
+            if iaf:
+                slots["iaf"] = iaf
 
         if addressed:
             slots["channel"] = addressed
@@ -1848,12 +2120,44 @@ def suggestions(
         # window (easy to say "complete" / "off station" by accident).
         if intent.id == "range_exit" and expected_l != "bj_range_exit":
             continue
+        # Bandsaw: check-in does not advance; tip checkout while still on check-in.
+        if intent.id == "bandsaw_check_in" and expected_l == "bandsaw_check_out":
+            continue
         if intent.step_id:
             rank = 0
         elif intent.id == "ready_departure" and expected_l in _DEPARTURE_READY_TEMPLATES:
             rank = 0
         elif intent.id == "departure_check_in" and expected_l == "radar_contact":
             rank = 0
+        elif intent.id == "bandsaw_check_out" and expected_l in (
+            "bandsaw_check_in",
+            "bandsaw_check_out",
+        ):
+            # Parked on optional check-in until checkout — tip that call.
+            rank = 0
+        elif intent.id in (
+            "inbound_recovery",
+            "request_approach",
+            "request_hold",
+            "request_vectors",
+            "approach_continue",
+        ) and (
+            expected_l
+            in (
+                "approach_check_in",
+                "approach_procedure",
+                "cleared_approach",
+            )
+            or channel_l == "approach"
+        ):
+            rank = 0 if intent.id in ("inbound_recovery", "approach_continue") else 1
+        # Winds / altimeter are fair game on Approach — keep them on the kneeboard.
+        elif intent.id in ("request_winds", "request_altimeter") and channel_l in (
+            "approach",
+            "tower",
+            "ground",
+        ):
+            rank = 0 if intent.id == "request_winds" else 1
         elif expected and intent.template and intent.template == expected:
             rank = 0
         elif intent.phases or intent.channels:

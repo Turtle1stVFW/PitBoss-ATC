@@ -1,0 +1,416 @@
+{
+  "_comment": "Nellis (KLSV) recoveries per NellisAFBI 11-250 §4.13.5 + FAA IAP plates (d-TPP). Four VFR recoveries: STRYK, TORYE, ARCOE, MINTT — TORYE and ARCOE are separate initial fixes (Figure 4.7). Prefer RWY 21; use 03 only when headwind on 03 is >= 11 kt. Instrument descend altitudes are IAF crossing altitudes from the plate. Speed is not cleared unless traffic requires it (speed_restrict).",
+  "defaults": {
+    "prefer_runway_side": "21",
+    "wind_flip_min_kt": 11,
+    "ifr_ceiling_ft": 3000,
+    "ifr_visibility_sm": 3.0,
+    "default_pattern_vmc": "visual_overhead",
+    "default_pattern_imc": "instrument",
+    "descend_ft": 10000,
+    "route_tail_tokens": 8,
+    "vfr_by_runway_side": {
+      "21": [
+        "ARCOE",
+        "TORYE",
+        "STRYK"
+      ],
+      "03": [
+        "MINTT",
+        "STRYK"
+      ]
+    }
+  },
+  "vfr_recoveries": [
+    {
+      "id": "STRYK",
+      "aliases": [
+        "STRYK",
+        "STRIKE",
+        "STRYKER"
+      ],
+      "say": "Stryk",
+      "direct_fix": "STRYK",
+      "direct_say": "Stryk",
+      "runway_sides": [
+        "21",
+        "03"
+      ],
+      "day_vmc_only": true,
+      "default_pattern": "visual_overhead",
+      "descend_ft": 10000,
+      "priority_note": "§4.13.5.1 Western ranges — Day/VMC; procedure speed 300 KIAS (not ATC-restricted unless traffic)",
+      "lat": 36.427056,
+      "lon": -115.511736,
+      "radial_ref": "LSV 283°/26 NM"
+    },
+    {
+      "id": "TORYE",
+      "aliases": [
+        "TORYE",
+        "TORY",
+        "TORIE",
+        "ACTON",
+        "ACTION"
+      ],
+      "say": "Torye",
+      "direct_fix": "TORYE",
+      "direct_say": "Torye",
+      "runway_sides": [
+        "21"
+      ],
+      "day_vmc_only": true,
+      "default_pattern": "visual_overhead",
+      "descend_ft": 12000,
+      "priority_note": "§4.13.5.2 / §4.13.3.2 Separate from ARCOE. Elgin VFR pick-up; northern ranges when RWY 21. ACTON kept as legacy alias.",
+      "lat": 36.742033,
+      "lon": -114.607644,
+      "radial_ref": "LSV 022°/36 NM"
+    },
+    {
+      "id": "ARCOE",
+      "aliases": [
+        "ARCOE",
+        "ARCO",
+        "RCO"
+      ],
+      "say": "Arcoe",
+      "direct_fix": "ARCOE",
+      "direct_say": "Arcoe",
+      "runway_sides": [
+        "21"
+      ],
+      "day_vmc_only": true,
+      "default_pattern": "visual_overhead",
+      "descend_ft": 12000,
+      "priority_note": "§4.13.5.2 Separate from TORYE. Northern ranges when RWY 21 — cleared direct Arcoe (not Torye)",
+      "lat": 36.737683,
+      "lon": -114.917067
+    },
+    {
+      "id": "MINTT",
+      "aliases": [
+        "MINTT",
+        "MINT",
+        "MINUTE"
+      ],
+      "say": "Mintt",
+      "direct_fix": "MINTT",
+      "direct_say": "Mintt",
+      "runway_sides": [
+        "03"
+      ],
+      "day_vmc_only": true,
+      "default_pattern": "visual_overhead",
+      "descend_ft": 10000,
+      "priority_note": "§4.13.5.3 Northern ranges when RWY 03 active (only if 03 is in use)",
+      "lat": 36.712356,
+      "lon": -115.104850,
+      "radial_ref": "LAS 349°/38 NM"
+    }
+  ],
+  "_instrument_comment": "IAFs and crossing altitudes from the KLSV CIFP procedure records. '+' constraints are at-or-above. ILS and LOC are separate procedures on the same plate — only one is ever assigned.",
+  "instrument": [
+    {
+      "id": "ILS_Z_21L",
+      "aliases": [
+        "ILSZ",
+        "ILSZ21L",
+        "ILS Z 21L",
+        "HI ILS Z 21L",
+        "HIILS21L",
+        "ILS21L"
+      ],
+      "say": "ILS Zulu runway two one left",
+      "procedure": "ILS",
+      "runway": "21L",
+      "plate": "HI-ILS OR LOC Z RWY 21L",
+      "iaf": [
+        {
+          "id": "ARCOE",
+          "aliases": [
+            "ARCOE",
+            "ARCO"
+          ],
+          "say": "Arcoe",
+          "altitude_ft": 15000,
+          "altitude_type": "at_or_above",
+          "via": "RONKY, WISTO, D024U, D033U",
+          "lat": 36.737683,
+          "lon": -114.917067
+        },
+        {
+          "id": "KRYSS",
+          "aliases": [
+            "KRYSS",
+            "KRIS",
+            "CHRIS"
+          ],
+          "say": "Kryss",
+          "altitude_ft": 8800,
+          "altitude_type": "at_or_above",
+          "lat": 36.506156,
+          "lon": -114.736508
+        }
+      ]
+    },
+    {
+      "id": "ILS_X_21L",
+      "aliases": [
+        "ILSX",
+        "ILSX21L",
+        "ILS X 21L"
+      ],
+      "say": "ILS X-ray runway two one left",
+      "procedure": "ILS",
+      "runway": "21L",
+      "plate": "ILS OR LOC X RWY 21L",
+      "iaf": [
+        {
+          "id": "KRYSS",
+          "aliases": [
+            "KRYSS",
+            "KRIS"
+          ],
+          "say": "Kryss",
+          "altitude_ft": 8800,
+          "altitude_type": "at_or_above",
+          "lat": 36.506156,
+          "lon": -114.736508
+        },
+        {
+          "id": "SHEET",
+          "aliases": [
+            "SHEET",
+            "SHEAT"
+          ],
+          "say": "Sheet",
+          "altitude_ft": 5000,
+          "altitude_type": "at_or_above",
+          "lat": 36.408861,
+          "lon": -114.844194
+        }
+      ]
+    },
+    {
+      "id": "LOC_Y_21L",
+      "aliases": [
+        "LOCY",
+        "LOCY21L",
+        "LOC Y 21L"
+      ],
+      "say": "localizer Yankee runway two one left",
+      "procedure": "LOC",
+      "runway": "21L",
+      "plate": "LOC Y RWY 21L",
+      "iaf": [
+        {
+          "id": "ZAPVO",
+          "aliases": [
+            "ZAPVO",
+            "ZAP VO"
+          ],
+          "say": "Zapvo",
+          "altitude_ft": 7000,
+          "altitude_type": "at_or_above",
+          "lat": 36.561172,
+          "lon": -114.796525
+        },
+        {
+          "id": "JEGET",
+          "aliases": [
+            "JEGET",
+            "JEG ET"
+          ],
+          "say": "Jeget",
+          "altitude_ft": 4000,
+          "altitude_type": "at_or_above",
+          "lat": 36.320075,
+          "lon": -114.940897
+        }
+      ]
+    },
+    {
+      "id": "HI_TACAN_Y_21L",
+      "aliases": [
+        "TACY",
+        "TACY21L",
+        "HI TACAN Y 21L",
+        "TACAN Y 21L"
+      ],
+      "say": "HI TACAN Yankee runway two one left",
+      "procedure": "TACAN",
+      "runway": "21L",
+      "plate": "HI-TACAN Y RWY 21L",
+      "iaf": [
+        {
+          "id": "DUDBE",
+          "aliases": [
+            "DUDBE",
+            "DUD BE",
+            "DEADBEE"
+          ],
+          "say": "Dudbe",
+          "altitude_ft": 15000,
+          "altitude_type": "at_or_above",
+          "via": "SECRT, D314M, D332M, D350M, D020M, D031M",
+          "lat": 36.364142,
+          "lon": -115.343022
+        },
+        {
+          "id": "HULPU",
+          "aliases": [
+            "HULPU",
+            "HUL PU"
+          ],
+          "say": "Hulpu",
+          "altitude_ft": 5500,
+          "altitude_type": "at_or_above",
+          "lat": 36.405761,
+          "lon": -114.845483
+        }
+      ]
+    },
+    {
+      "id": "HI_TACAN_Z_21L",
+      "aliases": [
+        "TACZ",
+        "TACZ21L",
+        "HI TACAN Z 21L",
+        "TACAN Z 21L"
+      ],
+      "say": "HI TACAN Zulu runway two one left",
+      "procedure": "TACAN",
+      "runway": "21L",
+      "plate": "HI-TACAN Z RWY 21L",
+      "iaf": [
+        {
+          "id": "ARCOE",
+          "aliases": [
+            "ARCOE",
+            "ARCO"
+          ],
+          "say": "Arcoe",
+          "altitude_ft": 15000,
+          "altitude_type": "at_or_above",
+          "via": "RONKY, WISTO, D024U, D033U",
+          "lat": 36.737683,
+          "lon": -114.917067
+        },
+        {
+          "id": "KUTME",
+          "aliases": [
+            "KUTME",
+            "KUT ME"
+          ],
+          "say": "Kutme",
+          "altitude_ft": 8800,
+          "altitude_type": "at_or_above",
+          "lat": 36.504764,
+          "lon": -114.734592
+        }
+      ]
+    },
+    {
+      "id": "TACAN_X_21L",
+      "aliases": [
+        "TACX",
+        "TACX21L",
+        "TACAN X 21L"
+      ],
+      "say": "TACAN X-ray runway two one left",
+      "procedure": "TACAN",
+      "runway": "21L",
+      "plate": "TACAN X RWY 21L",
+      "iaf": [
+        {
+          "id": "KUTME",
+          "aliases": [
+            "KUTME",
+            "KUT ME"
+          ],
+          "say": "Kutme",
+          "altitude_ft": 8800,
+          "altitude_type": "at_or_above",
+          "lat": 36.504764,
+          "lon": -114.734592
+        },
+        {
+          "id": "HULPU",
+          "aliases": [
+            "HULPU",
+            "HUL PU"
+          ],
+          "say": "Hulpu",
+          "altitude_ft": 5000,
+          "altitude_type": "at_or_above",
+          "lat": 36.405761,
+          "lon": -114.845483
+        }
+      ]
+    },
+    {
+      "id": "TACAN_03R",
+      "aliases": [
+        "TAC03R",
+        "TACAN 03R",
+        "HI TACAN 03R",
+        "HITACAN03R"
+      ],
+      "say": "TACAN runway zero three right",
+      "procedure": "TACAN",
+      "runway": "03R",
+      "plate": "TACAN RWY 03R",
+      "iaf": [
+        {
+          "id": "LUCIL",
+          "aliases": [
+            "LUCIL",
+            "LUCILLE"
+          ],
+          "say": "Lucil",
+          "altitude_ft": 10300,
+          "altitude_type": "at_or_above",
+          "lat": 35.979794,
+          "lon": -115.308
+        },
+        {
+          "id": "HUSTS",
+          "aliases": [
+            "HUSTS",
+            "HUSTZ"
+          ],
+          "say": "Husts",
+          "altitude_ft": 6300,
+          "altitude_type": "at_or_above",
+          "lat": 36.047967,
+          "lon": -115.235431
+        }
+      ]
+    }
+  ],
+  "holds": [
+    {
+      "id": "IAF",
+      "aliases": [
+        "IAF",
+        "AT THE IAF",
+        "AT IAF"
+      ],
+      "say": "the IAF",
+      "altitude_ft": 10000,
+      "turn": "standard",
+      "note": "Hold as published / as directed at the assigned IAF"
+    },
+    {
+      "id": "DUCK",
+      "aliases": [
+        "DUCK"
+      ],
+      "say": "Duck",
+      "altitude_ft": 4400,
+      "turn": "east",
+      "note": "Hold east of DUCK, remain 1.5 miles"
+    }
+  ]
+}

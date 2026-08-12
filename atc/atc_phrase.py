@@ -202,6 +202,8 @@ class Weather:
     wind_speed_kt: int | None
     altimeter_inhg: float | None
     raw: str
+    ceiling_ft: int | None = None  # lowest BKN/OVC height AGL, if present
+    visibility_sm: float | None = None
 
 
 @dataclass
@@ -272,7 +274,14 @@ OPUS_FREQ_NAME_MAP: dict[str, tuple[str, ...]] = {
     "departure": ("departure",),
     "approach": ("approach",),
     "blackjack": ("blackjack",),
-    "bandsaw": ("bandsaw", "band saw"),
+    "bandsaw": (
+        "bandsaw",
+        "band saw",
+        "ansa",
+        "and saw",
+        "bansaw",
+        "ban saw",
+    ),
     "ops": ("squadron ops", "ops"),
 }
 
@@ -938,6 +947,853 @@ def load_departure_catalog(airport: dict[str, Any]) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+def load_approach_catalog(airport: dict[str, Any]) -> dict[str, Any] | None:
+    """NAFBI 11-250 VFR recoveries + instrument IAF catalog for this airport."""
+    rel = airport.get("approaches_file")
+    if not rel:
+        return None
+    path = Path(rel)
+    if not path.is_absolute():
+        path = HERE / path
+    if not path.is_file():
+        print(f"WARNING: approaches file not found: {path}", file=sys.stderr)
+        return None
+    try:
+        data = load_json(path)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"WARNING: approaches file read failed ({exc})", file=sys.stderr)
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def approach_defaults(catalog: dict[str, Any] | None) -> dict[str, Any]:
+    raw = (catalog or {}).get("defaults") if isinstance(catalog, dict) else None
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def _runway_side(runway: str | None) -> str:
+    digits = re.sub(r"[^0-9]", "", str(runway or ""))
+    if not digits:
+        return "21"
+    n = int(digits) % 100
+    if n in (3, 4):
+        return "03"
+    if n in (21, 22):
+        return "21"
+    # Nearest of 03 / 21 by heading
+    hdg = (n * 10) % 360
+    d21 = heading_delta(float(hdg), 210.0)
+    d03 = heading_delta(float(hdg), 30.0)
+    return "21" if d21 <= d03 else "03"
+
+
+def _headwind_kt(wind_dir: float | None, wind_spd: float | None, rwy_hdg: float) -> float:
+    """Headwind component (kt) on a runway heading; negative = tailwind."""
+    if wind_dir is None or wind_spd is None:
+        return 0.0
+    # Angle from runway heading to wind-from direction
+    delta = (float(wind_dir) - float(rwy_hdg) + 180.0) % 360.0 - 180.0
+    return float(wind_spd) * math.cos(math.radians(delta))
+
+
+def pick_recovery_runway(
+    airport: dict[str, Any],
+    weather: Weather,
+    *,
+    instrument: bool = False,
+    catalog: dict[str, Any] | None = None,
+) -> str:
+    """
+    Prefer the 21s. Use the 03s only when headwind on 03 is >= wind_flip_min_kt
+    (default 11) and stronger than the 21 headwind.
+
+    Visual ops → 21R / 03L; instrument → 21L / 03R.
+    """
+    cat = catalog if catalog is not None else load_approach_catalog(airport)
+    defs = approach_defaults(cat)
+    prefer = str(defs.get("prefer_runway_side") or "21")
+    try:
+        min_kt = float(defs.get("wind_flip_min_kt") or 11)
+    except (TypeError, ValueError):
+        min_kt = 11.0
+
+    side = prefer
+    hw21 = _headwind_kt(weather.wind_dir, weather.wind_speed_kt, 210.0)
+    hw03 = _headwind_kt(weather.wind_dir, weather.wind_speed_kt, 30.0)
+    if prefer == "21":
+        if hw03 >= min_kt and hw03 > hw21:
+            side = "03"
+        else:
+            side = "21"
+    elif hw21 >= min_kt and hw21 > hw03:
+        side = "21"
+    else:
+        side = prefer
+
+    raw = "21R" if side == "21" else "03L"
+    if instrument:
+        raw = "21L" if side == "21" else "03R"
+    return align_runway_to_airport(airport, raw, instrument=instrument)
+
+
+def is_vfr_recovery_weather(
+    weather: Weather,
+    *,
+    catalog: dict[str, Any] | None = None,
+) -> bool:
+    """True when NAFBI-style VFR recoveries are allowed (day/VMC thresholds)."""
+    defs = approach_defaults(catalog)
+    try:
+        ceil_lim = int(defs.get("ifr_ceiling_ft") or 3000)
+    except (TypeError, ValueError):
+        ceil_lim = 3000
+    try:
+        vis_lim = float(defs.get("ifr_visibility_sm") or 3.0)
+    except (TypeError, ValueError):
+        vis_lim = 3.0
+    raw = (weather.raw or "").upper()
+    if any(tok in raw.split() for tok in ("FG", "FZFG", "TS", "+TSRA", "TSRA")):
+        # Fog / thunderstorm — treat as no VFR recovery
+        if "FG" in raw.split() or "FZFG" in raw.split():
+            return False
+    if weather.ceiling_ft is not None and weather.ceiling_ft < ceil_lim:
+        return False
+    if weather.visibility_sm is not None and weather.visibility_sm < vis_lim:
+        return False
+    # Broken/overcast without parsed height still present in raw near field elev
+    if weather.ceiling_ft is None and re.search(r"\b(BKN|OVC)00[0-2]\d\b", raw):
+        return False
+    return True
+
+
+def find_vfr_recovery(
+    catalog: dict[str, Any] | None, token: str | None
+) -> dict[str, Any] | None:
+    if not catalog or not token:
+        return None
+    want = re.sub(r"[^A-Z0-9]", "", str(token).upper())
+    for entry in catalog.get("vfr_recoveries") or []:
+        if not isinstance(entry, dict):
+            continue
+        aliases = [str(entry.get("id") or "")] + [
+            str(a) for a in (entry.get("aliases") or [])
+        ]
+        for a in aliases:
+            if re.sub(r"[^A-Z0-9]", "", a.upper()) == want:
+                return entry
+    return None
+
+
+def find_instrument_approach(
+    catalog: dict[str, Any] | None,
+    *,
+    runway: str | None = None,
+    token: str | None = None,
+) -> dict[str, Any] | None:
+    if not catalog:
+        return None
+    entries = [e for e in (catalog.get("instrument") or []) if isinstance(e, dict)]
+    if token:
+        want = re.sub(r"[^A-Z0-9]", "", str(token).upper())
+        for entry in entries:
+            aliases = [str(entry.get("id") or "")] + [
+                str(a) for a in (entry.get("aliases") or [])
+            ]
+            for a in aliases:
+                if re.sub(r"[^A-Z0-9]", "", a.upper()) == want:
+                    return entry
+    if runway:
+        rwy = normalize_runway(runway) or str(runway)
+        side = _runway_side(rwy)
+        for entry in entries:
+            er = normalize_runway(entry.get("runway")) or str(entry.get("runway") or "")
+            if er == rwy or _runway_side(er) == side:
+                return entry
+    return entries[0] if entries else None
+
+
+def find_iaf(
+    instrument: dict[str, Any] | None,
+    token: str | None = None,
+    *,
+    strict: bool = False,
+) -> dict[str, Any] | None:
+    """
+    IAF entry on this procedure.
+
+    A named token that is not published on this plate returns None (never the
+    first IAF). DUDBE cannot be attached to ILS Z — it belongs on HI-TACAN Y.
+    With no token, returns the procedure's default IAF.
+    """
+    if not instrument:
+        return None
+    iafs = [i for i in (instrument.get("iaf") or []) if isinstance(i, dict)]
+    if not iafs:
+        return None
+    if token:
+        want = re.sub(r"[^A-Z0-9]", "", str(token).upper())
+        for entry in iafs:
+            aliases = [str(entry.get("id") or "")] + [
+                str(a) for a in (entry.get("aliases") or [])
+            ]
+            for a in aliases:
+                if re.sub(r"[^A-Z0-9]", "", a.upper()) == want:
+                    return entry
+        return None
+    return iafs[0]
+
+
+def approach_plan_is_valid(
+    plan: dict[str, Any] | None,
+    catalog: dict[str, Any] | None,
+) -> bool:
+    """
+    True when the cached plan still matches the published catalog.
+
+    Rejects pre-rebuild leftovers such as DUDBE on HI_ILS_OR_LOC_Z_21L.
+    """
+    if not isinstance(plan, dict) or not plan:
+        return False
+    pattern = normalize_recovery_key(plan.get("pattern"))
+    if pattern != "instrument":
+        # VFR: named recovery must still exist when set.
+        vfr_id = str(plan.get("vfr_recovery") or "").strip()
+        if vfr_id and catalog and not find_vfr_recovery(catalog, vfr_id):
+            return False
+        return bool(plan.get("runway") or vfr_id or pattern)
+    if not catalog:
+        return False
+    inst_id = str(plan.get("instrument_id") or "").strip()
+    iaf_id = str(plan.get("iaf") or "").strip()
+    inst = find_instrument_approach(catalog, token=inst_id) if inst_id else None
+    if inst is None:
+        return False
+    # Catalog id may have been renamed (HI_ILS_OR_LOC_Z → ILS_Z).
+    if inst_id and str(inst.get("id") or "") != inst_id:
+        return False
+    if iaf_id and find_iaf(inst, iaf_id) is None:
+        return False
+    say = str(plan.get("instrument_say") or "")
+    if re.search(r"\bor\s+(localizer|loc)\b", say, flags=re.IGNORECASE):
+        return False
+    return True
+
+
+def find_instrument_by_iaf(
+    catalog: dict[str, Any] | None,
+    token: str | None,
+    *,
+    runway: str | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """
+    Procedure that actually publishes this IAF, preferring the runway in use.
+
+    Returns (instrument, iaf_entry) or None.
+    """
+    if not catalog or not token:
+        return None
+    entries = [e for e in (catalog.get("instrument") or []) if isinstance(e, dict)]
+    side = _runway_side(runway) if runway else ""
+    hits: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for inst in entries:
+        iaf_entry = find_iaf(inst, token, strict=True)
+        if iaf_entry:
+            hits.append((inst, iaf_entry))
+    if not hits:
+        return None
+    if side:
+        for inst, iaf_entry in hits:
+            er = normalize_runway(inst.get("runway")) or str(inst.get("runway") or "")
+            if _runway_side(er) == side:
+                return inst, iaf_entry
+    return hits[0]
+
+
+def _entry_latlon(entry: dict[str, Any] | None) -> tuple[float, float] | None:
+    if not isinstance(entry, dict):
+        return None
+    try:
+        return float(entry["lat"]), float(entry["lon"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def coerce_latlon(value: Any) -> tuple[float, float] | None:
+    """(lat, lon) from a tuple/list/dict, or None when unusable."""
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return _entry_latlon(value)
+    try:
+        lat, lon = value  # type: ignore[misc]
+        return float(lat), float(lon)
+    except (TypeError, ValueError):
+        return None
+
+
+# A cached position outlives the sortie in flow_state.json, so ignore old fixes
+# rather than recovering a fresh flight to where the last one happened to be.
+OWNSHIP_FIX_MAX_AGE_S = 300.0
+
+
+def _ownship_fix_is_fresh(state: dict[str, Any] | None) -> bool:
+    if not isinstance(state, dict) or not state.get("ownship_ll"):
+        return False
+    try:
+        return (time.time() - float(state.get("ownship_ll_t") or 0)) <= OWNSHIP_FIX_MAX_AGE_S
+    except (TypeError, ValueError):
+        return False
+
+
+def nearest_instrument_for_position(
+    catalog: dict[str, Any] | None,
+    position: Any,
+    *,
+    runway: str | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """
+    Closest published IAF to the aircraft, restricted to the landing runway.
+
+    Keeps arrivals from the north on the ARCOE plates and arrivals from the
+    west on DUDBE instead of always handing out the first plate in the catalog.
+    Returns (instrument, iaf) or None when nothing has coordinates.
+    """
+    pos = coerce_latlon(position)
+    if not catalog or pos is None:
+        return None
+    side = _runway_side(runway) if runway else ""
+    best: tuple[float, dict[str, Any], dict[str, Any]] | None = None
+    for inst in catalog.get("instrument") or []:
+        if not isinstance(inst, dict):
+            continue
+        er = normalize_runway(inst.get("runway")) or str(inst.get("runway") or "")
+        if side and _runway_side(er) != side:
+            continue
+        for iaf_entry in inst.get("iaf") or []:
+            ll = _entry_latlon(iaf_entry)
+            if ll is None:
+                continue
+            d = _haversine_nm(pos[0], pos[1], ll[0], ll[1])
+            if best is None or d < best[0]:
+                best = (d, inst, iaf_entry)
+    if best is None:
+        return None
+    return best[1], best[2]
+
+
+def nearest_vfr_recovery_for_position(
+    catalog: dict[str, Any] | None,
+    position: Any,
+    *,
+    runway: str | None = None,
+) -> dict[str, Any] | None:
+    """
+    Closest surveyed VFR recovery fix valid for this runway side.
+
+    Unsurveyed entries are skipped. Returns None when no candidate on that
+    side has coordinates, so the published priority order still decides.
+    """
+    pos = coerce_latlon(position)
+    if not catalog or pos is None:
+        return None
+    side = _runway_side(runway) if runway else ""
+    best: tuple[float, dict[str, Any]] | None = None
+    for entry in catalog.get("vfr_recoveries") or []:
+        if not isinstance(entry, dict):
+            continue
+        sides = [str(s) for s in (entry.get("runway_sides") or [])]
+        if side and sides and side not in sides:
+            continue
+        ll = _entry_latlon(entry)
+        if ll is None:
+            continue
+        d = _haversine_nm(pos[0], pos[1], ll[0], ll[1])
+        if best is None or d < best[0]:
+            best = (d, entry)
+    return best[1] if best else None
+
+
+def find_hold(catalog: dict[str, Any] | None, token: str | None) -> dict[str, Any] | None:
+    if not catalog:
+        return None
+    holds = [h for h in (catalog.get("holds") or []) if isinstance(h, dict)]
+    if not holds:
+        return None
+    if not token:
+        return holds[0]
+    want = re.sub(r"[^A-Z0-9]", "", str(token).upper())
+    for entry in holds:
+        aliases = [str(entry.get("id") or "")] + [
+            str(a) for a in (entry.get("aliases") or [])
+        ]
+        for a in aliases:
+            if re.sub(r"[^A-Z0-9]", "", a.upper()) == want:
+                return entry
+        say = re.sub(r"[^A-Z0-9]", "", str(entry.get("say") or "").upper())
+        if say and say == want:
+            return entry
+    return None
+
+
+def pick_default_vfr_recovery(
+    catalog: dict[str, Any] | None, runway: str
+) -> dict[str, Any] | None:
+    defs = approach_defaults(catalog)
+    side = _runway_side(runway)
+    order = list((defs.get("vfr_by_runway_side") or {}).get(side) or [])
+    for rid in order:
+        found = find_vfr_recovery(catalog, rid)
+        if found:
+            sides = [str(s) for s in (found.get("runway_sides") or [])]
+            if not sides or side in sides:
+                return found
+    # Fallback: first recovery that matches runway side
+    for entry in (catalog or {}).get("vfr_recoveries") or []:
+        if not isinstance(entry, dict):
+            continue
+        sides = [str(s) for s in (entry.get("runway_sides") or [])]
+        if not sides or side in sides:
+            return entry
+    return None
+
+
+def _route_tail_tokens(route: str | None, *, limit: int = 8) -> list[str]:
+    """Last enroute tokens of a filed route (skip arrival ICAO / runway)."""
+    tokens = _enroute_tokens(route)
+    if not tokens:
+        return []
+    n = max(1, int(limit))
+    return tokens[-n:]
+
+
+def match_recovery_from_route(
+    catalog: dict[str, Any] | None,
+    route: str | None,
+) -> dict[str, Any] | None:
+    """
+    Scan the filed route for a VFR recovery fix or an instrument IAF.
+
+    The tail (nearest arrival) wins; if nothing matches there the whole route
+    is scanned, so a recovery fix filed mid-route is still honoured.
+
+    A fix can be both — ARCOE is a published VFR recovery *and* the IAF for the
+    HI-ILS Z / HI-TACAN Z RWY 21L. Both sides are returned so the caller can use
+    whichever the weather calls for.
+    """
+    if not catalog or not route:
+        return None
+    defs = approach_defaults(catalog)
+    try:
+        tail_n = int(defs.get("route_tail_tokens") or 8)
+    except (TypeError, ValueError):
+        tail_n = 8
+    tail = _route_tail_tokens(route, limit=tail_n)
+    everything = _enroute_tokens(route)
+    if not tail and not everything:
+        return None
+
+    seen: set[str] = set()
+    # Walk from arrival backward so the fix closest to the field wins.
+    for tok in list(reversed(tail)) + list(reversed(everything)):
+        key = str(tok).upper()
+        if key in seen:
+            continue
+        seen.add(key)
+        vfr = find_vfr_recovery(catalog, tok)
+        inst_hit = find_instrument_by_iaf(catalog, tok)
+        if not vfr and not inst_hit:
+            continue
+        hit: dict[str, Any] = {
+            "kind": "vfr" if vfr else "iaf",
+            "id": str((vfr or inst_hit[1]).get("id") or ""),
+            "entry": vfr or inst_hit[1],
+        }
+        if inst_hit:
+            inst, iaf_entry = inst_hit
+            hit["iaf_id"] = str(iaf_entry.get("id") or "")
+            hit["iaf_entry"] = iaf_entry
+            hit["instrument_id"] = str(inst.get("id") or "")
+            hit["instrument"] = inst
+            if vfr:
+                hit["kind"] = "both"
+        if vfr:
+            hit["vfr_id"] = str(vfr.get("id") or "")
+        return hit
+    return None
+
+
+def _int_or(default: int, *candidates: Any) -> int:
+    for raw in candidates:
+        if raw is None or str(raw).strip() == "":
+            continue
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            continue
+    return default
+
+
+def _route_fix_conflicts_plan(
+    plan: dict[str, Any],
+    route_hit: dict[str, Any] | None,
+    *,
+    vmc: bool,
+) -> bool:
+    """True when the filed route names a recovery the cached plan ignored."""
+    if not route_hit or not plan:
+        return False
+    source = str(plan.get("source") or "")
+    # Pilot/voice overrides stay until the pilot changes them.
+    if source in ("override", "request"):
+        return False
+    kind = str(route_hit.get("kind") or "")
+    if vmc and kind in ("vfr", "both"):
+        want = str(route_hit.get("vfr_id") or "")
+        return bool(want) and want != str(plan.get("vfr_recovery") or "")
+    if (not vmc) or kind == "iaf":
+        want = str(route_hit.get("iaf_id") or route_hit.get("vfr_id") or "")
+        have = str(plan.get("iaf") or plan.get("vfr_recovery") or "")
+        return bool(want) and want != have
+    return False
+
+
+def assign_approach_plan(
+    airport: dict[str, Any],
+    weather: Weather,
+    *,
+    mission: dict[str, Any] | None = None,
+    state: dict[str, Any] | None = None,
+    opus: OpusFlightContext | None = None,
+    force: bool = False,
+    recovery: str | None = None,
+    vfr_recovery: str | None = None,
+    instrument_id: str | None = None,
+    iaf: str | None = None,
+    position: Any = None,
+) -> dict[str, Any]:
+    """
+    Build / refresh the Approach assignment in mission state.
+
+    Priority for which recovery/IAF:
+      1. Explicit pilot/voice/Fly fix override (vfr_recovery / iaf / instrument_id)
+      2. Named fix in the Opus filed route (always re-checked)
+      3. Published fix nearest the aircraft (CAOC position)
+      4. METAR VMC → runway-side VFR default; IFR → instrument + IAF
+
+    A recovery *pattern* alone (tactical_overhead / instrument) does not suppress
+    the flight-plan scan — only an explicit fix name does.
+
+    Descend / speed come from the chosen recovery or instrument entry
+    (not a single global 10k/300), capped by filed altitude when known.
+    """
+    catalog = load_approach_catalog(airport)
+    defs = approach_defaults(catalog)
+    st = state if isinstance(state, dict) else {}
+    # Pattern-only kwargs still allow the filed route to pick the fix.
+    explicit_fix = bool(vfr_recovery or instrument_id or iaf)
+    route = (opus.fp_route_string if opus else None) or None
+    route_hit = (
+        None if explicit_fix else match_recovery_from_route(catalog, route)
+    )
+    vmc_now = is_vfr_recovery_weather(weather, catalog=catalog)
+
+    if (
+        not force
+        and st.get("approach_assigned")
+        and not explicit_fix
+        and recovery is None
+    ):
+        plan = dict(st.get("approach_plan") or {})
+        # Drop catalog leftovers (DUDBE on HI-ILS Z) and rebuild from route/position.
+        if not approach_plan_is_valid(plan, catalog):
+            return assign_approach_plan(
+                airport,
+                weather,
+                mission=mission,
+                state=state,
+                opus=opus,
+                force=True,
+                recovery=str(plan.get("pattern") or st.get("active_recovery") or "")
+                or None,
+                position=position,
+            )
+        # Filed route changed, or a position/default plan ignored the FP fix.
+        route_changed = bool(route) and str(plan.get("fp_route") or "") != str(route)
+        if route_changed or _route_fix_conflicts_plan(plan, route_hit, vmc=vmc_now):
+            return assign_approach_plan(
+                airport,
+                weather,
+                mission=mission,
+                state=state,
+                opus=opus,
+                force=True,
+                recovery=str(plan.get("pattern") or "") or None,
+                position=position,
+            )
+        # Stale plan after a wind shift (e.g. still on 03 with 081/07) — re-pick
+        # the runway side unless the pilot/Setup pinned a runway.
+        if plan and not requested_runway(mission=mission, state=state):
+            instrument = normalize_recovery_key(plan.get("pattern")) == "instrument"
+            wind_rwy = pick_recovery_runway(
+                airport, weather, instrument=instrument, catalog=catalog
+            )
+            if _runway_side(wind_rwy) != _runway_side(str(plan.get("runway") or "")):
+                return assign_approach_plan(
+                    airport,
+                    weather,
+                    mission=mission,
+                    state=state,
+                    opus=opus,
+                    force=True,
+                    recovery=str(plan.get("pattern") or "") or None,
+                    position=position,
+                )
+        return plan
+
+    if position is None and _ownship_fix_is_fresh(st):
+        position = st.get("ownship_ll")
+    position = coerce_latlon(position)
+
+    if route_hit:
+        kind = str(route_hit.get("kind") or "")
+        if route_hit.get("vfr_id"):
+            vfr_recovery = str(route_hit.get("vfr_id") or "") or vfr_recovery
+        # A filed fix that is also an IAF carries its own plate, so an IMC
+        # recovery uses the fix the pilot actually filed (ARCOE stays ARCOE).
+        if route_hit.get("iaf_id"):
+            iaf = str(route_hit.get("iaf_id") or "") or iaf
+            instrument_id = str(route_hit.get("instrument_id") or "") or instrument_id
+        if kind == "iaf" and not recovery:
+            recovery = "instrument"
+
+    # Explicit pattern request, else keep prior, else weather / route default
+    if recovery:
+        pattern = normalize_recovery_key(recovery)
+    elif st.get("active_recovery") and any((vfr_recovery, instrument_id, iaf)):
+        pattern = normalize_recovery_key(st.get("active_recovery"))
+    elif not force and st.get("active_recovery") and st.get("approach_assigned"):
+        pattern = normalize_recovery_key(st.get("active_recovery"))
+    else:
+        vmc = is_vfr_recovery_weather(weather, catalog=catalog)
+        # Route-named IAF already forced instrument above; VFR route hit stays VMC.
+        if route_hit and str(route_hit.get("kind")) in ("vfr", "both") and vmc:
+            pattern = normalize_recovery_key(
+                defs.get("default_pattern_vmc"), default=DEFAULT_RECOVERY
+            )
+        else:
+            pattern = normalize_recovery_key(
+                defs.get("default_pattern_vmc")
+                if vmc
+                else defs.get("default_pattern_imc"),
+                default=DEFAULT_RECOVERY if vmc else "instrument",
+            )
+            if not vmc:
+                pattern = "instrument"
+
+    # An explicitly *requested* VFR recovery implies a VMC pattern. Filing one
+    # in the route does not — weather still decides whether you get it.
+    if vfr_recovery and pattern == "instrument" and not recovery and not route_hit:
+        pattern = normalize_recovery_key(
+            defs.get("default_pattern_vmc"), default=DEFAULT_RECOVERY
+        )
+
+    instrument = pattern == "instrument"
+    rwy = pick_recovery_runway(
+        airport, weather, instrument=instrument, catalog=catalog
+    )
+    # Honor pilot runway request if set
+    req = requested_runway(mission=mission, state=state)
+    if req:
+        rwy = align_runway_to_airport(airport, req, instrument=instrument)
+
+    plan: dict[str, Any] = {
+        "pattern": pattern,
+        "runway": rwy,
+        "vfr_recovery": None,
+        "vfr_recovery_say": None,
+        "direct_fix": None,
+        "direct_say": None,
+        "instrument_id": None,
+        "instrument_say": None,
+        "plate": None,
+        "iaf": None,
+        "iaf_say": None,
+        "iaf_source": None,
+        "iaf_altitude_type": None,
+        "vmc": is_vfr_recovery_weather(weather, catalog=catalog),
+        "source": (
+            "override"
+            if explicit_fix and not route_hit
+            else ("route" if route_hit else "weather")
+        ),
+        "fp_route": route,
+        "route_fix": str(
+            (route_hit or {}).get("vfr_id")
+            or (route_hit or {}).get("iaf_id")
+            or (route_hit or {}).get("id")
+            or ""
+        )
+        or None,
+    }
+
+    # Altitude from recovery / plate IAF. Speed only when traffic restricts.
+    plan["descend_ft"] = _int_or(10000, defs.get("descend_ft"))
+    plan["speed_kt"] = None
+    plan["speed_restrict"] = bool(st.get("speed_restrict"))
+
+    if instrument:
+        inst = None
+        iaf_entry = None
+        iaf_source = "default"
+        # A named IAF picks its own plate — DUDBE is HI-TACAN Y 21L, ARCOE is
+        # ILS/TACAN Z 21L. A mismatched instrument_id+IAF pair (old sticky
+        # HI-ILS Z + DUDBE) is resolved by the IAF, not the plate name.
+        if iaf:
+            hit = find_instrument_by_iaf(catalog, iaf, runway=rwy)
+            if hit:
+                by_iaf_inst, by_iaf_entry = hit
+                if not instrument_id:
+                    inst, iaf_entry = by_iaf_inst, by_iaf_entry
+                    iaf_source = "route" if route_hit else "request"
+                else:
+                    named = find_instrument_approach(
+                        catalog, runway=rwy, token=instrument_id
+                    )
+                    if named is None or find_iaf(named, iaf) is None:
+                        inst, iaf_entry = by_iaf_inst, by_iaf_entry
+                        iaf_source = "route" if route_hit else "request"
+                    else:
+                        inst, iaf_entry = named, find_iaf(named, iaf)
+                        iaf_source = "route" if route_hit else "request"
+        if inst is None and iaf:
+            iaf_source = "route" if route_hit else "request"
+        # Nothing filed or requested — hand out the plate whose IAF the jet is
+        # actually closest to instead of the first one in the catalog.
+        if (
+            inst is None
+            and not iaf
+            and not instrument_id
+            and not route_hit
+            and position
+        ):
+            near = nearest_instrument_for_position(catalog, position, runway=rwy)
+            if near:
+                inst, iaf_entry = near
+                iaf_source = "position"
+                plan["source"] = "position"
+        if inst is None:
+            inst = find_instrument_approach(
+                catalog, runway=rwy, token=instrument_id
+            ) or find_instrument_approach(catalog, runway=rwy)
+        if inst:
+            plan["instrument_id"] = str(inst.get("id") or "")
+            # One procedure only (ILS *or* LOC) — never "ILS or localizer".
+            plan["instrument_say"] = str(
+                inst.get("clearance_say") or inst.get("say") or plan["instrument_id"]
+            )
+            plan["instrument_procedure"] = str(inst.get("procedure") or "ILS")
+            plan["plate"] = str(inst.get("plate") or "") or None
+            if inst.get("runway"):
+                plan["runway"] = align_runway_to_airport(
+                    airport, str(inst["runway"]), instrument=True
+                )
+            if iaf_entry is None:
+                iaf_entry = find_iaf(inst, iaf) if iaf else find_iaf(inst)
+            if iaf_entry:
+                plan["iaf"] = str(iaf_entry.get("id") or "")
+                plan["iaf_say"] = str(iaf_entry.get("say") or plan["iaf"])
+                plan["iaf_source"] = iaf_source
+                plan["iaf_altitude_type"] = str(
+                    iaf_entry.get("altitude_type") or "at_or_above"
+                )
+                # Plate IAF crossing altitude is the descend clearance.
+                plan["descend_ft"] = _int_or(
+                    plan["descend_ft"],
+                    iaf_entry.get("altitude_ft"),
+                    inst.get("descend_ft"),
+                    defs.get("descend_ft"),
+                )
+            else:
+                plan["descend_ft"] = _int_or(
+                    plan["descend_ft"], inst.get("descend_ft"), defs.get("descend_ft")
+                )
+    else:
+        vfr = find_vfr_recovery(catalog, vfr_recovery) if vfr_recovery else None
+        # Position never outranks a filed recovery fix.
+        if vfr is None and not route_hit and position:
+            vfr = nearest_vfr_recovery_for_position(
+                catalog, position, runway=plan["runway"]
+            )
+            if vfr:
+                plan["source"] = "position"
+        if vfr is None:
+            vfr = pick_default_vfr_recovery(catalog, plan["runway"])
+        if vfr:
+            plan["vfr_recovery"] = str(vfr.get("id") or "")
+            plan["vfr_recovery_say"] = str(vfr.get("say") or plan["vfr_recovery"])
+            if vfr.get("default_pattern") and not recovery:
+                plan["pattern"] = normalize_recovery_key(
+                    vfr.get("default_pattern"), default=plan["pattern"]
+                )
+            plan["descend_ft"] = _int_or(
+                plan["descend_ft"], vfr.get("descend_ft"), defs.get("descend_ft")
+            )
+            plan["direct_fix"] = str(
+                vfr.get("direct_fix") or vfr.get("id") or ""
+            ) or None
+            plan["direct_say"] = str(
+                vfr.get("direct_say") or vfr.get("say") or plan["direct_fix"] or ""
+            ) or None
+            # Route-named recovery on 03-only (MINTT): keep wind gate — may stay 21.
+            sides = [str(s) for s in (vfr.get("runway_sides") or [])]
+            side = _runway_side(plan["runway"])
+            if sides and side not in sides and not req:
+                if "21" in sides:
+                    plan["runway"] = align_runway_to_airport(
+                        airport, "21R", instrument=False
+                    )
+                # else leave wind-picked runway (do not force 03 in light wind)
+
+    # Traffic speed restriction only — never a routine "maintain 300".
+    if plan.get("speed_restrict"):
+        plan["speed_kt"] = _int_or(300, st.get("speed_kt"), defs.get("speed_kt"))
+
+    # Never clear above filed altitude when Opus has one.
+    filed_ft = filed_altitude_feet(opus.fp_altitude if opus else None)
+    if filed_ft is not None and plan["descend_ft"] > filed_ft:
+        plan["descend_ft"] = filed_ft
+
+    if state is not None:
+        state["approach_assigned"] = True
+        state["approach_plan"] = plan
+        state["active_recovery"] = plan["pattern"]
+        state["active_vfr_recovery"] = plan.get("vfr_recovery")
+        state["active_instrument"] = plan.get("instrument_id")
+        state["active_iaf"] = plan.get("iaf")
+        state["approach_runway"] = plan.get("runway")
+        state["hold_active"] = bool(state.get("hold_active"))
+        state["vectors_active"] = bool(state.get("vectors_active"))
+    return plan
+
+
+def approach_plan_from_state(
+    state: dict[str, Any] | None,
+    *,
+    airport: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if not isinstance(state, dict):
+        return {}
+    plan = state.get("approach_plan")
+    if not isinstance(plan, dict):
+        return {}
+    out = dict(plan)
+    if airport is not None:
+        catalog = load_approach_catalog(airport)
+        if not approach_plan_is_valid(out, catalog):
+            return {}
+    return out
+
+
 def _enroute_tokens(route: str | None, *, dep_icao: str | None = None) -> list[str]:
     tokens = parse_route_tokens(route)
     if not tokens:
@@ -1572,7 +2428,7 @@ RECOVERY_CHOICES: list[tuple[str, str]] = [
     ("instrument", "Instrument"),
 ]
 
-DEFAULT_RECOVERY = "tactical_overhead"
+DEFAULT_RECOVERY = "visual_overhead"
 
 # Legacy / free-text aliases → canonical key
 _RECOVERY_ALIASES: dict[str, str] = {
@@ -1691,7 +2547,12 @@ def apply_active_recovery_to_step(
     """
     out = dict(step)
     tmpl = str(out.get("template") or "")
-    if tmpl not in ("approach_check_in", "cleared_approach"):
+    if tmpl not in (
+        "approach_check_in",
+        "cleared_approach",
+        "approach_procedure",
+        "approach_iaf",
+    ):
         return out
     if out.get("text"):
         return out
@@ -1699,6 +2560,13 @@ def apply_active_recovery_to_step(
     out["recovery"] = rec
     out["expect"] = recovery_expect(rec)
     out["approach_pattern"] = recovery_pattern(rec)
+    plan = approach_plan_from_state(state)
+    if plan.get("vfr_recovery"):
+        out["vfr_recovery"] = plan["vfr_recovery"]
+    if plan.get("iaf"):
+        out["iaf"] = plan["iaf"]
+    if plan.get("runway"):
+        out["runway"] = plan["runway"]
     return out
 
 
@@ -1821,6 +2689,20 @@ def should_skip_takeoff_step(
     return resolve_active_takeoff_mode(mission, state) == "rolling"
 
 
+def should_skip_approach_step(
+    step: dict[str, Any] | None,
+    mission: dict[str, Any] | None = None,
+    state: dict[str, Any] | None = None,
+) -> bool:
+    """Instrument / straight-in skip the visual right-break step."""
+    if not step:
+        return False
+    if str(step.get("template") or "") != "right_break":
+        return False
+    rec = resolve_active_recovery(step, mission, state=state)
+    return rec in ("instrument", "straight_in")
+
+
 def effective_takeoff_template(
     template: str,
     mission: dict[str, Any] | None = None,
@@ -1903,8 +2785,9 @@ def pilot_requests_for_channel(
                 continue
             out.append((key, f"Request runway {rwy}"))
             seen.add(key)
-        if requested_runway(state=state):
-            out.append(("clear_runway_request", "Clear runway request"))
+        # Always available — clears a sticky pilot request / Setup override and
+        # re-picks the runway from METAR (including Approach plan runway).
+        out.append(("clear_runway_request", "Reset runway to winds"))
     return out
 
 
@@ -1926,11 +2809,75 @@ def set_takeoff_mode(
     return key
 
 
+def reset_runway_to_winds(
+    airport: dict[str, Any],
+    weather: Weather,
+    *,
+    mission: dict[str, Any] | None = None,
+    state: dict[str, Any] | None = None,
+    opus: OpusFlightContext | None = None,
+    config: dict[str, Any] | None = None,
+) -> str:
+    """
+    Drop pilot / Setup runway overrides and re-pick from METAR winds.
+
+    If an Approach plan is already assigned, keep the pattern (tactical /
+    instrument) but rebuild runway-side recovery / IAF for the wind end.
+    """
+    set_requested_runway(None, mission=mission, state=state)
+    if config is not None:
+        config["runway_override"] = ""
+
+    st = state if isinstance(state, dict) else {}
+    prev = approach_plan_from_state(st)
+    pattern = str(prev.get("pattern") or st.get("active_recovery") or "") or None
+    # Drop cached runway so a force rebuild cannot keep the wrong end.
+    if st.get("approach_plan") and isinstance(st["approach_plan"], dict):
+        st["approach_plan"] = dict(st["approach_plan"])
+        st["approach_plan"].pop("runway", None)
+    st.pop("approach_runway", None)
+
+    if st.get("approach_assigned") or prev or pattern:
+        plan = assign_approach_plan(
+            airport,
+            weather,
+            mission=mission,
+            state=st,
+            opus=opus,
+            force=True,
+            recovery=pattern,
+        )
+        if weather.wind_dir is not None and weather.wind_speed_kt is not None:
+            print(
+                f"Runway reset to winds: {int(weather.wind_dir):03d}/"
+                f"{int(weather.wind_speed_kt)} -> {plan.get('runway')} "
+                f"({plan.get('vfr_recovery') or plan.get('iaf') or plan.get('pattern')})"
+            )
+        else:
+            print(f"Runway reset to winds -> {plan.get('runway')}")
+        return str(plan.get("runway") or "")
+
+    instrument = uses_instrument_runway(mission=mission, state=state)
+    picked = pick_recovery_runway(airport, weather, instrument=instrument)
+    if weather.wind_dir is not None and weather.wind_speed_kt is not None:
+        print(
+            f"Runway reset to winds: {int(weather.wind_dir):03d}/"
+            f"{int(weather.wind_speed_kt)} -> {picked}"
+        )
+    else:
+        print(f"Runway reset to winds -> {picked}")
+    return picked
+
+
 def apply_pilot_request(
     request_key: str,
     *,
     mission: dict[str, Any] | None = None,
     state: dict[str, Any] | None = None,
+    airport: dict[str, Any] | None = None,
+    weather: Weather | None = None,
+    opus: OpusFlightContext | None = None,
+    config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Apply a pilot request to mission/state.
@@ -1950,13 +2897,26 @@ def apply_pilot_request(
         set_takeoff_mode("lineup", mission=mission, state=state, clear_offer=True)
         return {"key": key, "takeoff_mode": "lineup", "pending_offer": None, "ack_kind": "request_lineup"}
     if key == "clear_runway_request":
-        set_requested_runway(None, mission=mission, state=state)
+        rwy: str | None = None
+        if airport is not None and weather is not None:
+            rwy = reset_runway_to_winds(
+                airport,
+                weather,
+                mission=mission,
+                state=state,
+                opus=opus,
+                config=config,
+            ) or None
+        else:
+            set_requested_runway(None, mission=mission, state=state)
+            if config is not None:
+                config["runway_override"] = ""
         return {
             "key": key,
             "takeoff_mode": resolve_active_takeoff_mode(mission, state),
             "pending_offer": pending_takeoff_offer(state),
             "ack_kind": "clear_runway_request",
-            "runway": None,
+            "runway": rwy,
         }
     req_rwy = parse_runway_request_key(key)
     if req_rwy:
@@ -1993,6 +2953,10 @@ def build_pilot_request_ack(
         rwy = speak_runway(runway) if runway else "requested"
         return f"{cs}, {name} {agency}, runway {rwy} approved."
     if kind == "clear_runway_request":
+        if runway:
+            return (
+                f"{cs}, {name} {agency}, roger, expect runway {speak_runway(runway)}."
+            )
         return f"{cs}, {name} {agency}, roger, expect active runway."
     return f"{cs}, {name} {agency}, roger."
 
@@ -2008,25 +2972,66 @@ def speak_recovery_clearance(recovery: str | None) -> str:
     return f"cleared {spoken}"
 
 
-def speak_expect_pattern(pattern: str | None, runway: str) -> str:
-    """Optional 'expect … runway …' clause for recovery check-in."""
+def speak_landing_flow(runway: str | None, airport_name: str) -> str:
+    """'Nellis landing south' (RWY 21) / 'Nellis landing north' (RWY 03)."""
+    name = str(airport_name or "Nellis").strip() or "Nellis"
+    side = _runway_side(runway)
+    direction = "north" if side == "03" else "south"
+    return f"{name} landing {direction}"
+
+
+def speak_pattern_for_runway(pattern: str | None, runway: str) -> str:
+    """'TAC Overhead runway two one right' / 'straight-in runway …'."""
     key = normalize_recovery_key(pattern, default="")
     rwy = speak_runway(runway) if runway else ""
     if key == "visual_overhead":
-        body = f"overhead runway {rwy}" if rwy else "overhead"
-    elif key == "tactical_overhead":
-        body = f"TAC overhead runway {rwy}" if rwy else "TAC overhead"
-    elif key == "straight_in":
-        body = f"straight-in runway {rwy}" if rwy else "straight-in"
-    elif key == "instrument":
-        body = f"instrument approach runway {rwy}" if rwy else "instrument approach"
-    else:
-        p = str(pattern or "").strip()
-        if not p:
-            body = f"TAC overhead runway {rwy}" if rwy else "TAC overhead"
-        else:
-            body = f"{p} runway {rwy}" if rwy else p
-    return f"expect {body}"
+        return f"overhead runway {rwy}" if rwy else "overhead"
+    if key == "tactical_overhead":
+        return f"TAC Overhead runway {rwy}" if rwy else "TAC Overhead"
+    if key == "straight_in":
+        return f"straight-in runway {rwy}" if rwy else "straight-in"
+    if key == "instrument":
+        return f"instrument approach runway {rwy}" if rwy else "instrument approach"
+    p = str(pattern or "").strip()
+    if not p:
+        return f"TAC Overhead runway {rwy}" if rwy else "TAC Overhead"
+    return f"{p} runway {rwy}" if rwy else p
+
+
+def speak_expect_pattern(pattern: str | None, runway: str) -> str:
+    """Legacy 'expect TAC Overhead runway …' (no named VFR recovery)."""
+    return f"expect {speak_pattern_for_runway(pattern, runway)}"
+
+
+def speak_expect_vfr_recovery(
+    vfr_say: str | None,
+    pattern: str | None,
+    runway: str,
+) -> str:
+    """'expect Arcoe recovery for the TAC Overhead runway two one right'."""
+    name = str(vfr_say or "recovery").strip() or "recovery"
+    pattern_body = speak_pattern_for_runway(pattern, runway)
+    return f"expect {name} recovery for the {pattern_body}"
+
+
+def _plan_direct_say(
+    plan: dict[str, Any],
+    airport: dict[str, Any],
+    *,
+    runway: str,
+) -> str:
+    """Spoken fix for Blackjack 'proceed direct …' / Approach naming."""
+    for key in ("direct_say", "vfr_recovery_say", "iaf_say", "direct_fix", "vfr_recovery", "iaf"):
+        val = str(plan.get(key) or "").strip()
+        if val:
+            return val
+    catalog = load_approach_catalog(airport)
+    defs = approach_defaults(catalog)
+    side = _runway_side(runway)
+    by_side = (defs.get("direct_by_runway_side") or {}).get(side) or {}
+    if isinstance(by_side, dict):
+        return str(by_side.get("say") or by_side.get("id") or "").strip()
+    return str(by_side or "").strip()
 
 
 def build_approach_recovery(
@@ -2036,36 +3041,293 @@ def build_approach_recovery(
     runway: str,
     *,
     recovery: str | None = None,
-    descend_ft: int | None = 10000,
-    speed_kt: int | None = 300,
+    descend_ft: int | None = None,
+    speed_kt: int | None = None,
     expect: str | None = None,
+    plan: dict[str, Any] | None = None,
 ) -> str:
+    """
+    Approach check-in (NATCF style), e.g.:
+    Fleece 1, Nellis Approach, Nellis landing south, expect Arcoe recovery
+    for the TAC Overhead runway two one right, …
+    """
     name = airport["name"]
     cs = speak_callsign(callsign)
     alt = speak_altimeter(weather.altimeter_inhg or 29.92)
-    rec_key = normalize_recovery_key(recovery)
-    cleared = speak_recovery_clearance(rec_key)
-    bits = [f"{cs}, {name} Approach, radar contact, {cleared}"]
-    if descend_ft:
+    p = dict(plan or {})
+    rec_key = normalize_recovery_key(recovery or p.get("pattern"))
+    rwy = str(p.get("runway") or runway or "")
+    rwy_s = speak_runway(rwy) if rwy else ""
+
+    bits = [
+        f"{cs}, {name} Approach",
+        speak_landing_flow(rwy, name),
+    ]
+
+    instrument = rec_key == "instrument" or bool(p.get("iaf"))
+    if instrument:
+        # Check-in: expect the assigned procedure only (clearance is the next step).
+        inst_say = str(p.get("instrument_say") or "").strip()
+        if inst_say:
+            bits.append(f"expect {inst_say}")
+        elif rwy_s:
+            bits.append(f"expect instrument approach runway {rwy_s}")
+        else:
+            bits.append("expect instrument approach")
+    else:
+        vfr_say = str(p.get("vfr_recovery_say") or p.get("vfr_recovery") or "").strip()
+        expect_key = expect if expect is not None else recovery_expect(rec_key)
+        if vfr_say:
+            bits.append(speak_expect_vfr_recovery(vfr_say, expect_key, rwy))
+        else:
+            bits.append(speak_expect_pattern(expect_key, rwy))
+        # VFR descend on check-in; instrument crossing altitude is on the clearance.
+        dft = p.get("descend_ft") if descend_ft is None else descend_ft
+        if dft is None and not p:
+            dft = 10000
+        if dft:
+            try:
+                bits.append(
+                    f"descend and maintain {speak_altitude_value(str(int(dft)), prefer_fl_below=1000)}"
+                )
+            except (TypeError, ValueError):
+                pass
+
+    # Speed only when traffic (or other factor) sets speed_restrict on the plan.
+    if p.get("speed_restrict"):
+        sk = p.get("speed_kt") if speed_kt is None else speed_kt
+        if sk:
+            try:
+                bits.append(f"maintain {speak_digits(str(int(sk)))} knots")
+            except (TypeError, ValueError):
+                pass
+
+    bits.append(f"{name} altimeter {alt}")
+    return ", ".join(bits) + "."
+
+
+def build_vfr_recovery_clearance(
+    airport: dict[str, Any],
+    callsign: str,
+    *,
+    plan: dict[str, Any] | None = None,
+    recovery_say: str | None = None,
+    pattern: str | None = None,
+    runway: str | None = None,
+) -> str:
+    """Step after check-in: clear the named VFR recovery / pattern."""
+    name = airport["name"]
+    cs = speak_callsign(callsign)
+    p = dict(plan or {})
+    vfr = str(recovery_say or p.get("vfr_recovery_say") or p.get("vfr_recovery") or "").strip()
+    rec_key = normalize_recovery_key(pattern or p.get("pattern"))
+    rwy = str(runway or p.get("runway") or "")
+    pattern_body = speak_pattern_for_runway(rec_key, rwy)
+    if vfr:
+        body = f"cleared {vfr} recovery for the {pattern_body}"
+    else:
+        body = f"cleared {pattern_body}"
+    return f"{cs}, {name} Approach, {body}."
+
+
+def build_iaf_clearance(
+    airport: dict[str, Any],
+    callsign: str,
+    *,
+    plan: dict[str, Any] | None = None,
+    iaf_say: str | None = None,
+    instrument_say: str | None = None,
+    runway: str | None = None,
+) -> str:
+    """
+    Instrument approach clearance (after check-in expect), e.g.:
+    Fleece 1, Nellis Approach, cross Dudbe at or above one six thousand,
+    cleared ILS Zulu runway two one left.
+    """
+    name = airport["name"]
+    cs = speak_callsign(callsign)
+    p = dict(plan or {})
+    iaf = str(iaf_say or p.get("iaf_say") or p.get("iaf") or "").strip()
+    inst = str(instrument_say or p.get("instrument_say") or "").strip()
+    rwy = speak_runway(str(runway or p.get("runway") or ""))
+    if not inst:
+        inst = f"instrument approach runway {rwy}" if rwy else "instrument approach"
+    # Never clear "ILS or LOC" — catalog assigns one procedure (usually ILS).
+    inst = re.sub(
+        r"\b(or|,)\s+(localizer|loc)\b",
+        "",
+        inst,
+        flags=re.IGNORECASE,
+    )
+    inst = re.sub(r"\s+", " ", inst).strip(" ,")
+
+    bits = [f"{cs}, {name} Approach"]
+    alt_ft = p.get("descend_ft")
+    if iaf and alt_ft:
         try:
-            dft = int(descend_ft)
+            alt_s = speak_altitude_value(str(int(alt_ft)), prefer_fl_below=1000)
+            at_or_above = str(p.get("iaf_altitude_type") or "at_or_above") == "at_or_above"
+            qualifier = "at or above" if at_or_above else "at"
+            bits.append(f"cross {iaf} {qualifier} {alt_s}")
+        except (TypeError, ValueError):
+            bits.append(f"cross {iaf}")
+    elif iaf:
+        bits.append(f"cross {iaf}")
+    bits.append(f"cleared {inst}")
+    return ", ".join(bits) + "."
+
+
+def build_approach_change(
+    airport: dict[str, Any],
+    callsign: str,
+    weather: Weather,
+    *,
+    plan: dict[str, Any] | None = None,
+) -> str:
+    """Acknowledge a pilot-requested change of recovery / approach."""
+    name = airport["name"]
+    cs = speak_callsign(callsign)
+    p = dict(plan or {})
+    rec_key = normalize_recovery_key(p.get("pattern"))
+    rwy = speak_runway(str(p.get("runway") or ""))
+    if rec_key == "instrument" or p.get("iaf"):
+        iaf = str(p.get("iaf_say") or p.get("iaf") or "the IAF")
+        inst = str(p.get("instrument_say") or "instrument approach")
+        body = f"roger, proceed direct {iaf}, expect {inst}"
+        if rwy and "runway" not in inst.lower():
+            body += f" runway {rwy}"
+    else:
+        vfr = str(p.get("vfr_recovery_say") or p.get("vfr_recovery") or "").strip()
+        cleared = speak_recovery_clearance(rec_key)
+        body = f"roger, {cleared}"
+        if vfr:
+            body = f"roger, cleared {vfr} recovery, {cleared}"
+        if rwy:
+            body += f" runway {rwy}"
+    alt = speak_altimeter(weather.altimeter_inhg or 29.92)
+    return f"{cs}, {name} Approach, {body}, {name} altimeter {alt}."
+
+
+def build_hold_clearance(
+    airport: dict[str, Any],
+    callsign: str,
+    *,
+    hold: dict[str, Any] | None = None,
+    plan: dict[str, Any] | None = None,
+    efc_minutes: int | None = None,
+) -> str:
+    """Spoken hold clearance (simple state — not a published-leg simulator)."""
+    name = airport["name"]
+    cs = speak_callsign(callsign)
+    p = dict(plan or {})
+    h = dict(hold or {})
+    fix = str(h.get("say") or h.get("id") or p.get("iaf_say") or p.get("iaf") or "the IAF")
+    try:
+        alt_ft = int(h.get("altitude_ft") or p.get("descend_ft") or 10000)
+    except (TypeError, ValueError):
+        alt_ft = 10000
+    alt = speak_altitude_value(str(alt_ft), prefer_fl_below=1000)
+    turn = str(h.get("turn") or "standard").strip().lower()
+    turn_bit = "left turns" if turn in ("left", "west") else (
+        "right turns" if turn in ("right", "east") else "standard turns"
+    )
+    bits = [
+        f"{cs}, {name} Approach, hold at {fix}",
+        f"maintain {alt}",
+        turn_bit,
+    ]
+    if efc_minutes is not None:
+        bits.append(f"expect further clearance in {speak_minutes_natural(int(efc_minutes))} minutes")
+    else:
+        bits.append("expect further clearance")
+    return ", ".join(bits) + "."
+
+
+def build_vector_clearance(
+    airport: dict[str, Any],
+    callsign: str,
+    *,
+    heading: int | None = None,
+    altitude_ft: int | None = None,
+    plan: dict[str, Any] | None = None,
+) -> str:
+    """Simple radar vector clearance toward recovery / final."""
+    name = airport["name"]
+    cs = speak_callsign(callsign)
+    p = dict(plan or {})
+    hdg = heading
+    if hdg is None:
+        # Point roughly toward the field from a northern recovery (210) or southern (030)
+        side = _runway_side(str(p.get("runway") or "21R"))
+        hdg = 180 if side == "21" else 360
+    try:
+        hdg_i = int(hdg) % 360
+    except (TypeError, ValueError):
+        hdg_i = 180
+    bits = [
+        f"{cs}, {name} Approach, fly heading {speak_digits(f'{hdg_i:03d}')}",
+        "vectors",
+    ]
+    if p.get("iaf_say") or p.get("vfr_recovery_say"):
+        dest = str(p.get("iaf_say") or p.get("vfr_recovery_say"))
+        bits.append(f"for {dest}")
+    else:
+        bits.append("for the field")
+    alt = altitude_ft if altitude_ft is not None else p.get("descend_ft")
+    if alt:
+        try:
             bits.append(
-                f"descend and maintain {speak_altitude_value(str(dft), prefer_fl_below=1000)}"
+                f"descend and maintain {speak_altitude_value(str(int(alt)), prefer_fl_below=1000)}"
             )
         except (TypeError, ValueError):
             pass
-    if speed_kt:
-        try:
-            sk = int(speed_kt)
-            bits.append(f"maintain {speak_digits(str(sk))} knots")
-        except (TypeError, ValueError):
-            pass
-    expect_key = expect if expect is not None else recovery_expect(rec_key)
-    expect_clause = speak_expect_pattern(expect_key, runway)
-    if expect_clause:
-        bits.append(expect_clause)
-    bits.append(f"{name} altimeter {alt}")
     return ", ".join(bits) + "."
+
+
+def build_leave_hold_clearance(
+    airport: dict[str, Any],
+    callsign: str,
+    *,
+    plan: dict[str, Any] | None = None,
+) -> str:
+    name = airport["name"]
+    cs = speak_callsign(callsign)
+    p = dict(plan or {})
+    if p.get("iaf_say") or p.get("pattern") == "instrument":
+        return build_iaf_clearance(airport, callsign, plan=p)
+    return build_vfr_recovery_clearance(airport, callsign, plan=p)
+
+
+def build_approach_tower_handoff(
+    airport: dict[str, Any],
+    callsign: str,
+    *,
+    plan: dict[str, Any] | None = None,
+    runway: str | None = None,
+) -> str:
+    """Cleared for the pattern / approach, contact tower."""
+    name = airport["name"]
+    cs = speak_callsign(callsign)
+    p = dict(plan or {})
+    rec_key = normalize_recovery_key(p.get("pattern"))
+    rwy = speak_runway(str(runway or p.get("runway") or ""))
+    spoken = recovery_spoken(rec_key)
+    if rec_key == "instrument":
+        inst = str(p.get("instrument_say") or "instrument approach")
+        cleared = f"cleared {inst}" if "cleared" not in inst.lower() else inst
+        if rwy and "runway" not in cleared.lower():
+            cleared = f"{cleared} runway {rwy}"
+    else:
+        cleared = f"cleared {spoken}"
+        if rwy:
+            cleared += f" runway {rwy}"
+    twr_local = speak_local_preset(airport, "tower")
+    tower = airport.get("tower") or {"freq_mhz": 327.0}
+    if twr_local:
+        contact = f"contact tower, {twr_local}"
+    else:
+        contact = f"contact tower on {speak_freq(float(tower['freq_mhz']))}"
+    return f"{cs}, {name} Approach, {cleared}, {contact}."
 
 
 def build_blackjack_range_exit(
@@ -2073,12 +3335,21 @@ def build_blackjack_range_exit(
     callsign: str,
     *,
     handoff_channel: str = "approach",
+    plan: dict[str, Any] | None = None,
 ) -> str:
+    """
+    Blackjack range exit: proceed direct to the exit / recovery fix and hand off.
+
+    Expect recovery (e.g. Arcoe recovery for the TAC Overhead) stays on Approach.
+    """
     cs = speak_callsign(callsign)
     target = speak_agency_contact_target(airport, handoff_channel or "approach")
+    p = dict(plan or {})
+    dest = _plan_direct_say(p, airport, runway=str(p.get("runway") or ""))
+    direct = f", proceed direct {dest}" if dest else ""
     return _pick(
-        f"{cs}, Blackjack, range exit approved, contact {target}.",
-        f"{cs}, Blackjack, range exit approved, contact {target}, good day.",
+        f"{cs}, Blackjack, range exit approved{direct}, contact {target}.",
+        f"{cs}, Blackjack, range exit approved{direct}, contact {target}, good day.",
     )
 
 
@@ -2092,6 +3363,21 @@ def build_bandsaw_check_in(
     if alpha_bullseye:
         return f"{cs}, Bandsaw, radar contact. Alpha check {alpha_bullseye}."
     return f"{cs}, Bandsaw, radar contact. Alpha check."
+
+
+def build_bandsaw_check_out(
+    airport: dict[str, Any],
+    callsign: str,
+    *,
+    handoff_channel: str = "blackjack",
+) -> str:
+    """Bandsaw checkout — clearly not a check-in; push back to Blackjack."""
+    cs = speak_callsign(callsign)
+    target = speak_agency_contact_target(airport, handoff_channel or "blackjack")
+    return _pick(
+        f"{cs}, Bandsaw, switching approved, contact {target}.",
+        f"{cs}, Bandsaw, check-out acknowledged, contact {target}.",
+    )
 
 
 def build_contact_bandsaw(airport: dict[str, Any], callsign: str) -> str:
@@ -2239,6 +3525,36 @@ def caoc_bullseye_brg_rng_nm(
     mag_brg = (true_brg - float(magnetic_declination_e_deg)) % 360.0
     rng_nm = _haversine_nm(be_lat, be_lon, unit_lat, unit_lon)
     return int(round(mag_brg)) % 360, int(round(rng_nm))
+
+
+def ll_at_bullseye_brg_rng(
+    be_lat: float,
+    be_lon: float,
+    mag_bearing_deg: float,
+    range_nm: float,
+    *,
+    magnetic_declination_e_deg: float = _NTTR_MAG_DECLINATION_E_DEG,
+) -> tuple[float, float]:
+    """
+    Lat/lon of a point at magnetic bearing/range from bullseye.
+
+    Inverse of caoc_bullseye_brg_rng_nm (WGS84 great-circle).
+    """
+    true_brg = (float(mag_bearing_deg) + float(magnetic_declination_e_deg)) % 360.0
+    # Earth radius in NM
+    r_nm = 3440.065
+    δ = float(range_nm) / r_nm
+    θ = math.radians(true_brg)
+    φ1 = math.radians(float(be_lat))
+    λ1 = math.radians(float(be_lon))
+    φ2 = math.asin(
+        math.sin(φ1) * math.cos(δ) + math.cos(φ1) * math.sin(δ) * math.cos(θ)
+    )
+    λ2 = λ1 + math.atan2(
+        math.sin(θ) * math.sin(δ) * math.cos(φ1),
+        math.cos(δ) - math.sin(φ1) * math.sin(φ2),
+    )
+    return math.degrees(φ2), ((math.degrees(λ2) + 540.0) % 360.0) - 180.0
 
 
 def parse_caoc_bullseye_text(text: str) -> tuple[str, int, int] | None:
@@ -2464,9 +3780,18 @@ def bullseye_for_caoc_unit(
     label = caoc_unit_label(unit)
     radio_cs = radio_callsign_from_caoc_unit(unit)
     unit_name = unit.get("name") or unit.get("groupName")
+
+    unit_lat: float | None = None
+    unit_lon: float | None = None
+    try:
+        ux, uz = float(unit["xMeters"]), float(unit["zMeters"])
+        unit_lat, unit_lon = caoc_xz_to_ll(ux, uz)
+    except (KeyError, TypeError, ValueError):
+        pass
+
     if parsed:
         name, brg, rng = parsed
-        return {
+        out = {
             "name": name,
             "bearing": brg,
             "range_nm": rng,
@@ -2479,14 +3804,18 @@ def bullseye_for_caoc_unit(
             "object_name": unit.get("objectName"),
             "unit_id": unit.get("id"),
         }
+        if unit_lat is not None and unit_lon is not None:
+            out["lat"] = unit_lat
+            out["lon"] = unit_lon
+        return out
 
     tid = opus.theater_id if opus and opus.theater_id else int(config.get("opus_theater_id") or 1)
     be = resolve_bullseye_navpoint(config, theater_id=tid) or dict(_CAOC_DEFAULT_BULLSEYE)
     try:
         be_lat, be_lon = float(be["lat"]), float(be["lon"])
-        ux, uz = float(unit["xMeters"]), float(unit["zMeters"])
-        unit_lat, unit_lon = caoc_xz_to_ll(ux, uz)
     except (KeyError, TypeError, ValueError):
+        return None
+    if unit_lat is None or unit_lon is None:
         return None
     try:
         decl = float(config.get("bullseye_magnetic_declination_deg", _NTTR_MAG_DECLINATION_E_DEG))
@@ -2674,6 +4003,71 @@ def resolve_alpha_bullseye(
     if unit is None:
         return None
     return bullseye_for_caoc_unit(unit, config, opus=opus)
+
+
+# Templates whose phrasing depends on the assigned recovery / approach plate.
+_RECOVERY_TEMPLATES = frozenset(
+    {
+        "approach_check_in",
+        "approach_procedure",
+        "approach_iaf",
+        "cleared_approach",
+        "bj_range_exit",
+    }
+)
+
+
+_ownship_miss_until = 0.0
+OWNSHIP_MISS_BACKOFF_S = 30.0
+
+
+def ownship_latlon(
+    config: dict[str, Any] | None,
+    *,
+    callsign: str | None = None,
+    opus: OpusFlightContext | None = None,
+    state: dict[str, Any] | None = None,
+    max_age_s: float = 10.0,
+) -> tuple[float, float] | None:
+    """
+    Own aircraft position from the CAOC feed, cached into state.
+
+    Approach uses this to hand out the recovery/plate nearest the jet. The feed
+    is often unavailable (no mission, no backend), so callers must treat None as
+    "decide from the flight plan and weather instead". A miss backs off for
+    OWNSHIP_MISS_BACKOFF_S so a dead backend never stalls phrase building.
+    """
+    global _ownship_miss_until
+    if not config:
+        return None
+    now = time.time()
+    if now < _ownship_miss_until:
+        return None
+
+    def _miss() -> None:
+        global _ownship_miss_until
+        _ownship_miss_until = time.time() + OWNSHIP_MISS_BACKOFF_S
+
+    try:
+        radar = fetch_caoc_radar(config, max_age_s=max_age_s)
+        if not radar:
+            _miss()
+            return None
+        units = caoc_air_units(list(radar.get("units") or []))
+        own = match_caoc_unit_for_flight(
+            units, callsign=callsign, opus=opus, config=config
+        )
+        if not own:
+            _miss()
+            return None
+        ll = caoc_xz_to_ll(float(own["xMeters"]), float(own["zMeters"]))
+    except (KeyError, TypeError, ValueError, OSError):
+        _miss()
+        return None
+    if isinstance(state, dict):
+        state["ownship_ll"] = [ll[0], ll[1]]
+        state["ownship_ll_t"] = time.time()
+    return ll
 
 
 _airspace_schedule_cache: dict[str, Any] = {"t": 0.0, "key": "", "rows": None}
@@ -3581,7 +4975,14 @@ def uses_instrument_runway(
         rec = resolve_active_recovery(step, mission, state=state)
     if rec != "instrument":
         return False
-    if tmpl in {"approach_check_in", "cleared_approach", "clear_land", "go_around"}:
+    if tmpl in {
+        "approach_check_in",
+        "cleared_approach",
+        "approach_procedure",
+        "approach_iaf",
+        "clear_land",
+        "go_around",
+    }:
         return True
     ch = str((step or {}).get("channel") or "").strip().casefold()
     return ch == "approach"
@@ -3603,7 +5004,8 @@ def pick_departure_runway(
     2. Pilot-requested runway (Fly) — honored as-is
     3. Manual runway_override from Setup — honored as-is
     4. Runway coded on the filed Opus route (snapped)
-    5. Wind-preferred active runway from airport.runways (snapped)
+    5. Wind-preferred recovery runway (prefer 21; 03 only with >= 11 kt
+       headwind on 03) — not nearest-heading alone
 
     FP/wind results snap to ops runways (21R / 03L), or to instrument
     runways (21L / 03R) only for instrument-approach phrases. Explicit
@@ -3625,12 +5027,44 @@ def pick_departure_runway(
             print(f"Runway override: {override}")
             return override
 
-    raw: str | None = runway_from_route(opus.fp_route_string if opus else None)
-    if raw is None:
-        raw = active_runway(list(airport.get("runways") or ["21R"]), weather.wind_dir)
     instrument = uses_instrument_runway(
         step=step, mission=mission, state=state, template=template
     )
+    tmpl = str(template or (step or {}).get("template") or "").strip()
+    # Recovery / approach phrases prefer the 21s unless wind requires 03.
+    if tmpl in {
+        "approach_check_in",
+        "cleared_approach",
+        "approach_procedure",
+        "approach_iaf",
+        "right_break",
+        "clear_land",
+        "go_around",
+        "bj_range_exit",
+    } or str((step or {}).get("phase") or "").lower() == "approach":
+        # Refresh stale Approach plans when winds no longer favor that end.
+        plan = assign_approach_plan(
+            airport,
+            weather,
+            mission=mission,
+            state=state,
+            opus=opus,
+            force=False,
+        )
+        plan_rwy = str(plan.get("runway") or "").strip()
+        if plan_rwy:
+            plan_instrument = normalize_recovery_key(plan.get("pattern")) == "instrument"
+            return align_runway_to_airport(
+                airport, plan_rwy, instrument=plan_instrument or instrument
+            )
+        picked = pick_recovery_runway(airport, weather, instrument=instrument)
+        print(f"Runway (recovery bias): {picked}")
+        return picked
+
+    raw: str | None = runway_from_route(opus.fp_route_string if opus else None)
+    if raw is None:
+        # Prefer-21 wind gate — do not use nearest-heading (081/07 → 03).
+        raw = pick_recovery_runway(airport, weather, instrument=instrument)
     aligned = align_runway_to_airport(airport, raw, instrument=instrument)
     if aligned != raw:
         kind = "instrument" if instrument else "ops"
@@ -3656,6 +5090,8 @@ TEMPLATES_USING_RUNWAY = frozenset(
         "exit_runway",
         "approach_check_in",
         "cleared_approach",
+        "approach_procedure",
+        "approach_iaf",
         "taxi_in",
         "radar_contact",
     }
@@ -3984,6 +5420,8 @@ def parse_metar(raw: str) -> Weather:
     wind_dir = None
     wind_speed = None
     altimeter = None
+    ceiling_ft = None
+    visibility_sm = None
 
     wind_m = re.search(r"\b(\d{3}|VRB)(\d{2,3})(G\d{2,3})?KT\b", raw)
     if wind_m:
@@ -4001,7 +5439,53 @@ def parse_metar(raw: str) -> Weather:
             hpa = int(q_m.group(1))
             altimeter = round(hpa * 0.02953, 2)
 
-    return Weather(wind_dir, wind_speed, altimeter, raw)
+    # Visibility: 1SM, 3SM, 10SM, 1/2SM, P6SM, or meters (e.g. 9999)
+    vis_m = re.search(r"\b(\d{1,2}(?:/\d{1,2})?)SM\b", raw)
+    if vis_m:
+        frac = vis_m.group(1)
+        if "/" in frac:
+            num, den = frac.split("/", 1)
+            try:
+                visibility_sm = float(num) / float(den)
+            except (TypeError, ValueError, ZeroDivisionError):
+                visibility_sm = None
+        else:
+            try:
+                visibility_sm = float(frac)
+            except (TypeError, ValueError):
+                visibility_sm = None
+    elif re.search(r"\bP6SM\b", raw):
+        visibility_sm = 6.0
+    else:
+        m_vis = re.search(r"\b(\d{4})\b", raw)
+        if m_vis:
+            try:
+                meters = int(m_vis.group(1))
+                if meters >= 9999:
+                    visibility_sm = 6.0
+                elif meters > 0:
+                    visibility_sm = round(meters / 1609.34, 1)
+            except (TypeError, ValueError):
+                pass
+
+    # Ceiling = lowest BKN/OVC layer (hundreds of feet → feet)
+    for cov, hun in re.findall(r"\b(BKN|OVC)(\d{3})\b", raw.upper()):
+        del cov
+        try:
+            ft = int(hun) * 100
+        except (TypeError, ValueError):
+            continue
+        if ceiling_ft is None or ft < ceiling_ft:
+            ceiling_ft = ft
+
+    return Weather(
+        wind_dir,
+        wind_speed,
+        altimeter,
+        raw,
+        ceiling_ft=ceiling_ft,
+        visibility_sm=visibility_sm,
+    )
 
 
 def fetch_metar(config: dict[str, Any], icao: str) -> Weather:
@@ -4598,6 +6082,10 @@ def build_template_text(
     if climb_ft_out is not None and template in ("radar_contact", "center_radar"):
         climb_ft_out.append(climb_ft)
 
+    if template in _RECOVERY_TEMPLATES and isinstance(state, dict):
+        # Refresh where the jet is so the recovery/plate can be picked from it.
+        ownship_latlon(config, callsign=callsign, opus=opus, state=state)
+
     if template == "clearance":
         text, used_climb = build_clearance_delivery(
             airport,
@@ -4720,13 +6208,22 @@ def build_template_text(
             from_channel=channel or "departure",
         )
     if template == "approach_check_in":
-        recovery = DEFAULT_RECOVERY
-        descend_ft: int | None = 10000
-        speed_kt: int | None = 300
+        plan = assign_approach_plan(
+            airport,
+            weather,
+            mission=mission,
+            state=state,
+            opus=opus,
+            force=False,
+        )
+        recovery = normalize_recovery_key(
+            plan.get("pattern")
+            or (step or {}).get("recovery")
+            or (step or {}).get("recovery_type")
+        )
+        descend_ft: int | None = plan.get("descend_ft")
+        speed_kt: int | None = plan.get("speed_kt")
         if step:
-            recovery = normalize_recovery_key(
-                step.get("recovery") or step.get("recovery_type")
-            )
             for key in ("descend_ft", "speed_kt"):
                 raw = step.get(key)
                 if raw is None or str(raw).strip() == "":
@@ -4738,32 +6235,45 @@ def build_template_text(
                         speed_kt = int(raw)
                 except (TypeError, ValueError):
                     pass
+        rwy_use = str(plan.get("runway") or runway)
         return build_approach_recovery(
             airport,
             callsign,
             weather,
-            runway,
+            rwy_use,
             recovery=recovery,
             descend_ft=descend_ft,
             speed_kt=speed_kt,
+            plan=plan,
         )
     if template == "cleared_approach":
-        pattern = DEFAULT_RECOVERY
-        if step:
-            pattern = (
-                step.get("approach_pattern")
-                or step.get("pattern")
-                or step.get("recovery")
-                or DEFAULT_RECOVERY
-            )
-        return generate_situation_phrase(
-            "approach_clearance",
+        # Always go through the assigner so a filed route can refresh the plan.
+        plan = assign_approach_plan(
+            airport,
+            weather,
+            mission=mission,
+            state=state,
+            opus=opus,
+            force=False,
+        )
+        return build_approach_tower_handoff(
             airport,
             callsign,
-            weather,
-            runway,
-            {"pattern": normalize_recovery_key(pattern)},
+            plan=plan,
+            runway=str(plan.get("runway") or runway),
         )
+    if template in ("approach_procedure", "approach_iaf"):
+        plan = assign_approach_plan(
+            airport,
+            weather,
+            mission=mission,
+            state=state,
+            opus=opus,
+            force=False,
+        )
+        if plan.get("pattern") == "instrument" or plan.get("iaf"):
+            return build_iaf_clearance(airport, callsign, plan=plan)
+        return build_vfr_recovery_clearance(airport, callsign, plan=plan)
     if template == "bj_check_in":
         # Check-in: radar contact (CAOC), OPUS airspace (≤2), VUL, altimeter, tactical.
         alpha_spoken = None
@@ -4825,8 +6335,18 @@ def build_template_text(
         )
         if step is not None:
             step["handoff_channel"] = next_ch
+        # Pre-assign so Blackjack can clear to the exit / recovery fix;
+        # Approach issues expect recovery + clearance on check-in.
+        plan = assign_approach_plan(
+            airport,
+            weather,
+            mission=mission,
+            state=state,
+            opus=opus,
+            force=False,
+        )
         return build_blackjack_range_exit(
-            airport, callsign, handoff_channel=next_ch
+            airport, callsign, handoff_channel=next_ch, plan=plan
         )
     if template == "contact_bandsaw":
         return build_contact_bandsaw(airport, callsign)
@@ -4848,6 +6368,14 @@ def build_template_text(
         elif step and isinstance(step.get("alpha_bullseye"), dict):
             alpha_spoken = str(step["alpha_bullseye"].get("spoken") or "") or None
         return build_bandsaw_check_in(callsign, alpha_bullseye=alpha_spoken)
+    if template == "bandsaw_check_out":
+        handoff = str(
+            (step or {}).get("handoff_channel")
+            or "blackjack"
+        ).strip().lower() or "blackjack"
+        return build_bandsaw_check_out(
+            airport, callsign, handoff_channel=handoff
+        )
     if template == "ops_check_in":
         return f"{cs}, Ops, go ahead."
     if template == "center_radar":
@@ -4911,6 +6439,7 @@ TEMPLATE_CHOICES = [
     ("radar_contact", "Departure — Radar contact"),
     ("departure_handoff", "Departure — Handoff (next agency)"),
     ("approach_check_in", "Approach — Recovery check-in"),
+    ("approach_procedure", "Approach — Clearance (VFR / IAF)"),
     ("cleared_approach", "Approach — Clearance + tower"),
     ("bj_check_in", "Blackjack — Check-in / alpha"),
     ("bj_alpha_check", "Blackjack — Alpha check (standalone)"),
@@ -4918,6 +6447,7 @@ TEMPLATE_CHOICES = [
     ("bj_range_exit", "Blackjack — Range exit → Approach"),
     ("contact_bandsaw", "Blackjack — Contact Bandsaw"),
     ("bandsaw_check_in", "Bandsaw — Check-in + alpha"),
+    ("bandsaw_check_out", "Bandsaw — Check-out → Blackjack"),
     ("ops_check_in", "Ops — Check-in"),
     ("center_radar", "Other — Center radar contact"),
     ("center_handoff", "Other — Center / handoff"),

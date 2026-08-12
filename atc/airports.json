@@ -30,6 +30,7 @@
     },
     "expect_minutes": 10,
     "departures_file": "departures/nellis.json",
+    "approaches_file": "approaches/nellis.json",
     "known_sids": [],
     "delivery": {
       "freq_mhz": 289.4,

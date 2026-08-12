@@ -806,12 +806,22 @@ class MissionPlanner(tk.Tk):
                 tuned_line = f"YOU ARE ON  ·  {tuned_ch.upper()}"
             if state.source:
                 tuned_line += f"  [{state.source.upper()}]"
-        elif state.fresh and state.freqs_mhz:
+        elif state.freqs_mhz:
+            # Fresh or last-known (stale DCS / quiet SRS) — still show something usable.
             tuned_line = f"YOU ARE ON  ·  {srs_radio.format_freqs(state.freqs_mhz)}"
             if state.source:
-                tuned_line += f"  [{state.source.upper()}]"
+                tuned_line += f"  [{state.source.upper()}"
+                if not state.fresh:
+                    tuned_line += " STALE"
+                tuned_line += "]"
         else:
-            tuned_line = "YOU ARE ON  ·  radio tune unknown"
+            udp = srs_radio.srs_udp_status()
+            hint = ""
+            if udp.get("error"):
+                hint = f"  ({udp['error']})"
+            elif udp.get("ports_bound") and not udp.get("fresh"):
+                hint = f"  (SRS UDP quiet on {', '.join(str(p) for p in udp['ports_bound'])})"
+            tuned_line = f"YOU ARE ON  ·  radio tune unknown{hint}"
 
         if step:
             ch = str(step.get("channel") or "other").strip().lower()
@@ -829,6 +839,8 @@ class MissionPlanner(tk.Tk):
             handoff = ""
             if tmpl == "bj_range_exit":
                 handoff = "  →  Approach"
+            elif tmpl == "bandsaw_check_out":
+                handoff = "  →  Blackjack"
             next_line = (
                 f"NEXT STEP  ·  {phase_lbl}  ·  {label}  ({ch.upper()} {need}){handoff}"
             )
@@ -1476,12 +1488,15 @@ class MissionPlanner(tk.Tk):
         text = evaluation.transcript
 
         def show() -> None:
+            heard = text or "(nothing)"
+            summary = f"MIC  {heard}  ->  {evaluation.describe()}"
             if hasattr(self, "var_voice_heard"):
-                heard = text or "(nothing)"
                 self.var_voice_heard.set(f"“{heard}”  →  {evaluation.describe()}")
             if text and hasattr(self, "fly_log"):
-                self.fly_log.insert(tk.END, f"MIC  {text}  ->  {evaluation.describe()}\n")
+                self.fly_log.insert(tk.END, summary + "\n")
                 self.fly_log.see(tk.END)
+            # Always update the Fly glance panel (including "nothing heard").
+            self._append_fly_voice_feed(summary)
 
         self._ui_call(show)
 
@@ -1593,9 +1608,29 @@ class MissionPlanner(tk.Tk):
         self.after(delay_ms, kick)
 
     def _voice_log(self, line: str) -> None:
+        text = line.rstrip() + "\n"
         if hasattr(self, "fly_log"):
-            self.fly_log.insert(tk.END, line.rstrip() + "\n")
+            self.fly_log.insert(tk.END, text)
             self.fly_log.see(tk.END)
+        self._append_fly_voice_feed(text)
+
+    def _append_fly_voice_feed(self, line: str) -> None:
+        """Push a short line into the Fly freq-box LAST HEARD panel."""
+        if not hasattr(self, "fly_voice_feed"):
+            return
+        feed = self.fly_voice_feed
+        feed.configure(state=tk.NORMAL)
+        feed.insert(tk.END, line if line.endswith("\n") else line + "\n")
+        # Keep the glanceable panel short (newest at bottom).
+        try:
+            end_line = int(float(feed.index("end-1c").split(".")[0]))
+        except (TypeError, ValueError):
+            end_line = 0
+        max_lines = 8
+        if end_line > max_lines:
+            feed.delete("1.0", f"{end_line - max_lines + 1}.0")
+        feed.see(tk.END)
+        feed.configure(state=tk.DISABLED)
 
     def _capture_key(self, prompt: str, apply: Callable[[str], None]) -> None:
         """Modal: press a key combo, hand it to `apply`."""
@@ -4797,6 +4832,7 @@ class MissionPlanner(tk.Tk):
         self.fly_recovery = tk.StringVar(
             value=atc_phrase.recovery_label(atc_phrase.DEFAULT_RECOVERY)
         )
+        self.fly_approach_detail = tk.StringVar(value="")
         self.always_on_top = tk.BooleanVar(value=False)
         self._fly_phrase_req_id = 0
         self._fly_recovery_loading = False
@@ -4923,18 +4959,27 @@ class MissionPlanner(tk.Tk):
             command=lambda: self._fly("back", bypass_freq_gate=True),
         ).grid(row=0, column=1, sticky="ew", padx=(8, 0))
 
-        # Frequency hero
+        # Frequency hero + glanceable voice feed (left = tune, right = last heard)
         freq_box = tk.Frame(card, bg="#0a0e14", highlightbackground=C_GREEN, highlightthickness=2)
         freq_box.pack(fill=tk.X, padx=20, pady=(0, 8))
         self._fly_freq_box = freq_box
+        freq_split = tk.Frame(freq_box, bg="#0a0e14")
+        freq_split.pack(fill=tk.BOTH, expand=True)
+        freq_split.columnconfigure(0, weight=3, minsize=280)
+        freq_split.columnconfigure(1, weight=2, minsize=220)
+        freq_left = tk.Frame(freq_split, bg="#0a0e14")
+        freq_left.grid(row=0, column=0, sticky="nsew")
+        freq_right = tk.Frame(freq_split, bg="#0a0e14")
+        freq_right.grid(row=0, column=1, sticky="nsew", padx=(8, 10), pady=(8, 10))
+
         tk.Label(
-            freq_box,
+            freq_left,
             text="NEXT TX FREQUENCY",
             bg="#0a0e14",
             fg=C_MUTED,
             font=("Segoe UI Semibold", 11),
         ).pack(anchor="w", padx=14, pady=(8, 0))
-        freq_row = tk.Frame(freq_box, bg="#0a0e14")
+        freq_row = tk.Frame(freq_left, bg="#0a0e14")
         freq_row.pack(fill=tk.X, padx=14, pady=(0, 2))
         self._fly_freq_lbl = tk.Label(
             freq_row,
@@ -4956,7 +5001,7 @@ class MissionPlanner(tk.Tk):
         self._fly_mod_lbl.pack(side=tk.LEFT, padx=(14, 0), pady=(8, 0))
 
         self._fly_channel_lbl = tk.Label(
-            freq_box,
+            freq_left,
             textvariable=self.fly_channel,
             bg="#0a0e14",
             fg=C_ACCENT,
@@ -4965,7 +5010,7 @@ class MissionPlanner(tk.Tk):
         )
         self._fly_channel_lbl.pack(fill=tk.X, padx=14, pady=(0, 2))
         tk.Label(
-            freq_box,
+            freq_left,
             textvariable=self.fly_tx_name,
             bg="#0a0e14",
             fg=C_MUTED,
@@ -4974,7 +5019,7 @@ class MissionPlanner(tk.Tk):
         ).pack(fill=tk.X, padx=14, pady=(0, 4))
         self.fly_tuned_now = tk.StringVar(value="YOU ARE ON  ·  radio tune unknown")
         self._fly_tuned_now_lbl = tk.Label(
-            freq_box,
+            freq_left,
             textvariable=self.fly_tuned_now,
             bg="#0a0e14",
             fg=C_GREEN,
@@ -4984,19 +5029,19 @@ class MissionPlanner(tk.Tk):
         self._fly_tuned_now_lbl.pack(fill=tk.X, padx=14, pady=(0, 2))
         self.fly_next_radio = tk.StringVar(value="NEXT STEP  ·  —")
         self._fly_next_radio_lbl = tk.Label(
-            freq_box,
+            freq_left,
             textvariable=self.fly_next_radio,
             bg="#0a0e14",
             fg=C_AMBER,
             font=("Segoe UI", 11),
             anchor="w",
-            wraplength=900,
+            wraplength=520,
             justify=tk.LEFT,
         )
         self._fly_next_radio_lbl.pack(fill=tk.X, padx=14, pady=(0, 2))
         self.fly_freq_gate = tk.StringVar(value="Radio tune unknown — gate open")
         self._fly_freq_gate_lbl = tk.Label(
-            freq_box,
+            freq_left,
             textvariable=self.fly_freq_gate,
             bg="#0a0e14",
             fg=C_MUTED,
@@ -5006,7 +5051,7 @@ class MissionPlanner(tk.Tk):
         self._fly_freq_gate_lbl.pack(fill=tk.X, padx=14, pady=(0, 2))
         self.fly_position = tk.StringVar(value="")
         self._fly_position_lbl = tk.Label(
-            freq_box,
+            freq_left,
             textvariable=self.fly_position,
             bg="#0a0e14",
             fg=C_MUTED,
@@ -5014,6 +5059,34 @@ class MissionPlanner(tk.Tk):
             anchor="w",
         )
         self._fly_position_lbl.pack(fill=tk.X, padx=14, pady=(0, 10))
+
+        tk.Label(
+            freq_right,
+            text="LAST HEARD",
+            bg="#0a0e14",
+            fg=C_MUTED,
+            font=("Segoe UI Semibold", 11),
+        ).pack(anchor="w")
+        self.fly_voice_feed = tk.Text(
+            freq_right,
+            height=7,
+            bg="#070a0f",
+            fg=C_TEXT,
+            insertbackground=C_TEXT,
+            font=("Consolas", 9),
+            relief=tk.FLAT,
+            wrap=tk.WORD,
+            highlightthickness=1,
+            highlightbackground=C_BORDER,
+            padx=6,
+            pady=4,
+        )
+        self.fly_voice_feed.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
+        self.fly_voice_feed.insert(
+            tk.END,
+            "Release PTT to see what Whisper heard and whether ATC acted.\n",
+        )
+        self.fly_voice_feed.configure(state=tk.DISABLED)
 
         # EAM test radios — shown when Setup → External AWACS radio source is on
         self._fly_eam_box = tk.Frame(
@@ -5157,6 +5230,13 @@ class MissionPlanner(tk.Tk):
             fg=C_MUTED,
             font=("Segoe UI", 10),
         ).pack(side=tk.LEFT, padx=(8, 0))
+        tk.Label(
+            self._fly_rec_box,
+            textvariable=self.fly_approach_detail,
+            bg=C_PANEL,
+            fg=C_GREEN,
+            font=("Consolas", 9),
+        ).pack(side=tk.LEFT, padx=(10, 0))
         # Built later via _sync_fly_recovery_ui; hidden until Approach
 
         # Tower rolling offer — Accept / Deny buttons when pending
@@ -5382,6 +5462,7 @@ class MissionPlanner(tk.Tk):
         "deny_rolling": "Deny rolling",
         "request_rolling": "Request rolling",
         "request_lineup": "Request LUAW",
+        "clear_runway_request": "Reset runway to winds",
     }
 
     def _sync_fly_recovery_ui(self, channel: str | None = None) -> None:
@@ -5392,6 +5473,24 @@ class MissionPlanner(tk.Tk):
         active = atc_phrase.resolve_active_recovery(
             None, self.mission, state=self.engine.state
         )
+        plan = atc_phrase.approach_plan_from_state(
+            self.engine.state, airport=self.engine.airport()
+        )
+        detail_bits: list[str] = []
+        if plan.get("vfr_recovery"):
+            detail_bits.append(str(plan.get("vfr_recovery_say") or plan["vfr_recovery"]))
+        if plan.get("iaf"):
+            detail_bits.append(f"IAF {plan.get('iaf_say') or plan['iaf']}")
+        if plan.get("runway"):
+            detail_bits.append(f"RWY {plan['runway']}")
+        if plan.get("descend_ft"):
+            detail_bits.append(f"{plan['descend_ft']}ft")
+        if plan.get("speed_restrict") and plan.get("speed_kt"):
+            detail_bits.append(f"{plan['speed_kt']}kt")
+        if plan.get("source"):
+            detail_bits.append(str(plan["source"]))
+        if hasattr(self, "fly_approach_detail"):
+            self.fly_approach_detail.set(" · ".join(detail_bits))
         self._fly_recovery_loading = True
         self.fly_recovery.set(atc_phrase.recovery_label(active))
         self._fly_recovery_loading = False
@@ -5422,9 +5521,28 @@ class MissionPlanner(tk.Tk):
         self.engine.state["active_recovery"] = key
         self.mission["active_recovery"] = key
         try:
+            airport = self.engine.airport()
+            opus, weather = atc_phrase.resolve_opus_and_metar(
+                self.config_data, airport["icao"]
+            )
+            atc_phrase.assign_approach_plan(
+                airport,
+                weather,
+                mission=self.mission,
+                state=self.engine.state,
+                opus=opus,
+                force=True,
+                recovery=key,
+                position=atc_phrase.ownship_latlon(
+                    self.config_data, opus=opus, state=self.engine.state
+                ),
+            )
             self.engine.save_state()
         except Exception:
-            pass
+            try:
+                self.engine.save_state()
+            except Exception:
+                pass
         for step in self._steps():
             if (step.get("template") or "") == "approach_check_in" and not step.get("text"):
                 step["recovery"] = key
@@ -5505,13 +5623,26 @@ class MissionPlanner(tk.Tk):
     def _apply_fly_pilot_request(self, request_key: str, *, tx_ack: bool = True) -> None:
         """Apply Accept/Deny/Request — update takeoff mode and optionally TX Tower ack."""
         try:
+            ap = self._airport()
+            opus, weather = atc_phrase.resolve_opus_and_metar(
+                self.config_data, ap["icao"]
+            )
             result = atc_phrase.apply_pilot_request(
-                request_key, mission=self.mission, state=self.engine.state
+                request_key,
+                mission=self.mission,
+                state=self.engine.state,
+                airport=ap,
+                weather=weather,
+                opus=opus,
+                config=self.config_data,
             )
         except ValueError as exc:
             messagebox.showerror("Pilot request", str(exc))
             return
         self.engine.mission = self.mission
+        # Keep Setup Manual runway field in sync when resetting to winds.
+        if request_key == "clear_runway_request" and hasattr(self, "var_runway_override"):
+            self.var_runway_override.set("")
         try:
             self.engine.save_state()
         except Exception:
@@ -5527,6 +5658,7 @@ class MissionPlanner(tk.Tk):
         except Exception:
             pass
         self._sync_fly_pilot_request_ui()
+        self._sync_fly_recovery_ui()
         self.engine.prepare_takeoff_cursor()
         try:
             self.engine.save_state()
@@ -6191,7 +6323,7 @@ class MissionPlanner(tk.Tk):
                     ("bullet", "• Wording is loose: \u201cready for taxi\u201d, \u201crequest taxi\u201d and a misheard \u201ctaxy\u201d all work."),
                     ("bullet", "• For the call that is due, the short version is enough — \u201cGround, Fleece 1, taxi\u201d."),
                     ("bullet", "• Right after ATC speaks, a plain \u201croger\u201d also clears the readback with no agency name."),
-                    ("bullet", "• Try: request runway two one left · say winds · request picture · say again."),
+                    ("bullet", "• Try: request runway · say winds · request picture · bogey dope · declare · say again."),
                     ("bullet", "• A call that fires a step advances Fly on its own — no need to press Play."),
                     ("bullet", "• Want your own wording? Plan → pick a step → Voice phrases, one per line."),
                     ("bullet", "• Your phrases add to the built-in calls and show first on the Fly card."),
@@ -6558,13 +6690,21 @@ class MissionPlanner(tk.Tk):
         self._setup_field(lf, 4, "Coalition (2=blue)", self.var_coalition, width=28)
         self._setup_field(lf, 5, "Runways", self.var_runways, width=28)
         self._setup_field(lf, 6, "Manual runway", self.var_runway_override, width=28)
+        rwy_hint = tk.Frame(lf, bg=C_PANEL)
+        rwy_hint.grid(row=7, column=1, sticky="w")
         tk.Label(
-            lf,
+            rwy_hint,
             text="Blank = flight plan / wind  (e.g. 21R or 03L)",
             bg=C_PANEL,
             fg=C_MUTED,
             font=("Segoe UI", 8),
-        ).grid(row=7, column=1, sticky="w")
+        ).pack(side=tk.LEFT)
+        ttk.Button(
+            rwy_hint,
+            text="Use winds",
+            width=10,
+            command=self._clear_setup_runway_override,
+        ).pack(side=tk.LEFT, padx=(8, 0))
         self._setup_field(lf, 8, "Expect FL (min)", self.var_expect_minutes, width=28)
         self._setup_field(lf, 9, "Known SIDs", self.var_known_sids, width=28)
         lf.columnconfigure(1, weight=1)
@@ -6731,8 +6871,9 @@ class MissionPlanner(tk.Tk):
             text=(
                 "External Advance / Previous / voice / Stream Deck URL only fire when you are "
                 "tuned to the step frequency. On-screen Play is never blocked. "
-                "Install DCS radio export for in-jet state (does not edit the SRS line); "
-                "use External AWACS below when testing in SRS EAM."
+                "Tune is read from the DCS radio export (in-jet) or live SRS selected radio "
+                "(common PTT). External AWACS below is only for the manual Fly EAM strip "
+                "when testing without a jet / without SRS UDP."
             ),
             bg=C_PANEL,
             fg=C_MUTED,
@@ -6754,7 +6895,7 @@ class MissionPlanner(tk.Tk):
         ).pack(anchor="w")
         ttk.Checkbutton(
             fg_inner,
-            text="External AWACS radio source (testing) — use Fly EAM strip when not in a jet",
+            text="External AWACS radio source (testing) — show Fly EAM strip / manual freqs",
             variable=self.var_freq_gate_eam,
             command=self._on_freq_gate_options_changed,
         ).pack(anchor="w", pady=(4, 0))
@@ -6780,8 +6921,9 @@ class MissionPlanner(tk.Tk):
         tk.Label(
             pic_inner,
             text=(
-                "Blackjack / Bandsaw picture only calls hostile groups inside this range "
-                "of your jet (AWACS and tankers are always skipped). Raise it for testing."
+                "Blackjack / Bandsaw picture, bogey dope, and declare only use contacts "
+                "inside this range of your jet (AWACS and tankers are always skipped). "
+                "Raise it for testing."
             ),
             bg=C_PANEL,
             fg=C_MUTED,
@@ -7192,6 +7334,12 @@ class MissionPlanner(tk.Tk):
         ttk.Entry(parent, textvariable=var, width=width).grid(
             row=row, column=1, sticky="we", pady=3, padx=(8, 0)
         )
+
+    def _clear_setup_runway_override(self) -> None:
+        """Blank Manual runway so wind / flight-plan selection takes over."""
+        if hasattr(self, "var_runway_override"):
+            self.var_runway_override.set("")
+        self.config_data["runway_override"] = ""
 
     @staticmethod
     def _short_voice(name: str) -> str:
