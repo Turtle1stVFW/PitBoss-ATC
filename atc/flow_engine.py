@@ -133,7 +133,7 @@ class FlowEngine:
         save_json(STATE_PATH, self.state)
 
     def _advance_past_skippable(self) -> None:
-        """Skip lineup when rolling; skip right-break on instrument/straight-in."""
+        """Skip lineup when rolling; honor any approach skip hooks."""
         steps = self.steps
         if not steps:
             return
@@ -143,9 +143,58 @@ class FlowEngine:
         while idx < len(steps) and (
             atc_phrase.should_skip_takeoff_step(steps[idx], self.mission, self.state)
             or atc_phrase.should_skip_approach_step(steps[idx], self.mission, self.state)
+            or atc_phrase.should_skip_cruise_climb_step(
+                steps[idx], self.mission, self.state
+            )
         ):
             idx += 1
         self.state["index"] = idx
+
+    def _step_is_skippable(self, step: dict[str, Any] | None) -> bool:
+        if not step:
+            return False
+        return bool(
+            atc_phrase.should_skip_takeoff_step(step, self.mission, self.state)
+            or atc_phrase.should_skip_approach_step(step, self.mission, self.state)
+            or atc_phrase.should_skip_cruise_climb_step(step, self.mission, self.state)
+        )
+
+    def _retreat_past_skippable(self, idx: int) -> int:
+        """
+        Walk backward to a step that is actually playable.
+
+        Forward-only skipping (e.g. rolling skips LUAW) used to trap Back/seek
+        when retreating onto a skipped step immediately jumped forward again.
+        """
+        steps = self.steps
+        if not steps:
+            return 0
+        idx = min(max(0, int(idx)), len(steps) - 1)
+        while idx > 0 and self._step_is_skippable(steps[idx]):
+            idx -= 1
+        return idx
+
+    def _clear_landing_progress_if_before_clear_land(self, idx: int) -> None:
+        """Reset per-ship landing tracking when cursor moves to/before clear_land."""
+        steps = self.steps
+        if not steps or not isinstance(self.state, dict):
+            return
+        clear_i = next(
+            (
+                i
+                for i, s in enumerate(steps)
+                if str(s.get("template") or "") == "clear_land"
+            ),
+            None,
+        )
+        if clear_i is None or int(idx) > clear_i:
+            return
+        for key in (
+            "landing_cleared_seats",
+            "landing_ships_total",
+            "_landing_clear_built_seat",
+        ):
+            self.state.pop(key, None)
 
     def _maybe_roll_takeoff_offer(self, step: dict[str, Any] | None) -> None:
         """
@@ -248,9 +297,18 @@ class FlowEngine:
         steps = self.steps
         if not steps:
             raise RuntimeError("No enabled steps")
+        prev = int(self.state.get("index") or 0)
         idx = max(0, min(int(index), len(steps)))  # len(steps) == past end
         self.state["index"] = idx
-        self.prepare_takeoff_cursor()
+        if idx < len(steps):
+            if idx < prev:
+                # Moving earlier — do not bounce forward over skipped approach steps.
+                self.state["index"] = self._retreat_past_skippable(idx)
+            else:
+                self.prepare_takeoff_cursor()
+        self._clear_landing_progress_if_before_clear_land(
+            int(self.state.get("index") or 0)
+        )
         # Arrows move the cursor without TX — keep the READ BACK card in sync
         # with the step ATC would have just said (the one before the cursor).
         self.sync_readback_for_cursor()
@@ -261,6 +319,9 @@ class FlowEngine:
 
     def seek_relative(self, delta: int) -> dict[str, Any]:
         idx = int(self.state.get("index") or 0) + int(delta)
+        if int(delta) < 0:
+            # One Back click should land on the previous *playable* step.
+            idx = self._retreat_past_skippable(idx)
         return self.seek(idx)
 
     def seek_number(self, number: int) -> dict[str, Any]:
@@ -287,6 +348,9 @@ class FlowEngine:
             )
             opus = atc_phrase.synthetic_flight_context(label)
         callsign = opus.radio_callsign
+        filed = atc_phrase.filed_altitude_feet(opus.fp_altitude)
+        if filed is not None:
+            self.state["filed_altitude_ft"] = filed
         channel = step.get("channel") or step.get("phase") or "other"
         runway = atc_phrase.pick_departure_runway(
             airport,
@@ -353,6 +417,15 @@ class FlowEngine:
             )
             detail["text"] = text
             detail["tts_speed"] = atc_phrase.tts_speed_for_step(self.config, step=step)
+            if str(step.get("template") or "") == "clear_land":
+                seat = atc_phrase.commit_landing_clearance(self.state)
+                if seat is not None:
+                    detail["landing_cleared_seat"] = seat
+                    detail["landing_cleared_seats"] = list(
+                        atc_phrase.landing_cleared_seats(self.state)
+                    )
+            if str(step.get("template") or "") == "bj_range_exit":
+                self.state["range_exit_approved"] = True
 
         detail["exit_code"] = code
         self.state["last_step_id"] = step.get("id")
@@ -375,7 +448,9 @@ class FlowEngine:
         Clearance (and similar) open a short window where the acknowledge intent
         does not need an agency opener — the exchange is already live.
         """
-        template = str(step.get("template") or "").strip()
+        template = atc_phrase.readback_template_for_step(
+            step, mission=self.mission, state=self.state
+        )
         climb_ft = atc_phrase.resolve_shared_climb_ft(
             step=step, mission=self.mission, state=self.state
         )
@@ -386,6 +461,7 @@ class FlowEngine:
             weather,
             runway,
             climb_ft=climb_ft,
+            state=self.state,
         )
         self.state["last_tx_text"] = str(detail.get("text") or "")
         self.state["last_tx_template"] = template
@@ -428,7 +504,12 @@ class FlowEngine:
         the cursor is what ATC would have said. Rebuild that checklist — or
         clear the card when that step does not open a readback window — so
         browsing with the arrows never leaves a stale strip on screen.
+
+        Go-around is not a flow step (cursor seeks land / Approach). Keep that
+        card until the pilot reads back the instruction.
         """
+        if atc_phrase.go_around_readback_open(self.state):
+            return
         steps = self.steps
         idx = int(self.state.get("index") or 0)
         prev = steps[idx - 1] if steps and 1 <= idx <= len(steps) else None
@@ -436,7 +517,9 @@ class FlowEngine:
             self._clear_readback_state()
             return
 
-        template = str(prev.get("template") or "").strip()
+        template = atc_phrase.readback_template_for_step(
+            prev, mission=self.mission, state=self.state
+        )
         if template in atc_phrase.READBACK_CONFIRM_TEMPLATES:
             self._clear_readback_state()
             return
@@ -474,6 +557,7 @@ class FlowEngine:
             weather,
             runway,
             climb_ft=climb_ft,
+            state=self.state,
         )
         if not items:
             self._clear_readback_state()
@@ -499,11 +583,483 @@ class FlowEngine:
 
     @staticmethod
     def _hold_cursor_after_play(step: dict[str, Any] | None) -> bool:
-        """Stay on Bandsaw / Approach procedure until a later call advances."""
+        """Stay on Bandsaw check-in until a checkout call advances."""
+        # Approach: check-in advances onto approach_procedure (auto-clearance ~6s
+        # later, before IAF / exit); clearance then advances to contact-tower.
+        return str((step or {}).get("template") or "") == "bandsaw_check_in"
+
+    def _hold_cursor_after_tx(self, step: dict[str, Any] | None) -> bool:
+        """Hold after TX when more per-ship landing clearances remain."""
+        if self._hold_cursor_after_play(step):
+            return True
         tmpl = str((step or {}).get("template") or "")
-        return tmpl in ("bandsaw_check_in", "approach_check_in", "approach_procedure")
+        if tmpl != "clear_land":
+            return False
+        if bool(self.state.get("awaiting_on_the_go")):
+            return True
+        return atc_phrase.should_hold_for_landing_clearances(
+            self.state, step=step, mission=self.mission
+        )
+
+    def _seek_template(self, template: str) -> bool:
+        """Move cursor to the first enabled step with this template (no TX)."""
+        want = str(template or "").strip()
+        if not want:
+            return False
+        for i, step in enumerate(self.steps):
+            if str(step.get("template") or "") == want:
+                self.state["index"] = i
+                return True
+        return False
+
+    def accept_option_full_stop(
+        self,
+        *,
+        play: bool = True,
+        bypass_freq_gate: bool = False,
+        prefer_templates: tuple[str, ...] = ("exit_runway", "taxi_in"),
+    ) -> dict[str, Any]:
+        """
+        After cleared-for-the-option, pilot lands full stop.
+
+        Drops the on-the-go wait (no second landing clearance) and continues
+        to Exit runway / Taxi in.
+        """
+        atc_phrase.commit_option_full_stop(
+            state=self.state, mission=self.mission
+        )
+        sought = ""
+        for tmpl in prefer_templates:
+            if self._seek_template(tmpl):
+                sought = tmpl
+                break
+        if not sought:
+            # Past clear_land if present; otherwise leave cursor alone.
+            for i, step in enumerate(self.steps):
+                if str(step.get("template") or "") == "clear_land":
+                    self.state["index"] = min(i + 1, len(self.steps))
+                    self._advance_past_skippable()
+                    break
+        self.save_state()
+        if not play or not sought:
+            st = self.status()
+            st["option_full_stop"] = True
+            st["sought_template"] = sought or None
+            return st
+        step = self.current_step()
+        if step is None:
+            st = self.status()
+            st["option_full_stop"] = True
+            return st
+        self._freq_gate_or_raise(step, bypass=bypass_freq_gate)
+        result = self.play_step(step)
+        if not self._hold_cursor_after_tx(step):
+            self.state["index"] = int(self.state.get("index") or 0) + 1
+            self._advance_past_skippable()
+        self.save_state()
+        result["option_full_stop"] = True
+        result["sought_template"] = sought
+        result["advanced_to_index"] = self.state.get("index")
+        return result
+
+    def execute_go_around(
+        self,
+        *,
+        prefer: str | None = None,
+        bypass_freq_gate: bool = False,
+    ) -> dict[str, Any]:
+        """
+        Transmit go-around / missed approach and rewind the timeline.
+
+        VFR closed / Flex / Duck → stay on Tower; seek land (already
+        checked in). Watch fires on base / short final, not on the go-around.
+        Instrument → published missed, seek Approach check-in, arm
+        rearm_tower_outside_nm so contact-tower / land cannot auto-fire while
+        still near the field.
+
+        Repeating “going around” while the instruction readback is open
+        acknowledges (closed traffic / Flex / missed) — it does not re-issue.
+        """
+        if atc_phrase.go_around_readback_open(self.state):
+            ga = dict(self.state.get("go_around_plan") or {})
+            self._clear_readback_state()
+            self.save_state()
+            return {
+                "label": "Go around readback",
+                "text": "",
+                "channel": "tower",
+                "exit_code": 0,
+                "acknowledged": True,
+                "go_around_plan": ga,
+            }
+        airport = self.airport()
+        opus, weather = atc_phrase.resolve_opus_and_metar(self.config, airport["icao"])
+        if not opus:
+            opus = atc_phrase.synthetic_flight_context(
+                atc_phrase.callsign_override(self.config) or "CALLSIGN"
+            )
+        callsign = opus.radio_callsign
+        runway = atc_phrase.pick_departure_runway(
+            airport,
+            weather,
+            opus,
+            self.config,
+            mission=self.mission,
+            state=self.state,
+            template="go_around",
+        )
+        text = atc_phrase.build_go_around(
+            airport,
+            callsign,
+            runway,
+            mission=self.mission,
+            state=self.state,
+            prefer=prefer,
+        )
+        ga = dict(self.state.get("go_around_plan") or {})
+        channel = "tower"
+        freq, mod, tx_name = atc_phrase.step_radio(airport, channel, None)
+        step = {
+            "id": "twr_go_around",
+            "label": "Go around / missed",
+            "channel": channel,
+            "phase": "approach",
+            "template": "go_around",
+            "mode": "tts",
+        }
+        self._freq_gate_or_raise(step, bypass=bypass_freq_gate)
+        voice_name, _ = atc_phrase.voice_for_step(self.config, channel, step)
+        code = atc_phrase.transmit(
+            self.config,
+            airport,
+            text,
+            tx_name,
+            freq,
+            mod,
+            channel=channel,
+            voice_override=voice_name,
+            step=step,
+        )
+        kind = str(ga.get("kind") or "")
+        seek = str(ga.get("seek_template") or "")
+        # Re-arm only what the next cycle may auto-fire. Closed traffic is
+        # still at the field — do not re-arm 12/6 NM straight-in / land.
+        if kind == "instrument_missed":
+            self.state["clear_position_fire_substrings"] = [
+                "clear_land",
+                "right_break",
+                "cleared_approach",
+                "app_tower",
+                "twr_clear",
+                "twr_right",
+            ]
+        else:
+            # VFR closed / Flex / Duck: already with Tower — new land on final.
+            self.state["clear_position_fire_substrings"] = [
+                "clear_land",
+                "twr_clear",
+            ]
+        if kind == "instrument_missed":
+            if not self._seek_template("approach_check_in"):
+                self._seek_template("approach_procedure")
+        else:
+            # Already with Tower — skip check-in / initial; wait for land.
+            if not seek or not self._seek_template(seek):
+                self._seek_template("clear_land")
+        # Replace the land readback with the go-around instruction card.
+        self._record_readback_expectation(
+            step,
+            {"text": text, "channel": channel},
+            airport,
+            opus,
+            weather,
+            runway,
+        )
+        self.state["last_step_id"] = "twr_go_around"
+        self.save_state()
+        return {
+            "label": step["label"],
+            "text": text,
+            "channel": channel,
+            "freq": freq,
+            "exit_code": code,
+            "go_around_plan": ga,
+            "advanced_to_index": self.state.get("index"),
+        }
+
+    def range_exit_ready(self) -> tuple[bool, str]:
+        """
+        True when Blackjack may hand to Approach (near APP / field boundary).
+
+        Range-complete far from the field only releases to the exit fix;
+        Approach waits for the approach zone or ≤40 NM from the field.
+        """
+        try:
+            import runway_position as rp
+        except Exception:
+            return True, ""
+        step = self.current_step() or {}
+        if str(step.get("template") or "") != "bj_range_exit":
+            step = {
+                "template": "bj_range_exit",
+                "trigger": {"zone": "approach", "within_nm": 40},
+            }
+        trigger = rp.resolve_step_trigger(
+            step, mission=self.mission, state=self.state
+        )
+        if trigger is None:
+            return True, ""
+        airport = self.airport()
+        opus, _wx = atc_phrase.resolve_opus_and_metar(self.config, airport["icao"])
+        if not opus:
+            opus = atc_phrase.synthetic_flight_context(
+                atc_phrase.callsign_override(self.config) or "CALLSIGN"
+            )
+        callsign = opus.radio_callsign
+        dist = rp.ownship_distance_nm(
+            airport,
+            config=self.config,
+            callsign=callsign,
+            opus=opus,
+            state=self.state,
+        )
+        waiting_bits: list[str] = []
+        if trigger.within_nm is not None:
+            held, waiting = rp.within_nm_held(trigger, dist)
+            if held:
+                return True, ""
+            if waiting:
+                waiting_bits.append(waiting)
+        if trigger.zone:
+            zones = rp.zones_by_ref(airport, trigger.zone, None)
+            if zones:
+                status = rp.PositionTracker().evaluate(
+                    self.config,
+                    airport,
+                    None,
+                    callsign=callsign,
+                    opus=opus,
+                    watch=zones,
+                )
+                count = status.in_zones(zones, settled=False)
+                if count.ok(need_full=False):
+                    return True, ""
+                desc = count.describe(need_full=False)
+                if desc:
+                    waiting_bits.append(desc)
+        if not waiting_bits and trigger.within_nm is None and not trigger.zone:
+            return True, ""
+        return False, " · ".join(waiting_bits) or "need closer to range exit"
+    def acknowledge_blackjack_continue(
+        self, *, bypass_freq_gate: bool = False
+    ) -> dict[str, Any]:
+        """Radar contact / remain this freq — not range exit yet."""
+        airport = self.airport()
+        opus, _wx = atc_phrase.resolve_opus_and_metar(self.config, airport["icao"])
+        if not opus:
+            opus = atc_phrase.synthetic_flight_context(
+                atc_phrase.callsign_override(self.config) or "CALLSIGN"
+            )
+        callsign = opus.radio_callsign
+        alpha_spoken = None
+        try:
+            fix = atc_phrase.resolve_alpha_bullseye(
+                self.config, callsign=callsign, opus=opus
+            )
+            if fix and fix.get("spoken"):
+                alpha_spoken = str(fix["spoken"])
+        except Exception:
+            alpha_spoken = None
+        text = atc_phrase.build_blackjack_continue(
+            callsign, alpha_bullseye=alpha_spoken
+        )
+        channel = "blackjack"
+        step = {
+            "id": "bj_continue",
+            "label": "Blackjack continue",
+            "channel": channel,
+            "phase": "flight",
+            "template": "bj_continue",
+            "mode": "tts",
+        }
+        self._freq_gate_or_raise(step, bypass=bypass_freq_gate)
+        freq, mod, tx_name = atc_phrase.step_radio(airport, channel, None)
+        voice_name, _ = atc_phrase.voice_for_step(self.config, channel, step)
+        code = atc_phrase.transmit(
+            self.config,
+            airport,
+            text,
+            tx_name,
+            freq,
+            mod,
+            channel=channel,
+            voice_override=voice_name,
+            step=step,
+        )
+        # Stay on bj_range_exit until inside the Approach gate.
+        if not self._seek_template("bj_range_exit"):
+            pass
+        self.state["last_step_id"] = "bj_continue"
+        self.state["last_tx_text"] = text
+        self.state["last_tx_template"] = "bj_continue"
+        self.state["last_tx_channel"] = channel
+        self.state["last_tx_at"] = time.time()
+        self.save_state()
+        return {
+            "label": "Blackjack continue",
+            "text": text,
+            "channel": channel,
+            "freq": freq,
+            "exit_code": code,
+            "blackjack_continue": True,
+            "advanced_to_index": self.state.get("index"),
+        }
+
+    def release_range_exit(self, *, bypass_freq_gate: bool = False) -> dict[str, Any]:
+        """Range complete far out: proceed direct the fix, remain this frequency."""
+        airport = self.airport()
+        opus, weather = atc_phrase.resolve_opus_and_metar(self.config, airport["icao"])
+        if not opus:
+            opus = atc_phrase.synthetic_flight_context(
+                atc_phrase.callsign_override(self.config) or "CALLSIGN"
+            )
+        callsign = opus.radio_callsign
+        plan = atc_phrase.assign_approach_plan(
+            airport,
+            weather,
+            mission=self.mission,
+            state=self.state,
+            opus=opus,
+            force=False,
+        )
+        text = atc_phrase.build_blackjack_range_exit(
+            airport, callsign, plan=plan, include_handoff=False
+        )
+        channel = "blackjack"
+        cur = self.current_step() or {}
+        step = {
+            "id": str(cur.get("id") or "bj_range_exit"),
+            "label": str(cur.get("label") or "Blackjack range exit"),
+            "channel": channel,
+            "phase": "flight",
+            "template": "bj_range_exit",
+            "mode": "tts",
+        }
+        self._freq_gate_or_raise(step, bypass=bypass_freq_gate)
+        freq, mod, tx_name = atc_phrase.step_radio(airport, channel, None)
+        voice_name, _ = atc_phrase.voice_for_step(self.config, channel, step)
+        code = atc_phrase.transmit(
+            self.config,
+            airport,
+            text,
+            tx_name,
+            freq,
+            mod,
+            channel=channel,
+            voice_override=voice_name,
+            step=step,
+        )
+        if not self._seek_template("bj_range_exit"):
+            pass
+        self.state["range_exit_approved"] = True
+        self.state["last_step_id"] = step["id"]
+        self.state["last_tx_text"] = text
+        self.state["last_tx_template"] = "bj_range_exit"
+        self.state["last_tx_channel"] = channel
+        self.state["last_tx_at"] = time.time()
+        self.save_state()
+        return {
+            "label": step["label"],
+            "text": text,
+            "channel": channel,
+            "freq": freq,
+            "exit_code": code,
+            "range_exit_released": True,
+            "advanced_to_index": self.state.get("index"),
+        }
+
+    def _range_exit_if_not_ready(
+        self,
+        step: dict[str, Any] | None,
+        *,
+        bypass_freq_gate: bool = False,
+    ) -> dict[str, Any] | None:
+        """Outside the Approach gate: release to the fix, or remain if already released."""
+        if str((step or {}).get("template") or "") != "bj_range_exit":
+            return None
+        ready, waiting = self.range_exit_ready()
+        if ready:
+            return None
+        if self.state.get("range_exit_approved"):
+            result = self.acknowledge_blackjack_continue(
+                bypass_freq_gate=bypass_freq_gate
+            )
+        else:
+            result = self.release_range_exit(bypass_freq_gate=bypass_freq_gate)
+        result["range_exit_waiting"] = waiting or "need closer to range exit"
+        return result
+
+    def replay_last_tx(self, *, bypass_freq_gate: bool = False) -> dict[str, Any]:
+        """
+        Say again — retransmit the last ATC call.
+
+        Do not re-run the step. play_id on bj_range_exit after a far-out
+        release would become 'radar contact, remain this frequency'.
+        """
+        text = str(self.state.get("last_tx_text") or "").strip()
+        if not text:
+            last = str(self.state.get("last_step_id") or "").strip()
+            if last:
+                return self.play_id(last, bypass_freq_gate=bypass_freq_gate)
+            raise RuntimeError("Nothing to repeat")
+        airport = self.airport()
+        channel = str(self.state.get("last_tx_channel") or "").strip().lower()
+        if not channel:
+            channel = str((self.current_step() or {}).get("channel") or "other")
+            channel = channel.strip().lower() or "other"
+        tmpl = str(self.state.get("last_tx_template") or "replay")
+        step = {
+            "id": str(self.state.get("last_step_id") or "replay"),
+            "label": "Say again",
+            "channel": channel,
+            "phase": str((self.current_step() or {}).get("phase") or channel),
+            "template": tmpl,
+            "mode": "tts",
+        }
+        self._freq_gate_or_raise(step, bypass=bypass_freq_gate)
+        freq, mod, tx_name = atc_phrase.step_radio(airport, channel, None)
+        voice_name, _ = atc_phrase.voice_for_step(self.config, channel, step)
+        code = atc_phrase.transmit(
+            self.config,
+            airport,
+            text,
+            tx_name,
+            freq,
+            mod,
+            channel=channel,
+            voice_override=voice_name,
+            step=step,
+        )
+        self.state["last_tx_at"] = time.time()
+        self.save_state()
+        return {
+            "label": "Say again",
+            "text": text,
+            "channel": channel,
+            "freq": freq,
+            "exit_code": code,
+            "replayed": True,
+        }
 
     def next(self, *, bypass_freq_gate: bool = False) -> dict[str, Any]:
+        # READ BACK card is the active step — close it, do not TX the next call.
+        if self.state.get("awaiting_readback") and self.state.get("readback_items"):
+            self.clear_readback()
+            return {
+                "acknowledged": True,
+                "label": "Readback noted",
+                "readback_cleared": True,
+            }
         steps = self.steps
         if not steps:
             raise RuntimeError("No enabled steps")
@@ -514,9 +1070,20 @@ class FlowEngine:
         if idx >= len(steps):
             raise RuntimeError("End of flow — seek or reset")
         step = steps[idx]
+        # Cleared for the option + Next → take the full stop (exit/taxi), not
+        # a second "cleared for the option" transmission.
+        if (
+            atc_phrase.awaiting_option_on_the_go(self.state)
+            and str(step.get("template") or "") == "clear_land"
+        ):
+            return self.accept_option_full_stop(bypass_freq_gate=bypass_freq_gate)
+        # Still outside 40 NM — ARCOE release only; Approach waits.
+        held = self._range_exit_if_not_ready(step, bypass_freq_gate=bypass_freq_gate)
+        if held is not None:
+            return held
         self._freq_gate_or_raise(step, bypass=bypass_freq_gate)
         result = self.play_step(step)
-        if not self._hold_cursor_after_play(step):
+        if not self._hold_cursor_after_tx(step):
             self.state["index"] = idx + 1
             self._advance_past_skippable()
         self.save_state()
@@ -528,40 +1095,104 @@ class FlowEngine:
         return result
 
     def back(self, *, bypass_freq_gate: bool = False) -> dict[str, Any]:
+        """
+        Move to the previous playable step, transmit it, leave cursor after it.
+
+        Does not call forward-only prepare_takeoff_cursor before TX (that was
+        bouncing the cursor when retreating onto a skippable step). After TX,
+        advances one step without skipping — Next will skip forward as usual.
+        """
         steps = self.steps
         if not steps:
             raise RuntimeError("No enabled steps")
-        idx = int(self.state.get("index") or 0) - 1
-        if idx < 0:
-            idx = 0
-        self.state["index"] = idx
-        self.prepare_takeoff_cursor()
+        target = self._retreat_past_skippable(int(self.state.get("index") or 0) - 1)
+        self.state["index"] = target
+        self._clear_landing_progress_if_before_clear_land(target)
         self.save_state()
-        step = self.current_step()
-        if step is None:
-            raise RuntimeError("No enabled steps")
+        step = steps[target]
         self._freq_gate_or_raise(step, bypass=bypass_freq_gate)
+        # Offer rolling only when backing onto a takeoff step
+        self._maybe_roll_takeoff_offer(step)
         result = self.play_step(step)
-        # After replaying, leave cursor on next after this step
-        idx = int(self.state.get("index") or 0)
-        self.state["index"] = min(idx + 1, len(steps))
-        self._advance_past_skippable()
+        if self._hold_cursor_after_tx(step):
+            self.state["index"] = target
+        else:
+            # Stay one past the replayed step; do not skip forward (avoids
+            # bouncing back onto the step we just left).
+            self.state["index"] = min(target + 1, len(steps))
         self.save_state()
+        result["advanced_to_index"] = self.state["index"]
         return result
 
     def reset(self) -> dict[str, Any]:
+        """Seek to the start of the flow and clear sticky sortie cache."""
+        atc_phrase.invalidate_flight_lookups()
+        atc_phrase.clear_flight_session_cache(
+            mission=self.mission,
+            state=self.state,
+            config=self.config,
+            reset_runway=False,
+            invalidate_lookups=False,
+        )
+        # Fresh METAR/winds so runway returns to wind default.
+        try:
+            airport = self.airport()
+            opus, weather = atc_phrase.resolve_opus_and_metar(
+                self.config, airport["icao"]
+            )
+            atc_phrase.reset_runway_to_winds(
+                airport,
+                weather,
+                mission=self.mission,
+                state=self.state,
+                opus=opus,
+                config=self.config,
+            )
+        except Exception:
+            atc_phrase.set_requested_runway(
+                None, mission=self.mission, state=self.state
+            )
         self.state["index"] = 0
         self.state["last_step_id"] = None
-        self.state["active_takeoff_mode"] = None
-        self.state["pending_takeoff_offer"] = None
-        self.state["takeoff_offer_rolled"] = False
         self._clear_readback_state()
         if "active_takeoff_mode" in self.mission:
             self.mission["active_takeoff_mode"] = atc_phrase.DEFAULT_TAKEOFF_MODE
-        # New sortie / replay — drop sticky pilot runway unless re-requested.
-        atc_phrase.set_requested_runway(None, mission=self.mission, state=self.state)
         self.save_state()
         return self.status()
+
+    def clear_flight_cache(self) -> dict[str, Any]:
+        """
+        Plan/Fly helper: drop unrestricted climb, approach, runway, and lookup
+        caches, then seek to the start of the timeline.
+        """
+        atc_phrase.invalidate_flight_lookups()
+        airport = self.airport()
+        try:
+            opus, weather = atc_phrase.resolve_opus_and_metar(
+                self.config, airport["icao"]
+            )
+        except Exception:
+            opus, weather = None, atc_phrase.Weather(None, None, None, "")
+        detail = atc_phrase.clear_flight_session_cache(
+            mission=self.mission,
+            state=self.state,
+            config=self.config,
+            airport=airport,
+            weather=weather,
+            opus=opus,
+            reset_runway=True,
+            invalidate_lookups=False,
+        )
+        self.state["index"] = 0
+        self.state["last_step_id"] = None
+        self._clear_readback_state()
+        if "active_takeoff_mode" in self.mission:
+            self.mission["active_takeoff_mode"] = atc_phrase.DEFAULT_TAKEOFF_MODE
+        self.save_state()
+        status = self.status()
+        status["cache_cleared"] = True
+        status["runway"] = detail.get("runway") or status.get("runway")
+        return status
 
     def flip(self) -> dict[str, Any]:
         """Legacy no-op — timeline is a single list now."""
@@ -579,9 +1210,14 @@ class FlowEngine:
                 # Cursor may have skipped past this id (rolling → skip lineup)
                 cur = self.current_step()
                 play = cur if cur is not None else step
+                held = self._range_exit_if_not_ready(
+                    play, bypass_freq_gate=bypass_freq_gate
+                )
+                if held is not None:
+                    return held
                 self._freq_gate_or_raise(play, bypass=bypass_freq_gate)
                 result = self.play_step(play)
-                if not self._hold_cursor_after_play(play):
+                if not self._hold_cursor_after_tx(play):
                     self.state["index"] = int(self.state.get("index") or 0) + 1
                     self._advance_past_skippable()
                 self.save_state()

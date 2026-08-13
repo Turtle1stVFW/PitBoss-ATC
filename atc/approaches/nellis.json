@@ -412,5 +412,34 @@
       "turn": "east",
       "note": "Hold east of DUCK, remain 1.5 miles"
     }
-  ]
+  ],
+  "_pattern_work_comment": "VFR go-around / pattern: closed traffic (side by runway) stays overhead. Flex (21R) / Duck (21L) reentry switches to straight-in and seeks land — Watch will not auto-clear at the field. Instrument missed uses default_missed_approach or per-plate missed_approach, then returns to Approach — rearm_tower_outside_nm blocks contact-tower / land until outside that distance.",
+  "pattern_work": {
+    "randomize": true,
+    "rearm_tower_outside_nm": 15,
+    "closed_traffic_by_runway": {
+      "21R": "right",
+      "21L": "left",
+      "03L": "left",
+      "03R": "right"
+    },
+    "reentries": [
+      {
+        "id": "FLEX",
+        "say": "Flex reentry",
+        "runways": ["21R"],
+        "aliases": ["FLEX", "FLEX REENTRY", "FLEX ENTRY"]
+      },
+      {
+        "id": "DUCK",
+        "say": "Duck reentry",
+        "runways": ["21L"],
+        "aliases": ["DUCK", "DUCK REENTRY", "DUCK ENTRY"]
+      }
+    ],
+    "default_missed_approach": {
+      "say": "climb to six thousand, missed approach as published",
+      "altitude_ft": 6000
+    }
+  }
 }

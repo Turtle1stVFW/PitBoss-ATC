@@ -25,6 +25,7 @@ Caveats worth knowing when reading a verdict:
 from __future__ import annotations
 
 import math
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -53,6 +54,8 @@ DEFAULTS: dict[str, float] = {
     # match_caoc_unit_for_flight returns its best guess even on thin evidence, so
     # with nobody flying it will happily hand back some AI flight. Anything this
     # far from the field is not the jet about to depart, whatever it matched.
+    # Applied only to EOR / in-position watches — approach and range-exit areas
+    # are supposed to score tens of NM out.
     "own_max_distance_m": 20000.0,
 }
 
@@ -205,17 +208,75 @@ def zone_label(zone: dict[str, Any] | None) -> str:
     return "zone"
 
 
+# Taxi "Alpha South" / "NW EOR" ↔ drawn names "AS EOR" / "NW EOR".
+_PLACE_EXPAND = {
+    "nw": "northwest",
+    "ne": "northeast",
+    "sw": "southwest",
+    "se": "southeast",
+    "as": "alpha south",
+    "an": "alpha north",
+}
+
+
+def _place_keys(text: str) -> set[str]:
+    """Comparable tokens for an EOR place label (compass collapsed, EOR dropped)."""
+    raw = re.sub(r"[^a-z0-9\s]", " ", str(text or "").lower())
+    toks = [t for t in raw.split() if t]
+    atomic: list[str] = []
+    i = 0
+    while i < len(toks):
+        if i + 1 < len(toks) and toks[i] in ("north", "south") and toks[i + 1] in (
+            "west",
+            "east",
+        ):
+            atomic.append(toks[i] + toks[i + 1])
+            i += 2
+            continue
+        atomic.append(_PLACE_EXPAND.get(toks[i], toks[i]))
+        i += 1
+    atomic = [t for t in atomic if t not in ("eor", "end")]
+    keys = set(atomic)
+    if atomic:
+        keys.add(" ".join(atomic))
+    return keys
+
+
+def zone_matches_place(zone: dict[str, Any] | None, place: str) -> bool:
+    """True when a drawn EOR is the taxi-assigned place."""
+    place_keys = _place_keys(place)
+    if not place_keys or not isinstance(zone, dict):
+        return False
+    zone_keys: set[str] = set()
+    for field in ("name", "id"):
+        zone_keys |= _place_keys(str(zone.get(field) or ""))
+    return bool(place_keys & zone_keys)
+
+
+def filter_zones_by_place(
+    zone_list: list[dict[str, Any]] | None,
+    place: str,
+) -> list[dict[str, Any]]:
+    """Keep drawn areas that match the assigned EOR place label."""
+    return [
+        z
+        for z in (zone_list or [])
+        if isinstance(z, dict) and zone_matches_place(z, place)
+    ]
+
+
 def zones_by_ref(
     airport: dict[str, Any] | None,
     ref: str,
     runway: str | None = None,
+    place: str | None = None,
 ) -> list[dict[str, Any]]:
     """
     Every zone a step is asking for, by id or by trigger tag.
 
-    An id pins to one drawn area. A tag follows the active runway and returns
-    *all* matching areas (e.g. both AS and AN EOR on 03L), so the flight can
-    sit in any of them. Runway-specific areas are listed before field-wide ones.
+    An id pins to one drawn area. A tag follows the active runway. For `eor`,
+    `place` (the taxi-assigned EOR, e.g. "NW EOR") pins that box when it
+    matches a drawn name; otherwise every EOR on that runway is used.
     """
     want = str(ref or "").strip()
     if not want:
@@ -226,6 +287,10 @@ def zones_by_ref(
             return [zone]
     matches = list(zones_for(airport, want, runway))
     matches.sort(key=lambda z: 0 if z.get("runway") else 1)
+    if place and fold == "eor":
+        pinned = filter_zones_by_place(matches, place)
+        if pinned:
+            return pinned
     return matches
 
 
@@ -623,6 +688,8 @@ class FlightStatus:
 # Templates that fired off position before steps could name a zone themselves.
 # Kept so flows written against the old behaviour keep working untouched.
 LEGACY_TEMPLATE_TRIGGERS: dict[str, tuple[str, str]] = {
+    # LUAW when the flight is in the runway / takeoff box (same area as clearance).
+    "lineup": ("in_position", "auto_takeoff_clearance"),
     "clear_takeoff": ("in_position", "auto_takeoff_clearance"),
     "clear_takeoff_rolling": ("in_position", "auto_takeoff_clearance"),
     "clear_takeoff_intersection": ("in_position", "auto_takeoff_clearance"),
@@ -632,9 +699,10 @@ LEGACY_TEMPLATE_TRIGGERS: dict[str, tuple[str, str]] = {
 
 @dataclass(frozen=True)
 class StepTrigger:
-    """A step's `trigger` block: which zone arms it, and how patiently."""
+    """A step's `trigger` block: zone and/or distance from the field."""
 
-    zone: str
+    zone: str = ""
+    within_nm: float | None = None  # ownship ≤ this many NM from the field
     when: str = "inside"  # inside | leaving
     flight: str = ""  # all | me | "" to follow auto_clearance_require_full_flight
     settled: bool = True
@@ -661,7 +729,14 @@ class StepTrigger:
         return bool((config or {}).get(self.enabled_key, True))
 
     def describe(self) -> str:
-        bits = [f"{'leaves' if self.when == 'leaving' else 'in'} {self.zone}"]
+        bits: list[str] = []
+        if self.within_nm is not None:
+            if self.when == "leaving":
+                bits.append(f"beyond {self.within_nm:g} NM")
+            else:
+                bits.append(f"within {self.within_nm:g} NM")
+        if self.zone:
+            bits.append(f"{'leaves' if self.when == 'leaving' else 'in'} {self.zone}")
         if self.flight:
             bits.append("whole flight" if self.flight == "all" else "just me")
         if self.settled:
@@ -670,7 +745,7 @@ class StepTrigger:
             bits.append(f"{self.dwell_s:g}s dwell")
         if self.gap_s:
             bits.append(f"{self.gap_s:g}s gap")
-        return ", ".join(bits)
+        return ", ".join(bits) if bits else "armed"
 
 
 def gap_remaining(
@@ -714,11 +789,13 @@ def step_trigger(step: dict[str, Any] | None) -> StepTrigger | None:
     raw = (step or {}).get("trigger")
     if isinstance(raw, dict):
         zone = str(raw.get("zone") or "").strip()
-        if zone:
+        within = _trigger_float(raw.get("within_nm"))
+        if zone or within is not None:
             flight = str(raw.get("flight") or "").strip().casefold()
             when = str(raw.get("when") or "").strip().casefold()
             return StepTrigger(
                 zone=zone,
+                within_nm=within,
                 when="leaving" if when.startswith("leav") else "inside",
                 flight=flight if flight in ("all", "me") else "",
                 settled=bool(raw.get("settled", True)),
@@ -730,6 +807,461 @@ def step_trigger(step: dict[str, Any] | None) -> StepTrigger | None:
         return None
     zone, key = pair
     return StepTrigger(zone=zone, enabled_key=key, explicit=False)
+
+
+def airport_field_latlon(airport: dict[str, Any] | None) -> tuple[float, float] | None:
+    """
+    Field reference point for distance gates (midpoint of the primary runway).
+    """
+    if not airport:
+        return None
+    for key in ("lat", "field_lat"):
+        try:
+            return float(airport[key]), float(airport.get("lon") or airport["field_lon"])
+        except (KeyError, TypeError, ValueError):
+            pass
+    geo = airport_geometry(airport)
+    runways = geo.get("runways") if isinstance(geo.get("runways"), dict) else {}
+    # Prefer first listed airport runway, else any geometry runway.
+    order = [str(r) for r in (airport.get("runways") or [])] + list(runways.keys())
+    seen: set[str] = set()
+    for rwy in order:
+        if rwy in seen:
+            continue
+        seen.add(rwy)
+        entry = runways.get(rwy) if isinstance(runways, dict) else None
+        if not isinstance(entry, dict):
+            continue
+        thr = entry.get("threshold") or {}
+        far = entry.get("far_end") or {}
+        try:
+            lat = (float(thr["lat"]) + float(far["lat"])) / 2.0
+            lon = (float(thr["lon"]) + float(far["lon"])) / 2.0
+            return lat, lon
+        except (KeyError, TypeError, ValueError):
+            continue
+    return None
+
+
+def ownship_distance_nm(
+    airport: dict[str, Any] | None,
+    *,
+    config: dict[str, Any] | None = None,
+    callsign: str | None = None,
+    opus: Any = None,
+    state: dict[str, Any] | None = None,
+    own_ll: tuple[float, float] | None = None,
+) -> float | None:
+    """NM from ownship to the field reference, or None when unknown."""
+    field = airport_field_latlon(airport)
+    if field is None:
+        return None
+    pos = own_ll
+    if pos is None and config is not None:
+        pos = atc_phrase.ownship_latlon(
+            config, callsign=callsign, opus=opus, state=state
+        )
+    if pos is None and isinstance(state, dict):
+        try:
+            raw = state.get("ownship_ll")
+            if isinstance(raw, (list, tuple)) and len(raw) >= 2:
+                pos = (float(raw[0]), float(raw[1]))
+        except (TypeError, ValueError):
+            pos = None
+    if pos is None:
+        return None
+    return atc_phrase._haversine_nm(pos[0], pos[1], field[0], field[1])
+
+
+def within_nm_held(
+    trigger: StepTrigger | None,
+    distance_nm: float | None,
+) -> tuple[bool, str]:
+    """
+    Whether a within_nm gate is satisfied.
+
+    Returns (held, waiting_summary).
+    """
+    if trigger is None or trigger.within_nm is None:
+        return False, ""
+    limit = float(trigger.within_nm)
+    if distance_nm is None:
+        need = (
+            f"beyond {limit:g} NM"
+            if trigger.when == "leaving"
+            else f"≤ {limit:g} NM"
+        )
+        return False, f"waiting for position (need {need})"
+    if trigger.when == "leaving":
+        # State check, not a crossing — already outside (airborne spawn) counts.
+        held = distance_nm > limit
+        waiting = (
+            f"{distance_nm:.1f} NM, already beyond {limit:g} NM"
+            if held
+            else f"{distance_nm:.1f} NM, still inside {limit:g} NM"
+        )
+    else:
+        held = distance_nm <= limit
+        waiting = (
+            f"{distance_nm:.1f} NM (≤ {limit:g} NM)"
+            if held
+            else f"{distance_nm:.1f} NM, need ≤ {limit:g} NM"
+        )
+    return held, waiting
+
+
+def field_proximity_applies(watch: list[dict[str, Any]] | None) -> bool:
+    """
+    Whether evaluate() should reject a track far from the field.
+
+    EOR / in-position boxes sit on the airfield; a match 15 NM out is the
+    wrong jet. Approach, tower, and range areas are supposed to score that
+    far out, so the cutoff stays off while those are in `watch`.
+    """
+    extra = [z for z in (watch or []) if isinstance(z, dict)]
+    if not extra:
+        return True
+    local = {"eor", "in_position"}
+    for zone in extra:
+        trig = str(zone.get("trigger") or "").strip().casefold()
+        if trig not in local:
+            return False
+    return True
+
+
+def condition_held(
+    trigger: StepTrigger | None,
+    status: FlightStatus,
+    *,
+    zones: list[dict[str, Any]] | None = None,
+    distance_nm: float | None = None,
+    config: dict[str, Any] | None = None,
+    tracker: PositionTracker | None = None,
+    leave_key: str = "",
+) -> tuple[bool, str]:
+    """
+    Whether a step's distance and/or zone condition is true.
+
+    Distance and zone are OR when both are set (range exit: approach area or
+    ≤ N NM). A distance gate can hold even when evaluate() has no field
+    verdict — the aircraft is not supposed to be "at the field" yet.
+    Returns (held, waiting_summary).
+    """
+    if trigger is None or not trigger.enabled(config):
+        return False, ""
+
+    need_full = trigger.need_full(config)
+    zone_list = [z for z in (zones or []) if isinstance(z, dict)]
+
+    held_dist = False
+    waiting_dist = ""
+    if trigger.within_nm is not None:
+        held_dist, waiting_dist = within_nm_held(trigger, distance_nm)
+
+    held_zone = False
+    waiting_zone = ""
+    if trigger.zone:
+        if trigger.explicit:
+            if not zone_list:
+                waiting_zone = f"no zone called {trigger.zone!r} is drawn for this field"
+            elif not status.ok:
+                waiting_zone = status.reason or "no position data"
+            else:
+                tag_label = zones_ref_label(trigger.zone, zone_list)
+                count = status.in_zones(
+                    zone_list, settled=trigger.settled, label=tag_label
+                )
+                if trigger.when == "leaving":
+                    inside_now = not count.out_ok(need_full=need_full)
+                    if tracker is not None:
+                        held_zone = tracker.has_left(leave_key or tag_label, inside_now)
+                    zone_waiting = (
+                        f"clear of {count.label}"
+                        if held_zone
+                        else f"in {count.label}, waiting to leave"
+                        if inside_now
+                        else f"has not reached {tag_label} yet"
+                    )
+                    waiting_zone = zone_waiting
+                else:
+                    held_zone = count.ok(need_full=need_full)
+                    waiting_zone = count.describe(need_full=need_full)
+                    if not held_zone and count.inside == 0 and len(zone_list) > 1:
+                        waiting_zone = (
+                            f"0/{count.total if need_full else 1} in {tag_label}"
+                        )
+        elif not status.ok:
+            waiting_zone = status.reason or "no position data"
+        elif not status.calibrated:
+            waiting_zone = "geometry not calibrated, nothing will fire"
+        else:
+            held_zone = (
+                status.all_in_position(need_full=need_full)
+                if trigger.zone == "in_position"
+                else status.all_at_eor(need_full=need_full)
+            )
+            waiting_zone = status.summary(need_full=need_full)
+
+    has_dist = trigger.within_nm is not None
+    has_zone = bool(trigger.zone)
+    if has_dist and has_zone:
+        held = held_dist or held_zone
+        if held:
+            waiting = waiting_dist if held_dist else waiting_zone
+        else:
+            waiting = "  ·  ".join(b for b in (waiting_dist, waiting_zone) if b)
+        return held, waiting
+    if has_dist:
+        return held_dist, waiting_dist
+    if has_zone:
+        return held_zone, waiting_zone
+    return False, ""
+
+
+# Landing clearance distance by recovery (NM from field).
+CLEAR_LAND_WITHIN_NM = {
+    "visual_overhead": 2.0,
+    "tactical_overhead": 2.0,
+    "straight_in": 6.0,
+    "instrument": 6.0,
+}
+CONTACT_TOWER_WITHIN_NM = 12.0
+# After a go-around, land only on the approach side of the threshold.
+_FINAL_PAST_THRESHOLD_M = 400.0
+_FINAL_HDG_TOL_DEG = 100.0
+_M_PER_NM = 1852.0
+
+
+def own_unit_fix(status: FlightStatus | None) -> UnitFix | None:
+    if status is None:
+        return None
+    for fix in status.fixes:
+        if fix.own:
+            return fix
+    return status.fixes[0] if status.fixes else None
+
+
+def on_base_or_short_final(
+    status: FlightStatus | None,
+    *,
+    within_nm: float,
+) -> tuple[bool, str]:
+    """
+    True on base / short final for the landing runway.
+
+    Approach side of the threshold (not upwind / departure after a go-around),
+    within `within_nm` of the threshold, heading not downwind.
+    """
+    fix = own_unit_fix(status)
+    if fix is None:
+        return False, "waiting for position (base / short final)"
+    along = float(fix.along_m)
+    if along > _FINAL_PAST_THRESHOLD_M:
+        return (
+            False,
+            f"upwind / departure ({along / _M_PER_NM:+.1f} NM along) — "
+            "need base / short final",
+        )
+    need_m = float(within_nm) * _M_PER_NM
+    if along < -need_m:
+        return (
+            False,
+            f"{-along / _M_PER_NM:.1f} NM from threshold, "
+            f"need ≤ {within_nm:g} NM on final",
+        )
+    if fix.heading_err_deg is not None and float(fix.heading_err_deg) > _FINAL_HDG_TOL_DEG:
+        return (
+            False,
+            f"hdg {fix.heading_err_deg:.0f}° off runway — need base / final",
+        )
+    dist_nm = abs(along) / _M_PER_NM
+    return True, f"base / short final ({dist_nm:.1f} NM to threshold)"
+DEPARTURE_HANDOFF_BEYOND_NM = 18.0
+CRUISE_CLIMB_BEYOND_NM = 10.0
+# Blackjack → Approach only when near the field / APP boundary (not deep NTTR).
+RANGE_EXIT_WITHIN_NM = 40.0
+
+
+def resolve_step_trigger(
+    step: dict[str, Any] | None,
+    *,
+    mission: dict[str, Any] | None = None,
+    state: dict[str, Any] | None = None,
+) -> StepTrigger | None:
+    """
+    Step trigger with recovery-aware within_nm for clear_land / contact tower /
+    departure handoff (beyond NM).
+    """
+    base = step_trigger(step)
+    tmpl = str((step or {}).get("template") or "").strip()
+    raw = (step or {}).get("trigger") if isinstance((step or {}).get("trigger"), dict) else {}
+    raw = raw if isinstance(raw, dict) else {}
+
+    def _from_raw_or_base(
+        *,
+        within_nm: float,
+        when: str | None = None,
+    ) -> StepTrigger:
+        gap = _trigger_float(raw.get("gap_s"))
+        dwell = _trigger_float(raw.get("dwell_s"))
+        flight = str(raw.get("flight") or "").strip().casefold()
+        when_raw = str(raw.get("when") or "").strip().casefold()
+        if when is None:
+            when_use = "leaving" if when_raw.startswith("leav") else "inside"
+        else:
+            when_use = when
+        if base is not None:
+            return StepTrigger(
+                zone=base.zone or "",
+                within_nm=within_nm,
+                when=when_use if when is not None else base.when,
+                flight=base.flight,
+                settled=base.settled,
+                dwell_s=base.dwell_s if dwell is None else dwell,
+                gap_s=float(base.gap_s if gap is None else gap),
+                enabled_key=base.enabled_key,
+                explicit=True,
+            )
+        return StepTrigger(
+            zone=str(raw.get("zone") or "").strip(),
+            within_nm=within_nm,
+            when=when_use,
+            flight=flight if flight in ("all", "me") else "",
+            settled=bool(raw.get("settled", False)),
+            dwell_s=dwell,
+            gap_s=gap or 5.0,
+            explicit=True,
+        )
+
+    # Explicit within_nm on the step always wins for contact/clear templates too.
+    if base and base.within_nm is not None and "within_nm" in raw:
+        if tmpl not in ("clear_land", "departure_handoff", "climb_cruise"):
+            return base
+        if tmpl in ("departure_handoff", "climb_cruise"):
+            # Keep explicit NM; default when to leaving if omitted.
+            when_raw = str(raw.get("when") or "").strip().casefold()
+            if when_raw:
+                return base
+            return StepTrigger(
+                zone=base.zone,
+                within_nm=base.within_nm,
+                when="leaving",
+                flight=base.flight,
+                settled=base.settled,
+                dwell_s=base.dwell_s,
+                gap_s=base.gap_s,
+                enabled_key=base.enabled_key,
+                explicit=True,
+            )
+        # clear_land: keep explicit override
+        return base
+
+    if tmpl in ("cleared_approach", "contact_tower"):
+        nm = CONTACT_TOWER_WITHIN_NM
+        if base and base.within_nm is not None:
+            nm = float(base.within_nm)
+        elif raw.get("within_nm") is not None:
+            parsed = _trigger_float(raw.get("within_nm"))
+            if parsed is not None:
+                nm = parsed
+        return _from_raw_or_base(within_nm=nm)
+
+    if tmpl == "right_break":
+        # Closed traffic go-around: still at the field — do not auto
+        # "continue straight-in" on the 12 NM gate.
+        if atc_phrase.closed_traffic_go_around_pending(state):
+            return None
+        # OHB / TAC: break approval when you check in (no NM gate unless set).
+        # Straight-in / instrument: same 12 NM window as contact-tower handoff;
+        # landing clearance remains 6 NM on clear_land.
+        rec = atc_phrase.resolve_active_recovery(step, mission, state=state)
+        if rec not in ("straight_in", "instrument"):
+            return base
+        nm = CONTACT_TOWER_WITHIN_NM
+        if base and base.within_nm is not None:
+            nm = float(base.within_nm)
+        elif raw.get("within_nm") is not None:
+            parsed = _trigger_float(raw.get("within_nm"))
+            if parsed is not None:
+                nm = parsed
+        return _from_raw_or_base(within_nm=nm)
+
+    if tmpl == "climb_cruise":
+        nm = CRUISE_CLIMB_BEYOND_NM
+        if base and base.within_nm is not None:
+            nm = float(base.within_nm)
+        elif raw.get("within_nm") is not None:
+            parsed = _trigger_float(raw.get("within_nm"))
+            if parsed is not None:
+                nm = parsed
+        when_raw = str(raw.get("when") or "").strip().casefold()
+        when_use = "leaving" if (not when_raw or when_raw.startswith("leav")) else "inside"
+        return _from_raw_or_base(within_nm=nm, when=when_use)
+
+    if tmpl == "departure_handoff":
+        nm = DEPARTURE_HANDOFF_BEYOND_NM
+        if base and base.within_nm is not None:
+            nm = float(base.within_nm)
+        elif raw.get("within_nm") is not None:
+            parsed = _trigger_float(raw.get("within_nm"))
+            if parsed is not None:
+                nm = parsed
+        when_raw = str(raw.get("when") or "").strip().casefold()
+        when_use = "leaving" if (not when_raw or when_raw.startswith("leav")) else "inside"
+        return _from_raw_or_base(within_nm=nm, when=when_use)
+
+    if tmpl == "clear_land":
+        rec = atc_phrase.resolve_active_recovery(step, mission, state=state)
+        # After a VFR go-around they are already with Tower. Auto-land on
+        # base / short final (2 NM closed, 6 NM Flex/Duck) — not a check-in.
+        pattern_nm = atc_phrase.pattern_land_within_nm(state)
+        if pattern_nm is not None:
+            return _from_raw_or_base(within_nm=float(pattern_nm))
+        # Overhead / TAC: the jet is inside ~2 NM from break through final, so a
+        # field-distance gate would clear right after the break. Voice
+        # "gear down" / Play is the clearance unless a zone or NM is explicit.
+        if rec in ("visual_overhead", "tactical_overhead"):
+            if "within_nm" in raw:
+                parsed = _trigger_float(raw.get("within_nm"))
+                if parsed is not None:
+                    return _from_raw_or_base(within_nm=parsed)
+            if base and base.zone:
+                return base
+            return None
+        nm = float(CLEAR_LAND_WITHIN_NM.get(rec, 6.0))
+        if "within_nm" in raw:
+            parsed = _trigger_float(raw.get("within_nm"))
+            if parsed is not None:
+                nm = parsed
+        return _from_raw_or_base(within_nm=nm)
+
+    if tmpl == "bj_range_exit":
+        # Prefer a drawn approach / range_exit zone; else ≤40 NM from the field.
+        if base and base.zone:
+            return base
+        zone = str(raw.get("zone") or "").strip() or "approach"
+        nm = RANGE_EXIT_WITHIN_NM
+        if base and base.within_nm is not None:
+            nm = float(base.within_nm)
+        elif raw.get("within_nm") is not None:
+            parsed = _trigger_float(raw.get("within_nm"))
+            if parsed is not None:
+                nm = parsed
+        gap = _trigger_float(raw.get("gap_s"))
+        dwell = _trigger_float(raw.get("dwell_s"))
+        flight = str(raw.get("flight") or "").strip().casefold()
+        return StepTrigger(
+            zone=zone,
+            within_nm=nm,
+            when="inside",
+            flight=flight if flight in ("all", "me") else "",
+            settled=bool(raw.get("settled", False)),
+            dwell_s=dwell,
+            gap_s=gap or 5.0,
+            explicit=True,
+        )
+
+    return base
 
 
 def flight_key(unit: dict[str, Any] | None) -> str:
@@ -783,6 +1315,7 @@ class PositionTracker:
         self._since: dict[str, float] = {}  # condition key -> first-true time
         self._fired: set[str] = set()
         self._entered: set[str] = set()
+        self.pending_latch: str = ""
 
     # -- motion ----------------------------------------------------------
     def _speed_mps(self, unit: dict[str, Any], now: float) -> float | None:
@@ -839,10 +1372,31 @@ class PositionTracker:
         """Whether `fire_once` would still fire for this key."""
         return key not in self._fired
 
+    def clear_fired(self, predicate: Any = None) -> int:
+        """
+        Drop fire-once latches so a second pattern / missed approach can re-arm.
+
+        predicate: None clears all; callable(key)->bool keeps matching keys removed;
+        str clears keys containing that substring.
+        """
+        if predicate is None:
+            n = len(self._fired)
+            self._fired.clear()
+            return n
+        if isinstance(predicate, str):
+            needle = predicate
+            doomed = [k for k in self._fired if needle in k]
+        else:
+            doomed = [k for k in self._fired if predicate(k)]
+        for k in doomed:
+            self._fired.discard(k)
+        return len(doomed)
+
     def reset(self) -> None:
         self._since.clear()
         self._fired.clear()
         self._entered.clear()
+        self.pending_latch = ""
 
     # -- main evaluation -------------------------------------------------
     def evaluate(
@@ -906,7 +1460,7 @@ class PositionTracker:
         if own_pos is None:
             status.reason = "own aircraft has no position"
             return status
-        if anchor is not None:
+        if anchor is not None and field_proximity_applies(extra):
             own_dist = math.hypot(own_pos[0] - anchor[0], own_pos[1] - anchor[1])
             if own_dist > rule(config, "own_max_distance_m"):
                 status.reason = (

@@ -26,6 +26,9 @@ CASES = [
     # ---- real ATC calls: must fire ----------------------------------------
     ("Nellis Ground, Fleece 1, ready to taxi", "ground", "departure", True, "ready_taxi"),
     ("Nellis Tower, Fleece 1, ready for departure", "tower", "departure", True, "ready_departure"),
+    ("Nellis Tower, Fleece 1, in position", "tower", "departure", True, "in_position"),
+    ("Tower, Fleece 1, we're in position", "tower", "departure", True, "in_position"),
+    ("Tower, Fleece 1, lined up", "tower", "departure", True, "in_position"),
     ("Ground, Fleece 1, request runway two one left", "ground", "departure", True, "request_runway"),
     ("Nellis Approach, Fleece 1, say winds", "approach", "approach", True, "request_winds"),
     ("Approach, Fleece 1, request altimeter", "approach", "approach", True, "request_altimeter"),
@@ -36,6 +39,9 @@ CASES = [
     # Blackjack check-in — callsign + mission colour; "checking in" is enough.
     ("Blackjack, Fleece 1, checking in", "blackjack", "flight", True, "range_entry"),
     ("Blackjack, Fleece 1, checking in, mission zero eight zero seven zero two", "blackjack", "flight", True, "range_entry"),
+    ("Blackjack, Fleece 1, with you", "blackjack", "flight", True, "range_entry"),
+    ("Blackjack, FLEECE 1 with you, 15,000", "blackjack", "flight", True, "range_entry"),
+    ("Blackjack, Fleece 1, with you at 15,000", "blackjack", "flight", True, "range_entry"),
     # Post-check-in range window: optional Bandsaw, then Blackjack checkout.
     ("Bandsaw, Fleece 1, checking in", "bandsaw", "flight", True, "bandsaw_check_in"),
     ("Bandsaw, Fleece 1, with you", "bandsaw", "flight", True, "bandsaw_check_in"),
@@ -57,20 +63,41 @@ CASES = [
     ("Blackjack, Fleece 1, request ANSA", "blackjack", "flight", True, "request_bandsaw"),
     ("Blackjack, Fleece 1, off station, range complete", "blackjack", "flight", True, "range_exit"),
     ("Blackjack, Fleece 1, range exit", "blackjack", "flight", True, "range_exit"),
+    ("Blackjack, Fleece 1, say again", "blackjack", "flight", True, "say_again"),
     # Approach / recovery
     ("Nellis Approach, Fleece 1, checking in", "approach", "approach", True, "inbound_recovery"),
     ("Approach, Fleece 1, with you", "approach", "approach", True, "inbound_recovery"),
     ("Approach, Fleece 1, inbound for recovery", "approach", "approach", True, "inbound_recovery"),
     ("Approach, Fleece 1, request ARCOE recovery", "approach", "approach", True, "request_approach"),
     ("Approach, Fleece 1, request tactical overhead", "approach", "approach", True, "request_approach"),
+    ("Approach, Fleece 1, request overhead", "approach", "approach", True, "request_approach"),
+    ("Approach, Fleece 1, request straight in", "approach", "approach", True, "request_approach"),
     ("Approach, Fleece 1, request instrument", "approach", "approach", True, "request_approach"),
+    ("Tower, Fleece 1, request tactical overhead", "tower", "approach", True, "request_approach"),
+    ("Tower, Fleece 1, request overhead", "tower", "approach", True, "request_approach"),
+    ("Tower, Fleece 1, request straight in", "tower", "approach", True, "request_approach"),
+    ("Tower, Fleece 1, request instrument", "tower", "approach", False, None),
     ("Approach, Fleece 1, request hold", "approach", "approach", True, "request_hold"),
     ("Approach, Fleece 1, cancel hold", "approach", "approach", True, "cancel_hold"),
     ("Approach, Fleece 1, request vectors", "approach", "approach", True, "request_vectors"),
     ("Approach, Fleece 1, airport in sight, request tower", "approach", "approach", True, "approach_continue"),
+    ("Approach, Fleece 1, request handoff", "approach", "approach", True, "approach_continue"),
+    ("Approach, Fleece 1, established", "approach", "approach", True, "approach_established"),
     ("Delivery, Fleece 1, request IFR clearance", "delivery", "departure", True, "ready_clearance"),
     ("Nellis Tower, Fleece 1, gear down full stop", "tower", "approach", True, "request_landing"),
+    ("Nellis Tower, Fleece 1, with you", "tower", "approach", True, "tower_check_in"),
+    ("Tower, Fleece 1, initial", "tower", "approach", True, "tower_initial"),
+    ("Nellis tower, FLEECE 1.1, initial, 2.1, right", "tower", "approach", True, "tower_initial"),
+    ("Nellis Tower, Fleece 1-1, initial", "tower", "approach", True, "tower_initial"),
+    ("Nellis Tower, Fleece 1.2, initial", "tower", "approach", False, None),
+    ("Nellis tower, FLEECE 1.1, going missed", "tower", "approach", True, "going_around"),
+    ("Nellis tower, FLEECE 1.1 on the go", "tower", "approach", True, "going_around"),
+    ("Nellis tower, FLEECE 1.1, missed approach", "tower", "approach", True, "going_around"),
+    ("Call to tower FLEECE 1. Go ahead and missed", "tower", "approach", True, "going_around"),
     ("Tower, Fleece 1, going around", "tower", "approach", True, "going_around"),
+    ("Tower, Fleece 1, missed approach", "tower", "approach", True, "going_around"),
+    ("Tower, Fleece 1, going missed", "tower", "approach", True, "going_around"),
+    ("Tower, Fleece 1, on the go", "tower", "approach", True, "going_around"),
     ("Ground, Fleece 1, clear of the runway", "ground", "approach", True, "clear_of_runway"),
     # own callsign, no agency named — still us talking to ATC
     ("Fleece 1, ready to taxi", "ground", "departure", True, "ready_taxi"),
@@ -82,8 +109,18 @@ CASES = [
     # Unrestricted climb — Tower only, hidden from kneeboard cues
     ("Tower, Fleece 1, request unrestricted climb", "tower", "departure", True, "request_unrestricted_climb"),
     ("Fleece 1, request unrestricted", "tower", "departure", True, "request_unrestricted_climb"),
+    ("Tower, Fleece 1, request rolling", "tower", "departure", True, "request_rolling"),
+    ("Departure, Fleece 1, request handoff", "departure", "departure", True, "request_handoff"),
+    ("Nellis Departure, Fleece 1, request blackjack", "departure", "departure", True, "request_handoff"),
+    ("Tower, Fleece 1, request a rolling takeoff", "tower", "departure", True, "request_rolling"),
     # we are Fleece 1, so "Fleece 1" is never a wingman
     ("Nellis Tower, Fleece 1 flight, ready for departure", "tower", "departure", True, "ready_departure"),
+    # EOR — Whisper writes the letters as "E or" / "e o r", not "eor"
+    ("Ground, Fleece 1, at EOR", "ground", "departure", True, "at_eor"),
+    ("Ground, Fleece 1, at E or", "ground", "departure", True, "at_eor"),
+    ("Ground, Fleece 1, at e o r", "ground", "departure", True, "at_eor"),
+    ("Ground, Fleece 1, at ee or", "ground", "departure", True, "at_eor"),
+    ("Ground, Fleece 1, end of the runway", "ground", "departure", True, "at_eor"),
 
     # ---- intra-flight chatter: must stay silent ---------------------------
     ("Two, go button five", "ground", "departure", False, None),
@@ -95,6 +132,8 @@ CASES = [
     ("Bingo fuel", "blackjack", "flight", False, None),
     ("Lead, you're streaming fuel", "departure", "departure", False, None),
     ("Fleece 2, push button three for tower", "ground", "departure", False, None),
+    ("Blackjack on 14, please push, 14", "departure", "departure", False, None),
+    ("Blackjack on 14, please push, 14", "blackjack", "flight", False, None),
     ("Two, master arm safe, fence out", "approach", "approach", False, None),
     ("Dash two, combat spread", "departure", "departure", False, None),
     # thinking out loud about a call is not making the call
@@ -167,8 +206,48 @@ def extras() -> int:
     elif "cleared" in bj_exit.lower():
         print(f"  FAIL Blackjack range exit should not say cleared: {bj_exit}")
         bad += 1
+    elif "descend pilot discretion" not in bj_exit.lower():
+        print(f"  FAIL Blackjack range exit should start the IAF descent: {bj_exit}")
+        bad += 1
     else:
         print(f"blackjack range exit — {bj_exit}")
+    bj_hold = atc_phrase.build_blackjack_range_exit(
+        nellis, "Fleece 1", plan=plan_vmc, include_handoff=False
+    )
+    if "proceed direct arcoe" not in bj_hold.lower():
+        print(f"  FAIL far-out range exit should proceed direct the fix: {bj_hold}")
+        bad += 1
+    elif "contact" in bj_hold.lower():
+        print(f"  FAIL far-out range exit must not hand to Approach: {bj_hold}")
+        bad += 1
+    elif "remain this frequency" not in bj_hold.lower():
+        print(f"  FAIL far-out range exit should remain this frequency: {bj_hold}")
+        bad += 1
+    elif "descend pilot discretion" not in bj_hold.lower():
+        print(f"  FAIL far-out range exit should start the IAF descent: {bj_hold}")
+        bad += 1
+    else:
+        print(f"blackjack range exit (far) — {bj_hold}")
+    bj_app = atc_phrase.build_blackjack_approach_handoff(nellis, "Fleece 1")
+    bj_after = atc_phrase.build_template_text(
+        nellis,
+        "bj_range_exit",
+        "Fleece 1",
+        vmc,
+        str(plan_vmc.get("runway") or "21R"),
+        state={"range_exit_approved": True},
+    )
+    if "contact" not in bj_app.lower() or "proceed direct" in bj_app.lower():
+        print(f"  FAIL Approach handoff should be contact only: {bj_app}")
+        bad += 1
+    elif "descend" in bj_app.lower() or "descend" in bj_after.lower():
+        print(f"  FAIL later Approach handoff must not re-issue descent: {bj_app} / {bj_after}")
+        bad += 1
+    elif "contact" not in bj_after.lower() or "proceed direct" in bj_after.lower():
+        print(f"  FAIL already-released range exit is Approach only: {bj_after}")
+        bad += 1
+    else:
+        print(f"blackjack Approach handoff — {bj_app}")
 
     phrase_vmc = atc_phrase.build_approach_recovery(
         nellis, "Fleece 1", vmc, str(plan_vmc.get("runway") or "21R"), plan=plan_vmc
@@ -176,6 +255,7 @@ def extras() -> int:
     need_bits = (
         "landing south",
         "expect arcoe recovery for the overhead",
+        "descend pilot discretion",
     )
     if any(bit.lower() not in phrase_vmc.lower() for bit in need_bits):
         print(f"  FAIL Approach check-in phrase: {phrase_vmc}")
@@ -232,6 +312,17 @@ def extras() -> int:
             f"IAF {plan_ifr.get('iaf')} RWY {plan_ifr.get('runway')} "
             f"desc {plan_ifr.get('descend_ft')} (no speed)"
         )
+    bj_ifr = atc_phrase.build_blackjack_range_exit(
+        nellis, "Fleece 1", plan=plan_ifr, include_handoff=False
+    )
+    if "descend pilot discretion" not in bj_ifr.lower():
+        print(f"  FAIL IFR range exit should start the IAF descent: {bj_ifr}")
+        bad += 1
+    elif "fifteen" not in bj_ifr.lower() and "one five" not in bj_ifr.lower() and "one fife" not in bj_ifr.lower():
+        print(f"  FAIL IFR range exit should use the 15000 IAF altitude: {bj_ifr}")
+        bad += 1
+    else:
+        print(f"blackjack range exit (IFR IAF) — {bj_ifr}")
     expect_ifr = atc_phrase.build_approach_recovery(
         nellis, "Fleece 1", ifr, str(plan_ifr.get("runway") or "21L"), plan=plan_ifr
     )
@@ -245,7 +336,11 @@ def extras() -> int:
     elif "cleared" in expect_ifr.lower() or "cross " in expect_ifr.lower():
         print(f"  FAIL IFR check-in is expect-only: {expect_ifr}")
         bad += 1
-    elif "cross arcoe at or above one fife thousand" not in clear_ifr.lower():
+    elif "cross arcoe at or above" not in clear_ifr.lower() or (
+        "fifteen" not in clear_ifr.lower()
+        and "one fife" not in clear_ifr.lower()
+        and "one five" not in clear_ifr.lower()
+    ):
         print(f"  FAIL IFR clearance needs cross ARCOE at/above 15000: {clear_ifr}")
         bad += 1
     elif "cleared ils zulu" not in clear_ifr.lower():
@@ -573,11 +668,16 @@ def extras() -> int:
         airport_name="Nellis",
         limit=4,
     )
-    if not any("wind" in say.lower() for say, _ in tips_app):
+    if not any("wind" in say.lower() for say, _does, _role, *_ in tips_app):
         print(f"  FAIL approach kneeboard should tip winds: {tips_app}")
         bad += 1
+    elif not any(
+        "wind" in say.lower() and role == "optional" for say, _does, role, *_ in tips_app
+    ):
+        print(f"  FAIL approach winds tip must be optional, not advance: {tips_app}")
+        bad += 1
     else:
-        print(f"approach kneeboard winds tip — {[s for s, _ in tips_app]}")
+        print(f"approach kneeboard winds tip — {[s for s, _, r, *_ in tips_app]}")
 
     # Filed route tail names the recovery (STRYK near arrival).
     class _Opus:
@@ -650,6 +750,58 @@ def extras() -> int:
         print("  FAIL seat-aware callsign gate")
         bad += 1
 
+    # Whisper writes element callsigns as 1.1 / 1-1 → normalize merges to 11.
+    # That is Fleece 1 ship 1 (us), not a wingman.
+    elem = voice_intent.evaluate(
+        "Nellis tower, FLEECE 1.1, initial, 2.1, right",
+        channel="tower",
+        phase="approach",
+        expected="right_break",
+        callsign=CALLSIGN,
+        runways=RUNWAYS,
+    )
+    wing = voice_intent.evaluate(
+        "Nellis Tower, Fleece 1.2, initial",
+        channel="tower",
+        phase="approach",
+        expected="right_break",
+        callsign=CALLSIGN,
+        runways=RUNWAYS,
+    )
+    if not elem.fired or elem.match.intent != "tower_initial":
+        print(f"  FAIL Fleece 1.1 initial is us, not the flight: {elem.describe()}")
+        bad += 1
+    elif wing.fired:
+        print(f"  FAIL Fleece 1.2 initial is the wingman: {wing.describe()}")
+        bad += 1
+    else:
+        print("element callsign — 1.1 is lead; 1.2 stays flight talk")
+
+    ga_ok = True
+    for text, want in (
+        ("Nellis tower, FLEECE 1.1, going missed", "going_around"),
+        ("Nellis tower, FLEECE 1.1 on the go", "going_around"),
+        ("Nellis tower, FLEECE 1.1, missed approach", "going_around"),
+        ("Call to tower FLEECE 1. Go ahead and missed", "going_around"),
+    ):
+        for cs in (CALLSIGN, "FLEECE 1-1", "FLEECE 1.1"):
+            got = voice_intent.evaluate(
+                text,
+                channel="tower",
+                phase="approach",
+                expected="exit_runway",
+                callsign=cs,
+                runways=RUNWAYS,
+            )
+            if not got.fired or got.match.intent != want:
+                print(
+                    f"  FAIL go-around {text!r} as {cs}: {got.describe()}"
+                )
+                bad += 1
+                ga_ok = False
+    if ga_ok:
+        print("go-around — 1.1 / on the go / missed / Whisper 'go ahead and missed'")
+
     # Discipline off: bare request without agency still fires.
     loose = voice_intent.evaluate(
         "Ready to taxi", channel="ground", phase="departure",
@@ -680,7 +832,9 @@ def extras() -> int:
         ("blackjack", "flight", "bj_check_in"),
         ("bandsaw", "flight", "bandsaw_check_in"),
         ("approach", "approach", "approach_check_in"),
+        ("approach", "approach", "cleared_approach"),
         ("departure", "departure", "radar_contact"),
+        ("tower", "approach", "right_break"),
     ):
         prompts = voice_intent.suggestions(
             phase=mission_phase, channel=channel, expected=expected,
@@ -691,18 +845,34 @@ def extras() -> int:
             bad += 1
             continue
         if expected == "radar_contact":
-            sayings = [s.lower() for s, _ in prompts]
+            sayings = [s.lower() for s, _d, _r, *_ in prompts]
             if any("wind" in s or "altimeter" in s for s in sayings):
                 print(f"  FAIL radar contact cues must not offer winds/altimeter: {prompts}")
                 bad += 1
             if any("inbound" in s or "overhead" in s for s in sayings):
                 print(f"  FAIL radar contact cues must not offer inbound/overhead: {prompts}")
                 bad += 1
-            if not any(s == "with you" for s, _ in prompts):
+            if not any(s == "with you" for s, _d, _r, *_ in prompts):
                 print(f"  FAIL radar contact should lead with check-in: {prompts}")
                 bad += 1
+        if expected == "cleared_approach":
+            sayings = [s.lower() for s, _d, r, *_ in prompts if r == "advance"]
+            if "request handoff" not in sayings or "established" not in sayings:
+                print(f"  FAIL contact tower cues should be request handoff / established: {prompts}")
+                bad += 1
+            if any("checking in" in s for s in sayings):
+                print(f"  FAIL contact tower must not tip checking in: {prompts}")
+                bad += 1
+        if expected == "right_break":
+            sayings = [s.lower() for s, _d, r, *_ in prompts if r == "advance"]
+            if "with you" not in sayings or "initial" not in sayings:
+                print(f"  FAIL tower check-in cues should be with you / initial: {prompts}")
+                bad += 1
+            if any("gear" in s or "full stop" in s for s in sayings):
+                print(f"  FAIL tower check-in must not tip gear down: {prompts}")
+                bad += 1
         agency = voice_intent.agency_spoken(channel, "Nellis")
-        for say, _does in prompts:
+        for say, _does, _role, *_ in prompts:
             # Short kneeboard cue → full call the address gate expects.
             spoken = f"{agency}, {CALLSIGN}, {say}"
             ev = voice_intent.evaluate(
@@ -716,6 +886,60 @@ def extras() -> int:
                 )
                 bad += 1
     print("every suggested call round-trips through the gate")
+
+    # Ground taxi: advance = taxi request; winds stay optional (not advance).
+    taxi_tips = voice_intent.suggestions(
+        phase="departure",
+        channel="ground",
+        expected="taxi",
+        callsign=CALLSIGN,
+        airport_name="Nellis",
+        limit=6,
+        advance_limit=2,
+        optional_limit=3,
+    )
+    taxi_adv = [s for s, _d, r, *_ in taxi_tips if r == "advance"]
+    taxi_opt = [s for s, _d, r, *_ in taxi_tips if r == "optional"]
+    if not any("taxi" in s.lower() for s in taxi_adv):
+        print(f"  FAIL taxi TO ADVANCE should include taxi cue: {taxi_tips}")
+        bad += 1
+    if any("wind" in s.lower() for s in taxi_adv):
+        print(f"  FAIL winds must not be TO ADVANCE on taxi: {taxi_tips}")
+        bad += 1
+    if not any("wind" in s.lower() for s in taxi_opt):
+        print(f"  FAIL taxi ALSO AVAILABLE should include winds: {taxi_tips}")
+        bad += 1
+    else:
+        print(f"taxi advance/optional split — adv={taxi_adv} opt={taxi_opt}")
+
+    # Fly card: agency opener required on clearance/taxi; optional on check-in.
+    clr_tips = voice_intent.suggestions(
+        phase="departure",
+        channel="delivery",
+        expected="clearance",
+        callsign=CALLSIGN,
+        airport_name="Nellis",
+        limit=4,
+    )
+    if not any(
+        "clearance" in s.lower() and needs
+        for s, _d, _r, needs in clr_tips
+    ):
+        print(f"  FAIL clearance cue should require the agency opener: {clr_tips}")
+        bad += 1
+    rc_tips = voice_intent.suggestions(
+        phase="departure",
+        channel="departure",
+        expected="radar_contact",
+        callsign=CALLSIGN,
+        airport_name="Nellis",
+        limit=4,
+    )
+    if not any(s == "with you" and not needs for s, _d, _r, needs in rc_tips):
+        print(f"  FAIL radar-contact 'with you' should be agency-optional: {rc_tips}")
+        bad += 1
+    else:
+        print("kneeboard agency-required flag — clearance yes, with-you no")
 
     # Tuned-agency tip helper: Flight + Bandsaw tune → Bandsaw tips.
     tip_ch = voice_intent.resolve_context_channel(
@@ -742,6 +966,23 @@ def extras() -> int:
     )
     if tip_dep != "tower":
         print(f"  FAIL departure tips must ignore flight freqs, got {tip_dep!r}")
+        bad += 1
+    # Next step is Ground taxi — opener is Ground even if still on Delivery.
+    cue_gnd = voice_intent.cue_channel(
+        mission_phase="departure",
+        cursor_channel="ground",
+        tuned_channel="delivery",
+    )
+    if cue_gnd != "ground":
+        print(f"  FAIL taxi cue must address Ground, not leftover Delivery: {cue_gnd!r}")
+        bad += 1
+    cue_flight = voice_intent.cue_channel(
+        mission_phase="flight",
+        cursor_channel="blackjack",
+        tuned_channel="bandsaw",
+    )
+    if cue_flight != "bandsaw":
+        print(f"  FAIL flight cues should follow Bandsaw tune, got {cue_flight!r}")
         bad += 1
     print("tuned-frequency tip channel — ok" if tip_ch == "bandsaw" else "tuned-frequency tip channel — FAIL")
 
@@ -781,7 +1022,68 @@ def extras() -> int:
             bad += 1
     print("departure radar contact — with you / airborne; no winds/altimeter")
 
-    # Unrestricted climb must fire on Tower but never appear in YOU CAN SAY.
+    for text, want in (
+        ("Approach, Fleece 1, request handoff", "approach_continue"),
+        ("Fleece 1, established", "approach_established"),
+        ("established", "approach_established"),
+    ):
+        ev = voice_intent.evaluate(
+            text,
+            channel="approach",
+            phase="approach",
+            expected="cleared_approach",
+            callsign=CALLSIGN,
+            runways=RUNWAYS,
+        )
+        if not ev.fired or ev.match.intent != want:
+            print(f"  FAIL contact tower should fire: {text!r} — {ev.describe()}")
+            bad += 1
+    checkin_on_tower = voice_intent.evaluate(
+        "Approach, Fleece 1, checking in",
+        channel="approach",
+        phase="approach",
+        expected="cleared_approach",
+        callsign=CALLSIGN,
+        runways=RUNWAYS,
+    )
+    if checkin_on_tower.fired and checkin_on_tower.match.intent == "inbound_recovery":
+        print(f"  FAIL checking in must not steal contact tower: {checkin_on_tower.describe()}")
+        bad += 1
+    else:
+        print("contact tower — request handoff / established; not checking in")
+
+    for text, want in (
+        ("with you", "tower_check_in"),
+        ("initial", "tower_initial"),
+        ("Tower, Fleece 1, with you", "tower_check_in"),
+        ("Nellis Tower, Fleece 1, at initial", "tower_initial"),
+    ):
+        ev = voice_intent.evaluate(
+            text,
+            channel="tower",
+            phase="approach",
+            expected="right_break",
+            callsign=CALLSIGN,
+            runways=RUNWAYS,
+        )
+        if not ev.fired or ev.match.intent != want:
+            print(f"  FAIL tower check-in should fire: {text!r} — {ev.describe()}")
+            bad += 1
+    land_on_checkin = voice_intent.evaluate(
+        "Tower, Fleece 1, gear down full stop",
+        channel="tower",
+        phase="approach",
+        expected="right_break",
+        callsign=CALLSIGN,
+        runways=RUNWAYS,
+    )
+    if land_on_checkin.fired and land_on_checkin.match.intent == "request_landing":
+        print(f"  FAIL gear down must not steal tower check-in: {land_on_checkin.describe()}")
+        bad += 1
+    else:
+        print("tower check-in — with you / initial; not gear down")
+
+    # Unrestricted climb must fire on Tower but never appear in voice cues.
     for channel, mission_phase, expected in (
         ("tower", "departure", "lineup"),
         ("tower", "departure", "clear_takeoff"),
@@ -791,10 +1093,118 @@ def extras() -> int:
             phase=mission_phase, channel=channel, expected=expected,
             callsign=CALLSIGN, airport_name="Nellis", limit=6,
         )
-        if any("unrestricted" in s.lower() for s, _ in prompts):
+        if any("unrestricted" in s.lower() for s, _d, _r, *_ in prompts):
             print(f"  FAIL unrestricted climb must stay off kneeboard: {prompts}")
             bad += 1
     print("unrestricted climb — available by voice, never hinted")
+
+    # Built-in keyword helpers for the Keywords editor.
+    clearance_intents = voice_intent.intents_for_template("clearance")
+    if not clearance_intents or clearance_intents[0].id != "ready_clearance":
+        print(f"  FAIL intents_for_template(clearance): {clearance_intents}")
+        bad += 1
+    elif "request" not in voice_intent.format_intent_keywords(clearance_intents[0]):
+        print(
+            f"  FAIL format_intent_keywords missing groups: "
+            f"{voice_intent.format_intent_keywords(clearance_intents[0])}"
+        )
+        bad += 1
+    takeoff_intents = voice_intent.intents_for_template("clear_takeoff")
+    if not takeoff_intents or takeoff_intents[0].id != "in_position":
+        print(f"  FAIL clear_takeoff should map to in_position: {takeoff_intents}")
+        bad += 1
+    elif any(i.id == "ready_departure" for i in takeoff_intents):
+        print(f"  FAIL clear_takeoff must not list ready_departure: {takeoff_intents}")
+        bad += 1
+    lineup_intents = voice_intent.intents_for_template("lineup")
+    if not lineup_intents or lineup_intents[0].id != "ready_departure":
+        print(f"  FAIL lineup should map to ready_departure: {lineup_intents}")
+        bad += 1
+    else:
+        print("intents_for_template / format_intent_keywords — ok")
+
+    tips_to = voice_intent.suggestions(
+        phase="departure",
+        channel="tower",
+        expected="clear_takeoff",
+        callsign=CALLSIGN,
+        airport_name="Nellis",
+        limit=6,
+    )
+    if any(
+        r == "advance" and "ready" in say.lower()
+        for say, _d, r, *_ in tips_to
+    ):
+        print(f"  FAIL clear_takeoff must not tip ready for departure: {tips_to}")
+        bad += 1
+    elif not any(
+        r == "advance" and "in position" in say.lower()
+        for say, _d, r, *_ in tips_to
+    ):
+        print(f"  FAIL clear_takeoff should tip in position: {tips_to}")
+        bad += 1
+    tips_luaw = voice_intent.suggestions(
+        phase="departure",
+        channel="tower",
+        expected="lineup",
+        callsign=CALLSIGN,
+        airport_name="Nellis",
+        limit=6,
+    )
+    if not any(
+        r == "advance" and "ready" in say.lower() for say, _d, r, *_ in tips_luaw
+    ):
+        print(f"  FAIL lineup should tip ready for departure: {tips_luaw}")
+        bad += 1
+    else:
+        print("lineup tips ready; clear_takeoff tips in position")
+
+    pos_on_takeoff = voice_intent.evaluate(
+        "in position",
+        channel="tower",
+        phase="departure",
+        expected="clear_takeoff",
+        callsign=CALLSIGN,
+        runways=RUNWAYS,
+    )
+    if not pos_on_takeoff.fired or pos_on_takeoff.match.intent != "in_position":
+        print(f"  FAIL in position should clear takeoff: {pos_on_takeoff.describe()}")
+        bad += 1
+    mixed = voice_intent.evaluate(
+        "Nellis Tower, Fleece 1, in position ready for takeoff",
+        channel="tower",
+        phase="departure",
+        expected="clear_takeoff",
+        callsign=CALLSIGN,
+        runways=RUNWAYS,
+    )
+    if not mixed.fired or mixed.match.intent != "in_position":
+        print(f"  FAIL in position + takeoff must not be ready_departure: {mixed.describe()}")
+        bad += 1
+    remain = voice_intent.evaluate(
+        "Tower, Fleece 1, remain in position",
+        channel="tower",
+        phase="departure",
+        expected="clear_takeoff",
+        callsign=CALLSIGN,
+        runways=RUNWAYS,
+    )
+    if remain.fired and remain.match.intent == "in_position":
+        print(f"  FAIL remain in position must not clear takeoff: {remain.describe()}")
+        bad += 1
+    pos_on_offer = voice_intent.evaluate(
+        "Tower, Fleece 1, in position",
+        channel="tower",
+        phase="departure",
+        expected="rolling_accept",
+        callsign=CALLSIGN,
+        runways=RUNWAYS,
+    )
+    if pos_on_offer.fired and pos_on_offer.match.intent == "in_position":
+        print(f"  FAIL in position must not answer rolling offer: {pos_on_offer.describe()}")
+        bad += 1
+    else:
+        print("in position — takeoff fallback; not LUAW / rolling / remain")
 
     # ---- readback windows -------------------------------------------------
     # Squawk hinge for IFR clearance.
@@ -802,6 +1212,8 @@ def extras() -> int:
         "squawk zero five five one",
         "squawking 0551",
         "Delivery, Fleece 1, squawk zero five five one",
+        "zero five five one",
+        "0551",
         "roger",
         "copy",
     ):
@@ -819,7 +1231,22 @@ def extras() -> int:
         if not result.fired or result.match.intent != "acknowledge_readback":
             print(f"  FAIL clearance readback should fire: {text!r} — {result.describe()}")
             bad += 1
-    print(f"awaiting readback — bare squawk fires: True (acknowledge_readback)")
+    # Wrong code alone must stay silent (not a random altitude/freq lookalike win).
+    wrong = voice_intent.evaluate(
+        "zero four one one",
+        channel="delivery",
+        phase="departure",
+        expected="clearance",
+        callsign=CALLSIGN,
+        runways=RUNWAYS,
+        awaiting_readback=True,
+        readback_items=READBACK_ITEMS,
+        require_address=True,
+    )
+    if wrong.fired and wrong.match and wrong.match.intent == "acknowledge_readback":
+        print(f"  FAIL wrong bare code must not close clearance readback: {wrong.describe()}")
+        bad += 1
+    print("awaiting readback — squawk word, bare code, or roger closes it")
 
     taxi_items = [
         {
@@ -855,6 +1282,9 @@ def extras() -> int:
     for text in (
         "runway two one left",
         "taxi to EOR",
+        "taxi to E or",
+        "taxi to e o r",
+        "northwest E or",
         "Ground, Fleece 1, runway 21 left",
         "two one left",
     ):
@@ -863,6 +1293,31 @@ def extras() -> int:
             print(f"  FAIL taxi readback should fire: {text!r} — {result.describe()}")
             bad += 1
     print("awaiting taxi readback — either runway or EOR, no agency required")
+
+    def eor_call(text: str):
+        return voice_intent.evaluate(
+            text,
+            channel="ground",
+            phase="departure",
+            expected="monitor_tower",
+            callsign=CALLSIGN,
+            runways=RUNWAYS,
+            require_address=True,
+        )
+
+    for text in (
+        "at EOR",
+        "at E or",
+        "E or",
+        "e o r",
+        "end of runway",
+        "Ground, Fleece 1, at ee or",
+    ):
+        result = eor_call(text)
+        if not result.fired or result.match.intent != "at_eor":
+            print(f"  FAIL at-EOR should fire: {text!r} — {result.describe()}")
+            bad += 1
+    print("at EOR — letters, Whisper splits, or end of runway")
 
     takeoff_items = [
         {
@@ -917,6 +1372,362 @@ def extras() -> int:
             bad += 1
     print("awaiting takeoff readback — runway or cleared for takeoff, agency optional")
 
+    land_items = [
+        {
+            "key": "runway",
+            "label": "Runway",
+            "value": "21L",
+            "spoken": "runway two one left",
+            "hinge": True,
+            "highlight": True,
+        },
+        {
+            "key": "clearance",
+            "label": "Clearance",
+            "value": "cleared to land",
+            "spoken": "cleared to land",
+            "hinge": True,
+        },
+    ]
+
+    def land_ga(text: str, *, awaiting: bool = True, expected: str = "clear_land"):
+        return voice_intent.evaluate(
+            text,
+            channel="tower",
+            phase="approach",
+            expected=expected,
+            callsign=CALLSIGN,
+            runways=RUNWAYS,
+            awaiting_readback=awaiting,
+            readback_items=land_items if awaiting else None,
+            require_address=True,
+        )
+
+    for text, label in (
+        ("going around", "going around"),
+        ("missed approach", "missed approach"),
+        ("going missed", "going missed"),
+        ("on the go", "on the go"),
+        ("cleared to land, going around", "cleared to land + going around"),
+        ("runway two one left, going around", "runway + going around"),
+        ("Fleece 1, going missed", "callsign + going missed"),
+    ):
+        result = land_ga(text)
+        if not result.fired or result.match.intent != "going_around":
+            print(
+                f"  FAIL land readback {label!r} should go around: "
+                f"{text!r} — {result.describe()}"
+            )
+            bad += 1
+    after_rb = land_ga("going around", awaiting=False, expected="exit_runway")
+    if not after_rb.fired or after_rb.match.intent != "going_around":
+        print(
+            f"  FAIL after land readback, bare going around should fire: "
+            f"{after_rb.describe()}"
+        )
+        bad += 1
+    land_ack_ok = True
+    for text in (
+        "cleared to land",
+        "clear to land",
+        "clear land",
+        "cleared land",
+    ):
+        land_only = land_ga(text)
+        if not land_only.fired or land_only.match.intent != "acknowledge_readback":
+            print(
+                f"  FAIL land readback without go-around should acknowledge: "
+                f"{text!r} — {land_only.describe()}"
+            )
+            bad += 1
+            land_ack_ok = False
+    if land_ack_ok:
+        print(
+            "awaiting land readback — going around / missed / on the go "
+            "(not stolen by cleared-to-land); clear/cleared to land both ack"
+        )
+
+    closed_items = [
+        {
+            "key": "instruction",
+            "label": "Traffic",
+            "value": "right closed traffic",
+            "spoken": "right closed traffic",
+            "hinge": True,
+            "highlight": True,
+        },
+        {
+            "key": "runway",
+            "label": "Runway",
+            "value": "21R",
+            "spoken": "runway two one right",
+            "hinge": True,
+        },
+    ]
+    flex_items = [
+        {
+            "key": "instruction",
+            "label": "Reentry",
+            "value": "Flex reentry",
+            "spoken": "flex reentry",
+            "hinge": True,
+            "highlight": True,
+        },
+    ]
+    missed_items = [
+        {
+            "key": "instruction",
+            "label": "Missed",
+            "value": "as published",
+            "spoken": "missed approach as published",
+            "hinge": True,
+            "highlight": True,
+        },
+    ]
+
+    def ga_rb(text: str, items, *, expected: str = "go_around"):
+        return voice_intent.evaluate(
+            text,
+            channel="tower",
+            phase="approach",
+            expected=expected,
+            callsign=CALLSIGN,
+            runways=RUNWAYS,
+            awaiting_readback=True,
+            readback_items=items,
+            require_address=True,
+        )
+
+    for text, items, label in (
+        ("going around", closed_items, "repeat going around"),
+        ("on the go", closed_items, "repeat on the go"),
+        ("right closed traffic", closed_items, "right closed traffic"),
+        ("right closed", closed_items, "right closed"),
+        ("right close traffic", closed_items, "right close traffic"),
+        ("Right, close traffic, FLEECE 1.", closed_items, "STT close traffic"),
+        ("close traffic", closed_items, "close traffic"),
+        ("roger", closed_items, "roger closed"),
+        ("flex", flex_items, "flex"),
+        ("flex reentry", flex_items, "flex reentry"),
+        ("missed approach as published", missed_items, "missed as published"),
+        ("as published", missed_items, "as published"),
+        ("going missed", missed_items, "repeat going missed"),
+    ):
+        result = ga_rb(text, items)
+        if not result.fired or result.match.intent != "acknowledge_readback":
+            print(
+                f"  FAIL go-around readback {label!r} should acknowledge: "
+                f"{text!r} — {result.describe()}"
+            )
+            bad += 1
+    still_waveoff = land_ga("going around")
+    if not still_waveoff.fired or still_waveoff.match.intent != "going_around":
+        print(
+            f"  FAIL land readback still waveoff after go-around tests: "
+            f"{still_waveoff.describe()}"
+        )
+        bad += 1
+    else:
+        print(
+            "awaiting go-around readback — closed / Flex / missed "
+            "(repeat going around does not re-issue)"
+        )
+
+    luaw_items = [
+        {
+            "key": "runway",
+            "label": "Runway",
+            "value": "21R",
+            "spoken": "runway two one right",
+            "hinge": True,
+            "highlight": True,
+        },
+        {
+            "key": "clearance",
+            "label": "Clearance",
+            "value": "line up and wait",
+            "spoken": "line up and wait",
+            "hinge": True,
+        },
+    ]
+    for text in (
+        "Tower, Fleece 1, request rolling",
+        "request a rolling takeoff",
+        "Tower, Fleece 1, runway two one right, request rolling",
+    ):
+        result = voice_intent.evaluate(
+            text,
+            channel="tower",
+            phase="departure",
+            expected="lineup",
+            callsign=CALLSIGN,
+            runways=RUNWAYS,
+            awaiting_readback=True,
+            readback_items=luaw_items,
+            require_address=True,
+        )
+        if not result.fired or result.match.intent != "request_rolling":
+            print(f"  FAIL LUAW readback must still allow rolling request: {text!r} — {result.describe()}")
+            bad += 1
+    # A normal LUAW readback must still close the window.
+    luaw_rb = voice_intent.evaluate(
+        "runway two one right, line up and wait",
+        channel="tower",
+        phase="departure",
+        expected="lineup",
+        callsign=CALLSIGN,
+        runways=RUNWAYS,
+        awaiting_readback=True,
+        readback_items=luaw_items,
+        require_address=True,
+    )
+    if not luaw_rb.fired or luaw_rb.match.intent != "acknowledge_readback":
+        print(f"  FAIL LUAW readback should still close: {luaw_rb.describe()}")
+        bad += 1
+    print("LUAW readback — rolling request fires; runway/LUAW still closes")
+
+    # Random "will you accept rolling?" — accept / decline, not LUAW / runway.
+    rolling_items = atc_phrase.build_readback_checklist(
+        "rolling_accept", nellis, None, vmc, "21R"
+    )
+    rolling_keys = {str(i.get("key") or "") for i in rolling_items}
+    rolling_spoken = " ".join(str(i.get("spoken") or "") for i in rolling_items).lower()
+    if rolling_keys != {"accept", "deny"}:
+        print(f"  FAIL rolling offer checklist keys: {rolling_items}")
+        bad += 1
+    elif "line up" in rolling_spoken or "21" in rolling_spoken:
+        print(f"  FAIL rolling offer must not list LUAW/runway: {rolling_items}")
+        bad += 1
+    else:
+        print("rolling offer checklist — accept / decline, no runway")
+
+    for text, want in (
+        ("Tower, Fleece 1, we'll take the rolling", "accept_rolling"),
+        ("accept rolling", "accept_rolling"),
+        ("unable rolling", "deny_rolling"),
+        ("line up and wait", "request_lineup"),
+    ):
+        result = voice_intent.evaluate(
+            text,
+            channel="tower",
+            phase="departure",
+            expected="rolling_accept",
+            callsign=CALLSIGN,
+            runways=RUNWAYS,
+            awaiting_readback=True,
+            readback_items=rolling_items,
+            require_address=True,
+        )
+        if not result.fired or result.match.intent != want:
+            print(
+                f"  FAIL rolling offer {text!r} → {want}: {result.describe()}"
+            )
+            bad += 1
+    ready_on_offer = voice_intent.evaluate(
+        "Nellis Tower, Fleece 1, ready for departure",
+        channel="tower",
+        phase="departure",
+        expected="rolling_accept",
+        callsign=CALLSIGN,
+        runways=RUNWAYS,
+        awaiting_readback=True,
+        readback_items=rolling_items,
+        require_address=True,
+    )
+    if ready_on_offer.fired:
+        print(
+            f"  FAIL ready for departure must not answer rolling offer: "
+            f"{ready_on_offer.describe()}"
+        )
+        bad += 1
+    rwy_on_offer = voice_intent.evaluate(
+        "runway two one right",
+        channel="tower",
+        phase="departure",
+        expected="rolling_accept",
+        callsign=CALLSIGN,
+        runways=RUNWAYS,
+        awaiting_readback=True,
+        readback_items=rolling_items,
+        require_address=True,
+    )
+    if rwy_on_offer.fired and rwy_on_offer.match.intent == "acknowledge_readback":
+        print(f"  FAIL runway alone must not close rolling offer: {rwy_on_offer.describe()}")
+        bad += 1
+    tips_roll = voice_intent.suggestions(
+        phase="departure",
+        channel="tower",
+        expected="rolling_accept",
+        callsign=CALLSIGN,
+        airport_name="Nellis",
+        awaiting_readback=True,
+        readback_items=rolling_items,
+        limit=6,
+    )
+    tip_text = " ".join(s.lower() for s, _d, _r, *_ in tips_roll)
+    if "line up and wait" in tip_text and "unable" not in tip_text:
+        print(f"  FAIL rolling offer tips still look like LUAW: {tips_roll}")
+        bad += 1
+    elif "rolling" not in tip_text:
+        print(f"  FAIL rolling offer tips should mention rolling: {tips_roll}")
+        bad += 1
+    else:
+        print("rolling offer voice — accept / decline; no ready / runway readback")
+
+    thanks = atc_phrase.build_template_text(
+        nellis,
+        "clear_takeoff_rolling",
+        "Fleece 1",
+        vmc,
+        "21R",
+        state={"rolling_offer_reply": "accept"},
+    )
+    luaw = atc_phrase.build_template_text(
+        nellis,
+        "lineup",
+        "Fleece 1",
+        vmc,
+        "21R",
+        state={"rolling_offer_reply": "deny"},
+    )
+    if "thanks" not in thanks.lower() or "cleared for takeoff" not in thanks.lower():
+        print(f"  FAIL accept rolling should clear takeoff with thanks: {thanks}")
+        bad += 1
+    elif "runway two one right" not in thanks.lower():
+        print(f"  FAIL takeoff clearance must include the runway: {thanks}")
+        bad += 1
+    elif "rolling approved" in thanks.lower():
+        print(f"  FAIL accept rolling must not say rolling approved: {thanks}")
+        bad += 1
+    elif "no worries" not in luaw.lower() or "line up" not in luaw.lower():
+        print(f"  FAIL deny rolling should be LUAW with no worries: {luaw}")
+        bad += 1
+    else:
+        print("rolling offer reply phrases — thanks/clearance vs no worries/LUAW")
+
+    takeoff_samples = [
+        thanks,
+        atc_phrase.build_template_text(nellis, "clear_takeoff", "Fleece 1", vmc, "21R", state={}),
+        atc_phrase.build_template_text(
+            nellis, "clear_takeoff_intersection", "Fleece 1", vmc, "21R", state={}
+        ),
+    ]
+    takeoff_bad = False
+    for sample in takeoff_samples:
+        low = sample.lower()
+        if "contact departure" in low:
+            print(f"  FAIL takeoff must not say contact departure: {sample}")
+            bad += 1
+            takeoff_bad = True
+            break
+        if "switch to departure" not in low and "change to departure" not in low:
+            print(f"  FAIL takeoff should switch/change to departure: {sample}")
+            bad += 1
+            takeoff_bad = True
+            break
+    if not takeoff_bad:
+        print("takeoff clearance — switch/change to departure, not contact")
+
     # Departure radar contact: climb altitude hinge (flexible forms).
     climb_items = [
         {
@@ -951,6 +1762,11 @@ def extras() -> int:
         "Fleece 1, climb and maintain 15 thousand",
         # No agency — exchange already open.
         "one five thousand",
+        # 'feet' must never be required (Whisper often omits or pluralizes).
+        "fifteen thousands",
+        "15 thousands",
+        "15k",
+        "FL150",
         # Informal / wrong-agency habits — still accept the altitude.
         "angels 15",
         "angels fifteen",
@@ -1027,6 +1843,607 @@ def extras() -> int:
             bad += 1
     print("awaiting blackjack check-in readback — callsign closes it")
 
+    # After Departure hands to Blackjack: "with you" is BJ check-in, not Bandsaw.
+    bj_after_ho_ok = True
+    for text, want in (
+        ("Blackjack, FLEECE 1 with you, 15,000", "range_entry"),
+        ("Blackjack, Fleece 1, with you at 15,000", "range_entry"),
+    ):
+        ev = voice_intent.evaluate(
+            text,
+            channel="blackjack",
+            phase="flight",
+            expected="bj_check_in",
+            callsign=CALLSIGN,
+            runways=RUNWAYS,
+            require_address=True,
+        )
+        if not ev.fired or ev.match.intent != want:
+            print(
+                f"  FAIL blackjack after handoff {text!r} should be {want}: "
+                f"{ev.describe()}"
+            )
+            bad += 1
+            bj_after_ho_ok = False
+    push_wing = voice_intent.evaluate(
+        "Blackjack on 14, please push, 14",
+        channel="blackjack",
+        phase="flight",
+        expected="bj_check_in",
+        callsign=CALLSIGN,
+        runways=RUNWAYS,
+        require_address=True,
+    )
+    if push_wing.fired:
+        print(
+            f"  FAIL wingman please-push must stay silent: {push_wing.describe()}"
+        )
+        bad += 1
+        bj_after_ho_ok = False
+    if bj_after_ho_ok:
+        print("blackjack after handoff — with you (not Bandsaw); please push is wingman")
+
+    # Say again must replay last_tx_text. Re-running bj_range_exit after a
+    # far-out release would become "radar contact, remain this frequency".
+    import voice_engine
+
+    class _ReplayEngine:
+        def __init__(self) -> None:
+            self.config = {"dry_run": True}
+            self.state = {
+                "last_step_id": "bj_range_exit",
+                "last_tx_text": (
+                    "Fleece one, Blackjack, range exit approved, "
+                    "proceed direct Arcoe, remain this frequency."
+                ),
+                "last_tx_template": "bj_range_exit",
+                "last_tx_channel": "blackjack",
+                "range_exit_approved": True,
+            }
+            self.played_id = None
+
+        def airport(self) -> dict:
+            return nellis
+
+        def replay_last_tx(self, **_k: object) -> dict:
+            return {
+                "text": self.state["last_tx_text"],
+                "channel": "blackjack",
+                "replayed": True,
+            }
+
+        def play_id(self, step_id: str, **_k: object) -> dict:
+            self.played_id = step_id
+            return {"text": "Fleece one, Blackjack, radar contact. Continue, remain this frequency."}
+
+    replay_eng = _ReplayEngine()
+    replay_match = voice_intent.Match(
+        intent="say_again", kind="request", template="", confidence=1.0
+    )
+    replayed = voice_engine.execute_intent(replay_match, replay_eng)
+    if replay_eng.played_id is not None:
+        print(f"  FAIL say again must not re-run play_id: {replay_eng.played_id}")
+        bad += 1
+    elif "range exit approved" not in str(replayed.get("text") or "").lower():
+        print(f"  FAIL say again should repeat the exit: {replayed}")
+        bad += 1
+    elif "radar contact" in str(replayed.get("text") or "").lower():
+        print(f"  FAIL say again must not become continue: {replayed}")
+        bad += 1
+    else:
+        print("say again — repeats last TX, does not re-run range exit")
+
+    # Tower handoff / check-in / clear-land (post-approach clearance).
+    handoff = atc_phrase.build_approach_tower_handoff(nellis, "Fleece 1")
+    if "cleared" in handoff.lower():
+        print(f"  FAIL contact tower must not re-clear the approach: {handoff}")
+        bad += 1
+    elif "contact tower" not in handoff.lower():
+        print(f"  FAIL contact tower handoff: {handoff}")
+        bad += 1
+    else:
+        print(f"tower handoff — {handoff}")
+
+    plan_ohb = {"pattern": "visual_overhead", "runway": "21R"}
+    brk = atc_phrase.build_tower_check_in(nellis, "Fleece 1", "21R", plan=plan_ohb)
+    if "right break approved" not in brk.lower():
+        print(f"  FAIL OHB tower check-in should approve right break: {brk}")
+        bad += 1
+    cont = atc_phrase.build_tower_check_in(
+        nellis, "Fleece 1", "21R", plan={"pattern": "straight_in", "runway": "21R"}
+    )
+    if "continue straight-in" not in cont.lower():
+        print(f"  FAIL straight-in tower check-in: {cont}")
+        bad += 1
+    twr_oh = voice_intent.evaluate(
+        "Tower, Fleece 1, request overhead",
+        channel="tower",
+        phase="approach",
+        callsign=CALLSIGN,
+        runways=RUNWAYS,
+    )
+    twr_inst = voice_intent.evaluate(
+        "Tower, Fleece 1, request instrument",
+        channel="tower",
+        phase="approach",
+        callsign=CALLSIGN,
+        runways=RUNWAYS,
+    )
+    app_oh = voice_intent.evaluate(
+        "Approach, Fleece 1, request overhead",
+        channel="approach",
+        phase="approach",
+        callsign=CALLSIGN,
+        runways=RUNWAYS,
+    )
+    if (
+        not twr_oh.fired
+        or twr_oh.match.intent != "request_approach"
+        or (twr_oh.match.slots or {}).get("recovery") != "visual_overhead"
+    ):
+        print(f"  FAIL Tower should take request overhead: {twr_oh.describe()}")
+        bad += 1
+    elif twr_inst.fired:
+        print(f"  FAIL Tower must not take request instrument: {twr_inst.describe()}")
+        bad += 1
+    elif (
+        not app_oh.fired
+        or (app_oh.match.slots or {}).get("recovery") != "visual_overhead"
+    ):
+        print(f"  FAIL Approach should take request overhead: {app_oh.describe()}")
+        bad += 1
+    else:
+        print("tower/approach recovery request — VFR on both; instrument Approach only")
+    wx_land = atc_phrase.Weather(210, 5, 29.92, "", visibility_sm=10)
+    land = atc_phrase.build_clear_land(nellis, "Fleece 1", wx_land, "21R")
+    if "check gear down" not in land.lower() or "cleared to land" not in land.lower():
+        print(f"  FAIL clear land needs gear down: {land}")
+        bad += 1
+    else:
+        print(f"tower clear land — {land}")
+
+    class _Multi:
+        signup_count = 2
+        flight_qty = 2
+        flight_callsign = "Fleece 1"
+        seat = 1
+
+        @property
+        def squawk_in_sequence(self) -> bool:
+            return True
+
+    st_ohb: dict = {"active_recovery": "visual_overhead"}
+    land_ohb = atc_phrase.build_clear_land(
+        nellis, "Fleece 1", wx_land, "21R", opus=_Multi(), state=st_ohb
+    )
+    if land_ohb.lower().count("cleared to land") != 1 or "one two" in land_ohb.lower():
+        print(f"  FAIL overhead must clear the flight once: {land_ohb}")
+        bad += 1
+    else:
+        atc_phrase.commit_landing_clearance(st_ohb)
+        if not atc_phrase.landing_already_cleared(st_ohb, opus=_Multi()):
+            print(f"  FAIL overhead should latch after one clearance: {st_ohb}")
+            bad += 1
+        else:
+            print(f"tower overhead multi-ship clear land — {land_ohb}")
+
+    st_si: dict = {"active_recovery": "straight_in"}
+    land_si1 = atc_phrase.build_clear_land(
+        nellis, "Fleece 1", wx_land, "21R", opus=_Multi(), state=st_si
+    )
+    atc_phrase.commit_landing_clearance(st_si)
+    land_si2 = atc_phrase.build_clear_land(
+        nellis, "Fleece 1", wx_land, "21R", opus=_Multi(), state=st_si
+    )
+    atc_phrase.commit_landing_clearance(st_si)
+    if (
+        "fleece one one" not in land_si1.lower()
+        or "fleece one two" in land_si1.lower()
+        or "fleece one two" not in land_si2.lower()
+        or not atc_phrase.should_hold_for_landing_clearances(
+            {"landing_cleared_seats": [1], "landing_ships_total": 2, "active_recovery": "straight_in"},
+            opus=_Multi(),
+        )
+        or atc_phrase.should_hold_for_landing_clearances(st_si, opus=_Multi())
+    ):
+        print(
+            f"  FAIL straight-in must clear element callsigns one ship per TX: "
+            f"{land_si1!r} then {land_si2!r} state={st_si}"
+        )
+        bad += 1
+    else:
+        print(f"tower straight-in sequenced clear land — {land_si1} / {land_si2}")
+
+    class _QtyOnly:
+        signup_count = 1
+        flight_qty = 2
+
+        @property
+        def squawk_in_sequence(self) -> bool:
+            return True
+
+    land_solo = atc_phrase.build_clear_land(
+        nellis, "Fleece 1", wx_land, "21R", opus=_QtyOnly()
+    )
+    if land_solo.lower().count("cleared to land") != 1 or "fleece two" in land_solo.lower():
+        print(f"  FAIL planned qty alone must not double clear land: {land_solo}")
+        bad += 1
+    else:
+        print(f"tower solo-on-qty2 clear land — {land_solo}")
+
+    closer_hits = 0
+    for _ in range(40):
+        h = atc_phrase.build_approach_tower_handoff(nellis, "Fleece 1")
+        if any(x in h.lower() for x in ("good day", "see ya", "see you")):
+            closer_hits += 1
+    if closer_hits < 10:
+        print(f"  FAIL handoff closers too rare ({closer_hits}/40): last={h}")
+        bad += 1
+    else:
+        print(f"tower handoff closers — {closer_hits}/40 samples had good day/see ya/see you")
+
+    import runway_position as rp
+
+    field = rp.airport_field_latlon(nellis)
+    if field is None:
+        print("  FAIL airport_field_latlon for Nellis")
+        bad += 1
+    else:
+        d_near = atc_phrase._haversine_nm(field[0], field[1], field[0] + 0.01, field[1])
+        # ~0.6 NM north of field centre
+        trig12 = rp.resolve_step_trigger(
+            {"template": "cleared_approach", "trigger": {"within_nm": 12}}
+        )
+        held, _ = rp.within_nm_held(trig12, 11.0)
+        if not held or trig12 is None or float(trig12.within_nm or 0) != 12:
+            print(f"  FAIL contact tower 12 NM gate: {trig12} held={held}")
+            bad += 1
+        st_land = {
+            "approach_plan": {"pattern": "visual_overhead", "runway": "21R"},
+            "active_recovery": "visual_overhead",
+        }
+        trig2 = rp.resolve_step_trigger(
+            {"template": "clear_land", "trigger": {"gap_s": 5}},
+            state=st_land,
+        )
+        if trig2 is not None and trig2.within_nm is not None:
+            print(f"  FAIL OHB clear_land must not auto on field distance: {trig2}")
+            bad += 1
+        st_si = {
+            "approach_plan": {"pattern": "straight_in", "runway": "21R"},
+            "active_recovery": "straight_in",
+        }
+        trig6 = rp.resolve_step_trigger(
+            {"template": "clear_land", "trigger": {"gap_s": 5}},
+            state=st_si,
+        )
+        gates_ok = True
+        if trig6 is None or abs(float(trig6.within_nm or 0) - 6.0) > 0.01:
+            print(f"  FAIL straight-in clear_land should be 6 NM: {trig6}")
+            bad += 1
+            gates_ok = False
+        trig_brk_si = rp.resolve_step_trigger(
+            {"template": "right_break"},
+            state=st_si,
+        )
+        if trig_brk_si is None or abs(float(trig_brk_si.within_nm or 0) - 12.0) > 0.01:
+            print(
+                f"  FAIL straight-in tower check-in should be 12 NM: {trig_brk_si}"
+            )
+            bad += 1
+            gates_ok = False
+        trig_brk_ohb = rp.resolve_step_trigger(
+            {"template": "right_break"},
+            state=st_land,
+        )
+        if trig_brk_ohb is not None and trig_brk_ohb.within_nm is not None:
+            print(
+                f"  FAIL OHB tower check-in should have no NM gate: {trig_brk_ohb}"
+            )
+            bad += 1
+            gates_ok = False
+        if atc_phrase.should_skip_approach_step(
+            {"template": "right_break"}, state=st_si
+        ):
+            print("  FAIL straight-in must not skip tower check-in")
+            bad += 1
+            gates_ok = False
+        if gates_ok:
+            print(
+                f"tower distance gates — contact/check-in 12 NM, "
+                f"straight-in land 6 NM (sample {d_near:.2f} NM offset)"
+            )
+
+        st_flex = {
+            "active_recovery": "tactical_overhead",
+            "approach_plan": {"pattern": "tactical_overhead", "runway": "21R"},
+        }
+        ga_flex = atc_phrase.assign_go_around_plan(
+            nellis, runway="21R", state=st_flex, prefer="flex"
+        )
+        trig_flex = rp.resolve_step_trigger(
+            {"template": "clear_land", "trigger": {"gap_s": 5}},
+            state=st_flex,
+        )
+        if (
+            str(ga_flex.get("kind") or "") != "reentry"
+            or str(ga_flex.get("seek_template") or "") != "clear_land"
+            or st_flex.get("active_recovery") != "straight_in"
+            or (st_flex.get("approach_plan") or {}).get("pattern") != "straight_in"
+            or not atc_phrase.reentry_go_around_pending(st_flex)
+            or not st_flex.get("pattern_land_needs_leave")
+            or trig_flex is None
+            or abs(float(trig_flex.within_nm or 0) - 6.0) > 0.01
+        ):
+            print(
+                f"  FAIL Flex reentry should seek land at 6 NM (short final): "
+                f"ga={ga_flex} state={st_flex} trig={trig_flex}"
+            )
+            bad += 1
+        else:
+            print("flex/duck reentry — straight-in land on short final (6 NM)")
+
+        st_closed = {
+            "active_recovery": "tactical_overhead",
+            "approach_plan": {"pattern": "tactical_overhead", "runway": "21R"},
+        }
+        next_after_flex = atc_phrase.pick_vfr_go_around_plan(
+            "21R", nellis, last=ga_flex
+        )
+        if str(next_after_flex.get("kind") or "") != "closed_traffic":
+            print(f"  FAIL after Flex, next VFR go-around should be closed traffic: {next_after_flex}")
+            bad += 1
+        kinds = {
+            str(atc_phrase.pick_vfr_go_around_plan("21R", nellis).get("kind") or "")
+            for _ in range(40)
+        }
+        if "closed_traffic" not in kinds or "reentry" not in kinds:
+            print(f"  FAIL 21R go-around mix should include closed and Flex: {kinds}")
+            bad += 1
+
+        ga_closed = atc_phrase.assign_go_around_plan(
+            nellis, runway="21R", state=st_closed, prefer="closed"
+        )
+        trig_closed_brk = rp.resolve_step_trigger(
+            {"template": "right_break"},
+            state=st_closed,
+        )
+        trig_closed_land = rp.resolve_step_trigger(
+            {"template": "clear_land", "trigger": {"gap_s": 5}},
+            state=st_closed,
+        )
+        if (
+            str(ga_closed.get("kind") or "") != "closed_traffic"
+            or str(ga_closed.get("seek_template") or "") != "clear_land"
+            or st_closed.get("active_recovery") != "tactical_overhead"
+            or trig_closed_brk is not None
+            or trig_closed_land is None
+            or abs(float(trig_closed_land.within_nm or 0) - 2.0) > 0.01
+        ):
+            print(
+                f"  FAIL closed traffic should seek land at 2 NM, no check-in: "
+                f"{ga_closed} {st_closed} brk={trig_closed_brk} land={trig_closed_land}"
+            )
+            bad += 1
+
+        st_after_flex = {
+            "active_recovery": "straight_in",
+            "overhead_recovery": "tactical_overhead",
+            "approach_plan": {"pattern": "straight_in", "runway": "21R"},
+            "go_around_plan": dict(ga_flex),
+        }
+        ga_restore = atc_phrase.assign_go_around_plan(
+            nellis, runway="21R", state=st_after_flex, prefer="closed"
+        )
+        trig_restore = rp.resolve_step_trigger(
+            {"template": "right_break"},
+            state=st_after_flex,
+        )
+        trig_land_closed = rp.resolve_step_trigger(
+            {"template": "clear_land", "trigger": {"gap_s": 5}},
+            state=st_after_flex,
+        )
+        if (
+            st_after_flex.get("active_recovery") != "tactical_overhead"
+            or str(ga_restore.get("kind") or "") != "closed_traffic"
+            or str(ga_restore.get("seek_template") or "") != "clear_land"
+            or trig_restore is not None
+            or trig_land_closed is None
+            or abs(float(trig_land_closed.within_nm or 0) - 2.0) > 0.01
+        ):
+            print(
+                f"  FAIL closed after Flex must restore overhead and land at 2 NM: "
+                f"{ga_restore} {st_after_flex} brk={trig_restore} land={trig_land_closed}"
+            )
+            bad += 1
+        else:
+            dep = rp.FlightStatus(
+                fixes=[
+                    rp.UnitFix(
+                        "1", "me", 2500.0, 0.0, 10.0, None, None, None, own=True
+                    )
+                ]
+            )
+            fin = rp.FlightStatus(
+                fixes=[
+                    rp.UnitFix(
+                        "1", "me", -1500.0, 200.0, 20.0, None, None, None, own=True
+                    )
+                ]
+            )
+            ok_dep, _ = rp.on_base_or_short_final(dep, within_nm=2.0)
+            ok_fin, _ = rp.on_base_or_short_final(fin, within_nm=2.0)
+            if ok_dep or not ok_fin:
+                print(f"  FAIL short-final gate: dep={ok_dep} final={ok_fin}")
+                bad += 1
+            else:
+                print("closed / reentry — already with Tower; land on base / short final")
+
+        rb_closed = atc_phrase.build_readback_checklist(
+            "go_around", nellis, None, None, "21R", state=st_closed
+        )
+        rb_flex = atc_phrase.build_readback_checklist(
+            "go_around", nellis, None, None, "21R", state=st_flex
+        )
+        keys_closed = {str(i.get("key") or "") for i in rb_closed}
+        spoken_closed = " ".join(str(i.get("spoken") or "") for i in rb_closed).lower()
+        spoken_flex = " ".join(str(i.get("spoken") or "") for i in rb_flex).lower()
+        if (
+            "instruction" not in keys_closed
+            or "closed traffic" not in spoken_closed
+            or "flex" not in spoken_flex
+        ):
+            print(
+                f"  FAIL go-around readback checklist: "
+                f"closed={rb_closed} flex={rb_flex}"
+            )
+            bad += 1
+        else:
+            print("go-around readback — closed traffic / Flex hinges")
+
+        trig18 = rp.resolve_step_trigger(
+            {
+                "template": "departure_handoff",
+                "trigger": {"within_nm": 18, "when": "leaving"},
+            }
+        )
+        held_in, _ = rp.within_nm_held(trig18, 17.0)
+        held_out, _ = rp.within_nm_held(trig18, 18.5)
+        if (
+            trig18 is None
+            or float(trig18.within_nm or 0) != 18
+            or trig18.when != "leaving"
+            or held_in
+            or not held_out
+        ):
+            print(
+                f"  FAIL departure handoff 18 NM leaving gate: {trig18} "
+                f"in17={held_in} out18.5={held_out}"
+            )
+            bad += 1
+        else:
+            print(
+                "departure handoff — auto beyond 18 NM "
+                "(manual Play still works earlier)"
+            )
+
+        trig10 = rp.resolve_step_trigger(
+            {
+                "template": "climb_cruise",
+                "trigger": {"within_nm": 10, "when": "leaving"},
+            }
+        )
+        c_in, _ = rp.within_nm_held(trig10, 9.0)
+        c_out, _ = rp.within_nm_held(trig10, 10.5)
+        opus_hi = atc_phrase.synthetic_flight_context("Fleece 1")
+        opus_hi.fp_altitude = "220"
+        cruise_txt = atc_phrase.build_template_text(
+            nellis,
+            "climb_cruise",
+            "Fleece 1",
+            atc_phrase.Weather(210, 5, 29.92, ""),
+            "21R",
+            opus=opus_hi,
+            state={"initial_climb_ft": 15000},
+        )
+        skip_same = atc_phrase.should_skip_cruise_climb_step(
+            {"template": "climb_cruise"},
+            state={"initial_climb_ft": 15000, "filed_altitude_ft": 15000},
+        )
+        skip_higher = atc_phrase.should_skip_cruise_climb_step(
+            {"template": "climb_cruise"},
+            state={"initial_climb_ft": 15000, "filed_altitude_ft": 22000},
+            opus=opus_hi,
+        )
+        if (
+            trig10 is None
+            or float(trig10.within_nm or 0) != 10
+            or trig10.when != "leaving"
+            or c_in
+            or not c_out
+            or "climb and maintain" not in cruise_txt.lower()
+            or "fifteen" in cruise_txt.lower()
+            or "one five" in cruise_txt.lower()
+            or not skip_same
+            or skip_higher
+        ):
+            print(
+                f"  FAIL climb to cruise: trig={trig10} in9={c_in} out10.5={c_out} "
+                f"txt={cruise_txt!r} skip_same={skip_same} skip_higher={skip_higher}"
+            )
+            bad += 1
+        else:
+            print("climb to cruise — auto beyond 10 NM (filed, not the 15k interim)")
+
+        hold_rb = atc_phrase.auto_tx_hold_reason(
+            {"awaiting_readback": True, "readback_items": [{"key": "climb"}]}
+        )
+        hold_clear = atc_phrase.auto_tx_hold_reason({"awaiting_readback": False})
+        if hold_rb != "waiting for readback" or hold_clear:
+            print(f"  FAIL auto-TX must wait for readback: {hold_rb!r} {hold_clear!r}")
+            bad += 1
+        else:
+            print("auto-TX — waits for readback before the next command")
+
+        dep_reqs = {
+            k
+            for k, _ in atc_phrase.pilot_requests_for_channel(
+                "tower", phase="departure", template="lineup"
+            )
+        }
+        app_reqs = {
+            k
+            for k, _ in atc_phrase.pilot_requests_for_channel(
+                "tower", phase="approach", template="clear_land"
+            )
+        }
+        if "request_lineup" not in dep_reqs or "request_rolling" not in dep_reqs:
+            print(f"  FAIL departure Tower should offer LUAW/rolling: {dep_reqs}")
+            bad += 1
+        elif "request_landing" in dep_reqs:
+            print(f"  FAIL departure Tower should not offer landing requests: {dep_reqs}")
+            bad += 1
+        elif "request_lineup" in app_reqs or "request_rolling" in app_reqs:
+            print(f"  FAIL approach Tower must not offer LUAW/rolling: {app_reqs}")
+            bad += 1
+        elif "request_landing" not in app_reqs or "request_go_around" not in app_reqs:
+            print(f"  FAIL approach Tower should offer landing/go-around: {app_reqs}")
+            bad += 1
+        elif atc_phrase.takeoff_offer_visible(
+            {"pending_takeoff_offer": "rolling"},
+            channel="tower",
+            phase="approach",
+            template="clear_land",
+        ):
+            print("  FAIL rolling offer must not show on approach Tower")
+            bad += 1
+        else:
+            print(
+                "tower pilot requests — departure LUAW/rolling; "
+                "approach gear-down / go-around (no takeoff offer)"
+            )
+
+        ho_on = {
+            k
+            for k, _ in atc_phrase.pilot_requests_for_channel(
+                "departure", phase="departure", template="departure_handoff"
+            )
+        }
+        ho_off = {
+            k
+            for k, _ in atc_phrase.pilot_requests_for_channel(
+                "departure", phase="departure", template="radar_contact"
+            )
+        }
+        if "request_handoff" not in ho_on:
+            print(f"  FAIL departure handoff step should offer Request handoff: {ho_on}")
+            bad += 1
+        elif "request_handoff" in ho_off:
+            print(f"  FAIL radar contact must not offer Request handoff: {ho_off}")
+            bad += 1
+        else:
+            print("departure Request handoff — only on the handoff step")
+
     return bad
 
 
@@ -1054,28 +2471,111 @@ PHRASE_STEPS: list[dict[str, object]] = [
 def step_phrases() -> int:
     bad = 0
 
-    def run(text: str, *, phase: str, channel: str):
+    def run(text: str, *, phase: str, channel: str, expected: str = "", step_id: str = ""):
         return voice_intent.evaluate(
-            text, channel=channel, phase=phase, callsign=CALLSIGN, steps=PHRASE_STEPS
+            text,
+            channel=channel,
+            phase=phase,
+            expected=expected,
+            callsign=CALLSIGN,
+            steps=PHRASE_STEPS,
+            current_step_id=step_id,
         )
 
     authored = run(
         "Delivery, Fleece 1, hit me with the clearance",
         phase="departure",
         channel="delivery",
+        expected="clearance",
+        step_id="del_clearance",
     )
     if not authored.fired or not str(authored.match.intent).startswith("step:"):
         print(f"  FAIL authored phrase should fire: {authored.describe()}")
+        bad += 1
+
+    bare = run(
+        "hit me with the clearance",
+        phase="departure",
+        channel="delivery",
+        expected="clearance",
+        step_id="del_clearance",
+    )
+    if not bare.fired or not str(bare.match.intent).startswith("step:"):
+        print(f"  FAIL authored phrase on the due step needs no agency: {bare.describe()}")
+        bad += 1
+
+    wrong_step = run(
+        "hit me with the clearance",
+        phase="departure",
+        channel="ground",
+        expected="taxi",
+        step_id="gnd_taxi",
+    )
+    if wrong_step.fired and str(getattr(wrong_step.match, "intent", "")).startswith("step:"):
+        print(f"  FAIL clearance phrase must not fire on taxi step: {wrong_step.describe()}")
         bad += 1
 
     stock = run(
         "Ground, Fleece 1, request taxi",
         phase="departure",
         channel="ground",
+        expected="taxi",
+        step_id="gnd_taxi",
     )
     if not stock.fired or stock.match.intent != "ready_taxi":
         print(f"  FAIL stock grammar still works with steps loaded: {stock.describe()}")
         bad += 1
+
+    half = voice_intent.evaluate(
+        "Delivery, Fleece 1, request",
+        channel="delivery",
+        phase="departure",
+        expected="clearance",
+        callsign=CALLSIGN,
+    )
+    if half.fired and half.match and half.match.intent == "ready_clearance":
+        print(f"  FAIL lone 'request' must not advance clearance: {half.describe()}")
+        bad += 1
+
+    del_cues = voice_intent.suggestions(
+        phase="departure",
+        channel="delivery",
+        expected="clearance",
+        steps=PHRASE_STEPS,
+        current_step_id="del_clearance",
+        limit=5,
+        advance_limit=2,
+        optional_limit=3,
+    )
+    del_says = [str(s) for s, *_ in del_cues]
+    taxi_cues = voice_intent.suggestions(
+        phase="departure",
+        channel="ground",
+        expected="taxi",
+        steps=PHRASE_STEPS,
+        current_step_id="gnd_taxi",
+        limit=5,
+        advance_limit=2,
+        optional_limit=3,
+    )
+    taxi_says = [str(s) for s, *_ in taxi_cues]
+    if "hit me with the clearance" not in del_says:
+        print(f"  FAIL clearance cues should show the mission phrase: {del_cues}")
+        bad += 1
+    elif "lets roll to the end" in del_says:
+        print(f"  FAIL taxi mission phrase must not show on clearance: {del_cues}")
+        bad += 1
+    elif any("clearance" in s.lower() and s != "hit me with the clearance" for s in del_says[:2]):
+        print(f"  FAIL stock clearance cue should yield to the mission phrase: {del_cues}")
+        bad += 1
+    elif "lets roll to the end" not in taxi_says:
+        print(f"  FAIL taxi cues should show the mission phrase: {taxi_cues}")
+        bad += 1
+    elif "hit me with the clearance" in taxi_says:
+        print(f"  FAIL clearance mission phrase must not show on taxi: {taxi_cues}")
+        bad += 1
+    else:
+        print("custom step cues — current mission phrases only")
 
     print(f"step phrases — {'ok' if not bad else f'{bad} problem(s)'}")
     return bad
@@ -1085,9 +2585,9 @@ def expecting() -> int:
     """Short-form answers while ATC is waiting on a specific call."""
     bad = 0
 
-    # Clearance readback: squawk code is enough with no agency opener.
+    # Clearance readback: bare spoken digits are enough with no agency opener.
     result = voice_intent.evaluate(
-        "squawk zero five five one",
+        "zero five five one",
         channel="delivery",
         phase="departure",
         expected="clearance",

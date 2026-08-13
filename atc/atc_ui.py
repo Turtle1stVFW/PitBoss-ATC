@@ -53,33 +53,14 @@ def save_json(path: Path, data: dict) -> None:
 
 def list_windows_voices() -> list[tuple[str, str, str]]:
     """Return [(name, gender, culture), ...] via System.Speech (free)."""
-    ps = r"""
-Add-Type -AssemblyName System.Speech
-$s = New-Object System.Speech.Synthesis.SpeechSynthesizer
-$s.GetInstalledVoices() | ForEach-Object {
-  if ($_.Enabled) {
-    Write-Output ("{0}`t{1}`t{2}" -f $_.VoiceInfo.Name, $_.VoiceInfo.Gender, $_.VoiceInfo.Culture)
-  }
-}
-"""
-    try:
-        proc = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", ps],
-            capture_output=True,
-            text=True,
-            timeout=15,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return [("Microsoft Zira Desktop", "Female", "en-US")]
-
-    voices: list[tuple[str, str, str]] = []
-    for line in (proc.stdout or "").splitlines():
-        parts = line.strip().split("\t")
-        if len(parts) >= 3:
-            voices.append((parts[0], parts[1], parts[2]))
-    return voices or [("Microsoft Zira Desktop", "Female", "en-US")]
-
+    # Prefer shared SAPI list so OneCore-unlocked voices appear after Unlock.
+    names = atc_phrase.list_windows_voices()
+    out: list[tuple[str, str, str]] = []
+    for name in names:
+        gender = atc_phrase.voice_gender(name)
+        culture = atc_phrase.voice_locale(name)
+        out.append((name, gender.title(), culture))
+    return out or [("Microsoft Zira Desktop", "Female", "en-US")]
 
 def preview_voice_local(voice: str, text: str) -> None:
     safe_voice = voice.replace("'", "''")

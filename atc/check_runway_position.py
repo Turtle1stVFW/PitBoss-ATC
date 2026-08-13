@@ -1,13 +1,21 @@
-"""Synthetic checks for runway_position geometry (no live feed needed)."""
+"""Synthetic checks for runway_position geometry (no live feed needed).
+
+Pass --live to dump the current CAOC match against the active flow step.
+"""
 
 from __future__ import annotations
 
 import math
+import sys
 
 import atc_phrase
 import runway_position as rp
 
 AIRPORT = atc_phrase.load_json(atc_phrase.AIRPORTS_PATH)["nellis"]
+
+
+def _ascii(text: str) -> str:
+    return text.replace("\u2264", "<=").replace("\u00b7", "|")
 
 
 def show(title: str) -> None:
@@ -135,6 +143,7 @@ def main() -> int:
     bad += check_zone_admission()
     bad += check_step_triggers()
     bad += check_trigger_timing()
+    bad += check_distance_or_zone()
 
     print(f"\n{'all good' if not bad else f'{bad} problem(s)'}")
     return 1 if bad else 0
@@ -265,6 +274,29 @@ def check_zones() -> int:
     if rp.zones_ref_label("eor", got_all) != "any eor area":
         print(f"  FAIL zones_ref_label for a multi tag: {rp.zones_ref_label('eor', got_all)!r}")
         bad += 1
+    got_as = rp.zones_by_ref(multi, "eor", "03L", place="Alpha South")
+    as_names = [str(z.get("name") or "") for z in got_as]
+    if as_names != ["AS EOR"]:
+        print(f"  FAIL assigned Alpha South should pin AS EOR, got {as_names}")
+        bad += 1
+    else:
+        print("ok   assigned Alpha South -> AS EOR")
+    got_an = rp.zones_by_ref(multi, "eor", "03L", place="AN EOR")
+    an_names = [str(z.get("name") or "") for z in got_an]
+    if an_names != ["AN EOR"]:
+        print(f"  FAIL assigned AN EOR should pin AN EOR, got {an_names}")
+        bad += 1
+    else:
+        print("ok   assigned AN EOR -> AN EOR")
+    nw_zone = dict(other, name="NW EOR")
+    nw_field = {"geometry": {"zones": [as_eor, an_eor, nw_zone]}}
+    got_nw = rp.zones_by_ref(nw_field, "eor", "21R", place="NW EOR")
+    nw_names = [str(z.get("name") or "") for z in got_nw]
+    if nw_names != ["NW EOR"]:
+        print(f"  FAIL assigned NW EOR should pin NW EOR, got {nw_names}")
+        bad += 1
+    else:
+        print("ok   assigned NW EOR -> NW EOR")
     return bad
 
 
@@ -457,7 +489,12 @@ def check_step_triggers() -> int:
     if legacy.enabled({"auto_monitor_tower": False}):
         print("  FAIL the legacy toggle should still switch it off")
         bad += 1
-    for template in ("clear_takeoff", "clear_takeoff_rolling", "clear_takeoff_intersection"):
+    for template in (
+        "lineup",
+        "clear_takeoff",
+        "clear_takeoff_rolling",
+        "clear_takeoff_intersection",
+    ):
         t = rp.step_trigger({"template": template})
         if t is None or t.zone != "in_position":
             print(f"  FAIL {template} lost its in-position trigger")
@@ -540,5 +577,262 @@ def check_trigger_timing() -> int:
     return bad
 
 
+def check_distance_or_zone() -> int:
+    """Range-exit / EOR gates must not need a 'at the field' verdict."""
+    bad = 0
+    show("distance OR zone (range exit) and Nellis EOR boxes")
+
+    if rp.field_proximity_applies(None) is not True:
+        print("  FAIL empty watch still uses the field-proximity cutoff")
+        bad += 1
+    eor_watch = rp.zones_by_ref(AIRPORT, "eor", "21R", place="NW EOR")
+    if not rp.field_proximity_applies(eor_watch):
+        print("  FAIL assigned EOR should still use the field-proximity cutoff")
+        bad += 1
+    app_watch = rp.zones_by_ref(AIRPORT, "approach", None)
+    if rp.field_proximity_applies(app_watch):
+        print("  FAIL approach watch must skip the field-proximity cutoff")
+        bad += 1
+    else:
+        print("ok   field-proximity cutoff: EOR on, approach off")
+
+    far = rp.FlightStatus(
+        ok=False, reason="nearest match is 25 NM out — not at the field"
+    )
+    range_exit = rp.step_trigger(
+        {
+            "template": "bj_range_exit",
+            "trigger": {
+                "zone": "approach",
+                "within_nm": 40,
+                "settled": False,
+            },
+        }
+    )
+    held_in, wait_in = rp.condition_held(
+        range_exit, far, zones=app_watch, distance_nm=25.0
+    )
+    if not held_in:
+        print(f"  FAIL 25 NM should fire range exit without a field verdict: {_ascii(wait_in)}")
+        bad += 1
+    else:
+        print(f"ok   25 NM + no field verdict -> fire ({_ascii(wait_in)})")
+
+    held_out, wait_out = rp.condition_held(
+        range_exit, far, zones=app_watch, distance_nm=50.0
+    )
+    if held_out:
+        print(f"  FAIL 50 NM must not fire range exit: {_ascii(wait_out)}")
+        bad += 1
+    elif "50" not in wait_out or "40" not in wait_out:
+        print(f"  FAIL 50 NM waiting should name the 40 NM gate: {_ascii(wait_out)}")
+        bad += 1
+    else:
+        print(f"ok   50 NM waits on the 40 NM gate ({_ascii(wait_out)})")
+
+    tower = rp.step_trigger(
+        {"template": "cleared_approach", "trigger": {"within_nm": 12, "settled": False}}
+    )
+    held_twr, _ = rp.condition_held(tower, far, distance_nm=11.0)
+    if not held_twr:
+        print("  FAIL contact-tower 12 NM must fire far from the field")
+        bad += 1
+    else:
+        print("ok   11 NM fires the 12 NM tower gate with no field verdict")
+
+    eor_trig = rp.step_trigger(
+        {"template": "monitor_tower", "trigger": {"zone": "eor", "settled": True}}
+    )
+    held_eor, wait_eor = rp.condition_held(
+        eor_trig, far, zones=eor_watch, distance_nm=25.0
+    )
+    if held_eor:
+        print(f"  FAIL EOR must not fire 25 NM out: {_ascii(wait_eor)}")
+        bad += 1
+    else:
+        print(f"ok   EOR stays waiting far from the field ({_ascii(wait_eor)})")
+
+    for rwy, place in (("21R", "NW EOR"), ("03L", "Alpha South")):
+        boxes = rp.zones_by_ref(AIRPORT, "eor", rwy, place=place)
+        if len(boxes) != 1:
+            print(f"  FAIL {rwy} {place} should pin one box, got {len(boxes)}")
+            bad += 1
+            continue
+        centre = rp.zone_centre_xz(boxes[0])
+        if centre is None or not rp.point_in_zone(centre[0], centre[1], boxes[0]):
+            print(f"  FAIL {place} centroid is not inside its drawn polygon")
+            bad += 1
+        else:
+            print(f"ok   {rwy} {place} centroid is inside the drawn box")
+
+    if not app_watch:
+        print("  FAIL Nellis has no approach zone")
+        bad += 1
+    else:
+        centre = rp.zone_centre_xz(app_watch[0])
+        assert centre is not None
+        inside = (centre[0] + 55_560.0, centre[1])  # ~30 NM east
+        outside = (centre[0] + 83_340.0, centre[1])  # ~45 NM east
+        if not rp.point_in_zone(*inside, app_watch[0]):
+            print("  FAIL 30 NM from APP centre should be inside the approach circle")
+            bad += 1
+        elif rp.point_in_zone(*outside, app_watch[0]):
+            print("  FAIL 45 NM from APP centre should be outside the approach circle")
+            bad += 1
+        else:
+            print("ok   approach circle covers ~30 NM, not 45 NM")
+
+        app_status = rp.FlightStatus(
+            ok=True,
+            total=1,
+            fixes=[
+                rp.UnitFix(
+                    unit_id="1",
+                    label="Fleece 1",
+                    along_m=0.0,
+                    lateral_m=0.0,
+                    heading_err_deg=None,
+                    alt_m=None,
+                    height_m=None,
+                    speed_mps=None,
+                    x_m=inside[0],
+                    z_m=inside[1],
+                    own=True,
+                )
+            ],
+        )
+        held_zone, wait_zone = rp.condition_held(
+            range_exit, app_status, zones=app_watch, distance_nm=50.0
+        )
+        if not held_zone:
+            print(f"  FAIL inside approach at 50 NM should still OR-fire: {_ascii(wait_zone)}")
+            bad += 1
+        else:
+            print(f"ok   inside approach OR-fires even at 50 NM ({_ascii(wait_zone)})")
+
+    handoff = rp.resolve_step_trigger(
+        {
+            "template": "departure_handoff",
+            "trigger": {"within_nm": 18, "when": "leaving"},
+        }
+    )
+    held_spawn, wait_spawn = rp.within_nm_held(handoff, 87.0)
+    held_close, _ = rp.within_nm_held(handoff, 12.0)
+    none_held, none_wait = rp.within_nm_held(handoff, None)
+    if not held_spawn or held_close or none_held:
+        print(
+            f"  FAIL handoff must fire when already beyond 18 NM: "
+            f"87={held_spawn} 12={held_close} none={none_held}"
+        )
+        bad += 1
+    elif "already beyond" not in wait_spawn.lower():
+        print(f"  FAIL already-beyond wording: {_ascii(wait_spawn)}")
+        bad += 1
+    elif "beyond 18" not in none_wait.lower():
+        print(f"  FAIL unknown position should ask for beyond 18 NM: {_ascii(none_wait)}")
+        bad += 1
+    else:
+        print(f"ok   spawn already beyond 18 NM fires handoff ({_ascii(wait_spawn)})")
+
+    return bad
+
+
+def dump_live_triggers() -> int:
+    """Print CAOC vs the current flow step so a parked jet can prove the pipeline."""
+    import flow_engine
+
+    cfg = atc_phrase.load_json(atc_phrase.CONFIG_PATH)
+    auto = bool(cfg.get("auto_clearance_enabled"))
+    print(f"auto_clearance_enabled: {auto}")
+    if not auto:
+        print("  nothing auto-fires until Setup -> Watch live position is on")
+
+    engine = flow_engine.FlowEngine()
+    step = engine.current_step() or {}
+    trigger = rp.resolve_step_trigger(
+        step, mission=engine.mission, state=engine.state
+    )
+    print(f"step: {step.get('id') or '(none)'}  {step.get('label') or step.get('template') or ''}")
+    print(f"trigger: {trigger.describe() if trigger else '(none - this step is voice/manual)'}")
+
+    airport = engine.airport()
+    opus, weather = atc_phrase.resolve_opus_and_metar(cfg, airport["icao"])
+    if not opus:
+        opus = atc_phrase.synthetic_flight_context(
+            atc_phrase.callsign_override(cfg) or "CALLSIGN"
+        )
+    callsign = (
+        atc_phrase.cached_radio_callsign(cfg)
+        or (opus.radio_callsign if opus else "")
+        or ""
+    )
+    runway = atc_phrase.pick_departure_runway(
+        airport,
+        weather,
+        opus,
+        cfg,
+        step=step,
+        mission=engine.mission,
+        state=engine.state,
+        template=str(step.get("template") or "") or None,
+    )
+    assigned_eor = ""
+    if trigger is not None and str(trigger.zone).strip().lower() == "eor" and runway:
+        assigned_eor = str(
+            (atc_phrase.resolve_taxi_route(airport, runway, opus=opus) or {}).get("eor")
+            or ""
+        ).strip()
+    watch = []
+    if trigger is not None and trigger.zone:
+        watch = rp.zones_by_ref(
+            airport, trigger.zone, runway, place=assigned_eor or None
+        )
+    print(f"runway: {runway or '?'}  assigned EOR: {assigned_eor or '(n/a)'}")
+    print(f"watch zones: {[rp.zone_label(z) for z in watch] or '(none)'}")
+
+    dist = rp.ownship_distance_nm(
+        airport, config=cfg, callsign=callsign, opus=opus, state=engine.state
+    )
+    print(f"ownship NM from field: {dist if dist is None else f'{dist:.1f}'}")
+
+    status = rp.PositionTracker().evaluate(
+        cfg, airport, runway, callsign=callsign, opus=opus, watch=watch or None
+    )
+    print(
+        f"evaluate: ok={status.ok}  label={status.own_label or '-'}  "
+        f"{_ascii(status.reason or status.summary())}"
+    )
+
+    if trigger is not None:
+        held, waiting = rp.condition_held(
+            trigger,
+            status,
+            zones=watch,
+            distance_nm=dist,
+            config=cfg,
+        )
+        print(f"would hold now: {held}  ({_ascii(waiting) or 'ready'})")
+        if held:
+            print("  dwell / radio gap still apply before AUTO actually transmits")
+        elif not auto:
+            print("  even if this held, AUTO is off so Fly will not transmit")
+
+    # Always score the EOR / approach boxes so a ramp jet proves matching.
+    for rwy, place in (("21R", "NW EOR"), ("03L", "Alpha South")):
+        boxes = rp.zones_by_ref(airport, "eor", rwy, place=place)
+        if not boxes:
+            print(f"{place}: no drawn box")
+            continue
+        count = status.in_zones(boxes, settled=True, label=place)
+        print(f"{place}: {_ascii(count.describe(need_full=False))}")
+    app = rp.zones_by_ref(airport, "approach", None)
+    if app:
+        count = status.in_zones(app, settled=False, label="approach")
+        print(f"approach: {_ascii(count.describe(need_full=False))}")
+    return 0
+
+
 if __name__ == "__main__":
+    if "--live" in sys.argv:
+        raise SystemExit(dump_live_triggers())
     raise SystemExit(main())

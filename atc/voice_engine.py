@@ -58,7 +58,8 @@ DEFAULT_MIN_CONFIDENCE = 0.6
 _BASE_PROMPT = (
     "Radio call to air traffic control. Nellis ground, tower, approach, departure, "
     "clearance delivery, Blackjack, Bandsaw, Magic. Request taxi, ready for departure, "
-    "cleared for takeoff, request runway two one left, say winds, say altimeter, "
+    "in position, cleared for takeoff, request handoff, established, initial, with you, "
+    "request runway two one left, say winds, say altimeter, "
     "request picture, bogey dope, declare, alpha check, bullseye, angels, rolling departure, "
     "line up and wait, gear down full stop, tactical overhead, say again. "
     "Bandsaw, Bandsaw, band saw."
@@ -299,6 +300,12 @@ class VoiceController:
     def level(self) -> float:
         return self._recorder.level() if self._recorder else 0.0
 
+    @property
+    def ptt_held(self) -> bool:
+        """True while the voice PTT is down (pilot still on the radio)."""
+        with self._lock:
+            return self._held > 0
+
     # ---- PTT edges -------------------------------------------------------
 
     def _on_ptt_down(self) -> None:
@@ -362,6 +369,7 @@ class VoiceController:
             if isinstance(context.get("readback_items"), list)
             else None,
             steps=context.get("steps") if isinstance(context.get("steps"), list) else None,
+            current_step_id=str(context.get("current_step_id") or ""),
         )
         self.on_status(f"{elapsed:.0f}ms · {text}")
         self.on_transcript(evaluation)
@@ -452,6 +460,24 @@ def execute_intent(
     Returns {action, detail, text} describing what happened. Kept free of UI so
     it can be exercised from tests and the CLI.
     """
+    intent = match.intent
+    if intent == "say_again":
+        text = str((engine.state or {}).get("last_tx_text") or "").strip()
+        last = (engine.state or {}).get("last_step_id")
+        if not text and not last:
+            return {"action": "none", "detail": "nothing to repeat"}
+        if hasattr(engine, "replay_last_tx"):
+            detail = engine.replay_last_tx()
+            return {
+                "action": "replay",
+                "text": detail.get("text"),
+                "channel": detail.get("channel"),
+                "detail": detail,
+            }
+        if not last:
+            return {"action": "none", "detail": "nothing to repeat"}
+        return {"action": "replay", "detail": engine.play_id(last)}
+
     config = engine.config
     airport = engine.airport()
     opus, weather = atc_phrase.resolve_opus_and_metar(config, airport["icao"])
@@ -460,13 +486,6 @@ def execute_intent(
             atc_phrase.callsign_override(config) or "CALLSIGN"
         )
     callsign = opus.radio_callsign
-    intent = match.intent
-
-    if intent == "say_again":
-        last = engine.state.get("last_step_id")
-        if not last:
-            return {"action": "none", "detail": "nothing to repeat"}
-        return {"action": "replay", "detail": engine.play_id(last)}
 
     if intent in (
         "request_winds",
@@ -518,9 +537,33 @@ def execute_intent(
             return played
         return _ack("request_runway", engine, airport, callsign, runway=runway, match=match)
 
-    if intent in ("accept_rolling", "deny_rolling", "request_lineup"):
+    if intent in ("accept_rolling", "deny_rolling", "request_lineup", "request_rolling"):
+        answering = _rolling_offer_open(engine)
         atc_phrase.apply_pilot_request(intent, mission=engine.mission, state=engine.state)
         engine.save_state()
+        # LUAW / takeoff readback is a different clearance — drop it so the
+        # rolling (or LUAW) request is not stuck behind "say the runway".
+        last_tx = str(engine.state.get("last_tx_template") or "")
+        if (
+            hasattr(engine, "clear_readback")
+            and engine.state.get("awaiting_readback")
+            and last_tx in (
+                "lineup",
+                "line_up_and_wait",
+                "rolling_accept",
+                "clear_takeoff",
+                "clear_takeoff_rolling",
+                "clear_takeoff_intersection",
+            )
+        ):
+            engine.clear_readback()
+        if hasattr(engine, "prepare_takeoff_cursor"):
+            engine.prepare_takeoff_cursor()
+            engine.save_state()
+        if answering:
+            played = play_rolling_offer_reply(engine, intent)
+            if played.get("action") != "none":
+                return played
         return _ack(intent, engine, airport, callsign, match=match)
 
     if intent == "request_unrestricted_climb":
@@ -537,14 +580,10 @@ def execute_intent(
         return _transmit(engine, airport, text, channel)
 
     if intent == "acknowledge_readback":
-        last_tmpl = str(engine.state.get("last_tx_template") or "")
-        result = _acknowledge(engine, match)
-        # "Runway 21R, at EOR" — close the readback and hand off in one call.
-        if last_tmpl == "taxi" and _eor_also_heard(match):
-            played = _play_template(engine, "monitor_tower")
-            played["detail"] = f"readback noted; {played.get('detail')}"
-            return played
-        return result
+        # Taxi readback often includes the destination ("taxi northwest EOR").
+        # That is not arrival — monitor tower waits for the EOR zone, a manual
+        # advance, or a later "at EOR" call.
+        return _acknowledge(engine, match)
 
     if intent == "correct_climb_readback":
         climb_ft = match.slots.get("climb_ft")
@@ -566,7 +605,67 @@ def execute_intent(
     if intent == "ready_departure":
         return _play_departure_ready(engine, match)
 
+    if intent == "in_position":
+        return _play_clear_takeoff(engine)
+
+    if intent == "request_low_approach":
+        atc_phrase.apply_pilot_request(
+            "request_low_approach",
+            mission=engine.mission,
+            state=engine.state,
+            airport=airport,
+            weather=weather,
+            opus=opus,
+            config=getattr(engine, "config", None),
+        )
+        engine.save_state()
+        return _ack(
+            "request_low_approach", engine, airport, callsign, match=match
+        )
+
+    if intent == "going_around":
+        if hasattr(engine, "execute_go_around"):
+            detail = engine.execute_go_around()
+            if detail.get("acknowledged"):
+                return {
+                    "action": "acknowledged",
+                    "detail": "go-around readback noted",
+                    "channel": detail.get("channel") or "tower",
+                }
+            return {
+                "action": "play" if detail.get("exit_code") == 0 else "transmit",
+                "text": detail.get("text"),
+                "channel": detail.get("channel") or "tower",
+                "detail": detail,
+            }
+        return {"action": "none", "detail": "go-around not available"}
+
     if match.kind == "step":
+        # Cleared for the option → full stop / clear of runway: no second land clear.
+        if atc_phrase.awaiting_option_on_the_go(engine.state) and (
+            intent in ("request_landing", "clear_of_runway")
+            or match.template in ("clear_land", "exit_runway", "taxi_in")
+        ):
+            if hasattr(engine, "accept_option_full_stop"):
+                prefer: tuple[str, ...] = ("exit_runway", "taxi_in")
+                if intent == "clear_of_runway" or match.template == "taxi_in":
+                    prefer = ("taxi_in", "exit_runway")
+                elif match.template == "exit_runway":
+                    prefer = ("exit_runway", "taxi_in")
+                detail = engine.accept_option_full_stop(prefer_templates=prefer)
+                return {
+                    "action": "play",
+                    "text": detail.get("text"),
+                    "channel": detail.get("channel") or "tower",
+                    "detail": detail,
+                    "option_full_stop": True,
+                }
+            atc_phrase.commit_option_full_stop(
+                state=engine.state, mission=engine.mission
+            )
+            engine.save_state()
+            # Fall through to normal step play (exit / taxi) without re-clearing.
+
         # Do not hand to tower until the taxi runway readback is done.
         if (
             (match.template == "monitor_tower" or intent == "at_eor")
@@ -610,6 +709,51 @@ def execute_intent(
             if result.get("action") == "transmit":
                 _advance_past_bandsaw(engine)
             return result
+        # Back on Blackjack after Bandsaw (or still on the range): check-in is
+        # "continue", not range exit → Approach.
+        if intent == "range_entry" or match.template == "bj_check_in":
+            cur = engine.current_step() or {}
+            if str(cur.get("template") or "") == "bj_range_exit":
+                if hasattr(engine, "acknowledge_blackjack_continue"):
+                    detail = engine.acknowledge_blackjack_continue()
+                    return {
+                        "action": "play",
+                        "text": detail.get("text"),
+                        "channel": "blackjack",
+                        "detail": detail,
+                        "blackjack_continue": True,
+                    }
+        # Range complete: ARCOE anytime; Approach only inside ~40 NM.
+        if intent == "range_exit" or match.template == "bj_range_exit":
+            ready, waiting = (False, "")
+            if hasattr(engine, "range_exit_ready"):
+                ready, waiting = engine.range_exit_ready()
+            if not ready:
+                already = bool(
+                    isinstance(engine.state, dict)
+                    and engine.state.get("range_exit_approved")
+                )
+                if already and hasattr(engine, "acknowledge_blackjack_continue"):
+                    detail = engine.acknowledge_blackjack_continue()
+                    return {
+                        "action": "play",
+                        "text": detail.get("text"),
+                        "channel": "blackjack",
+                        "detail": detail,
+                        "blackjack_continue": True,
+                        "range_exit_waiting": waiting,
+                    }
+                if hasattr(engine, "release_range_exit"):
+                    detail = engine.release_range_exit()
+                    return {
+                        "action": "play",
+                        "text": detail.get("text"),
+                        "channel": "blackjack",
+                        "detail": detail,
+                        "range_exit_released": True,
+                        "range_exit_waiting": waiting,
+                    }
+            return _play_step(engine, match)
         # Approach check-in: METAR / route auto-assign recovery / IAF; hold cursor.
         if intent == "inbound_recovery" or match.template == "approach_check_in":
             return _approach_check_in(
@@ -617,6 +761,22 @@ def execute_intent(
             )
         # Continue to tower / cleared approach — play step and leave hold window.
         if intent == "approach_continue" or match.template == "cleared_approach":
+            # After instrument missed, stay on Approach until outside the rearm
+            # bubble — do not hand to Tower / land early near the field.
+            ok_rearm, wait_rearm = atc_phrase.tower_land_gates_allowed(
+                engine.state, None
+            )
+            if not ok_rearm:
+                plan = atc_phrase.approach_plan_from_state(
+                    engine.state, airport=airport
+                )
+                iaf = str(plan.get("iaf_say") or plan.get("iaf") or "the IAF")
+                text = (
+                    f"{atc_phrase.speak_callsign(callsign)}, "
+                    f"{airport['name']} Approach, "
+                    f"negative tower, continue to {iaf}."
+                )
+                return _transmit(engine, airport, text, "approach")
             played = _play_step(engine, match)
             if played.get("action") != "none":
                 return played
@@ -634,6 +794,31 @@ def execute_intent(
             if result.get("action") == "transmit":
                 _advance_to_tower_approach(engine)
             return result
+        if intent == "request_landing" or match.template == "clear_land":
+            if atc_phrase.landing_already_cleared(
+                engine.state,
+                opus=opus,
+                step=engine.current_step() if hasattr(engine, "current_step") else None,
+                mission=getattr(engine, "mission", None),
+            ):
+                return {"action": "none", "detail": "already cleared to land"}
+            if atc_phrase.awaiting_option_on_the_go(engine.state):
+                # Handled above; keep a safe fallback.
+                if hasattr(engine, "accept_option_full_stop"):
+                    detail = engine.accept_option_full_stop()
+                    return {
+                        "action": "play",
+                        "text": detail.get("text"),
+                        "channel": detail.get("channel") or "tower",
+                        "detail": detail,
+                        "option_full_stop": True,
+                    }
+            atc_phrase.set_landing_intent(
+                atc_phrase.LANDING_INTENT_FULL_STOP,
+                state=engine.state,
+                mission=engine.mission,
+            )
+            engine.save_state()
         return _play_step(engine, match)
 
     return {"action": "none", "detail": f"unhandled intent {intent}"}
@@ -662,32 +847,6 @@ def _taxi_also_heard(match: voice_intent.Match) -> bool:
     ):
         return False
     return bool(voice_intent._group_hit(text, ("taxi",)))
-
-
-def _eor_also_heard(match: voice_intent.Match) -> bool:
-    """True when the same call also reports at the EOR / holding short."""
-    text = _call_text(match)
-    if not text:
-        return False
-    return bool(
-        voice_intent._group_hit(
-            text,
-            (
-                "at eor",
-                "at the eor",
-                "ready at eor",
-                "parked eor",
-                "parked at eor",
-                "holding eor",
-                "holding at eor",
-                "holding short",
-                "at the end",
-                "we re at eor",
-                "we are at eor",
-            ),
-            fuzzy=False,
-        )
-    )
 
 
 def _should_reissue_taxi(engine: Any, match: voice_intent.Match) -> bool:
@@ -869,6 +1028,53 @@ def resolve_unrestricted_climb(
         "detail": played.get("detail") if isinstance(played, dict) else played,
         "takeoff": played,
     }
+
+
+def _rolling_offer_open(engine: Any) -> bool:
+    """True while Tower is waiting on 'will you accept rolling?'."""
+    if atc_phrase.pending_takeoff_offer(getattr(engine, "state", None)) == "rolling":
+        return True
+    last = str((getattr(engine, "state", None) or {}).get("last_tx_template") or "")
+    return last == "rolling_accept"
+
+
+def play_rolling_offer_reply(engine: Any, intent: str) -> dict[str, Any]:
+    """
+    After the rolling offer: accept → takeoff clearance; decline → LUAW.
+
+    Unique Tower wording is applied via state['rolling_offer_reply'].
+    """
+    kind = str(intent or "").strip().casefold()
+    played: dict[str, Any]
+    if kind in ("accept_rolling", "request_rolling"):
+        if isinstance(engine.state, dict):
+            engine.state["rolling_offer_reply"] = "accept"
+            engine.save_state()
+        played = _play_clear_takeoff(engine)
+    elif kind in ("deny_rolling", "request_lineup"):
+        if isinstance(engine.state, dict):
+            engine.state["rolling_offer_reply"] = "deny"
+            engine.save_state()
+        played = _play_lineup(engine)
+    else:
+        return {"action": "none", "detail": "not a rolling-offer reply"}
+    if isinstance(engine.state, dict):
+        engine.state.pop("rolling_offer_reply", None)
+        engine.save_state()
+    return played
+
+
+def _play_lineup(engine: Any) -> dict[str, Any]:
+    """Transmit the line-up-and-wait step (used after declining rolling)."""
+    if hasattr(engine, "prepare_takeoff_cursor"):
+        engine.prepare_takeoff_cursor()
+    steps = engine.steps
+    if not steps:
+        return {"action": "none", "detail": "no enabled steps"}
+    for step in steps:
+        if str(step.get("template") or "") == "lineup":
+            return {"action": "play", "detail": engine.play_id(step.get("id"))}
+    return {"action": "none", "detail": "no lineup step"}
 
 
 def _play_clear_takeoff(engine: Any) -> dict[str, Any]:
@@ -1095,6 +1301,27 @@ def _handle_approach_action(
             ),
         )
         engine.save_state()
+        recovery = atc_phrase.normalize_recovery_key(
+            slots.get("recovery") or plan.get("pattern")
+        )
+        addressed = str(slots.get("channel") or "").strip().lower()
+        step_ch = str((engine.current_step() or {}).get("channel") or "").strip().lower()
+        vfr_ok = recovery in (
+            "visual_overhead",
+            "tactical_overhead",
+            "straight_in",
+        )
+        to_tower = vfr_ok and (
+            addressed == "tower" or (not addressed and step_ch == "tower")
+        )
+        if to_tower:
+            text = atc_phrase.build_tower_check_in(
+                airport,
+                callsign,
+                str(plan.get("runway") or ""),
+                plan=plan,
+            )
+            return _transmit(engine, airport, text, "tower")
         text = atc_phrase.build_approach_change(
             airport, callsign, weather, plan=plan
         )
@@ -1172,11 +1399,10 @@ def _current_channel(engine: Any) -> str:
 
 def _play_departure_ready(engine: Any, match: voice_intent.Match) -> dict[str, Any]:
     """
-    "Ready for departure" answers the current Tower takeoff step.
+    "Ready for departure" answers LUAW (or "will you accept rolling?").
 
-    Normally that is line-up-and-wait (or "will you accept rolling?"). Cleared
-    takeoff only plays once the cursor has advanced there — e.g. after LUAW,
-    or when rolling mode has skipped LUAW.
+    Cleared takeoff is not voice-advanced by this call — that fires from the
+    in-position runway zone, Play / Next, or the "in position" fallback.
     """
     del match  # intent routing only; play uses the flow cursor
     if hasattr(engine, "prepare_takeoff_cursor"):
@@ -1184,20 +1410,27 @@ def _play_departure_ready(engine: Any, match: voice_intent.Match) -> dict[str, A
     steps = engine.steps
     if not steps:
         return {"action": "none", "detail": "no enabled steps"}
+    ready_tmpls = frozenset({"lineup", "rolling_accept"})
     index = int(engine.state.get("index") or 0)
     current = steps[index] if 0 <= index < len(steps) else None
-    if current and atc_phrase.is_takeoff_related_template(current.get("template")):
-        return {"action": "play", "detail": engine.play_id(current.get("id"))}
+    if current and str(current.get("template") or "") in ready_tmpls:
+        if str(current.get("template") or "") == "lineup" and atc_phrase.should_skip_takeoff_step(
+            current, engine.mission, engine.state
+        ):
+            pass
+        else:
+            return {"action": "play", "detail": engine.play_id(current.get("id"))}
     for i in range(max(0, index), len(steps)):
         step = steps[i]
         tmpl = str(step.get("template") or "")
+        if tmpl not in ready_tmpls:
+            continue
         if tmpl == "lineup" and atc_phrase.should_skip_takeoff_step(
             step, engine.mission, engine.state
         ):
             continue
-        if atc_phrase.is_takeoff_related_template(tmpl):
-            return {"action": "play", "detail": engine.play_id(step.get("id"))}
-    return {"action": "none", "detail": "no takeoff step ahead"}
+        return {"action": "play", "detail": engine.play_id(step.get("id"))}
+    return {"action": "none", "detail": "no line-up step ahead"}
 
 
 def _play_step(engine: Any, match: voice_intent.Match) -> dict[str, Any]:

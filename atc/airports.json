@@ -9,7 +9,30 @@
       "21R",
       "03L"
     ],
-    "parking": "Row 18",
+    "parking": "Ramp",
+    "parking_by_squadron": [
+      {
+        "match": [
+          "469th",
+          "469"
+        ],
+        "parking": "Row 18"
+      },
+      {
+        "match": [
+          "561st",
+          "561"
+        ],
+        "parking": "Knight Ramp"
+      },
+      {
+        "match": [
+          "8th",
+          "wool"
+        ],
+        "parking": "WOOL Ramp"
+      }
+    ],
     "taxi_via": "Foxtrot",
     "clearance_consolidated_with_ground": false,
     "taxi_routes": {

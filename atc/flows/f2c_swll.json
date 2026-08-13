@@ -1,5 +1,5 @@
 {
-  "name": "Nellis Default",
+  "name": "F2C SWLL",
   "airport": "nellis",
   "active_recovery": "straight_in",
   "recovery_options": [
@@ -19,7 +19,7 @@
       "file": null,
       "enabled": true,
       "text": null,
-      "initial_climb_ft": 15000
+      "initial_climb_ft": 22000
     },
     {
       "id": "del_readback",
@@ -105,7 +105,7 @@
       "file": null,
       "enabled": true,
       "text": null,
-      "initial_climb_ft": 15000
+      "initial_climb_ft": 22000
     },
     {
       "id": "dep_cruise",
@@ -134,68 +134,203 @@
       "template": "departure_handoff",
       "file": null,
       "enabled": true,
-      "text": null,
-      "trigger": {
-        "within_nm": 18,
-        "when": "leaving",
-        "settled": false,
-        "dwell_s": 0,
-        "gap_s": 5
-      }
+      "text": "\"Bruiser Five, contact Los Angeles Center three-seven-seven decimal one good day."
     },
     {
       "id": "bj_checkin",
       "phase": "flight",
-      "label": "Blackjack check-in / alpha",
-      "channel": "blackjack",
-      "mode": "tts",
+      "label": "LA Center Check In",
+      "channel": "other",
+      "mode": "file",
       "template": "bj_check_in",
-      "file": null,
+      "file": "C:/ATCSounds/10.mp3",
       "enabled": true,
       "text": null,
-      "voice": "en-US-Chirp3-HD-Kore"
+      "voice": "en-US-Chirp3-HD-Kore",
+      "freq_mhz": 377.1,
+      "mod": "AM"
+    },
+    {
+      "id": "la_center_check_in_682c3c",
+      "phase": "flight",
+      "label": "LA Center Radar Contact Direct Jenid",
+      "channel": "other",
+      "mode": "file",
+      "template": "bj_check_in",
+      "file": "C:/ATCSounds/11.mp3",
+      "enabled": true,
+      "text": null,
+      "voice": "en-US-Chirp3-HD-Kore",
+      "freq_mhz": 377.1,
+      "mod": "AM",
+      "locked": false,
+      "voice_phrases": [
+        "With you."
+      ]
+    },
+    {
+      "id": "la_center_radar_contact_direct_jenid_fbd5e9",
+      "phase": "flight",
+      "label": "request",
+      "channel": "other",
+      "mode": "file",
+      "template": "bj_check_in",
+      "file": "C:/ATCSounds/12.mp3",
+      "enabled": true,
+      "text": null,
+      "voice": "en-US-Chirp3-HD-Kore",
+      "freq_mhz": 377.1,
+      "mod": "AM",
+      "locked": false,
+      "voice_phrases": [
+        "With you."
+      ]
+    },
+    {
+      "id": "go_with_request_df5eb1",
+      "phase": "flight",
+      "label": "Go with request copy",
+      "channel": "other",
+      "mode": "file",
+      "template": "bj_check_in",
+      "file": "C:/ATCSounds/13.mp3",
+      "enabled": true,
+      "text": null,
+      "voice": "en-US-Chirp3-HD-Kore",
+      "freq_mhz": 377.1,
+      "mod": "AM",
+      "locked": false,
+      "voice_phrases": [
+        "With you."
+      ]
+    },
+    {
+      "id": "la_center_check_in_copy_d7f067",
+      "phase": "flight",
+      "label": "Contct Joshua",
+      "channel": "other",
+      "mode": "file",
+      "template": "bj_check_in",
+      "file": "C:/ATCSounds/14.mp3",
+      "enabled": true,
+      "text": null,
+      "voice": "en-US-Chirp3-HD-Kore",
+      "freq_mhz": 377.1,
+      "mod": "AM",
+      "locked": false,
+      "voice_phrases": [
+        "With you."
+      ]
     },
     {
       "id": "bs_checkin",
       "phase": "flight",
-      "label": "Bandsaw check-in (optional)",
-      "channel": "bandsaw",
-      "mode": "tts",
+      "label": "Joshua Control Check In",
+      "channel": "other",
+      "mode": "file",
       "template": "bandsaw_check_in",
-      "file": null,
-      "enabled": true,
-      "text": null
-    },
-    {
-      "id": "bs_checkout",
-      "phase": "flight",
-      "label": "Bandsaw check-out \u2192 Blackjack",
-      "channel": "bandsaw",
-      "mode": "tts",
-      "template": "bandsaw_check_out",
-      "file": null,
-      "enabled": true,
-      "text": null
-    },
-    {
-      "id": "bj_range_exit",
-      "phase": "flight",
-      "label": "Blackjack range exit",
-      "channel": "blackjack",
-      "mode": "tts",
-      "template": "bj_range_exit",
-      "file": null,
+      "file": "C:/ATCSounds/15.mp3",
       "enabled": true,
       "text": null,
-      "handoff_channel": "approach",
-      "trigger": {
-        "zone": "approach",
-        "within_nm": 40,
-        "when": "inside",
-        "settled": false,
-        "dwell_s": 0,
-        "gap_s": 5
-      }
+      "voice": "en-US-Chirp3-HD-Iapetus",
+      "freq_mhz": 348.7,
+      "mod": "AM"
+    },
+    {
+      "id": "joshua_control_check_in_3c06af",
+      "phase": "flight",
+      "label": "JC radar terminated switch to SWLL",
+      "channel": "other",
+      "mode": "file",
+      "template": "bandsaw_check_in",
+      "file": "C:/ATCSounds/16.mp3",
+      "enabled": true,
+      "text": null,
+      "voice": "en-US-Chirp3-HD-Iapetus",
+      "freq_mhz": 348.7,
+      "mod": "AM",
+      "locked": false
+    },
+    {
+      "id": "jc_radar_terminated_switch_to_swll_e5cf7a",
+      "phase": "flight",
+      "label": "JC after SWLL",
+      "channel": "other",
+      "mode": "file",
+      "template": "bandsaw_check_in",
+      "file": "C:/ATCSounds/17.mp3",
+      "enabled": true,
+      "text": null,
+      "voice": "en-US-Chirp3-HD-Iapetus",
+      "freq_mhz": 348.7,
+      "mod": "AM",
+      "locked": false
+    },
+    {
+      "id": "jc_after_swll_e10f11",
+      "phase": "flight",
+      "label": "JC radar contact",
+      "channel": "other",
+      "mode": "file",
+      "template": "bandsaw_check_in",
+      "file": "C:/ATCSounds/17-1.mp3",
+      "enabled": true,
+      "text": null,
+      "voice": "en-US-Chirp3-HD-Iapetus",
+      "freq_mhz": 348.7,
+      "mod": "AM",
+      "locked": false
+    },
+    {
+      "id": "jc_radar_contact_083094",
+      "phase": "flight",
+      "label": "JC radar contact copy",
+      "channel": "other",
+      "mode": "file",
+      "template": "bandsaw_check_in",
+      "file": "C:/ATCSounds/17-2.mp3",
+      "enabled": true,
+      "text": null,
+      "voice": "en-US-Chirp3-HD-Iapetus",
+      "freq_mhz": 348.7,
+      "mod": "AM",
+      "locked": false
+    },
+    {
+      "id": "contct_joshua_05740a",
+      "phase": "flight",
+      "label": "LA Center return",
+      "channel": "other",
+      "mode": "tts",
+      "template": "bj_check_in",
+      "file": null,
+      "enabled": true,
+      "text": "Bruiser Five, Los Angeles Center, Welcome Back",
+      "voice": "en-US-Chirp3-HD-Kore",
+      "freq_mhz": 377.1,
+      "mod": "AM",
+      "locked": false,
+      "voice_phrases": [
+        "With you."
+      ]
+    },
+    {
+      "id": "la_center_return_9da1ef",
+      "phase": "flight",
+      "label": "LA Center descend handoff 50 miles",
+      "channel": "other",
+      "mode": "tts",
+      "template": "bj_check_in",
+      "file": null,
+      "enabled": true,
+      "text": "Bruiser Five, descend Fifteen thousand feet, Contact Nellis approach two seven three decimal fife fife, Gooday!",
+      "voice": "en-US-Chirp3-HD-Kore",
+      "freq_mhz": 377.1,
+      "mod": "AM",
+      "locked": false,
+      "voice_phrases": [
+        "With you."
+      ]
     },
     {
       "id": "app_checkin",
@@ -293,5 +428,5 @@
   ],
   "active_takeoff_mode": "lineup",
   "landing_intent": "full_stop",
-  "initial_climb_ft": 15000
+  "initial_climb_ft": 22000
 }

@@ -48,7 +48,11 @@
     "other": "Microsoft Zira Desktop"
   },
   "tts_volume": 0.8,
-  "tts_speed": 7,
+  "tts_speed": 4,
+  "tts_speed_by_provider": {
+    "windows": 4,
+    "google": 7
+  },
   "flow_file": "flows/nellis_default.json",
   "flow_http_port": 8765,
   "zone_editor_port": 8777,
