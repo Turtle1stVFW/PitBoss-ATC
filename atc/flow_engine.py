@@ -21,6 +21,7 @@ sys.path.insert(0, str(HERE))
 
 import atc_phrase  # noqa: E402
 import srs_radio  # noqa: E402
+import voice_intent  # noqa: E402
 
 CONFIG_PATH = HERE / "config.json"
 AIRPORTS_PATH = HERE / "airports.json"
@@ -583,10 +584,8 @@ class FlowEngine:
 
     @staticmethod
     def _hold_cursor_after_play(step: dict[str, Any] | None) -> bool:
-        """Stay on Bandsaw check-in until a checkout call advances."""
-        # Approach: check-in advances onto approach_procedure (auto-clearance ~6s
-        # later, before IAF / exit); clearance then advances to contact-tower.
-        return str((step or {}).get("template") or "") == "bandsaw_check_in"
+        """Stay on this step after Play when the step asks to hold (Bandsaw, or hold=true)."""
+        return voice_intent.step_holds_after_play(step)
 
     def _hold_cursor_after_tx(self, step: dict[str, Any] | None) -> bool:
         """Hold after TX when more per-ship landing clearances remain."""
@@ -1051,7 +1050,49 @@ class FlowEngine:
             "replayed": True,
         }
 
+    def answer_rolling_offer(
+        self, *, accept: bool, bypass_freq_gate: bool = False
+    ) -> dict[str, Any]:
+        """
+        HOTAS / Next / Back answer to 'will you accept rolling?'.
+
+        Accept → cleared takeoff. Decline → line up and wait.
+        """
+        import voice_engine  # local — avoid import cycle at module load
+
+        step = self.current_step()
+        self._freq_gate_or_raise(step, bypass=bypass_freq_gate)
+        intent = "accept_rolling" if accept else "deny_rolling"
+        atc_phrase.apply_pilot_request(
+            intent, mission=self.mission, state=self.state
+        )
+        self.save_state()
+        if self.state.get("awaiting_readback"):
+            self._clear_readback_state()
+        self.prepare_takeoff_cursor()
+        self.save_state()
+        played = voice_engine.play_rolling_offer_reply(self, intent)
+        if not isinstance(played, dict) or played.get("action") == "none":
+            detail = (
+                played.get("detail") if isinstance(played, dict) else None
+            ) or "no takeoff step"
+            raise RuntimeError(str(detail))
+        result = played.get("detail")
+        if not isinstance(result, dict):
+            result = dict(played)
+        result["rolling_offer_reply"] = "accept" if accept else "deny"
+        result["pending_takeoff_offer"] = atc_phrase.pending_takeoff_offer(
+            self.state
+        )
+        return result
+
     def next(self, *, bypass_freq_gate: bool = False) -> dict[str, Any]:
+        # After Tower asked 'will you accept rolling?', Next accepts — do not
+        # treat the ANSWER card as a normal readback dismiss.
+        if atc_phrase.rolling_offer_awaiting_reply(self.state):
+            return self.answer_rolling_offer(
+                accept=True, bypass_freq_gate=bypass_freq_gate
+            )
         # READ BACK card is the active step — close it, do not TX the next call.
         if self.state.get("awaiting_readback") and self.state.get("readback_items"):
             self.clear_readback()
@@ -1102,6 +1143,10 @@ class FlowEngine:
         bouncing the cursor when retreating onto a skippable step). After TX,
         advances one step without skipping — Next will skip forward as usual.
         """
+        if atc_phrase.rolling_offer_awaiting_reply(self.state):
+            return self.answer_rolling_offer(
+                accept=False, bypass_freq_gate=bypass_freq_gate
+            )
         steps = self.steps
         if not steps:
             raise RuntimeError("No enabled steps")
@@ -1200,7 +1245,13 @@ class FlowEngine:
         st["note"] = "Single timeline — flip is unused"
         return st
 
-    def play_id(self, step_id: str, *, bypass_freq_gate: bool = False) -> dict[str, Any]:
+    def play_id(
+        self,
+        step_id: str,
+        *,
+        bypass_freq_gate: bool = False,
+        force_advance: bool = False,
+    ) -> dict[str, Any]:
         steps = enabled_steps(self.mission)
         for i, step in enumerate(steps):
             if step.get("id") == step_id:
@@ -1217,7 +1268,7 @@ class FlowEngine:
                     return held
                 self._freq_gate_or_raise(play, bypass=bypass_freq_gate)
                 result = self.play_step(play)
-                if not self._hold_cursor_after_tx(play):
+                if force_advance or not self._hold_cursor_after_tx(play):
                     self.state["index"] = int(self.state.get("index") or 0) + 1
                     self._advance_past_skippable()
                 self.save_state()
@@ -1296,6 +1347,22 @@ def make_handler(engine: FlowEngine) -> type[BaseHTTPRequestHandler]:
                     r = engine.play_id(sid)
                     self._send(200, _html_ok("Play", r.get("label") or sid))
                     return
+                if path == "/seek_next":
+                    r = engine.seek_relative(1)
+                    label = r.get("label") or ("(end)" if r.get("at_end") else "OK")
+                    self._send(
+                        200,
+                        _html_ok("Step forward", f"Now step {r.get('step_number')}/{r.get('total')}: {label}"),
+                    )
+                    return
+                if path == "/seek_prev":
+                    r = engine.seek_relative(-1)
+                    label = r.get("label") or ("(end)" if r.get("at_end") else "OK")
+                    self._send(
+                        200,
+                        _html_ok("Step back", f"Now step {r.get('step_number')}/{r.get('total')}: {label}"),
+                    )
+                    return
                 if path == "/seek":
                     if qs.get("n"):
                         r = engine.seek_number(int(qs["n"][0]))
@@ -1316,7 +1383,7 @@ def make_handler(engine: FlowEngine) -> type[BaseHTTPRequestHandler]:
                     200,
                     _html_ok(
                         "ATC Flow",
-                        "Endpoints: /next /back /reset /flip /play?id=... /seek?n=7 /status",
+                        "Endpoints: /next /back /reset /flip /play?id=... /seek?n=7 /seek_next /seek_prev /status",
                     ),
                 )
             except Exception as exc:  # noqa: BLE001

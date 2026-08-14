@@ -687,6 +687,9 @@ def execute_intent(
         # Bandsaw check-in: talk to them, but stay on the Bandsaw step until
         # checkout — picture / declare / dope happen in that window.
         if intent == "bandsaw_check_in" or match.template == "bandsaw_check_in":
+            cur = engine.current_step() or {}
+            if voice_intent.step_is_authored(cur):
+                return _play_step(engine, match)
             alpha_spoken = None
             fix = atc_phrase.resolve_alpha_bullseye(
                 engine.config, callsign=callsign, opus=opus
@@ -1198,7 +1201,9 @@ def _advance_past_bandsaw(engine: Any) -> None:
         step = steps[idx]
         ch = str(step.get("channel") or "").lower()
         tmpl = str(step.get("template") or "")
-        if ch == "bandsaw" or tmpl.startswith("bandsaw_"):
+        if ch == "bandsaw" or (
+            tmpl.startswith("bandsaw_") and not voice_intent.step_is_authored(step)
+        ):
             idx += 1
             continue
         break
@@ -1448,7 +1453,10 @@ def _play_step(engine: Any, match: voice_intent.Match) -> dict[str, Any]:
     # A phrase written on a step names that step outright — no template search.
     if match.step_id:
         if any(s.get("id") == match.step_id for s in steps):
-            return {"action": "play", "detail": engine.play_id(match.step_id)}
+            return {
+                "action": "play",
+                "detail": engine.play_id(match.step_id, force_advance=True),
+            }
         return {"action": "none", "detail": f"step {match.step_id} is not enabled"}
 
     if match.template:

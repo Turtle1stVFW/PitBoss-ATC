@@ -3062,6 +3062,19 @@ def pending_takeoff_offer(state: dict[str, Any] | None) -> str | None:
     return None
 
 
+def rolling_offer_awaiting_reply(state: dict[str, Any] | None) -> bool:
+    """
+    Tower has already asked 'will you accept rolling?' and is waiting.
+
+    Distinct from a pending offer that has not been transmitted yet — the
+    first Next still plays the question; the next Next/Back answer it.
+    """
+    if pending_takeoff_offer(state) != "rolling":
+        return False
+    last = str((state or {}).get("last_tx_template") or "").strip()
+    return last == "rolling_accept"
+
+
 def takeoff_offer_chance(
     config: dict[str, Any] | None = None,
     mission: dict[str, Any] | None = None,

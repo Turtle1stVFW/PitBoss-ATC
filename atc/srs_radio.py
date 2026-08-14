@@ -1,16 +1,20 @@
 """
 Pilot radio tune state for the Advance / TX frequency gate.
 
-Sources (first match wins):
-  1. Fresh DCS Export file from ATC-RadioExport.lua (in-jet)
-  2. Live SRS client UDP CombinedRadioState (selected radio / common PTT)
+The gate matches if ANY tuned radio is on the step frequency. Selected / PTT
+only chooses which radio you transmit on — keying intra-flight VHF must not
+block UHF ATC / C2 triggers you are still receiving.
+
+Sources (union when more than one is fresh):
+  1. Fresh DCS Export file from ATC-RadioExport.lua (in-jet radio bank)
+  2. Live SRS client UDP CombinedRadioState (full radios[] bank + selected)
   3. Manual in-app EAM radio strip (only when External AWACS mode is enabled)
   4. Unknown — caller should allow and warn
 
 SRS SR-ClientRadio.exe already broadcasts CombinedRadioState JSON to
 127.0.0.1:7080 and :7082 (~5 Hz) including RadioInfo.selected + radios[].freq.
-That is how we learn the common-PTT selected frequency without requiring the
-External AWACS checkbox (that flag only enables the manual Fly EAM strip).
+Selected is used for TX / "TX" on the Fly line, not as the only tuned freq.
+The External AWACS checkbox only enables the manual Fly EAM strip.
 """
 
 from __future__ import annotations
@@ -38,7 +42,7 @@ MOD_INTERCOM = 3
 DEFAULT_SRS_UDP_PORTS = (7080, 7082)  # OutgoingDCSUDPInfo, OutgoingDCSUDPOther
 
 # Runtime EAM freqs (MHz) — updated by the Fly UI; also mirrored into config on save.
-# Only the selected (active) radio counts as "tuned" for the frequency gate.
+# The whole strip is the receive bank; selected index is TX only.
 _eam_freqs_mhz: list[float] = []
 _eam_active_index: int = 0
 _eam_enabled: bool = False
@@ -63,6 +67,7 @@ MatchResult = Literal["match", "mismatch", "unknown"]
 class RadioState:
     source: str  # "dcs" | "srs" | "eam" | "none"
     freqs_mhz: list[float] = field(default_factory=list)
+    selected_mhz: float | None = None  # keyed / common-PTT radio, if known
     unit: str = ""
     age_s: float | None = None
     fresh: bool = False
@@ -197,10 +202,26 @@ def srs_udp_status() -> dict[str, Any]:
 
 
 def read_srs_client_selected(*, stale_s: float = SRS_UDP_STALE_S) -> RadioState:
-    """Selected radio from the live SRS client UDP export (EAM common PTT)."""
+    """Keyed radio only — for EAM common-PTT TX, not the frequency gate."""
+    bank = read_srs_client_radios(stale_s=stale_s)
+    if not bank.fresh or bank.selected_mhz is None:
+        return bank
+    return RadioState(
+        source=bank.source,
+        freqs_mhz=[float(bank.selected_mhz)],
+        selected_mhz=float(bank.selected_mhz),
+        unit=bank.unit,
+        age_s=bank.age_s,
+        fresh=bank.fresh,
+        path=bank.path,
+    )
+
+
+def read_srs_client_radios(*, stale_s: float = SRS_UDP_STALE_S) -> RadioState:
+    """Every usable radio in the live SRS CombinedRadioState bank."""
     ensure_srs_udp_listener()
     with _srs_udp_lock:
-        if not _srs_udp_received_at or _srs_udp_selected_mhz is None:
+        if not _srs_udp_received_at:
             return RadioState(
                 source="srs",
                 fresh=False,
@@ -209,11 +230,25 @@ def read_srs_client_selected(*, stale_s: float = SRS_UDP_STALE_S) -> RadioState:
             )
         age = max(0.0, time.time() - _srs_udp_received_at)
         idx = _srs_udp_selected_index
-        mhz = float(_srs_udp_selected_mhz)
+        selected = (
+            float(_srs_udp_selected_mhz) if _srs_udp_selected_mhz is not None else None
+        )
+        freqs = [float(x) for x in _srs_udp_radios_mhz]
         name = _srs_udp_name or "SRS"
+        err = _srs_udp_error
+    if not freqs and selected is not None:
+        freqs = [selected]
+    if not freqs:
+        return RadioState(
+            source="srs",
+            fresh=False,
+            age_s=age,
+            unit=err or name,
+        )
     return RadioState(
         source="srs",
-        freqs_mhz=[mhz],
+        freqs_mhz=freqs,
+        selected_mhz=selected,
         unit=f"{name} R{idx}" if idx >= 0 else name,
         age_s=age,
         fresh=age <= float(stale_s),
@@ -470,14 +505,26 @@ def read_dcs_radios(*, stale_s: float = DEFAULT_STALE_S) -> RadioState:
     return best
 
 
+def _merge_mhz(into: list[float], freqs: list[float]) -> None:
+    for mhz in freqs:
+        try:
+            value = float(mhz)
+        except (TypeError, ValueError):
+            continue
+        if not any(abs(value - x) < 1e-6 for x in into):
+            into.append(value)
+
+
 def current_radio_state(
     config: dict[str, Any] | None = None,
     *,
     stale_s: float | None = None,
 ) -> RadioState:
     """
-    Resolve tuned radios: fresh DCS export, else live SRS selected radio,
-    else (when External AWACS mode is on) the manual EAM strip, else none.
+    Resolve the receive radio bank: union of a fresh DCS export and live SRS
+    radios, else (when External AWACS mode is on) the whole EAM strip.
+
+    Selected / PTT is recorded separately for TX; it does not replace the bank.
     """
     cfg = config or {}
     if config is not None:
@@ -493,23 +540,54 @@ def current_radio_state(
                 pass
     limit = float(cfg.get("freq_gate_stale_s") or stale_s or DEFAULT_STALE_S)
     dcs = read_dcs_radios(stale_s=limit)
-    # In-jet with fresh export wins even if freqs empty (still "known" session)
-    if dcs.fresh and dcs.unit:
-        dcs.fresh = True
-        return dcs
-    if dcs.fresh and dcs.freqs_mhz:
-        return dcs
-    # Live SRS selected radio (common PTT) — works in-jet or EAM without the
-    # External AWACS checkbox; that flag only enables the manual Fly strip.
-    srs = read_srs_client_selected(stale_s=SRS_UDP_STALE_S)
+    srs = read_srs_client_radios(stale_s=SRS_UDP_STALE_S)
+
+    freqs: list[float] = []
+    selected: float | None = None
+    source = "none"
+    unit = ""
+    age: float | None = None
+    path: Path | None = None
+    fresh = False
+
+    if dcs.fresh and (dcs.unit or dcs.freqs_mhz):
+        _merge_mhz(freqs, dcs.freqs_mhz)
+        source = "dcs"
+        unit = dcs.unit
+        age = dcs.age_s
+        path = dcs.path
+        fresh = True
     if srs.fresh and srs.freqs_mhz:
-        return srs
+        _merge_mhz(freqs, srs.freqs_mhz)
+        selected = srs.selected_mhz
+        if source == "none":
+            source = "srs"
+            unit = srs.unit
+            age = srs.age_s
+            fresh = True
+        elif srs.age_s is not None:
+            age = min(age if age is not None else srs.age_s, srs.age_s)
+
+    if fresh:
+        return RadioState(
+            source=source,
+            freqs_mhz=freqs,
+            selected_mhz=selected,
+            unit=unit,
+            age_s=age,
+            fresh=True,
+            path=path,
+        )
     if _eam_enabled:
-        # Manual strip fallback when SRS client is not broadcasting.
+        # Whole strip is the receive bank; selected row is TX only.
+        bank = eam_freqs_mhz()
         active = eam_active_mhz()
+        if not bank and active is not None:
+            bank = [active]
         return RadioState(
             source="eam",
-            freqs_mhz=[active] if active is not None else [],
+            freqs_mhz=list(bank),
+            selected_mhz=active,
             unit=f"EAM R{eam_active_index() + 1} (manual)",
             age_s=0.0,
             fresh=True,
@@ -517,6 +595,9 @@ def current_radio_state(
     if dcs.source == "dcs":
         dcs.fresh = False
         return dcs
+    if srs.source == "srs" and (srs.freqs_mhz or srs.unit):
+        srs.fresh = False
+        return srs
     return RadioState(source="none", fresh=False, age_s=None)
 
 
@@ -641,34 +722,96 @@ def seed_eam_from_airport(airport: dict[str, Any]) -> list[float]:
     return freqs
 
 
+def format_you_are_on(
+    state: RadioState,
+    airport: dict[str, Any] | None = None,
+    *,
+    tol_mhz: float = DEFAULT_TOL_MHZ,
+) -> str:
+    """
+    Fly 'YOU ARE ON' line: every tuned radio, with TX on the keyed one.
+
+    Intra-flight VHF still shows, but no longer hides UHF agencies.
+    """
+    if not state.freqs_mhz:
+        return ""
+    import atc_phrase  # local import — avoid circular at module load
+
+    tol = max(0.001, float(tol_mhz))
+    parts: list[str] = []
+    for freq in state.freqs_mhz:
+        label = format_mhz(freq)
+        if airport:
+            for ch in atc_phrase.CHANNELS:
+                try:
+                    mhz, _mod, _name = atc_phrase.channel_radio(airport, ch)
+                except Exception:  # noqa: BLE001
+                    continue
+                if mhz is None:
+                    continue
+                try:
+                    if abs(float(mhz) - freq) <= tol:
+                        label = f"{str(ch).upper()} {format_mhz(freq)}"
+                        break
+                except (TypeError, ValueError):
+                    continue
+        if state.selected_mhz is not None and abs(freq - float(state.selected_mhz)) <= tol:
+            label += " TX"
+        parts.append(label)
+    line = "YOU ARE ON  ·  " + "  ·  ".join(parts)
+    if state.source:
+        line += f"  [{state.source.upper()}"
+        if not state.fresh:
+            line += " STALE"
+        line += "]"
+    return line
+
+
 def channel_for_tuned_freq(
     airport: dict[str, Any],
     config: dict[str, Any] | None = None,
     *,
     tol_mhz: float | None = None,
+    state: RadioState | None = None,
 ) -> str | None:
     """
-    Agency whose published freq matches the currently tuned radio.
+    Agency whose published freq matches a currently tuned radio.
 
-    Used so voice replies (winds, altimeter, …) TX on the active frequency
-    instead of whatever step the flow cursor is on.
+    Prefers the keyed / selected radio so voice replies TX on the PTT net.
+    If that radio is intra-flight VHF (no agency), falls through to another
+    tuned agency so Blackjack / Bandsaw tips still follow the UHF stack.
     """
     import atc_phrase
 
     cfg = config or {}
     tol = float(tol_mhz if tol_mhz is not None else cfg.get("freq_gate_tolerance_mhz") or DEFAULT_TOL_MHZ)
-    state = current_radio_state(cfg)
-    if not state.fresh or not state.freqs_mhz:
+    st = state if state is not None else current_radio_state(cfg)
+    if not st.fresh or not st.freqs_mhz:
         return None
-    for ch in atc_phrase.CHANNELS:
-        try:
-            mhz, _mod, _name = atc_phrase.channel_radio(airport, ch)
-        except Exception:  # noqa: BLE001
-            continue
-        if mhz is None:
-            continue
-        if on_frequency(float(mhz), state, tol_mhz=tol, config=cfg) == "match":
-            return str(ch)
+
+    def _channel_for_mhz(target: float) -> str | None:
+        for ch in atc_phrase.CHANNELS:
+            try:
+                mhz, _mod, _name = atc_phrase.channel_radio(airport, ch)
+            except Exception:  # noqa: BLE001
+                continue
+            if mhz is None:
+                continue
+            try:
+                if abs(float(mhz) - target) <= tol:
+                    return str(ch)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    if st.selected_mhz is not None:
+        keyed = _channel_for_mhz(float(st.selected_mhz))
+        if keyed:
+            return keyed
+    for freq in st.freqs_mhz:
+        matched = _channel_for_mhz(float(freq))
+        if matched:
+            return matched
     return None
 
 

@@ -36,7 +36,7 @@ privilege, not which keys you picked. Three ways around it:
 |--------|--------------|-------|
 | **HOTAS / mouse button** | No | Reads the stick or mouse directly, unaffected by focus. Setup → Controls → **Learn…** (same control — press either) |
 | **Keyboard hotkey** | No | Also polled, so it survives DCS focus. Does not swallow the key, so pick a combo DCS ignores |
-| **Local URL** | No | `http://127.0.0.1:8765/next` and `/back` — a Stream Deck *Website* action, no keystroke involved |
+| **Local URL** | No | `http://127.0.0.1:8765/next` and `/back` transmit; `/seek_next` and `/seek_prev` only move the cursor |
 | **Restart as administrator** | Yes | Belt and braces: makes the registered hotkey work as well |
 
 Use whichever you prefer, or all of them at once — a press is only acted on once no
@@ -50,8 +50,10 @@ The **Last trigger** line confirms a press actually reached the app.
 
 Defaults are F13/F14 because Stream Deck can *send* those even though no keyboard has
 them, and they never collide with a DCS binding. On a plain keyboard pick anything free
-— **Capture…** takes whatever you press, e.g. `Ctrl+Alt+Shift+N`. The Controls tab shows
-what actually registered, and says so when another app already owns the combo.
+— **Capture…** takes whatever you press, e.g. `Ctrl+Alt+Shift+N`. **Step forward** and
+**Step back** are unbound until you assign them; they cycle the timeline without
+transmitting. The Controls tab shows what actually registered, and says so when another
+app already owns the combo.
 
 Keys are handled two ways at once. `RegisterHotKey` swallows the keystroke so it never
 reaches the game, but Windows will not deliver it while DCS has focus. Polling the key
@@ -64,9 +66,11 @@ Other endpoints on the same local server: `/reset`, `/flip`, `/seek?n=7`, `/stat
 ### Frequency gate
 
 External Advance / Previous (hotkey, HOTAS, mouse, voice, Stream Deck URL) only
-transmit when you are tuned to the step’s frequency. On-screen **Play** is never
-blocked. If radio state is unknown or stale, the gate **allows** and Fly shows
-`Radio tune unknown — gate open`.
+transmit when **any** of your radios is tuned to the step’s frequency. Keying
+intra-flight VHF does not block UHF ATC / C2 triggers — selected / PTT is TX
+only. On-screen **Play** is never blocked. If radio state is unknown or stale,
+the gate **allows** and Fly shows `Radio tune unknown — gate open`. Fly lists
+every tuned radio and marks the keyed one `TX`.
 
 **In the jet:** Setup → Controls → **Install DCS radio export…** (or
 `Install-DCS-Radio-Export.cmd`). That copies the Lua script and patches
@@ -275,7 +279,7 @@ Calls it understands:
 | "Request vectors" | Radar vector clearance toward recovery / field |
 | "Airport in sight, request tower" | Cleared approach / contact Tower |
 | "Alpha check" | Bullseye position for your aircraft |
-| "We'll take the rolling" / "unable rolling" | Accepts or declines the rolling departure |
+| "We'll take the rolling" / "unable rolling" | Accepts or declines the rolling departure. After Tower asks, **Next / Advance accepts** and **Previous declines** (HOTAS, hotkey, Stream Deck) — no voice or alt-tab needed. |
 | "Gear down full stop" / "going around" / "clear of the runway" | Fires the matching step |
 | "Say again" | Replays the last transmission |
 
@@ -339,6 +343,14 @@ Points worth knowing:
   the mission and are per-step, not global.
 - They stack on top of the built-in calls rather than replacing them; "ready to taxi"
   keeps working either way.
+- **Custom** and **file** steps do not inherit leftover template cues (so Fly will not
+  show “with you” unless you type it). Edit step → **Say to advance** sets the Fly
+  **TO ADVANCE** line for that step.
+- They also do not inherit Bandsaw/Blackjack behavior from a leftover template.
+  **C2 services** (picture / bogey dope / declare) and **Stay after play** are checkboxes
+  on Edit step. Leave both off for Center / Joshua / other transit agencies. Check C2
+  only if that agency should answer those tactical calls. Check Stay if Play should
+  transmit and wait (Bandsaw-style); the Say to advance phrases still move the cursor.
 - Your phrase is offered first on the **You can say** card, so you can see what you wrote.
 - Near-misses still count, so you do not need to enumerate every variation.
 - A phrase you wrote outranks the casual-speech filter — "let's roll" works as a trigger

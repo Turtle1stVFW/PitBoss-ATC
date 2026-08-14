@@ -1601,6 +1601,24 @@ def extras() -> int:
     else:
         print("rolling offer checklist — accept / decline, no runway")
 
+    if not atc_phrase.rolling_offer_awaiting_reply(
+        {"pending_takeoff_offer": "rolling", "last_tx_template": "rolling_accept"}
+    ):
+        print("  FAIL Next/Prev should answer after Tower has asked rolling")
+        bad += 1
+    elif atc_phrase.rolling_offer_awaiting_reply(
+        {"pending_takeoff_offer": "rolling", "last_tx_template": "taxi"}
+    ):
+        print("  FAIL first Next must still play the rolling question, not answer it")
+        bad += 1
+    elif atc_phrase.rolling_offer_awaiting_reply(
+        {"pending_takeoff_offer": None, "last_tx_template": "rolling_accept"}
+    ):
+        print("  FAIL Next/Prev must not steal after the offer is closed")
+        bad += 1
+    else:
+        print("rolling offer Next=accept / Prev=decline gate — ok")
+
     for text, want in (
         ("Tower, Fleece 1, we'll take the rolling", "accept_rolling"),
         ("accept rolling", "accept_rolling"),
@@ -2577,6 +2595,72 @@ def step_phrases() -> int:
     else:
         print("custom step cues — current mission phrases only")
 
+    leftover = [
+        {
+            "id": "dep_custom",
+            "label": "Custom airborne",
+            "channel": "departure",
+            "phase": "departure",
+            "template": "radar_contact",
+            "text": "Nellis Departure, Fleece 1, picture.",
+            "voice_phrases": ["picture"],
+        }
+    ]
+    leftover_cues = voice_intent.suggestions(
+        phase="departure",
+        channel="departure",
+        expected="radar_contact",
+        steps=leftover,
+        current_step_id="dep_custom",
+        limit=5,
+        advance_limit=2,
+        optional_limit=3,
+    )
+    leftover_adv = [
+        str(s).lower()
+        for s, _d, role, *_rest in leftover_cues
+        if role == "advance"
+    ]
+    if "with you" in leftover_adv:
+        print(f"  FAIL custom step must not inherit WITH YOU: {leftover_cues}")
+        bad += 1
+    elif "picture" not in leftover_adv:
+        print(f"  FAIL custom step cue should be the authored phrase: {leftover_cues}")
+        bad += 1
+    else:
+        print("authored custom cues — leftover template hidden")
+
+    empty_custom = [
+        {
+            "id": "dep_empty",
+            "label": "Custom empty",
+            "channel": "departure",
+            "phase": "departure",
+            "template": "radar_contact",
+            "text": "Nellis Departure, Fleece 1, checking in.",
+        }
+    ]
+    empty_cues = voice_intent.suggestions(
+        phase="departure",
+        channel="departure",
+        expected="radar_contact",
+        steps=empty_custom,
+        current_step_id="dep_empty",
+        limit=5,
+        advance_limit=2,
+        optional_limit=3,
+    )
+    empty_adv = [
+        str(s).lower()
+        for s, _d, role, *_rest in empty_cues
+        if role == "advance"
+    ]
+    if "with you" in empty_adv:
+        print(f"  FAIL empty custom step must not show WITH YOU: {empty_cues}")
+        bad += 1
+    else:
+        print("empty custom cues — no leftover WITH YOU")
+
     print(f"step phrases — {'ok' if not bad else f'{bad} problem(s)'}")
     return bad
 
@@ -2604,6 +2688,88 @@ def expecting() -> int:
     return bad
 
 
+def custom_agency_behavior() -> int:
+    """Center / Joshua on channel other must not inherit Bandsaw C2 or hold."""
+    bad = 0
+    center = {
+        "id": "la_center",
+        "label": "LA Center check-in",
+        "channel": "other",
+        "phase": "flight",
+        "template": "bandsaw_check_in",
+        "mode": "file",
+        "file": "center.mp3",
+    }
+    if voice_intent.step_holds_after_play(center):
+        print("  FAIL authored leftover Bandsaw template must not hold after play")
+        bad += 1
+    if voice_intent.step_offers_c2(center):
+        print("  FAIL Other/Center must not offer C2 unless c2=true")
+        bad += 1
+    if not voice_intent.step_holds_after_play({**center, "hold": True}):
+        print("  FAIL hold=true must keep the cursor after play")
+        bad += 1
+    live_bs = {
+        "id": "bs",
+        "channel": "bandsaw",
+        "template": "bandsaw_check_in",
+        "mode": "tts",
+    }
+    if not voice_intent.step_holds_after_play(live_bs):
+        print("  FAIL live Bandsaw check-in must still hold")
+        bad += 1
+    if not voice_intent.step_offers_c2(live_bs, channel="bandsaw"):
+        print("  FAIL Bandsaw must still offer C2")
+        bad += 1
+
+    dope = voice_intent.evaluate(
+        "Center, Fleece 1, bogey dope",
+        channel="other",
+        phase="flight",
+        expected="bandsaw_check_in",
+        callsign=CALLSIGN,
+        steps=[center],
+        current_step_id="la_center",
+    )
+    if dope.fired:
+        print(f"  FAIL Center must not answer bogey dope: {dope.describe()}")
+        bad += 1
+
+    cues = voice_intent.suggestions(
+        phase="flight",
+        channel="other",
+        expected="bandsaw_check_in",
+        steps=[center],
+        current_step_id="la_center",
+        limit=8,
+        advance_limit=2,
+        optional_limit=6,
+    )
+    says = " ".join(str(s).lower() for s, *_ in cues)
+    if "bogey" in says or "picture" in says or "declare" in says:
+        print(f"  FAIL Center cues must not list C2 calls: {cues}")
+        bad += 1
+
+    c2_step = {**center, "c2": True}
+    dope_on = voice_intent.evaluate(
+        "Center, Fleece 1, bogey dope",
+        channel="other",
+        phase="flight",
+        callsign=CALLSIGN,
+        steps=[c2_step],
+        current_step_id="la_center",
+    )
+    if not dope_on.fired or dope_on.match.intent != "request_bogey_dope":
+        print(f"  FAIL c2=true Other step should answer bogey dope: {dope_on.describe()}")
+        bad += 1
+
+    if bad:
+        print(f"custom agency behavior — {bad} problem(s)")
+    else:
+        print("custom agency behavior — Center is transit; C2/hold are opt-in")
+    return bad
+
+
 def main() -> int:
     failures = 0
     for transcript, channel, mission_phase, should_fire, want in CASES:
@@ -2627,6 +2793,7 @@ def main() -> int:
     failures += extras()
     failures += step_phrases()
     failures += expecting()
+    failures += custom_agency_behavior()
     return 1 if failures else 0
 
 

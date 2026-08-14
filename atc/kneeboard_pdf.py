@@ -43,6 +43,8 @@ def build_lines(mission: dict[str, Any], airport: dict[str, Any]) -> list[tuple[
     lines.append(("CONTROLS", None))
     lines.append((">> PLAY NEXT", f"{BASE}/next"))
     lines.append(("<< PLAY PREVIOUS", f"{BASE}/back"))
+    lines.append((">> STEP (no TX)", f"{BASE}/seek_next"))
+    lines.append(("<< STEP (no TX)", f"{BASE}/seek_prev"))
     lines.append(("RESET", f"{BASE}/reset"))
     lines.append(("", None))
 

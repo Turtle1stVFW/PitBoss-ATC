@@ -1,5 +1,6 @@
 """
-Fly hotkeys for Next / Back — configurable strings + Windows global RegisterHotKey.
+Fly hotkeys for Next / Back / step cycle — configurable strings + Windows
+global RegisterHotKey.
 
 Config examples:
   "F13"
@@ -16,7 +17,7 @@ Two ways to read the keyboard, because RegisterHotKey alone is not enough:
     elevation and reports release as well as press, so it can drive
     hold-to-talk. Does not consume the keystroke.
 
-Both run at once for Next / Back; the UI debounces so a press fires once.
+Both run at once for bound actions; the UI debounces so a press fires once.
 """
 
 from __future__ import annotations
@@ -31,6 +32,16 @@ from typing import Any
 # Defaults work well with Stream Deck Hotkey actions (rarely collide with DCS)
 DEFAULT_HOTKEY_NEXT = "F13"
 DEFAULT_HOTKEY_BACK = "F14"
+# Step cycle is unbound until the user assigns it — do not steal extra F-keys.
+DEFAULT_HOTKEY_SEEK_NEXT = ""
+DEFAULT_HOTKEY_SEEK_PREV = ""
+
+_HOTKEY_CONFIG_KEYS = {
+    "next": ("hotkey_next", DEFAULT_HOTKEY_NEXT),
+    "back": ("hotkey_back", DEFAULT_HOTKEY_BACK),
+    "seek_next": ("hotkey_seek_next", DEFAULT_HOTKEY_SEEK_NEXT),
+    "seek_prev": ("hotkey_seek_prev", DEFAULT_HOTKEY_SEEK_PREV),
+}
 
 MOD_ALT = 0x0001
 MOD_CONTROL = 0x0002
@@ -238,11 +249,10 @@ def elevation_warning() -> str:
 
 
 def hotkey_from_config(config: dict[str, Any], which: str) -> str:
-    if which == "next":
-        return normalize_hotkey(config.get("hotkey_next"), default=DEFAULT_HOTKEY_NEXT)
-    if which == "back":
-        return normalize_hotkey(config.get("hotkey_back"), default=DEFAULT_HOTKEY_BACK)
-    return ""
+    key, default = _HOTKEY_CONFIG_KEYS.get(which, ("", ""))
+    if not key:
+        return ""
+    return normalize_hotkey(config.get(key), default=default)
 
 
 def format_event(event: Any) -> str:
@@ -415,6 +425,7 @@ class GlobalHotkeyListener:
         self._specs: list[tuple[int, int, int, str, Callable[[], None]]] = []
         self._register_errors: list[str] = []
         self._registered_labels: list[str] = []
+        self._notify_names: dict[int, str] = {}
         self.on_trigger: Callable[[str], None] | None = None
 
     @property
@@ -434,6 +445,10 @@ class GlobalHotkeyListener:
         back_hotkey: str,
         on_next: Callable[[], None],
         on_back: Callable[[], None],
+        seek_next_hotkey: str = "",
+        seek_prev_hotkey: str = "",
+        on_seek_next: Callable[[], None] | None = None,
+        on_seek_prev: Callable[[], None] | None = None,
     ) -> list[str]:
         """(Re)start listener. Returns list of warning strings."""
         warnings: list[str] = []
@@ -443,21 +458,28 @@ class GlobalHotkeyListener:
             return warnings
 
         specs: list[tuple[int, int, int, str, Callable[[], None]]] = []
+        names: dict[int, str] = {}
         for hid, raw, cb, label in (
             (1, next_hotkey, on_next, "Next"),
             (2, back_hotkey, on_back, "Back"),
+            (3, seek_next_hotkey, on_seek_next, "Step ▶"),
+            (4, seek_prev_hotkey, on_seek_prev, "Step ◀"),
         ):
+            if cb is None or not str(raw or "").strip():
+                continue
             parsed = parse_hotkey(raw)
             if not parsed:
                 warnings.append(f"Invalid {label} hotkey: {raw!r}")
                 continue
             mods, vk, _seq = parsed
             specs.append((hid, mods, vk, f"{label} {raw}", cb))
+            names[hid] = label
 
         if not specs:
             return warnings
 
         self._specs = specs
+        self._notify_names = names
         self._stop.clear()
         self._ready.clear()
         self._thread = threading.Thread(target=self._run, name="atc-hotkeys", daemon=True)
@@ -555,6 +577,6 @@ class GlobalHotkeyListener:
         if not observer:
             return
         try:
-            observer("Next" if hid == 1 else "Back")
+            observer(self._notify_names.get(hid, "Hotkey"))
         except Exception:  # noqa: BLE001
             pass

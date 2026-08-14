@@ -18,8 +18,7 @@
       "template": "clearance",
       "file": null,
       "enabled": true,
-      "text": null,
-      "initial_climb_ft": 22000
+      "text": null
     },
     {
       "id": "del_readback",
@@ -55,8 +54,7 @@
       "text": null,
       "trigger": {
         "zone": "eor",
-        "when": "inside",
-        "settled": true
+        "settled": false
       }
     },
     {
@@ -71,8 +69,6 @@
       "text": null,
       "trigger": {
         "zone": "in_position",
-        "when": "inside",
-        "settled": true,
         "dwell_s": 3,
         "gap_s": 5
       }
@@ -104,8 +100,7 @@
       "template": "radar_contact",
       "file": null,
       "enabled": true,
-      "text": null,
-      "initial_climb_ft": 22000
+      "text": null
     },
     {
       "id": "dep_cruise",
@@ -234,7 +229,12 @@
       "text": null,
       "voice": "en-US-Chirp3-HD-Iapetus",
       "freq_mhz": 348.7,
-      "mod": "AM"
+      "mod": "AM",
+      "c2": false,
+      "hold": false,
+      "voice_phrases": [
+        "Point Charlie"
+      ]
     },
     {
       "id": "joshua_control_check_in_3c06af",
@@ -249,7 +249,9 @@
       "voice": "en-US-Chirp3-HD-Iapetus",
       "freq_mhz": 348.7,
       "mod": "AM",
-      "locked": false
+      "locked": false,
+      "c2": false,
+      "hold": false
     },
     {
       "id": "jc_radar_terminated_switch_to_swll_e5cf7a",
@@ -264,7 +266,9 @@
       "voice": "en-US-Chirp3-HD-Iapetus",
       "freq_mhz": 348.7,
       "mod": "AM",
-      "locked": false
+      "locked": false,
+      "c2": false,
+      "hold": false
     },
     {
       "id": "jc_after_swll_e10f11",
@@ -427,6 +431,5 @@
     }
   ],
   "active_takeoff_mode": "lineup",
-  "landing_intent": "full_stop",
-  "initial_climb_ft": 22000
+  "landing_intent": "full_stop"
 }

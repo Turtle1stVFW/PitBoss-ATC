@@ -146,7 +146,12 @@ class MissionPlanner(tk.Tk):
         self._tk_hotkey_binds: list[str] = []
         self._keys = hotkeys.KeyWatcher()
         self._joystick = joystick.JoystickWatcher()
-        self._joy_bindings: dict[str, dict[str, Any] | None] = {"next": None, "back": None}
+        self._joy_bindings: dict[str, dict[str, Any] | None] = {
+            "next": None,
+            "back": None,
+            "seek_next": None,
+            "seek_prev": None,
+        }
         self._trigger_lock = threading.Lock()
         self._trigger_last: dict[str, float] = {}
         self._voice: voice_engine.VoiceController | None = None
@@ -433,14 +438,23 @@ class MissionPlanner(tk.Tk):
             return
         nxt = hotkeys.hotkey_from_config(self.config_data, "next")
         bak = hotkeys.hotkey_from_config(self.config_data, "back")
+        seek_n = hotkeys.hotkey_from_config(self.config_data, "seek_next")
+        seek_p = hotkeys.hotkey_from_config(self.config_data, "seek_prev")
         parts = [f"Hotkeys  Next {nxt}  ·  Back {bak}"]
-        joy_next = self._joy_bindings.get("next")
-        joy_back = self._joy_bindings.get("back")
-        if joy_next or joy_back:
-            parts.append(
-                f"Controller  Next {joystick.describe_binding(joy_next)}"
-                f"  ·  Back {joystick.describe_binding(joy_back)}"
-            )
+        if seek_n or seek_p:
+            parts[0] += f"  ·  Step {seek_p or '—'} / {seek_n or '—'}"
+        joy_bits = []
+        for key, label in (
+            ("next", "Next"),
+            ("back", "Back"),
+            ("seek_next", "Step ▶"),
+            ("seek_prev", "Step ◀"),
+        ):
+            binding = self._joy_bindings.get(key)
+            if binding:
+                joy_bits.append(f"{label} {joystick.describe_binding(binding)}")
+        if joy_bits:
+            parts.append("Controller  " + "  ·  ".join(joy_bits))
         self.fly_hotkey_hint.set("      ".join(parts))
 
     def _on_trigger_received(self, label: str) -> None:
@@ -466,10 +480,13 @@ class MissionPlanner(tk.Tk):
         def run() -> None:
             allowed, msg = self._external_freq_gate_allows(action)
             if not allowed:
-                self._on_trigger_received(msg)
-                if hasattr(self, "fly_log"):
-                    self.fly_log.insert(tk.END, f"{msg}\n")
-                    self.fly_log.see(tk.END)
+                step = None
+                try:
+                    eng = getattr(self, "engine", None)
+                    step = eng.current_step() if eng is not None else None
+                except Exception:  # noqa: BLE001
+                    step = None
+                self._note_no_tx(msg, action=action, step=step)
                 return
             self._fly(action, bypass_freq_gate=False)
 
@@ -485,7 +502,11 @@ class MissionPlanner(tk.Tk):
         try:
             eng = getattr(self, "engine", None)
             if eng is not None:
-                if action == "back":
+                # Answering a live rolling offer TXes on Tower — not the
+                # previous step Back would otherwise replay.
+                if atc_phrase.rolling_offer_awaiting_reply(eng.state):
+                    step = eng.current_step()
+                elif action == "back":
                     steps = eng.steps
                     idx = max(0, int(eng.state.get("index") or 0) - 1)
                     step = steps[idx] if steps and idx < len(steps) else eng.current_step()
@@ -805,25 +826,12 @@ class MissionPlanner(tk.Tk):
         (you_are_on, next_step_line, gate_line, gate_color) for the Fly freq box.
         """
         state = srs_radio.current_radio_state(self.config_data)
-        tuned_ch = srs_radio.channel_for_tuned_freq(airport, self.config_data)
-        if tuned_ch:
+        if state.freqs_mhz:
             try:
-                mhz, _mod, _ = atc_phrase.channel_radio(airport, tuned_ch)
-                tuned_line = (
-                    f"YOU ARE ON  ·  {tuned_ch.upper()}  {srs_radio.format_mhz(mhz)}"
-                )
-            except Exception:  # noqa: BLE001
-                tuned_line = f"YOU ARE ON  ·  {tuned_ch.upper()}"
-            if state.source:
-                tuned_line += f"  [{state.source.upper()}]"
-        elif state.freqs_mhz:
-            # Fresh or last-known (stale DCS / quiet SRS) — still show something usable.
-            tuned_line = f"YOU ARE ON  ·  {srs_radio.format_freqs(state.freqs_mhz)}"
-            if state.source:
-                tuned_line += f"  [{state.source.upper()}"
-                if not state.fresh:
-                    tuned_line += " STALE"
-                tuned_line += "]"
+                tol = float(self.config_data.get("freq_gate_tolerance_mhz") or 0.05)
+            except (TypeError, ValueError):
+                tol = 0.05
+            tuned_line = srs_radio.format_you_are_on(state, airport, tol_mhz=tol)
         else:
             udp = srs_radio.srs_udp_status()
             hint = ""
@@ -858,6 +866,14 @@ class MissionPlanner(tk.Tk):
             next_line = (
                 f"NEXT STEP  ·  {phase_lbl}  ·  {label}  ({ch.upper()} {need}){handoff}"
             )
+            try:
+                st = getattr(self.engine, "state", None)
+                if atc_phrase.rolling_offer_awaiting_reply(st):
+                    next_line = (
+                        "NEXT  ·  accept rolling    PREV  ·  decline"
+                    )
+            except Exception:  # noqa: BLE001
+                pass
         else:
             next_line = "NEXT STEP  ·  —"
 
@@ -868,7 +884,7 @@ class MissionPlanner(tk.Tk):
         return tuned_line, next_line, gate_msg, color
 
     def _schedule_freq_gate_poll(self) -> None:
-        """Keep Fly gate / EAM TX marker in sync with the live SRS selected radio."""
+        """Keep Fly gate / tuned-radio line in sync with the live SRS radio bank."""
         try:
             if hasattr(self, "fly_freq_gate"):
                 self._update_fly_freq_gate_status()
@@ -1193,7 +1209,7 @@ class MissionPlanner(tk.Tk):
         except Exception as exc:  # noqa: BLE001
             tracker.clear_fired(latch)
             tracker.pending_latch = ""
-            self._voice_log(f"AUTO  {label or fire} blocked: {exc}")
+            self._note_no_tx(str(exc), action="auto", step=step if isinstance(step, dict) else None)
             return
         tracker.fire_once(latch)
         tracker.pending_latch = ""
@@ -1281,33 +1297,54 @@ class MissionPlanner(tk.Tk):
         self._tk_hotkey_binds = []
 
     def _apply_hotkeys(self) -> None:
-        """Register global (Windows) + in-app binds for Next / Back."""
-        if hasattr(self, "var_hotkey_next"):
-            nxt = hotkeys.normalize_hotkey(
-                self.var_hotkey_next.get(), default=hotkeys.DEFAULT_HOTKEY_NEXT
-            )
-            bak = hotkeys.normalize_hotkey(
-                self.var_hotkey_back.get(), default=hotkeys.DEFAULT_HOTKEY_BACK
-            )
-            self.var_hotkey_next.set(nxt)
-            self.var_hotkey_back.set(bak)
-        else:
-            nxt = hotkeys.hotkey_from_config(self.config_data, "next")
-            bak = hotkeys.hotkey_from_config(self.config_data, "back")
-        self.config_data["hotkey_next"] = nxt
-        self.config_data["hotkey_back"] = bak
+        """Register global (Windows) + in-app binds for Next / Back / step cycle."""
+        combos: dict[str, str] = {}
+        for which, default in (
+            ("next", hotkeys.DEFAULT_HOTKEY_NEXT),
+            ("back", hotkeys.DEFAULT_HOTKEY_BACK),
+            ("seek_next", hotkeys.DEFAULT_HOTKEY_SEEK_NEXT),
+            ("seek_prev", hotkeys.DEFAULT_HOTKEY_SEEK_PREV),
+        ):
+            var = getattr(self, f"var_hotkey_{which}", None)
+            if var is not None:
+                combo = hotkeys.normalize_hotkey(var.get(), default=default)
+                var.set(combo)
+            else:
+                combo = hotkeys.hotkey_from_config(self.config_data, which)
+            combos[which] = combo
+            self.config_data[f"hotkey_{which}"] = combo
+
+        seen_combos: dict[str, str] = {}
+        dup_warnings: list[str] = []
+        for which, combo in combos.items():
+            if not combo:
+                continue
+            other = seen_combos.get(combo)
+            if other:
+                dup_warnings.append(
+                    f"{which.replace('_', ' ')} uses the same key as {other.replace('_', ' ')} ({combo})"
+                )
+            else:
+                seen_combos[combo] = which
 
         self._clear_tk_hotkeys()
 
-        def on_next() -> None:
-            self._trigger("next")
-
-        def on_back() -> None:
-            self._trigger("back")
+        callbacks = {
+            "next": lambda: self._trigger("next"),
+            "back": lambda: self._trigger("back"),
+            "seek_next": lambda: self._trigger("seek_next"),
+            "seek_prev": lambda: self._trigger("seek_prev"),
+        }
+        labels = {
+            "next": "Next",
+            "back": "Back",
+            "seek_next": "Step ▶",
+            "seek_prev": "Step ◀",
+        }
 
         # In-app binds (when this window has focus)
-        for raw, cb in ((nxt, on_next), (bak, on_back)):
-            parsed = hotkeys.parse_hotkey(raw)
+        for which, cb in callbacks.items():
+            parsed = hotkeys.parse_hotkey(combos[which])
             if not parsed:
                 continue
             _mods, _vk, seq = parsed
@@ -1323,33 +1360,39 @@ class MissionPlanner(tk.Tk):
                 pass
 
         warnings = self._hotkey_listener.start(
-            next_hotkey=nxt,
-            back_hotkey=bak,
-            on_next=on_next,
-            on_back=on_back,
+            next_hotkey=combos["next"],
+            back_hotkey=combos["back"],
+            on_next=callbacks["next"],
+            on_back=callbacks["back"],
+            seek_next_hotkey=combos["seek_next"],
+            seek_prev_hotkey=combos["seek_prev"],
+            on_seek_next=callbacks["seek_next"],
+            on_seek_prev=callbacks["seek_prev"],
         )
+        warnings[0:0] = dup_warnings
         # Polled in parallel: RegisterHotKey dies in-game, this does not.
         # _trigger() collapses the two so a press still counts once.
         self._keys.clear_bindings()
-        for key, combo, cb, label in (
-            ("next", nxt, on_next, "Next"),
-            ("back", bak, on_back, "Back"),
-        ):
-            def fire(fn: Callable[[], None] = cb, name: str = label) -> None:
+        for which, cb in callbacks.items():
+            combo = combos[which]
+            if not combo:
+                continue
+
+            def fire(fn: Callable[[], None] = cb, name: str = labels[which]) -> None:
                 self._on_trigger_received(f"Key {name}")
                 fn()
 
-            warning = self._keys.set_binding(key, combo, on_press=fire)
+            warning = self._keys.set_binding(which, combo, on_press=fire)
             if warning:
                 warnings.append(warning)
         self._keys.start()
 
         registered = self._hotkey_listener.registered
         status = f"Keyboard: {', '.join(registered) if registered else 'none registered'}"
-        warnings.extend(self._apply_joystick(on_next, on_back))
+        warnings.extend(self._apply_joystick(callbacks))
         joy = [
-            f"{label} {joystick.describe_binding(self._joy_bindings[key])}"
-            for key, label in (("next", "Next"), ("back", "Back"))
+            f"{labels[key]} {joystick.describe_binding(self._joy_bindings[key])}"
+            for key in labels
             if self._joy_bindings.get(key)
         ]
         status += f"   ·   Controller: {', '.join(joy) if joy else 'none bound'}"
@@ -1360,14 +1403,20 @@ class MissionPlanner(tk.Tk):
         self._update_fly_hotkey_hint()
 
     def _apply_joystick(
-        self, on_next: Callable[[], None], on_back: Callable[[], None]
+        self, callbacks: dict[str, Callable[[], None]]
     ) -> list[str]:
         """Bind HOTAS / mouse buttons. Unlike hotkeys these survive DCS having focus."""
         warnings: list[str] = []
         self._joystick.clear_bindings()
         if not self._joystick.supported:
             return warnings
-        for key, cb, label in (("next", on_next, "Next"), ("back", on_back, "Back")):
+        labels = {
+            "next": "Next",
+            "back": "Back",
+            "seek_next": "Step ▶",
+            "seek_prev": "Step ◀",
+        }
+        for key, cb in callbacks.items():
             binding = self._joy_bindings.get(key)
             var = getattr(self, f"var_joy_{key}", None)
             if var is not None:
@@ -1377,14 +1426,16 @@ class MissionPlanner(tk.Tk):
             source = "Mouse" if joystick.is_mouse_binding(binding) else "HOTAS"
 
             def fire(
-                fn: Callable[[], None] = cb, name: str = label, src: str = source
+                fn: Callable[[], None] = cb,
+                name: str = labels.get(key, key),
+                src: str = source,
             ) -> None:
                 self._on_trigger_received(f"{src} {name}")
                 fn()
 
             warning = self._joystick.set_binding(key, binding, on_press=fire)
             if warning:
-                warnings.append(f"{label}: {warning}")
+                warnings.append(f"{labels.get(key, key)}: {warning}")
         if any(self._joy_bindings.values()):
             self._joystick.start()
         else:
@@ -1392,8 +1443,8 @@ class MissionPlanner(tk.Tk):
         return warnings
 
     def _learn_joy_button(self, which: str) -> None:
-        """Capture the next HOTAS or mouse press and bind it to Next or Back."""
-        var = self.var_joy_next if which == "next" else self.var_joy_back
+        """Capture the next HOTAS or mouse press and bind it to a Fly action."""
+        var = getattr(self, f"var_joy_{which}")
         previous = var.get()
         var.set("Press a HOTAS or mouse button…")
 
@@ -1415,7 +1466,7 @@ class MissionPlanner(tk.Tk):
 
     def _clear_joy_button(self, which: str) -> None:
         self._joy_bindings[which] = None
-        (self.var_joy_next if which == "next" else self.var_joy_back).set("(none)")
+        getattr(self, f"var_joy_{which}").set("(none)")
         self._apply_hotkeys()
 
     def _suggest_srs_ptt(self) -> None:
@@ -1513,8 +1564,16 @@ class MissionPlanner(tk.Tk):
                     str(step.get("phase") or ""),
                     channel=cursor_channel,
                 )
-                context["expected"] = str(step.get("template") or "")
-                context["current_step_id"] = str(step.get("id") or "").strip()
+                live_step = step
+                sid = str(step.get("id") or "").strip()
+                live = self.mission.get("steps") if isinstance(self.mission.get("steps"), list) else None
+                if sid and live:
+                    for row in live:
+                        if isinstance(row, dict) and str(row.get("id") or "").strip() == sid:
+                            live_step = row
+                            break
+                context["expected"] = voice_intent.step_expected_template(live_step)
+                context["current_step_id"] = sid
         except Exception:  # noqa: BLE001
             pass
         # Tips / voice scoring follow the live radio when it is an agency in
@@ -1656,8 +1715,7 @@ class MissionPlanner(tk.Tk):
 
                 def fail() -> None:
                     if err.startswith("Blocked:"):
-                        self._voice_log(err)
-                        self._on_trigger_received(err)
+                        self._note_no_tx(err, action="voice")
                     else:
                         self._voice_log(f"VOICE  {match.intent} failed: {err}")
 
@@ -1669,8 +1727,11 @@ class MissionPlanner(tk.Tk):
                 detail = result.get("detail")
                 if action == "blocked":
                     blocked = str(detail or "Blocked off frequency")
-                    self._voice_log(blocked)
-                    self._on_trigger_received(blocked)
+                    self._note_no_tx(
+                        blocked,
+                        action="voice",
+                        channel=str(result.get("channel") or ""),
+                    )
                 elif action == "transmit":
                     self._voice_log(f"TX   {result.get('channel', '').upper()}  {result.get('text', '')}")
                 elif isinstance(detail, dict):
@@ -1758,13 +1819,57 @@ class MissionPlanner(tk.Tk):
             self.fly_log.see(tk.END)
         self._append_fly_voice_feed(text)
 
+    def _note_no_tx(
+        self,
+        reason: str,
+        *,
+        action: str = "",
+        step: dict[str, Any] | None = None,
+        channel: str = "",
+    ) -> None:
+        """LAST HEARD + log: a scripted TX was attempted but did not go out."""
+        label = ""
+        if isinstance(step, dict):
+            label = str(
+                step.get("label") or step.get("id") or step.get("channel") or ""
+            ).strip()
+        ch = (channel or "").strip().upper()
+        if not ch and isinstance(step, dict):
+            ch = str(step.get("channel") or "").strip().upper()
+        act = (action or "").strip().upper()
+        why = (reason or "did not transmit").strip()
+        if why.lower().startswith("blocked:"):
+            why = why.split(":", 1)[1].strip()
+        parts = ["NO TX"]
+        if act:
+            parts.append(act)
+        if label:
+            parts.append(label)
+        elif ch:
+            parts.append(ch)
+        line = "  ·  ".join(parts) + f"  —  {why}"
+        self._voice_log(line)
+        self._on_trigger_received(line)
+
     def _append_fly_voice_feed(self, line: str) -> None:
         """Push a short line into the Fly freq-box LAST HEARD panel."""
         if not hasattr(self, "fly_voice_feed"):
             return
+        text = line if line.endswith("\n") else line + "\n"
+        # Mashing Next off-freq should not flood the 8-line glance panel.
+        if text.lstrip().upper().startswith("NO TX"):
+            if getattr(self, "_last_no_tx_feed", "") == text:
+                return
+            self._last_no_tx_feed = text
+        else:
+            self._last_no_tx_feed = ""
         feed = self.fly_voice_feed
         feed.configure(state=tk.NORMAL)
-        feed.insert(tk.END, line if line.endswith("\n") else line + "\n")
+        tag = "no_tx" if text.lstrip().upper().startswith("NO TX") else ""
+        if tag:
+            feed.insert(tk.END, text, tag)
+        else:
+            feed.insert(tk.END, text)
         # Keep the glanceable panel short (newest at bottom).
         try:
             end_line = int(float(feed.index("end-1c").split(".")[0]))
@@ -1822,17 +1927,28 @@ class MissionPlanner(tk.Tk):
         dlg.wait_window()
 
     def _capture_hotkey(self, which: str) -> None:
-        """Press a key combo to set Next or Back."""
-        label = "Advance (Next)" if which == "next" else "Previous (Back)"
+        """Press a key combo to set a Fly action."""
+        labels = {
+            "next": "Advance (Next)",
+            "back": "Previous (Back)",
+            "seek_next": "Step forward (no TX)",
+            "seek_prev": "Step back (no TX)",
+        }
+        label = labels.get(which, which)
+        var = getattr(self, f"var_hotkey_{which}")
 
         def apply(combo: str) -> None:
-            if which == "next":
-                self.var_hotkey_next.set(combo)
-            else:
-                self.var_hotkey_back.set(combo)
+            var.set(combo)
             self.after(250, self._apply_hotkeys)
 
         self._capture_key(f"Press a key combo for {label}", apply)
+
+    def _clear_hotkey(self, which: str) -> None:
+        var = getattr(self, f"var_hotkey_{which}", None)
+        if var is None:
+            return
+        var.set("")
+        self.after(250, self._apply_hotkeys)
 
     def _capture_voice_ptt_key(self) -> None:
         """Press a key to use as push-to-talk. Held, not tapped."""
@@ -2181,6 +2297,8 @@ class MissionPlanner(tk.Tk):
         self.var_template = tk.StringVar()
         self.var_file = tk.StringVar()
         self.var_enabled = tk.BooleanVar(value=True)
+        self.var_step_c2 = tk.BooleanVar(value=False)
+        self.var_step_hold = tk.BooleanVar(value=False)
         self.var_freq_hint = tk.StringVar(value="")
         self.var_freq_mhz = tk.StringVar()
         self.var_step_voice = tk.StringVar()
@@ -2463,12 +2581,43 @@ class MissionPlanner(tk.Tk):
         file_fr.grid(row=11, column=1, sticky="we", pady=4, padx=(0, 10))
         self._file_fr = file_fr
 
+        self.var_enabled = tk.BooleanVar(value=True)
+        step_flags = tk.Frame(form, bg=C_PANEL)
         ttk.Checkbutton(
-            form,
+            step_flags,
             text="Include in flight (enabled)",
             variable=self.var_enabled,
             style="Panel.TCheckbutton",
-        ).grid(row=12, column=1, sticky="w", pady=6, padx=(0, 10))
+        ).pack(anchor="w")
+        ttk.Checkbutton(
+            step_flags,
+            text="C2 services — picture, bogey dope, declare",
+            variable=self.var_step_c2,
+            style="Panel.TCheckbutton",
+            command=self._refresh_step_summary,
+        ).pack(anchor="w", pady=(2, 0))
+        ttk.Checkbutton(
+            step_flags,
+            text="Stay after play — transmit, leave cursor here",
+            variable=self.var_step_hold,
+            style="Panel.TCheckbutton",
+            command=self._refresh_step_summary,
+        ).pack(anchor="w")
+        tk.Label(
+            step_flags,
+            text="C2 is Blackjack / Bandsaw-style control — off for Center and transit. "
+            "Stay: Play does not advance; use Seek or the Say to advance phrases.",
+            bg=C_PANEL,
+            fg=C_MUTED,
+            font=("Segoe UI", 8),
+            wraplength=360,
+            justify=tk.LEFT,
+        ).pack(anchor="w", pady=(4, 0))
+        tk.Label(form, text="Step", bg=C_PANEL, fg=C_LABEL, font=("Segoe UI", 9)).grid(
+            row=12, column=0, sticky="nw", pady=4, padx=(10, 6)
+        )
+        step_flags.grid(row=12, column=1, sticky="we", pady=4, padx=(0, 10))
+        self._step_flags_fr = step_flags
 
         self._step_phrases_draft: list[str] = []
         self.var_keywords_summary = tk.StringVar(value="")
@@ -2500,6 +2649,32 @@ class MissionPlanner(tk.Tk):
         phrases_fr.grid(row=14, column=1, sticky="we", pady=4, padx=(0, 10))
         self._row_phrases_hint.grid(row=15, column=1, sticky="w", padx=(0, 10), pady=(0, 6))
         self._phrases_fr = phrases_fr
+
+        self._row_cues_lbl = tk.Label(
+            form, text="Say to advance", bg=C_PANEL, fg=C_LABEL, font=("Segoe UI", 9)
+        )
+        self.txt_cues = tk.Text(
+            form,
+            height=3,
+            bg=C_CARD,
+            fg=C_TEXT,
+            insertbackground=C_TEXT,
+            font=("Segoe UI", 10),
+            relief=tk.FLAT,
+            wrap=tk.WORD,
+        )
+        self._row_cues_hint = tk.Label(
+            form,
+            text="Shown on Fly under TO ADVANCE. One phrase per line — any one fires this step.",
+            bg=C_PANEL,
+            fg=C_MUTED,
+            font=("Segoe UI", 8),
+            wraplength=360,
+            justify=tk.LEFT,
+        )
+        self._row_cues_lbl.grid_remove()
+        self.txt_cues.grid_remove()
+        self._row_cues_hint.grid_remove()
 
         self._build_trigger_group(form, row=16)
         dlg.bind("<Escape>", lambda _e: self._cancel_step_editor())
@@ -2571,11 +2746,15 @@ class MissionPlanner(tk.Tk):
             lines.append(f"Recovery · {self.var_step_recovery.get() or '—'}")
 
         enabled = "Enabled" if self.var_enabled.get() else "Disabled"
+        bits = [enabled]
+        if bool(self.var_step_c2.get()) if hasattr(self, "var_step_c2") else False:
+            bits.append("C2")
+        if bool(self.var_step_hold.get()) if hasattr(self, "var_step_hold") else False:
+            bits.append("stay after play")
         trig = (self.var_trig_zone_lbl.get() or "").strip() if hasattr(self, "var_trig_zone_lbl") else ""
         if trig and trig != TRIG_NONE:
-            lines.append(f"{enabled} · fires: {trig}")
-        else:
-            lines.append(enabled)
+            bits.append(f"fires: {trig}")
+        lines.append(" · ".join(bits))
 
         if self.var_locked.get():
             label = f"{label}  (locked)"
@@ -2616,6 +2795,8 @@ class MissionPlanner(tk.Tk):
         if not self.apply_step():
             return
         self.after(40, lambda: self.preview_step(apply=False))
+        if hasattr(self, "_refresh_voice_prompts"):
+            self._refresh_voice_prompts()
         self._close_step_editor()
 
     def _cancel_step_editor(self) -> None:
@@ -3173,6 +3354,11 @@ class MissionPlanner(tk.Tk):
             return
         if self._step_is_locked():
             return
+        try:
+            if getattr(self, "txt_cues", None) and self.txt_cues.winfo_ismapped():
+                self._step_phrases_draft = self._read_cues_box()
+        except tk.TclError:
+            pass
         mode = self.var_mode.get()
         if mode == "tts" and self.selected_index is not None:
             step = self._steps()[self.selected_index]
@@ -3184,6 +3370,8 @@ class MissionPlanner(tk.Tk):
             self._preview_base_phrase = ""
             self.after(20, lambda: self.preview_step(apply=False))
         self._mode_ui()
+        if mode in ("custom", "file"):
+            self._fill_cues_box()
 
     def _mode_ui(self) -> None:
         mode = self.var_mode.get()
@@ -3212,6 +3400,21 @@ class MissionPlanner(tk.Tk):
 
         _set(self._row_file_lbl, show_file, row=11, column=0, sticky="nw", pady=4, padx=(10, 6))
         _set(self._file_fr, show_file, row=11, column=1, sticky="we", pady=4, padx=(0, 10))
+
+        show_cues = mode in ("custom", "file")
+        show_keywords = mode == "tts"
+        _set(self._row_cues_lbl, show_cues, row=14, column=0, sticky="nw", pady=4, padx=(10, 6))
+        _set(self.txt_cues, show_cues, row=14, column=1, sticky="we", pady=4, padx=(0, 10))
+        _set(self._row_cues_hint, show_cues, row=15, column=1, sticky="w", padx=(0, 10), pady=(0, 6))
+        _set(self._row_phrases_lbl, show_keywords, row=14, column=0, sticky="nw", pady=4, padx=(10, 6))
+        _set(self._phrases_fr, show_keywords, row=14, column=1, sticky="we", pady=4, padx=(0, 10))
+        _set(self._row_phrases_hint, show_keywords, row=15, column=1, sticky="w", padx=(0, 10), pady=(0, 6))
+        if show_cues:
+            try:
+                self.txt_cues.configure(state=tk.NORMAL)
+            except tk.TclError:
+                pass
+        self._refresh_keywords_summary()
 
         self._update_step_runway_ui()
         self._update_recovery_ui()
@@ -3402,6 +3605,16 @@ class MissionPlanner(tk.Tk):
             sh = int(dlg.winfo_screenheight())
             x = (sw - width) // 2
             y = (sh - height) // 2
+        try:
+            sw = int(dlg.winfo_screenwidth())
+            sh = int(dlg.winfo_screenheight())
+        except tk.TclError:
+            sw, sh = 1280, 720
+        # Keep the whole modal on-screen (taskbar / short Fly windows).
+        width = min(width, max(320, sw - 24))
+        height = min(height, max(240, sh - 72))
+        x = max(8, min(x, sw - width - 8))
+        y = max(8, min(y, sh - height - 56))
         dlg.geometry(f"{width}x{height}+{x}+{y}")
 
     def _pick_list_value(
@@ -3770,6 +3983,8 @@ class MissionPlanner(tk.Tk):
         self.var_template.set(self._label_by_tmpl.get(tmpl, self._label_by_tmpl["radio_check"]))
         self.var_file.set(step.get("file") or "")
         self.var_enabled.set(bool(step.get("enabled", True)))
+        self.var_step_c2.set(voice_intent.step_offers_c2(step))
+        self.var_step_hold.set(voice_intent.step_holds_after_play(step))
         self.var_locked.set(bool(step.get("locked")))
         self.var_step_voice.set(str(step.get("voice") or "").strip())
         self.var_step_runway.set(str(step.get("runway") or "").strip())
@@ -3800,6 +4015,7 @@ class MissionPlanner(tk.Tk):
         if step.get("text"):
             self.txt_custom.insert(tk.END, step.get("text"))
         self._step_phrases_draft = list(voice_intent.parse_phrases(step.get("voice_phrases")))
+        self._fill_cues_box()
         self._refresh_keywords_summary()
         self._trigger_to_form(step)
         self._mode_ui()
@@ -3835,6 +4051,8 @@ class MissionPlanner(tk.Tk):
         step["phase"] = phase
         mode = self.var_mode.get()
         step["enabled"] = bool(self.var_enabled.get())
+        step["c2"] = bool(self.var_step_c2.get())
+        step["hold"] = bool(self.var_step_hold.get())
 
         voice = self.var_step_voice.get().strip()
         if voice:
@@ -3842,7 +4060,7 @@ class MissionPlanner(tk.Tk):
         else:
             step.pop("voice", None)
 
-        phrases = list(voice_intent.parse_phrases(self._step_phrases_draft))
+        phrases = list(voice_intent.parse_phrases(self._phrases_for_apply()))
         if phrases:
             step["voice_phrases"] = phrases
         else:
@@ -3980,10 +4198,42 @@ class MissionPlanner(tk.Tk):
 
     def _current_step_template_key(self) -> str:
         mode = (self.var_mode.get() or "").strip()
-        if mode == "file":
+        if mode in ("file", "custom"):
             return ""
         lab = (self.var_template.get() or "").strip()
         return str(self._tmpl_by_label.get(lab, "") or "").strip()
+
+    def _fill_cues_box(self) -> None:
+        box = getattr(self, "txt_cues", None)
+        if box is None:
+            return
+        try:
+            locked = bool(self.var_locked.get()) if hasattr(self, "var_locked") else False
+            box.configure(state=tk.NORMAL)
+            box.delete("1.0", tk.END)
+            box.insert(tk.END, "\n".join(self._step_phrases_draft or []))
+            if locked:
+                box.configure(state=tk.DISABLED)
+        except tk.TclError:
+            pass
+
+    def _read_cues_box(self) -> list[str]:
+        box = getattr(self, "txt_cues", None)
+        if box is None:
+            return list(getattr(self, "_step_phrases_draft", []) or [])
+        try:
+            return list(voice_intent.parse_phrases(box.get("1.0", tk.END)))
+        except tk.TclError:
+            return list(getattr(self, "_step_phrases_draft", []) or [])
+
+    def _phrases_for_apply(self) -> list[str]:
+        mode = (self.var_mode.get() or "").strip()
+        editor_open = bool(getattr(self, "_step_edit_open", False))
+        if mode in ("custom", "file") and editor_open:
+            phrases = self._read_cues_box()
+            self._step_phrases_draft = phrases
+            return phrases
+        return list(getattr(self, "_step_phrases_draft", []) or [])
 
     def _refresh_keywords_summary(self) -> None:
         """One-line Keywords… summary on the Edit step form."""
@@ -4009,121 +4259,122 @@ class MissionPlanner(tk.Tk):
             return
         parent = self._step_edit_parent()
         locked = self._step_is_locked()
+        if (self.var_mode.get() or "").strip() in ("custom", "file") and getattr(
+            self, "_step_edit_open", False
+        ):
+            self._step_phrases_draft = self._read_cues_box()
 
         dlg = tk.Toplevel(parent)
-        dlg.title("Keywords")
+        step_label = (self.var_label.get() or "Step").strip() or "Step"
+        dlg.title(f"Keywords — {step_label}")
         dlg.configure(bg=C_BG)
-        dlg.minsize(520, 520)
+        dlg.minsize(480, 360)
+        dlg.resizable(True, True)
         dlg.transient(parent)
         dlg.grab_set()
-        self._place_dialog(dlg, 580, 600)
+        self._place_dialog(dlg, 560, 480)
 
         phrases = list(getattr(self, "_step_phrases_draft", []) or [])
+        tmpl = self._current_step_template_key()
+        builtins = voice_intent.intents_for_template(tmpl) if tmpl else []
+
+        # Pin Save at the bottom first so expanding lists cannot cover it.
+        foot = tk.Frame(dlg, bg=C_BG)
+        foot.pack(side=tk.BOTTOM, fill=tk.X, padx=12, pady=(6, 12))
+
+        try_fr = tk.Frame(dlg, bg=C_PANEL, highlightbackground=C_BORDER, highlightthickness=1)
+        try_fr.pack(side=tk.BOTTOM, fill=tk.X, padx=12)
 
         hdr = tk.Frame(dlg, bg=C_PANEL, highlightbackground=C_BORDER, highlightthickness=1)
-        hdr.pack(fill=tk.X, padx=12, pady=(12, 6))
+        hdr.pack(side=tk.TOP, fill=tk.X, padx=12, pady=(12, 6))
         tk.Label(
             hdr,
-            text="What actually advances this step",
+            text=step_label,
             bg=C_PANEL,
             fg=C_TEXT,
             font=("Segoe UI Semibold", 11),
-        ).pack(anchor="w", padx=12, pady=(10, 2))
+        ).pack(anchor="w", padx=12, pady=(8, 0))
         tk.Label(
             hdr,
-            text="Built-in grammar needs a word from EVERY required line together "
-            "(not each word on its own). Mission phrases: say that whole phrase "
-            "while this step is next — then Save this step (and Save mission to keep it).",
-            bg=C_PANEL,
-            fg=C_MUTED,
-            font=("Segoe UI", 9),
-            wraplength=520,
-            justify=tk.LEFT,
-        ).pack(anchor="w", padx=12, pady=(0, 10))
-
-        body = tk.Frame(dlg, bg=C_BG)
-        body.pack(fill=tk.BOTH, expand=True, padx=12, pady=6)
-
-        # ---- Built-in ----------------------------------------------------
-        built_fr = tk.Frame(body, bg=C_PANEL, highlightbackground=C_BORDER, highlightthickness=1)
-        built_fr.pack(fill=tk.BOTH, expand=True)
-        tk.Label(
-            built_fr,
-            text="MUST SAY (built-in) — one from each line, together",
-            bg=C_PANEL,
-            fg=C_ACCENT,
-            font=("Segoe UI Semibold", 10),
-        ).pack(anchor="w", padx=12, pady=(10, 4))
-        built_box = tk.Text(
-            built_fr,
-            height=8,
-            bg="#0a0e14",
-            fg=C_TEXT,
-            insertbackground=C_TEXT,
-            font=("Consolas", 9),
-            relief=tk.FLAT,
-            wrap=tk.WORD,
-            padx=8,
-            pady=8,
-        )
-        built_box.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 10))
-        tmpl = self._current_step_template_key()
-        builtins = voice_intent.intents_for_template(tmpl) if tmpl else []
-        if builtins:
-            chunks: list[str] = []
-            for intent in builtins:
-                example = intent.example or intent.id
-                does = intent.does or "run this step"
-                need = voice_intent.format_intent_need_lines(intent)
-                lines = [
-                    f'Works like: "{example}"  →  {does}',
-                    "You must include ALL of these (any wording on a line):",
-                ]
-                for i, line in enumerate(need, start=1):
-                    lines.append(f"  {i}. {line}")
-                if len(need) > 1:
-                    lines.append("A single word from the list will not advance.")
-                chunks.append("\n".join(lines))
-            built_box.insert(tk.END, "\n\n".join(chunks))
-        elif tmpl:
-            built_box.insert(
-                tk.END,
-                f'No built-in step intent for template "{tmpl}".\n'
-                "Only mission phrases below will fire this step by voice.",
-            )
-        else:
-            built_box.insert(
-                tk.END,
-                "Custom / file steps have no template grammar.\n"
-                "Add mission phrases below so voice can fire this step.",
-            )
-        built_box.configure(state=tk.DISABLED)
-
-        # ---- Mission phrases ---------------------------------------------
-        miss_fr = tk.Frame(body, bg=C_PANEL, highlightbackground=C_BORDER, highlightthickness=1)
-        miss_fr.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
-        tk.Label(
-            miss_fr,
-            text="MISSION PHRASES (editable)",
-            bg=C_PANEL,
-            fg=C_ACCENT,
-            font=("Segoe UI Semibold", 10),
-        ).pack(anchor="w", padx=12, pady=(10, 2))
-        tk.Label(
-            miss_fr,
-            text="Any one whole phrase fires this step when it is next. "
-            "OK writes it onto the step — then Save mission so it survives a restart.",
+            text="Any one mission phrase fires this step. Built-in grammar needs "
+            "one word from every required line together.",
             bg=C_PANEL,
             fg=C_MUTED,
             font=("Segoe UI", 8),
             wraplength=500,
             justify=tk.LEFT,
-        ).pack(anchor="w", padx=12, pady=(0, 4))
+        ).pack(anchor="w", padx=12, pady=(0, 8))
+
+        body = tk.Frame(dlg, bg=C_BG)
+        body.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 6))
+
+        built_lines: list[str] = []
+        if builtins:
+            for intent in builtins:
+                example = intent.example or intent.id
+                does = intent.does or "run this step"
+                need = voice_intent.format_intent_need_lines(intent)
+                built_lines.append(f'"{example}"  →  {does}')
+                for i, line in enumerate(need, start=1):
+                    built_lines.append(f"  {i}. {line}")
+        elif tmpl:
+            built_lines.append(f'No built-in intent for "{tmpl}". Use mission phrases.')
+        if built_lines:
+            built_fr = tk.Frame(
+                body, bg=C_PANEL, highlightbackground=C_BORDER, highlightthickness=1
+            )
+            built_fr.pack(fill=tk.X)
+            tk.Label(
+                built_fr,
+                text="MUST SAY (built-in, read-only)",
+                bg=C_PANEL,
+                fg=C_ACCENT,
+                font=("Segoe UI Semibold", 9),
+            ).pack(anchor="w", padx=10, pady=(6, 2))
+            built_box = tk.Text(
+                built_fr,
+                height=min(6, max(3, len(built_lines))),
+                bg="#0a0e14",
+                fg=C_TEXT,
+                insertbackground=C_TEXT,
+                font=("Consolas", 9),
+                relief=tk.FLAT,
+                wrap=tk.WORD,
+                padx=6,
+                pady=4,
+            )
+            built_box.pack(fill=tk.X, padx=10, pady=(0, 8))
+            built_box.insert(tk.END, "\n".join(built_lines))
+            built_box.configure(state=tk.DISABLED)
+
+        miss_fr = tk.Frame(body, bg=C_PANEL, highlightbackground=C_BORDER, highlightthickness=1)
+        miss_fr.pack(fill=tk.BOTH, expand=True, pady=(8, 0) if built_lines else 0)
+        tk.Label(
+            miss_fr,
+            text="MISSION PHRASES",
+            bg=C_PANEL,
+            fg=C_ACCENT,
+            font=("Segoe UI Semibold", 9),
+        ).pack(anchor="w", padx=10, pady=(8, 2))
+        tk.Label(
+            miss_fr,
+            text="Type a phrase and Add (or Enter). Save writes it onto this step.",
+            bg=C_PANEL,
+            fg=C_MUTED,
+            font=("Segoe UI", 8),
+        ).pack(anchor="w", padx=10, pady=(0, 4))
+
+        add_row = tk.Frame(miss_fr, bg=C_PANEL)
+        add_row.pack(fill=tk.X, padx=10, pady=(0, 6))
+        var_new = tk.StringVar()
+        add_entry = ttk.Entry(add_row, textvariable=var_new)
+        add_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
         list_fr = tk.Frame(miss_fr, bg=C_PANEL)
-        list_fr.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 4))
+        list_fr.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 4))
         lb = tk.Listbox(
             list_fr,
-            height=6,
+            height=5,
             bg=C_CARD,
             fg=C_TEXT,
             selectbackground=C_ACCENT,
@@ -4139,6 +4390,8 @@ class MissionPlanner(tk.Tk):
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
         lb.configure(yscrollcommand=scroll.set)
 
+        editing_idx: list[int | None] = [None]
+
         def refill() -> None:
             lb.delete(0, tk.END)
             for p in phrases:
@@ -4150,71 +4403,39 @@ class MissionPlanner(tk.Tk):
             sel = lb.curselection()
             return int(sel[0]) if sel else None
 
-        def edit_phrase(initial: str = "") -> str | None:
-            ed = tk.Toplevel(dlg)
-            ed.title("Phrase")
-            ed.configure(bg=C_BG)
-            ed.transient(dlg)
-            ed.grab_set()
-            self._place_dialog(ed, 420, 140)
-            tk.Label(
-                ed,
-                text="Pilot phrase (near-misses count)",
-                bg=C_BG,
-                fg=C_MUTED,
-                font=("Segoe UI", 9),
-            ).pack(anchor="w", padx=12, pady=(12, 4))
-            var = tk.StringVar(value=initial)
-            entry = ttk.Entry(ed, textvariable=var)
-            entry.pack(fill=tk.X, padx=12, pady=(0, 8))
-            entry.focus_set()
-            entry.selection_range(0, tk.END)
-            result: dict[str, str | None] = {"value": None}
-
-            def ok() -> None:
-                text = var.get().strip()
-                if not text:
-                    messagebox.showinfo("Phrase", "Enter a phrase.", parent=ed)
-                    return
-                result["value"] = text
-                ed.destroy()
-
-            def cancel() -> None:
-                ed.destroy()
-
-            btns = tk.Frame(ed, bg=C_BG)
-            btns.pack(fill=tk.X, padx=12, pady=(0, 12))
-            ttk.Button(btns, text="OK", command=ok).pack(side=tk.RIGHT)
-            ttk.Button(btns, text="Cancel", command=cancel).pack(side=tk.RIGHT, padx=(0, 6))
-            ed.bind("<Return>", lambda _e: ok())
-            ed.bind("<Escape>", lambda _e: cancel())
-            ed.wait_window()
-            return result["value"]
-
-        def add_phrase() -> None:
+        def add_phrase(_evt: object | None = None) -> str:
             if locked:
                 messagebox.showinfo("Locked", "Unlock this step before editing.", parent=dlg)
-                return
-            text = edit_phrase()
-            if text:
+                return "break"
+            text = var_new.get().strip()
+            if not text:
+                return "break"
+            idx = editing_idx[0]
+            if idx is not None and 0 <= idx < len(phrases):
+                phrases[idx] = text
+                refill()
+                lb.selection_set(idx)
+                editing_idx[0] = None
+            elif text not in phrases:
                 phrases.append(text)
                 refill()
                 lb.selection_clear(0, tk.END)
                 lb.selection_set(tk.END)
                 lb.see(tk.END)
+            var_new.set("")
+            return "break"
 
-        def edit_selected() -> None:
+        def edit_selected(_evt: object | None = None) -> None:
             if locked:
                 messagebox.showinfo("Locked", "Unlock this step before editing.", parent=dlg)
                 return
             idx = selected_index()
             if idx is None:
                 return
-            text = edit_phrase(phrases[idx])
-            if text:
-                phrases[idx] = text
-                refill()
-                lb.selection_set(idx)
+            var_new.set(phrases[idx])
+            editing_idx[0] = idx
+            add_entry.focus_set()
+            add_entry.selection_range(0, tk.END)
 
         def remove_selected() -> None:
             if locked:
@@ -4224,6 +4445,7 @@ class MissionPlanner(tk.Tk):
             if idx is None:
                 return
             del phrases[idx]
+            editing_idx[0] = None
             refill()
 
         def move(delta: int) -> None:
@@ -4236,56 +4458,58 @@ class MissionPlanner(tk.Tk):
             if j < 0 or j >= len(phrases):
                 return
             phrases[idx], phrases[j] = phrases[j], phrases[idx]
+            editing_idx[0] = None
             refill()
             lb.selection_set(j)
 
+        ttk.Button(add_row, text="Add", command=add_phrase).pack(side=tk.LEFT, padx=(6, 0))
+        add_entry.bind("<Return>", add_phrase)
+        if not locked:
+            add_entry.focus_set()
+
         btn_row = tk.Frame(miss_fr, bg=C_PANEL)
-        btn_row.pack(fill=tk.X, padx=12, pady=(0, 10))
-        ttk.Button(btn_row, text="Add…", command=add_phrase).pack(side=tk.LEFT)
-        ttk.Button(btn_row, text="Edit…", command=edit_selected).pack(side=tk.LEFT, padx=(6, 0))
+        btn_row.pack(fill=tk.X, padx=10, pady=(0, 8))
+        ttk.Button(btn_row, text="Edit", command=edit_selected).pack(side=tk.LEFT)
         ttk.Button(btn_row, text="Remove", command=remove_selected).pack(side=tk.LEFT, padx=(6, 0))
         ttk.Button(btn_row, text="Up", command=lambda: move(-1)).pack(side=tk.LEFT, padx=(12, 0))
         ttk.Button(btn_row, text="Down", command=lambda: move(1)).pack(side=tk.LEFT, padx=(6, 0))
-        lb.bind("<Double-Button-1>", lambda _e: edit_selected())
+        lb.bind("<Double-Button-1>", edit_selected)
 
-        # ---- Try match ---------------------------------------------------
-        try_fr = tk.Frame(body, bg=C_PANEL, highlightbackground=C_BORDER, highlightthickness=1)
-        try_fr.pack(fill=tk.X, pady=(8, 0))
         tk.Label(
             try_fr,
             text="TRY MATCH",
             bg=C_PANEL,
             fg=C_ACCENT,
-            font=("Segoe UI Semibold", 10),
-        ).pack(anchor="w", padx=12, pady=(10, 4))
+            font=("Segoe UI Semibold", 9),
+        ).pack(anchor="w", padx=10, pady=(8, 2))
         try_row = tk.Frame(try_fr, bg=C_PANEL)
-        try_row.pack(fill=tk.X, padx=12, pady=(0, 4))
+        try_row.pack(fill=tk.X, padx=10, pady=(0, 2))
         var_try = tk.StringVar()
-        ttk.Entry(try_row, textvariable=var_try).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        var_try_result = tk.StringVar(value="Type a call and Test — uses the live voice gate.")
+        try_entry = ttk.Entry(try_row, textvariable=var_try)
+        try_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        var_try_result = tk.StringVar(value="Type a call and Test.")
         tk.Label(
             try_fr,
             textvariable=var_try_result,
             bg=C_PANEL,
             fg=C_MUTED,
-            font=("Segoe UI", 9),
-            wraplength=520,
+            font=("Segoe UI", 8),
+            wraplength=500,
             justify=tk.LEFT,
             anchor="w",
-        ).pack(fill=tk.X, padx=12, pady=(0, 10))
+        ).pack(fill=tk.X, padx=10, pady=(0, 8))
 
-        def run_try() -> None:
+        def run_try(_evt: object | None = None) -> str:
             spoken = var_try.get().strip()
             if not spoken:
                 var_try_result.set("Enter something to test.")
-                return
+                return "break"
             channel = (self.var_channel.get() or "").strip().lower()
             phase = ""
             if hasattr(self, "var_mission_phase"):
                 phase = voice_intent.normalize_mission_phase(
                     self.var_mission_phase.get(), channel=channel
                 )
-            # Live step id so Try Match uses the same “this step is due” rule as Fly.
             step_id = ""
             if self.selected_index is not None:
                 try:
@@ -4295,7 +4519,7 @@ class MissionPlanner(tk.Tk):
             draft_steps = [
                 {
                     "id": step_id or "_keywords_try",
-                    "label": (self.var_label.get() or "Step").strip() or "Step",
+                    "label": step_label,
                     "channel": channel,
                     "phase": phase,
                     "template": tmpl,
@@ -4328,32 +4552,33 @@ class MissionPlanner(tk.Tk):
                 )
             else:
                 var_try_result.set(ev.describe())
+            return "break"
 
         ttk.Button(try_row, text="Test", command=run_try).pack(side=tk.LEFT, padx=(6, 0))
+        try_entry.bind("<Return>", run_try)
 
-        # ---- OK / Cancel -------------------------------------------------
-        foot = tk.Frame(dlg, bg=C_BG)
-        foot.pack(fill=tk.X, padx=12, pady=(8, 12))
-
-        def accept() -> None:
+        def accept(_evt: object | None = None) -> None:
             if not locked:
-                self._step_phrases_draft = list(
-                    voice_intent.parse_phrases(phrases)
-                )
+                pending = var_new.get().strip()
+                if pending and pending not in phrases:
+                    phrases.append(pending)
+                self._step_phrases_draft = list(voice_intent.parse_phrases(phrases))
+                self._fill_cues_box()
                 self._refresh_keywords_summary()
-                # Write onto the live step now so Fly can use them without
-                # another round-trip through the Edit step form.
                 self.apply_step()
             dlg.destroy()
             if hasattr(self, "_refresh_voice_prompts"):
                 self._refresh_voice_prompts()
 
-        def cancel() -> None:
+        def cancel(_evt: object | None = None) -> None:
             dlg.destroy()
 
-        ttk.Button(foot, text="OK", style="Accent.TButton", command=accept).pack(side=tk.RIGHT)
+        ttk.Button(foot, text="Save", style="Accent.TButton", command=accept).pack(
+            side=tk.RIGHT
+        )
         ttk.Button(foot, text="Cancel", command=cancel).pack(side=tk.RIGHT, padx=(0, 6))
-        dlg.bind("<Escape>", lambda _e: cancel())
+        dlg.bind("<Escape>", cancel)
+        dlg.bind("<Control-Return>", accept)
 
     def phrase_helper(self) -> None:
         """Modal: pick a situation + fields → auto-generate wording onto the step."""
@@ -5851,6 +6076,8 @@ class MissionPlanner(tk.Tk):
             fg=C_GREEN,
             font=("Segoe UI Semibold", 12),
             anchor="w",
+            wraplength=520,
+            justify=tk.LEFT,
         )
         self._fly_tuned_now_lbl.pack(fill=tk.X, padx=14, pady=(0, 2))
         self.fly_next_radio = tk.StringVar(value="NEXT STEP  ·  —")
@@ -5908,9 +6135,10 @@ class MissionPlanner(tk.Tk):
             pady=4,
         )
         self.fly_voice_feed.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
+        self.fly_voice_feed.tag_configure("no_tx", foreground=C_AMBER)
         self.fly_voice_feed.insert(
             tk.END,
-            "Release PTT to see what Whisper heard and whether ATC acted.\n",
+            "Release PTT to see what Whisper heard. Script Next/Back shows TX or why it did not fire.\n",
         )
         self.fly_voice_feed.configure(state=tk.DISABLED)
 
@@ -6070,7 +6298,7 @@ class MissionPlanner(tk.Tk):
         ).pack(side=tk.LEFT, padx=(0, 10))
         tk.Label(
             self._fly_offer_fr,
-            text="Will you accept rolling?",
+            text="Will you accept rolling?   Next = yes  ·  Prev = no",
             bg=C_PANEL,
             fg=C_TEXT,
             font=("Segoe UI Semibold", 12),
@@ -6774,7 +7002,7 @@ class MissionPlanner(tk.Tk):
             )
         elif hinge_keys == {"accept", "deny"}:
             self.fly_readback_title.set(
-                "ANSWER  ·  accept or decline rolling  ·  agency optional"
+                "ANSWER  ·  Next = accept rolling  ·  Prev = decline"
             )
         elif hinge_keys == {"squawk"}:
             self.fly_readback_title.set(
@@ -7129,7 +7357,10 @@ class MissionPlanner(tk.Tk):
                 phase=step_phase,
                 template=str(tmpl),
             ):
-                hint += "  ·  rolling offer pending"
+                if atc_phrase.rolling_offer_awaiting_reply(self.engine.state):
+                    hint += "  ·  rolling offer — Next accept / Prev decline"
+                else:
+                    hint += "  ·  rolling offer pending"
             if atc_phrase.awaiting_option_on_the_go(self.engine.state):
                 hint += "  ·  option — On the go or Full stop / Next"
             self.fly_hint.set(hint)
@@ -7195,6 +7426,7 @@ class MissionPlanner(tk.Tk):
         save_json(CONFIG_PATH, self.config_data)
 
         def work() -> None:
+            eng = None
             try:
                 eng = flow_engine.FlowEngine()
                 if action == "next":
@@ -7225,8 +7457,15 @@ class MissionPlanner(tk.Tk):
                             freq_s = f"{float(r['freq']):.3f}"
                         except (TypeError, ValueError):
                             freq_s = str(r.get("freq"))
+                        reply = str(r.get("rolling_offer_reply") or "")
+                        if reply == "accept":
+                            who = "accept rolling"
+                        elif reply == "deny":
+                            who = "decline rolling"
+                        else:
+                            who = r.get("label") or r.get("step_id") or "step"
                         line = (
-                            f"TX  {r.get('label') or r.get('step_id') or 'step'}  ·  "
+                            f"TX  {who}  ·  "
                             f"{freq_s}  ·  {str(r.get('channel') or '').upper()}\n"
                         )
                     elif isinstance(r, dict) and (r.get("seeked") or action.startswith("seek") or action == "reset"):
@@ -7236,19 +7475,25 @@ class MissionPlanner(tk.Tk):
                         line = f"{action.upper()}\n"
                     self.fly_log.insert(tk.END, line)
                     self.fly_log.see(tk.END)
+                    if action in ("next", "back"):
+                        self._append_fly_voice_feed(line)
                     self.engine = eng
                     self._refresh_fly_status()
 
                 self.after(0, done)
             except Exception as exc:  # noqa: BLE001
                 err = str(exc)
+                step = None
+                try:
+                    step = eng.current_step()
+                except Exception:  # noqa: BLE001
+                    step = None
+
                 def show_err() -> None:
-                    if err.startswith("Blocked:"):
-                        self._on_trigger_received(err)
-                        if hasattr(self, "fly_log"):
-                            self.fly_log.insert(tk.END, f"{err}\n")
-                            self.fly_log.see(tk.END)
-                        return
+                    if action in ("next", "back") or err.startswith("Blocked:"):
+                        self._note_no_tx(err, action=action, step=step)
+                        if err.startswith("Blocked:"):
+                            return
                     messagebox.showerror("Fly", err)
 
                 self.after(0, show_err)
@@ -7472,20 +7717,21 @@ class MissionPlanner(tk.Tk):
                     ("bullet", "• On Approach: recovery buttons (Overhead / Tactical / Straight-in / Instrument)."),
                     ("heading", "Takeoff — rolling vs line up and wait"),
                     ("bullet", "• Tower may offer rolling (~35% by default; config takeoff_offer_chance)."),
-                    ("bullet", "• Accept / Deny on the Tower offer bar; Request rolling / LUAW buttons on Tower."),
+                    ("bullet", "• After Tower asks, Next / HOTAS Advance accepts; Previous declines. Accept / Deny buttons still work on the Fly offer bar."),
                     ("bullet", "• Rolling skips Line up and wait; clearance is still “cleared for takeoff” (no “rolling” in the call)."),
                     ("bullet", "• Ready for departure → Line up and wait only. Cleared takeoff fires from the runway in-position zone, Play, or “in position” / “lined up”."),
                     ("bullet", "• Departure: climb to cruise auto beyond 10 NM (filed altitude), then handoff beyond 18 NM — or Request handoff / “request handoff” to switch now."),
                     ("bullet", "• Pilot request buttons only appear on frequencies that support them."),
                     ("heading", "Triggers — HOTAS, hotkeys, Stream Deck"),
-                    ("bullet", "• Setup → Controls → HOTAS: Learn… a spare stick button for Advance / Previous."),
+                    ("bullet", "• Setup → Controls → HOTAS: Learn… a spare stick button for Advance / Previous, and optionally Step forward / back (cursor only, no TX)."),
                     ("bullet", "• HOTAS is the reliable option in-game — it keeps working while DCS is focused."),
                     ("bullet", "• Show SRS PTT buttons… lists what SRS already uses so you avoid a clash."),
-                    ("bullet", "• Setup → Controls → Keyboard: Capture… any free combo (F13 / F14 only suit Stream Deck)."),
+                    ("bullet", "• Setup → Controls → Keyboard: Capture… any free combo (F13 / F14 only suit Stream Deck Advance / Previous)."),
+                    ("bullet", "• Step forward / Step back hotkeys only move the timeline cursor — they never transmit."),
                     ("bullet", "• Keys are also polled, so they keep working in-game without administrator rights."),
                     ("bullet", "• Polling does not swallow the key, so pick a combo DCS itself does not use."),
                     ("bullet", "• Use a key, a HOTAS button, or both — one press only ever advances one step."),
-                    ("bullet", "• No-keystroke option: http://127.0.0.1:8765/next and /back from a Stream Deck Website action."),
+                    ("bullet", "• No-keystroke option: http://127.0.0.1:8765/next and /back from a Stream Deck Website action; /seek_next and /seek_prev step the cursor without TX."),
                     ("bullet", "• Last trigger on the Controls tab confirms a press actually reached the app."),
                     ("heading", "Voice control"),
                     ("bullet", "• Setup → Controls → Voice: tick Enable, then hold your normal SRS PTT and talk."),
@@ -7978,25 +8224,31 @@ class MissionPlanner(tk.Tk):
 
         self.var_hotkey_next = tk.StringVar(value=hotkeys.DEFAULT_HOTKEY_NEXT)
         self.var_hotkey_back = tk.StringVar(value=hotkeys.DEFAULT_HOTKEY_BACK)
+        self.var_hotkey_seek_next = tk.StringVar(value="")
+        self.var_hotkey_seek_prev = tk.StringVar(value="")
         self.var_hotkey_status = tk.StringVar(value="")
         self.var_joy_next = tk.StringVar(value="(none)")
         self.var_joy_back = tk.StringVar(value="(none)")
+        self.var_joy_seek_next = tk.StringVar(value="(none)")
+        self.var_joy_seek_prev = tk.StringVar(value="(none)")
         self.var_trigger_seen = tk.StringVar(value="Last trigger: (none yet)")
 
-        # --- HOTAS / mouse: the reliable path in-game ---
-        joy = tk.Frame(panel, bg=C_PANEL, highlightbackground=C_BORDER, highlightthickness=1)
-        joy.pack(fill=tk.X, padx=14, pady=(14, 8))
-        joy_inner = tk.Frame(joy, bg=C_PANEL)
-        joy_inner.pack(fill=tk.X, padx=12, pady=10)
+        # --- Keyboard + HOTAS / mouse ---
+        ctrl = tk.Frame(panel, bg=C_PANEL, highlightbackground=C_BORDER, highlightthickness=1)
+        ctrl.pack(fill=tk.X, padx=14, pady=(14, 8))
+        ctrl_inner = tk.Frame(ctrl, bg=C_PANEL)
+        ctrl_inner.pack(fill=tk.X, padx=12, pady=10)
         ttk.Label(
-            joy_inner, text="HOTAS / mouse buttons (recommended)", style="Header.TLabel"
+            ctrl_inner, text="Keyboard & HOTAS / mouse", style="Header.TLabel"
         ).pack(anchor="w")
         tk.Label(
-            joy_inner,
+            ctrl_inner,
             text=(
-                "Reads the stick or mouse buttons directly, so it keeps working while DCS "
-                "is focused and needs no administrator rights. Learn… accepts either — "
-                "side mouse buttons (4 / 5) work well; avoid your SRS PTT on the stick."
+                "Bind a key, a HOTAS or mouse button, or both. Capture… / Learn… take "
+                "whatever you press. Keys are polled so they work while DCS is focused, "
+                "but they are not swallowed — avoid a combo DCS itself uses. "
+                "Step forward / back only move the cursor; they do not transmit. "
+                "Side mouse buttons (4 / 5) work well; avoid your SRS PTT."
             ),
             bg=C_PANEL,
             fg=C_MUTED,
@@ -8005,23 +8257,50 @@ class MissionPlanner(tk.Tk):
             justify="left",
         ).pack(anchor="w", pady=(2, 8))
 
-        for which, label, var in (
-            ("next", "Advance (Next)", self.var_joy_next),
-            ("back", "Previous (Back)", self.var_joy_back),
+        hdr = tk.Frame(ctrl_inner, bg=C_PANEL)
+        hdr.pack(fill=tk.X, pady=(0, 2))
+        tk.Label(hdr, text="", bg=C_PANEL, width=18).pack(side=tk.LEFT)
+        tk.Label(
+            hdr, text="Keyboard", bg=C_PANEL, fg=C_MUTED, font=("Segoe UI Semibold", 8),
+            width=22, anchor="w",
+        ).pack(side=tk.LEFT, padx=(8, 6))
+        tk.Label(hdr, text="", bg=C_PANEL, width=18).pack(side=tk.LEFT)
+        tk.Label(
+            hdr, text="HOTAS / mouse", bg=C_PANEL, fg=C_MUTED, font=("Segoe UI Semibold", 8),
+            anchor="w",
+        ).pack(side=tk.LEFT, padx=(16, 0))
+
+        for which, label, key_var, joy_var, can_clear_key in (
+            ("next", "Advance (Next)", self.var_hotkey_next, self.var_joy_next, False),
+            ("back", "Previous (Back)", self.var_hotkey_back, self.var_joy_back, False),
+            ("seek_next", "Step forward", self.var_hotkey_seek_next, self.var_joy_seek_next, True),
+            ("seek_prev", "Step back", self.var_hotkey_seek_prev, self.var_joy_seek_prev, True),
         ):
-            row = tk.Frame(joy_inner, bg=C_PANEL)
+            row = tk.Frame(ctrl_inner, bg=C_PANEL)
             row.pack(fill=tk.X, pady=3)
-            tk.Label(row, text=label, bg=C_PANEL, fg=C_LABEL, width=16, anchor="w").pack(side=tk.LEFT)
+            tk.Label(
+                row, text=label, bg=C_PANEL, fg=C_LABEL, width=18, anchor="w"
+            ).pack(side=tk.LEFT)
+            ttk.Entry(row, textvariable=key_var, width=22).pack(side=tk.LEFT, padx=(8, 6))
+            ttk.Button(
+                row, text="Capture…", command=lambda w=which: self._capture_hotkey(w)
+            ).pack(side=tk.LEFT)
+            if can_clear_key:
+                ttk.Button(
+                    row, text="Clear", command=lambda w=which: self._clear_hotkey(w)
+                ).pack(side=tk.LEFT, padx=(4, 0))
+            else:
+                tk.Label(row, text="", bg=C_PANEL, width=6).pack(side=tk.LEFT, padx=(4, 0))
             tk.Label(
                 row,
-                textvariable=var,
+                textvariable=joy_var,
                 bg=C_CARD,
                 fg=C_TEXT,
                 font=("Consolas", 9),
-                width=46,
+                width=28,
                 anchor="w",
                 padx=6,
-            ).pack(side=tk.LEFT, padx=(8, 6), ipady=3)
+            ).pack(side=tk.LEFT, padx=(16, 6), ipady=3)
             ttk.Button(
                 row, text="Learn…", command=lambda w=which: self._learn_joy_button(w)
             ).pack(side=tk.LEFT)
@@ -8029,11 +8308,37 @@ class MissionPlanner(tk.Tk):
                 row, text="Clear", command=lambda w=which: self._clear_joy_button(w)
             ).pack(side=tk.LEFT, padx=4)
 
+        actions = tk.Frame(ctrl_inner, bg=C_PANEL)
+        actions.pack(fill=tk.X, pady=(8, 2))
         ttk.Button(
-            joy_inner, text="Show SRS PTT buttons…", command=self._suggest_srs_ptt
-        ).pack(anchor="w", pady=(8, 2))
+            actions, text="Show SRS PTT buttons…", command=self._suggest_srs_ptt
+        ).pack(side=tk.LEFT)
+        ttk.Button(actions, text="Apply controls", command=self._apply_hotkeys).pack(
+            side=tk.LEFT, padx=(8, 0)
+        )
+        self.btn_admin = ttk.Button(
+            actions, text="Restart as administrator…", command=self._restart_as_admin
+        )
+        self.btn_admin.pack(side=tk.LEFT, padx=8)
 
-        # Voice before freq-gate / keyboard so it stays on-screen without scrolling.
+        tk.Label(
+            ctrl_inner,
+            textvariable=self.var_hotkey_status,
+            bg=C_PANEL,
+            fg=C_MUTED,
+            font=("Segoe UI", 8),
+            wraplength=880,
+            justify="left",
+        ).pack(anchor="w", pady=(4, 0))
+        tk.Label(
+            ctrl_inner,
+            textvariable=self.var_trigger_seen,
+            bg=C_PANEL,
+            fg=C_GREEN,
+            font=("Consolas", 10),
+        ).pack(anchor="w", pady=(4, 0))
+
+        # Voice after Fly controls so keys/HOTAS stay at the top of the tab.
         self._build_setup_voice(panel)
 
         # --- Frequency gate ---
@@ -8046,9 +8351,11 @@ class MissionPlanner(tk.Tk):
             fg_inner,
             text=(
                 "External Advance / Previous / voice / Stream Deck URL only fire when you are "
-                "tuned to the step frequency. On-screen Play is never blocked. "
-                "Tune is read from the DCS radio export (in-jet) or live SRS selected radio "
-                "(common PTT). External AWACS below is only for the manual Fly EAM strip "
+                "tuned to the step frequency on any radio — not only the one you are keying. "
+                "Talking on intra-flight VHF will not block UHF ATC / C2 triggers. "
+                "On-screen Play is never blocked. "
+                "Tune is read from the DCS radio export (in-jet) and/or the live SRS radio bank "
+                "(common PTT is TX only). External AWACS below is only for the manual Fly EAM strip "
                 "when testing without a jet / without SRS UDP."
             ),
             bg=C_PANEL,
@@ -8229,66 +8536,6 @@ class MissionPlanner(tk.Tk):
             justify="left",
         ).pack(anchor="w", pady=(4, 0))
         self._update_zone_hint()
-
-        # --- Keyboard hotkeys ---
-        hk = tk.Frame(panel, bg=C_PANEL, highlightbackground=C_BORDER, highlightthickness=1)
-        hk.pack(fill=tk.X, padx=14, pady=(0, 8))
-        hk_inner = tk.Frame(hk, bg=C_PANEL)
-        hk_inner.pack(fill=tk.X, padx=12, pady=10)
-        ttk.Label(hk_inner, text="Keyboard hotkeys (Stream Deck)", style="Header.TLabel").pack(anchor="w")
-        tk.Label(
-            hk_inner,
-            text=(
-                "Capture… takes whatever you press. F13 / F14 are the defaults because a "
-                "Stream Deck can send them without a keyboard having them; on a plain "
-                "keyboard use any free combo. Keys are polled as well as registered, so "
-                "they keep working while DCS is focused — but polling does not swallow "
-                "the key, so avoid a combo DCS itself uses."
-            ),
-            bg=C_PANEL,
-            fg=C_MUTED,
-            font=("Segoe UI", 8),
-            wraplength=880,
-            justify="left",
-        ).pack(anchor="w", pady=(2, 8))
-
-        row_n = tk.Frame(hk_inner, bg=C_PANEL)
-        row_n.pack(fill=tk.X, pady=3)
-        tk.Label(row_n, text="Advance (Next)", bg=C_PANEL, fg=C_LABEL, width=16, anchor="w").pack(side=tk.LEFT)
-        ttk.Entry(row_n, textvariable=self.var_hotkey_next, width=22).pack(side=tk.LEFT, padx=(8, 6))
-        ttk.Button(row_n, text="Capture…", command=lambda: self._capture_hotkey("next")).pack(side=tk.LEFT)
-
-        row_b = tk.Frame(hk_inner, bg=C_PANEL)
-        row_b.pack(fill=tk.X, pady=3)
-        tk.Label(row_b, text="Previous (Back)", bg=C_PANEL, fg=C_LABEL, width=16, anchor="w").pack(side=tk.LEFT)
-        ttk.Entry(row_b, textvariable=self.var_hotkey_back, width=22).pack(side=tk.LEFT, padx=(8, 6))
-        ttk.Button(row_b, text="Capture…", command=lambda: self._capture_hotkey("back")).pack(side=tk.LEFT)
-
-        actions = tk.Frame(hk_inner, bg=C_PANEL)
-        actions.pack(fill=tk.X, pady=(8, 2))
-        ttk.Button(actions, text="Apply controls", command=self._apply_hotkeys).pack(side=tk.LEFT)
-        self.btn_admin = ttk.Button(
-            actions, text="Restart as administrator…", command=self._restart_as_admin
-        )
-        self.btn_admin.pack(side=tk.LEFT, padx=8)
-
-        tk.Label(
-            hk_inner,
-            textvariable=self.var_hotkey_status,
-            bg=C_PANEL,
-            fg=C_MUTED,
-            font=("Segoe UI", 8),
-            wraplength=880,
-            justify="left",
-        ).pack(anchor="w")
-
-        tk.Label(
-            panel,
-            textvariable=self.var_trigger_seen,
-            bg=C_PANEL,
-            fg=C_GREEN,
-            font=("Consolas", 10),
-        ).pack(anchor="w", padx=26, pady=(4, 10))
 
         if hasattr(self, "_setup_controls_canvas"):
             self.after_idle(
@@ -9181,6 +9428,8 @@ class MissionPlanner(tk.Tk):
         if hasattr(self, "var_hotkey_next"):
             self.var_hotkey_next.set(hotkeys.hotkey_from_config(c, "next"))
             self.var_hotkey_back.set(hotkeys.hotkey_from_config(c, "back"))
+            self.var_hotkey_seek_next.set(hotkeys.hotkey_from_config(c, "seek_next"))
+            self.var_hotkey_seek_prev.set(hotkeys.hotkey_from_config(c, "seek_prev"))
         if hasattr(self, "var_freq_gate_enabled"):
             self.var_freq_gate_enabled.set(bool(c.get("freq_gate_enabled", True)))
             self.var_freq_gate_eam.set(bool(c.get("freq_gate_eam_enabled")))
@@ -9203,7 +9452,12 @@ class MissionPlanner(tk.Tk):
             self.var_auto_full_flight.set(
                 bool(c.get("auto_clearance_require_full_flight", True))
             )
-        for which, var in (("next", "var_joy_next"), ("back", "var_joy_back")):
+        for which, var in (
+            ("next", "var_joy_next"),
+            ("back", "var_joy_back"),
+            ("seek_next", "var_joy_seek_next"),
+            ("seek_prev", "var_joy_seek_prev"),
+        ):
             binding = joystick.binding_from_config(c, which)
             self._joy_bindings[which] = binding
             if hasattr(self, var):
@@ -9278,9 +9532,17 @@ class MissionPlanner(tk.Tk):
             self.config_data["hotkey_back"] = hotkeys.normalize_hotkey(
                 self.var_hotkey_back.get(), default=hotkeys.DEFAULT_HOTKEY_BACK
             )
+            self.config_data["hotkey_seek_next"] = hotkeys.normalize_hotkey(
+                self.var_hotkey_seek_next.get(), default=""
+            )
+            self.config_data["hotkey_seek_prev"] = hotkeys.normalize_hotkey(
+                self.var_hotkey_seek_prev.get(), default=""
+            )
             self.var_hotkey_next.set(str(self.config_data["hotkey_next"]))
             self.var_hotkey_back.set(str(self.config_data["hotkey_back"]))
-        for which in ("next", "back"):
+            self.var_hotkey_seek_next.set(str(self.config_data["hotkey_seek_next"]))
+            self.var_hotkey_seek_prev.set(str(self.config_data["hotkey_seek_prev"]))
+        for which in ("next", "back", "seek_next", "seek_prev"):
             self.config_data[f"joy_{which}"] = self._joy_bindings.get(which)
         self._sync_eam_freqs_to_config()
         if hasattr(self, "var_picture_max_range"):

@@ -1460,21 +1460,89 @@ def cue_needs_agency(intent: Intent, *, expected: str = "", awaiting_readback: b
     return True
 
 
+def step_is_authored(step: dict[str, Any] | None) -> bool:
+    """True when ATC audio is custom text or a file, not a live template."""
+    if not isinstance(step, dict):
+        return False
+    mode = str(step.get("mode") or "").strip().lower()
+    if mode in ("file", "custom"):
+        return True
+    return bool(str(step.get("text") or "").strip())
+
+
+# Picture / bogey dope / declare belong on C2 agencies, not Center / transit.
+_C2_AGENCIES = frozenset({"blackjack", "bandsaw", "ops"})
+_C2_INTENT_IDS = frozenset(
+    {
+        "request_picture",
+        "request_bogey_dope",
+        "request_declare",
+        "request_alpha_check",
+    }
+)
+
+
+def step_offers_c2(step: dict[str, Any] | None, *, channel: str = "") -> bool:
+    """
+    Whether this step answers picture / bogey dope / declare / alpha check.
+
+    Explicit `c2` on the step wins. Otherwise only Blackjack, Bandsaw, and Ops
+    offer those calls — channel `other` (Center, Joshua, …) does not.
+    """
+    if isinstance(step, dict) and "c2" in step:
+        return bool(step.get("c2"))
+    ch = ""
+    if isinstance(step, dict):
+        ch = str(step.get("channel") or "").strip().lower()
+    ch = ch or str(channel or "").strip().lower()
+    return ch in _C2_AGENCIES
+
+
+def step_holds_after_play(step: dict[str, Any] | None) -> bool:
+    """
+    True when Play transmits but leaves the cursor on this step.
+
+    Bandsaw check-in holds until checkout. Custom/file steps with a leftover
+    Bandsaw template do not — set `hold: true` to opt back in.
+    """
+    if not isinstance(step, dict):
+        return False
+    if "hold" in step:
+        return bool(step.get("hold"))
+    if step_is_authored(step):
+        return False
+    return str(step.get("template") or "").strip().lower() == "bandsaw_check_in"
+
+
+def step_expected_template(step: dict[str, Any] | None) -> str:
+    """Template key that drives stock Fly cues. Empty for authored steps."""
+    if not isinstance(step, dict) or step_is_authored(step):
+        return ""
+    return str(step.get("template") or "").strip()
+
+
+def step_by_id(
+    steps: list[dict[str, Any]] | None,
+    step_id: str,
+) -> dict[str, Any] | None:
+    want = str(step_id or "").strip()
+    if not want:
+        return None
+    for step in steps or []:
+        if isinstance(step, dict) and str(step.get("id") or "").strip() == want:
+            return step
+    return None
+
+
 def step_voice_phrases(
     steps: list[dict[str, Any]] | None,
     step_id: str,
 ) -> list[str]:
     """Mission voice_phrases on this step, in author order."""
-    want = str(step_id or "").strip()
-    if not want:
+    step = step_by_id(steps, step_id)
+    if step is None:
         return []
-    for step in steps or []:
-        if not isinstance(step, dict):
-            continue
-        if str(step.get("id") or "").strip() != want:
-            continue
-        return list(parse_phrases(step.get("voice_phrases")))
-    return []
+    return list(parse_phrases(step.get("voice_phrases")))
 
 
 def step_intents(steps: list[dict[str, Any]] | None) -> tuple[Intent, ...]:
@@ -2242,11 +2310,17 @@ def _score_intents(
     readback_items: list[dict[str, Any]] | None = None,
     extra: tuple[Intent, ...] = (),
     current_step_id: str = "",
+    steps: list[dict[str, Any]] | None = None,
 ) -> Match | None:
     """Highest-scoring intent for a transcript, before any addressing gate."""
     best: Match | None = None
+    current_step = step_by_id(steps, current_step_id)
     for intent in tuple(INTENTS) + tuple(extra):
         if intent.veto and _group_hit(text, intent.veto, fuzzy=False):
+            continue
+        if intent.id in _C2_INTENT_IDS and not step_offers_c2(
+            current_step, channel=channel
+        ):
             continue
         # Tower will take overhead / tac overhead / straight-in. Instrument
         # and named IAF / recovery fixes stay with Approach.
@@ -2570,6 +2644,8 @@ def evaluate(
     # Who the pilot called outranks where the timeline cursor happens to sit.
     channel = address.agency or channel
     phase = normalize_mission_phase(phase, channel=channel or "")
+    if step_is_authored(step_by_id(steps, current_step_id)):
+        expected = ""
 
     candidate = _score_intents(
         text,
@@ -2583,6 +2659,7 @@ def evaluate(
         readback_items=readback_items,
         extra=step_intents(steps),
         current_step_id=current_step_id,
+        steps=steps,
     )
     result = Evaluation(
         transcript=transcript, normalized=text, candidate=candidate, address=address
@@ -2770,12 +2847,21 @@ def suggestions(
 
     When `current_step_id` has mission `voice_phrases`, those are the advance
     cues and the stock template call is hidden so custom steps stay in sync.
+
+    Authored (custom/file) steps never inherit leftover template cues such as
+    "with you" — only that step's `voice_phrases` appear under TO ADVANCE.
     """
     _ = (callsign, airport_name)  # kept for call-site compatibility
     out: list[tuple[str, str, str, bool]] = []
     channel_l = (channel or "").strip().lower()
     phase_l = normalize_mission_phase(phase, channel=channel_l)
     expected_l = (expected or "").strip().lower()
+    current_id = str(current_step_id or "").strip()
+    current_step = step_by_id(steps, current_id)
+    authored = step_is_authored(current_step)
+    if authored:
+        # Leftover template on a custom/file step must not drive stock cues.
+        expected_l = ""
     if awaiting_readback:
         hinges = _hinge_items(readback_items)
         hinge_says = [
@@ -2815,14 +2901,11 @@ def suggestions(
                 )
             )
 
-    current_id = str(current_step_id or "").strip()
     current_phrases = step_voice_phrases(steps, current_id)
     current_does = "run this step"
     if current_id and current_phrases and not awaiting_readback:
-        for step in steps or []:
-            if isinstance(step, dict) and str(step.get("id") or "").strip() == current_id:
-                current_does = str(step.get("label") or current_does)
-                break
+        if isinstance(current_step, dict):
+            current_does = str(current_step.get("label") or current_does)
         take = advance_limit if advance_limit is not None else limit
         for phrase in current_phrases[:take]:
             out.append((phrase, current_does, "advance", False))
@@ -2835,6 +2918,13 @@ def suggestions(
             continue
         if intent.id == "acknowledge_readback":
             # Only ever valid mid-readback, and the lead line above covers it.
+            continue
+        # Custom/file steps: only the author's cue advances — not "with you".
+        if authored and intent.kind == "step":
+            continue
+        if intent.id in _C2_INTENT_IDS and not step_offers_c2(
+            current_step, channel=channel_l
+        ):
             continue
         # This step has its own wording — don't also tip the stock template call.
         if (
