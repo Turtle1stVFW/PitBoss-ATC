@@ -59,6 +59,15 @@ CASES = [
     ("Bandsaw, Fleece 1, bogey dope", "bandsaw", "flight", True, "request_bogey_dope"),
     ("Bandsaw, Fleece 1, declare", "bandsaw", "flight", True, "request_declare"),
     ("Blackjack, Fleece 1, request Bandsaw", "blackjack", "flight", True, "request_bandsaw"),
+    ("Blackjack, Fleece 1, request tanker", "blackjack", "flight", True, "request_tanker"),
+    ("Blackjack, Fleece 1, request vectors to the tanker", "blackjack", "flight", True, "request_tanker"),
+    ("Bandsaw, Fleece 1, going to the tanker", "bandsaw", "flight", True, "request_tanker"),
+    ("Texaco, Fleece 1, request boom", "tanker", "flight", True, "tanker_check_in"),
+    ("Texaco 1, Fleece 1, left observation", "tanker", "flight", True, "tanker_observation"),
+    ("Texaco, Fleece 1, astern", "tanker", "flight", True, "tanker_astern"),
+    ("Texaco, Fleece 1, contact", "tanker", "flight", True, "tanker_contact"),
+    ("Texaco, Fleece 1, disconnect", "tanker", "flight", True, "tanker_disconnect"),
+    ("Texaco, Fleece 1, request departure", "tanker", "flight", True, "tanker_depart"),
     ("Blackjack, Fleece 1, push Bandsaw", "blackjack", "flight", True, "request_bandsaw"),
     ("Blackjack, Fleece 1, request ANSA", "blackjack", "flight", True, "request_bandsaw"),
     ("Blackjack, Fleece 1, off station, range complete", "blackjack", "flight", True, "range_exit"),
@@ -2319,6 +2328,100 @@ def extras() -> int:
         else:
             print("go-around readback — closed traffic / Flex hinges")
 
+        st_miss = {
+            "active_recovery": "instrument",
+            "approach_plan": {
+                "pattern": "instrument",
+                "runway": "21L",
+                "instrument_id": "ILS_Z_21L",
+                "iaf": "ARCOE",
+                "iaf_say": "Arcoe",
+                "fix_lat": 36.737683,
+                "fix_lon": -114.917067,
+            },
+        }
+        ga_miss = atc_phrase.assign_go_around_plan(
+            nellis, runway="21L", state=st_miss
+        )
+        st_miss["last_tx_at"] = 0.0
+        st_miss["ownship_ll"] = [36.236, -115.034]
+        ready_far, wait_far = atc_phrase.approach_clearance_auto_ready(
+            airport=nellis, state=st_miss, gap_s=0
+        )
+        st_miss["ownship_ll"] = [36.737683, -114.917067]
+        ready_near, wait_near = atc_phrase.approach_clearance_auto_ready(
+            airport=nellis, state=st_miss, gap_s=0
+        )
+        st_first = {
+            "approach_plan": dict(st_miss["approach_plan"]),
+            "ownship_ll": [36.236, -115.034],
+            "last_tx_at": 0.0,
+        }
+        ready_first, _ = atc_phrase.approach_clearance_auto_ready(
+            airport=nellis, state=st_first, gap_s=0
+        )
+        if (
+            str(ga_miss.get("kind") or "") != "instrument_missed"
+            or not st_miss.get("approach_clearance_need_fix")
+            or ready_far
+            or "need" not in wait_far.lower()
+            or not ready_near
+            or "near fix" not in wait_near.lower()
+            or not ready_first
+        ):
+            print(
+                f"  FAIL missed approach IAF gate: ga={ga_miss} "
+                f"far={ready_far}/{wait_far} near={ready_near}/{wait_near} "
+                f"first={ready_first}"
+            )
+            bad += 1
+        else:
+            print(
+                "instrument missed — wait until near IAF (ARCOE) "
+                "before auto approach clearance"
+            )
+
+        import tanker as tanker_mod
+
+        boom_ok = tanker_mod.tanker_is_f16_boom({"aircraft": "KC-135"})
+        mprs_no = tanker_mod.tanker_is_f16_boom({"aircraft": "KC-135MPRS"})
+        c130_no = tanker_mod.tanker_is_f16_boom({"aircraft": "KC-130"})
+        tex = {
+            "callsign": "TEXACO 1",
+            "track": "ARLNS",
+            "aircraft": "KC-135",
+            "altitude": "23000",
+            "freq_mhz": 322.3,
+            "tcn": "39X",
+            "boom": True,
+        }
+        vec = tanker_mod.build_c2_tanker_vectors("blackjack", "Fleece 1", tex)
+        join = tanker_mod.build_tanker_check_in("Fleece 1", tex)
+        astern = tanker_mod.build_tanker_observation("Fleece 1", tex)
+        dcs_contact = tanker_mod.dcs_tanker_radio_hint("tanker_contact")
+        dcs_abort = tanker_mod.dcs_tanker_radio_hint("tanker_dcs_abort")
+        if (
+            not boom_ok
+            or mprs_no
+            or c130_no
+            or "texaco one" not in vec.lower()
+            or "kc-135 boom" not in vec.lower()
+            or "niner x-ray" not in vec.lower()
+            or "cleared rejoin left" not in join.lower()
+            or "cleared astern" not in astern.lower()
+            or "ready pre-contact" not in astern.lower()
+            or "ready pre-contact" not in dcs_contact.lower()
+            or "abort" not in dcs_abort.lower()
+        ):
+            print(
+                f"  FAIL tanker boom comms: boom={boom_ok} mprs={mprs_no} "
+                f"c130={c130_no} vec={vec} join={join} astern={astern} "
+                f"dcs={dcs_contact} abort={dcs_abort}"
+            )
+            bad += 1
+        else:
+            print("tanker — F-16 KC-135 boom vectors + DCS cleared contact")
+
         trig18 = rp.resolve_step_trigger(
             {
                 "template": "departure_handoff",
@@ -2770,6 +2873,55 @@ def custom_agency_behavior() -> int:
     return bad
 
 
+def instruction_readback_echo() -> int:
+    """Repeating a handoff / instruction must not fire the next step."""
+    bad = 0
+    last = "Fleece one, Nellis Departure, contact Blackjack 377.8, good day."
+
+    echo = voice_intent.evaluate(
+        "Departure, Fleece 1, contact Blackjack 377.8",
+        channel="departure",
+        phase="departure",
+        expected="departure_handoff",
+        callsign=CALLSIGN,
+        last_tx_text=last,
+    )
+    if echo.fired:
+        print(f"  FAIL handoff readback must not fire: {echo.describe()}")
+        bad += 1
+
+    checkin = voice_intent.evaluate(
+        "Blackjack, Fleece 1, with you",
+        channel="blackjack",
+        phase="flight",
+        expected="bj_check_in",
+        callsign=CALLSIGN,
+        last_tx_text=last,
+    )
+    if not checkin.fired or checkin.match.intent != "range_entry":
+        print(f"  FAIL real check-in after handoff should fire: {checkin.describe()}")
+        bad += 1
+
+    tower_last = "Fleece one, Nellis Approach, contact tower, Local four, good day."
+    tower_echo = voice_intent.evaluate(
+        "Approach, Fleece 1, contact tower",
+        channel="approach",
+        phase="approach",
+        expected="cleared_approach",
+        callsign=CALLSIGN,
+        last_tx_text=tower_last,
+    )
+    if tower_echo.fired:
+        print(f"  FAIL tower-handoff readback must not fire: {tower_echo.describe()}")
+        bad += 1
+
+    if bad:
+        print(f"instruction readback echo — {bad} problem(s)")
+    else:
+        print("instruction readback echo — handoff readback silent; with you still fires")
+    return bad
+
+
 def main() -> int:
     failures = 0
     for transcript, channel, mission_phase, should_fire, want in CASES:
@@ -2794,6 +2946,7 @@ def main() -> int:
     failures += step_phrases()
     failures += expecting()
     failures += custom_agency_behavior()
+    failures += instruction_readback_echo()
     return 1 if failures else 0
 
 

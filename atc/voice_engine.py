@@ -370,6 +370,8 @@ class VoiceController:
             else None,
             steps=context.get("steps") if isinstance(context.get("steps"), list) else None,
             current_step_id=str(context.get("current_step_id") or ""),
+            last_tx_text=str(context.get("last_tx_text") or ""),
+            last_tx_at=float(context.get("last_tx_at") or 0.0),
         )
         self.on_status(f"{elapsed:.0f}ms · {text}")
         self.on_transcript(evaluation)
@@ -499,6 +501,24 @@ def execute_intent(
     if intent == "request_bandsaw":
         text = atc_phrase.build_contact_bandsaw(airport, callsign)
         return _transmit(engine, airport, text, "blackjack")
+
+    if intent in (
+        "request_tanker",
+        "tanker_check_in",
+        "tanker_observation",
+        "tanker_astern",
+        "tanker_contact",
+        "tanker_disconnect",
+        "tanker_depart",
+    ):
+        return execute_tanker_action(
+            engine,
+            intent,
+            match=match,
+            airport=airport,
+            callsign=callsign,
+            opus=opus,
+        )
 
     if intent in (
         "request_approach",
@@ -766,9 +786,27 @@ def execute_intent(
         if intent == "approach_continue" or match.template == "cleared_approach":
             # After instrument missed, stay on Approach until outside the rearm
             # bubble — do not hand to Tower / land early near the field.
+            dist_nm = None
+            try:
+                import runway_position as rp
+
+                dist_nm = rp.ownship_distance_nm(
+                    airport,
+                    config=getattr(engine, "config", None),
+                    callsign=callsign,
+                    opus=opus,
+                    state=engine.state,
+                )
+            except Exception:
+                dist_nm = None
             ok_rearm, wait_rearm = atc_phrase.tower_land_gates_allowed(
-                engine.state, None
+                engine.state, dist_nm
             )
+            if ok_rearm:
+                try:
+                    engine.save_state()
+                except Exception:
+                    pass
             if not ok_rearm:
                 plan = atc_phrase.approach_plan_from_state(
                     engine.state, airport=airport
@@ -1171,14 +1209,30 @@ def _ack(
     return _transmit(engine, airport, text, channel)
 
 
-def _transmit(engine: Any, airport: dict[str, Any], text: str, channel: str) -> dict[str, Any]:
+def _transmit(
+    engine: Any,
+    airport: dict[str, Any],
+    text: str,
+    channel: str,
+    *,
+    freq_mhz: float | None = None,
+) -> dict[str, Any]:
     srs_radio.apply_config(engine.config)
     allowed, msg, _result = srs_radio.check_freq_gate(
-        engine.config, airport, None, channel=channel
+        engine.config,
+        airport,
+        None,
+        channel=channel,
+        target_mhz=freq_mhz,
     )
     if not allowed:
         return {"action": "blocked", "detail": msg, "channel": channel}
     freq, mod, tx_name = atc_phrase.channel_radio(airport, channel)
+    if freq_mhz is not None:
+        try:
+            freq = float(freq_mhz)
+        except (TypeError, ValueError):
+            pass
     voice_name, _ = atc_phrase.voice_for_step(engine.config, channel, None)
     code = atc_phrase.transmit(
         engine.config,
@@ -1190,7 +1244,115 @@ def _transmit(engine: Any, airport: dict[str, Any], text: str, channel: str) -> 
         channel=channel,
         voice_override=voice_name,
     )
-    return {"action": "transmit", "text": text, "channel": channel, "exit_code": code}
+    return {
+        "action": "transmit",
+        "text": text,
+        "channel": channel,
+        "exit_code": code,
+        "freq": freq,
+    }
+
+
+def execute_tanker_action(
+    engine: Any,
+    action: str,
+    *,
+    match: voice_intent.Match | None = None,
+    airport: dict[str, Any] | None = None,
+    callsign: str = "",
+    opus: Any = None,
+) -> dict[str, Any]:
+    """C2 vectors + missing join calls. DCS radio keeps cleared contact."""
+    import tanker as tanker_mod
+
+    ap = airport if isinstance(airport, dict) else engine.airport()
+    if not callsign:
+        if opus is None:
+            opus, _wx = atc_phrase.resolve_opus_and_metar(
+                engine.config, ap.get("icao") if isinstance(ap, dict) else ""
+            )
+        if not opus:
+            opus = atc_phrase.synthetic_flight_context(
+                atc_phrase.callsign_override(engine.config) or "CALLSIGN"
+            )
+        callsign = opus.radio_callsign
+    named = ""
+    if match is not None:
+        named = tanker_mod.extract_tanker_name(
+            str(match.normalized or match.transcript or "")
+        ) or str((match.slots or {}).get("tanker") or "")
+    own_ll = atc_phrase.ownship_latlon(
+        engine.config, callsign=callsign, opus=opus, state=engine.state
+    )
+    boom_only = action == "request_tanker" and not named
+    tanker = tanker_mod.pick_tanker(
+        engine.config,
+        opus=opus,
+        state=engine.state,
+        name=named or None,
+        own_ll=own_ll,
+        boom_only=boom_only,
+    )
+    if tanker:
+        tanker_mod.remember_tanker(engine.state, tanker)
+        if hasattr(engine, "save_state"):
+            engine.save_state()
+
+    if action == "request_tanker":
+        channel = "blackjack"
+        if match is not None:
+            channel = _resolve_tx_channel(engine, ap, match) or channel
+        if channel not in ("blackjack", "bandsaw", "ops"):
+            channel = "blackjack"
+        text = tanker_mod.build_c2_tanker_vectors(channel, callsign, tanker)
+        return _transmit(engine, ap, text, channel)
+
+    if action in tanker_mod.DCS_TANKER_ACTIONS:
+        tanker_mod.apply_tanker_phase(
+            engine.state,
+            {
+                "tanker_astern": tanker_mod.PHASE_ASTERN,
+                "tanker_contact": tanker_mod.PHASE_CONTACT,
+                "tanker_dcs_precontact": tanker_mod.PHASE_ASTERN,
+                "tanker_disconnect": tanker_mod.PHASE_RIGHT,
+                "tanker_depart": tanker_mod.PHASE_DEPARTED,
+                "tanker_dcs_abort": tanker_mod.PHASE_RIGHT,
+            }.get(action, tanker_mod.PHASE_ASTERN),
+        )
+        if hasattr(engine, "save_state"):
+            engine.save_state()
+        hint = tanker_mod.dcs_tanker_radio_hint(action)
+        return {
+            "action": "hint",
+            "detail": hint,
+            "channel": "tanker",
+            "text": hint,
+        }
+
+    tanker_mod.apply_tanker_phase(
+        engine.state,
+        {
+            "tanker_check_in": tanker_mod.PHASE_JOIN,
+            "tanker_observation": tanker_mod.PHASE_OBSERVATION,
+        }.get(action, tanker_mod.PHASE_JOIN),
+    )
+    builders = {
+        "tanker_check_in": tanker_mod.build_tanker_check_in,
+        "tanker_observation": tanker_mod.build_tanker_observation,
+    }
+    build = builders.get(action)
+    if build is None:
+        return {"action": "none", "detail": f"unknown tanker action {action}"}
+    text = build(callsign, tanker)
+    freq = tanker_mod.tanker_target_mhz(engine.state)
+    if freq is None and tanker:
+        try:
+            freq = float(tanker.get("freq_mhz") or 0) or None
+        except (TypeError, ValueError):
+            freq = None
+    if hasattr(engine, "save_state"):
+        engine.save_state()
+    return _transmit(engine, ap, text, "tanker", freq_mhz=freq)
 
 
 def _advance_past_bandsaw(engine: Any) -> None:
@@ -1262,6 +1424,12 @@ def _approach_check_in(
         ),
     )
     engine.save_state()
+    # Approach check-in closes the Tower missed-approach readback so Watch
+    # can arm IAF / tower gates on the way back in.
+    if atc_phrase.go_around_readback_open(engine.state) and hasattr(
+        engine, "clear_readback"
+    ):
+        engine.clear_readback()
     # Prefer playing the flow step so last_tx / readback state stay consistent.
     played = _play_step(engine, match)
     if played.get("action") != "none":
@@ -1363,6 +1531,15 @@ def _handle_approach_action(
 
     if intent == "request_vectors":
         engine.state["vectors_active"] = True
+        engine.state["approach_clearance_need_fix"] = True
+        if atc_phrase.go_around_readback_open(engine.state) and hasattr(
+            engine, "clear_readback"
+        ):
+            engine.clear_readback()
+        step = engine.current_step() if hasattr(engine, "current_step") else None
+        tmpl = str((step or {}).get("template") or "")
+        if tmpl == "approach_check_in" and hasattr(engine, "_seek_template"):
+            engine._seek_template("approach_procedure")
         engine.save_state()
         text = atc_phrase.build_vector_clearance(
             airport, callsign, plan=plan
@@ -1389,6 +1566,8 @@ def _resolve_tx_channel(
         addressed = str(match.slots.get("channel") or "").strip().lower()
     if addressed:
         return addressed
+    if match is not None and str(match.intent or "").startswith("tanker_"):
+        return "tanker"
     tuned = srs_radio.channel_for_tuned_freq(airport, engine.config)
     if tuned:
         return tuned

@@ -15,8 +15,8 @@ drawing the areas that fire steps automatically — the app has a button for it 
 4. **Help** — in-app how-tos (Getting started, Google JSON setup, Plan Flight tips, troubleshooting). Also the top-right **Help** button.
 
 ## Typical workflow
-1. Setup → Choose flight… from Opus → confirm callsign/FP → Save setup  
-   (Opus username is optional — used to auto-pick your seat on that flight.)
+1. Title bar — type your CAOC name and click the green flight chip to pick the
+   Opus flight (saves immediately; Setup → Save is not required for identity).
 2. Plan Flight → add/reorder steps → Preview → Save mission  
 3. Fly → Play Next through the full timeline (seek/jump to skip)  
 
@@ -257,7 +257,10 @@ the wrong code, does nothing.
 
 Taxi / takeoff / landing readbacks have no scripted reply, so your ack simply closes the
 window and the strip clears. Outside a readback window a bare “roger” means nothing and
-is ignored. Flight chatter on the same PTT stays silent throughout.
+is ignored. Repeating the last instruction (for example “contact Blackjack” after a
+handoff) is treated as a readback and does **not** fire the next step — check in with
+“with you” / “checking in” when you are ready. Flight chatter on the same PTT stays
+silent throughout.
 
 Calls it understands:
 
@@ -272,6 +275,10 @@ Calls it understands:
 | "Bandsaw, checking in" / picture / bogey dope / declare | Optional C2 on Bandsaw |
 | "Bandsaw, checking out / switch Blackjack" | Leave Bandsaw → contact Blackjack (not check-in) |
 | "Blackjack, request Bandsaw" | Push to Bandsaw (optional; you can also self-tune) |
+| "Blackjack / Bandsaw, request tanker" | Vectors to the Opus KC-135 (boom — not MPRS). Live CAOC bullseye / steer when the track is up |
+| "Texaco, request boom" | Missing official join: identified, cleared rejoin left (still use DCS **Intent to refuel**) |
+| "Left observation" | Missing official call: cleared astern, then use DCS **Ready pre-contact** |
+| DCS tanker radio | **Ready pre-contact** → DCS *cleared contact* (boom). **Abort refueling** to disconnect. Do not use SRS for those. |
 | "Blackjack, off station / range complete" | Range checkout → Approach (required after Blackjack check-in) |
 | "Approach, checking in" / "inbound" | Approach assigns recovery from METAR (VMC → VFR recovery + TAC overhead; IFR → instrument + IAF). Prefers RWY 21 |
 | "Request ARCOE / TORYE / STRYK / MINTT / overhead / instrument" | Change the assigned recovery / approach |
@@ -321,6 +328,11 @@ unless traffic (or similar) sets a restriction. Recoveries prefer the **21s**;
 the **03s** are used only when headwind on 03 is **11 kt or greater**. You can
 request a different recovery, hold, or vectors. “Airport in sight / request tower”
 clears you to Tower.
+
+After an **instrument missed**, Approach sends you back to the IAF (e.g. Arcoe).
+Watch re-arms the approach-clearance gate there (about 8 NM) and will not
+auto-hand to Tower until you are outside the missed-approach bubble and then
+inside 12 NM of the field.
 
 When a call fires a step, the Fly card moves to the next step on its own — same as if you
 had pressed **Play and advance**. Answers that are not steps (winds, altimeter, picture,

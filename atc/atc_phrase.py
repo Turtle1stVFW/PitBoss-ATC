@@ -1953,6 +1953,28 @@ APPROACH_CLEARANCE_GAP_S = 6.0
 # If closer than this to the IAF / exit fix, still fire (about to arrive) —
 # clearance is meant to come before the fix, not wait until you get there.
 APPROACH_CLEARANCE_AT_FIX_NM = 3.0
+# After an instrument missed / radar vectors back to the IAF, wait until the
+# jet is this close to the fix before auto-clearing the approach again.
+APPROACH_CLEARANCE_AFTER_MISSED_NM = 8.0
+
+
+def approach_clearance_needs_fix(state: dict[str, Any] | None) -> bool:
+    """True after a missed / vectors until the next approach clearance."""
+    if not isinstance(state, dict):
+        return False
+    return bool(state.get("approach_clearance_need_fix") or state.get("vectors_active"))
+
+
+def _ownship_ll_from_state(state: dict[str, Any] | None) -> tuple[float, float] | None:
+    if not isinstance(state, dict):
+        return None
+    raw = state.get("ownship_ll")
+    try:
+        if isinstance(raw, (list, tuple)) and len(raw) >= 2:
+            return (float(raw[0]), float(raw[1]))
+    except (TypeError, ValueError):
+        return None
+    return None
 
 
 def approach_clearance_auto_ready(
@@ -1967,8 +1989,13 @@ def approach_clearance_auto_ready(
     """
     True when Approach may auto-issue the procedure clearance.
 
-    After check-in (cursor on approach_procedure): wait a short radio gap, then
-    fire while still inbound — do not wait until the jet reaches the IAF / exit.
+    After a normal check-in: wait a short radio gap, then fire while still
+    inbound — do not wait until the jet reaches the IAF / exit.
+
+    After an instrument missed or radar vectors back to the IAF: wait until
+    the jet is near that fix (ARCOE / DUDBE / …). Otherwise the first-pass
+    fire-once latch / an early check-in at the field never re-clears.
+
     Holding suspends auto-clearance until the hold is cancelled.
     """
     st = state if isinstance(state, dict) else {}
@@ -1990,12 +2017,12 @@ def approach_clearance_auto_ready(
 
     plan = approach_plan_from_state(st, airport=airport)
     fix = approach_exit_fix_latlon(plan, airport=airport)
+    need_fix = approach_clearance_needs_fix(st)
     if fix is None:
         return True, "after check-in"
-    pos = ownship_latlon(config, callsign=callsign, opus=opus, state=st)
+    pos = _ownship_ll_from_state(st)
     if pos is None:
-        return True, "after check-in (no position)"
-    dist = _haversine_nm(pos[0], pos[1], fix[0], fix[1])
+        pos = ownship_latlon(config, callsign=callsign, opus=opus, state=st)
     name = str(
         plan.get("iaf_say")
         or plan.get("iaf")
@@ -2004,7 +2031,17 @@ def approach_clearance_auto_ready(
         or plan.get("vfr_recovery")
         or "fix"
     )
-    # Still inbound or already at the fix — either way, clear now (before / at).
+    if pos is None:
+        if need_fix:
+            return False, f"waiting for position to {name}"
+        return True, "after check-in (no position)"
+    dist = _haversine_nm(pos[0], pos[1], fix[0], fix[1])
+    if need_fix:
+        need = APPROACH_CLEARANCE_AFTER_MISSED_NM
+        if dist > need:
+            return False, f"{dist:.1f} NM to {name} — need ≤ {need:g} NM for clearance"
+        return True, f"{dist:.1f} NM to {name} — clearance (near fix)"
+    # First recovery: still inbound or already at the fix — clear now.
     if dist > APPROACH_CLEARANCE_AT_FIX_NM:
         return True, f"{dist:.1f} NM to {name} — clearance"
     return True, f"{dist:.1f} NM to {name} — clearance (near fix)"
@@ -2605,6 +2642,14 @@ _SORTIE_STATE_CACHE_KEYS = (
     "awaiting_on_the_go",
     "go_around_plan",
     "rearm_tower_outside_nm",
+    "approach_clearance_need_fix",
+    "tanker_id",
+    "tanker_callsign",
+    "tanker_freq_mhz",
+    "tanker_phase",
+    "tanker_aircraft",
+    "tanker_track",
+    "tanker_tcn",
     "pattern_land_needs_leave",
     "overhead_recovery",
     "range_exit_approved",
@@ -2714,6 +2759,7 @@ HANDOFF_AGENCY_NAMES: dict[str, str] = {
     "ops": "Ops",
     "other": "Center",
     "center": "Center",
+    "tanker": "Tanker",
 }
 
 # Skip these when auto-picking the next handoff agency from the timeline
@@ -3007,10 +3053,28 @@ PILOT_REQUESTS_BY_CHANNEL: dict[str, list[tuple[str, str]]] = {
     "delivery": [],
     "departure": list(_DEPARTURE_HANDOFF_REQUESTS),
     "approach": [],
-    "blackjack": [],
-    "bandsaw": [],
+    "blackjack": [
+        ("request_tanker", "Request tanker"),
+        ("tanker_check_in", "Tanker check-in / boom"),
+        ("tanker_observation", "Left observation"),
+        ("tanker_dcs_precontact", "DCS: Ready pre-contact"),
+        ("tanker_dcs_abort", "DCS: Abort / disconnect"),
+    ],
+    "bandsaw": [
+        ("request_tanker", "Request tanker"),
+        ("tanker_check_in", "Tanker check-in / boom"),
+        ("tanker_observation", "Left observation"),
+        ("tanker_dcs_precontact", "DCS: Ready pre-contact"),
+        ("tanker_dcs_abort", "DCS: Abort / disconnect"),
+    ],
     "ops": [],
     "other": [],
+    "tanker": [
+        ("tanker_check_in", "Tanker check-in / boom"),
+        ("tanker_observation", "Left observation"),
+        ("tanker_dcs_precontact", "DCS: Ready pre-contact"),
+        ("tanker_dcs_abort", "DCS: Abort / disconnect"),
+    ],
 }
 _CHANNELS_WITH_RUNWAY_REQUESTS = frozenset({"tower", "ground", "approach"})
 
@@ -3287,6 +3351,10 @@ def pilot_requests_for_channel(
             continue
         if key == "request_handoff" and str(template or "") not in _HANDOFF_REQUEST_TEMPLATES:
             continue
+        if key.startswith("tanker_") and not (
+            isinstance(state, dict) and str(state.get("tanker_callsign") or "").strip()
+        ):
+            continue
         out.append((key, lab))
     # Alternate runway (e.g. 21L) — only when pilot requests it, or instrument use.
     if airport is not None and ch in _CHANNELS_WITH_RUNWAY_REQUESTS:
@@ -3472,6 +3540,24 @@ def apply_pilot_request(
             "pending_offer": pending_takeoff_offer(state),
             "ack_kind": "",
             "execute_departure_handoff": True,
+        }
+    if key in (
+        "request_tanker",
+        "tanker_check_in",
+        "tanker_observation",
+        "tanker_astern",
+        "tanker_contact",
+        "tanker_disconnect",
+        "tanker_depart",
+        "tanker_dcs_precontact",
+        "tanker_dcs_abort",
+    ):
+        return {
+            "key": key,
+            "takeoff_mode": resolve_active_takeoff_mode(mission, state),
+            "pending_offer": pending_takeoff_offer(state),
+            "ack_kind": "",
+            "execute_tanker_action": key,
         }
     if key == "clear_runway_request":
         rwy: str | None = None
@@ -4495,6 +4581,10 @@ def assign_go_around_plan(
                 )
             except (TypeError, ValueError):
                 state["rearm_tower_outside_nm"] = DEFAULT_REARM_TOWER_OUTSIDE_NM
+            # Next clearance waits until the jet is back at the IAF — the
+            # first-pass fire-once latch is also dropped by the UI.
+            state["approach_clearance_need_fix"] = True
+            state["vectors_active"] = False
         state.pop("awaiting_on_the_go", None)
         # Fresh landing sequence after the go
         for key in (
@@ -8806,6 +8896,7 @@ CHANNELS = [
     "blackjack",
     "bandsaw",
     "ops",
+    "tanker",
     "other",
 ]
 

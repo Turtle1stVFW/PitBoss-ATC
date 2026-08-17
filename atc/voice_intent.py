@@ -16,6 +16,7 @@ Two families of intent:
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -30,7 +31,7 @@ MISSION_PHASE_LABELS: dict[str, str] = {
 # Agencies that normally belong in each mission phase (tips + scoring).
 CHANNELS_IN_MISSION_PHASE: dict[str, frozenset[str]] = {
     "departure": frozenset({"delivery", "ground", "tower", "departure"}),
-    "flight": frozenset({"blackjack", "bandsaw", "ops", "other"}),
+    "flight": frozenset({"blackjack", "bandsaw", "ops", "other", "tanker"}),
     "approach": frozenset({"approach", "tower", "ground"}),
 }
 # Default mission phase when a step's channel is set (tower/ground appear in two).
@@ -43,6 +44,7 @@ DEFAULT_MISSION_PHASE_FOR_CHANNEL: dict[str, str] = {
     "bandsaw": "flight",
     "ops": "flight",
     "other": "flight",
+    "tanker": "flight",
     "approach": "approach",
 }
 
@@ -338,6 +340,7 @@ _AGENCY_TERMS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("blackjack", ("blackjack", "black jack", "magic", "darkstar", "awacs")),
     ("bandsaw", _BANDSAW_TERMS),
     ("ops", ("ops", "operations", "base ops")),
+    ("tanker", ("texaco", "shell", "arco", "esso", "tanker")),
     ("other", ("center", "centre", "control")),
 )
 
@@ -691,6 +694,90 @@ INTENTS: tuple[Intent, ...] = (
         # Optional push — keep off Blackjack YOU CAN SAY.
         example="",
         does="",
+    ),
+    Intent(
+        "request_tanker",
+        (
+            _ASKING + ("push", "go", "going"),
+            ("tanker", "texaco", "air refuel", "air refueling", "aar"),
+        ),
+        kind="request",
+        channels=("blackjack", "bandsaw", "ops", "other"),
+        phases=("flight",),
+        weight=1.2,
+        example="request tanker",
+        does="vectors to the Opus KC-135",
+    ),
+    Intent(
+        "tanker_check_in",
+        (
+            (
+                "request boom",
+                "request the boom",
+                "request rejoin",
+                "cleared rejoin",
+                "rejoin left",
+                "checking in",
+                "with you",
+            ),
+        ),
+        kind="request",
+        channels=("tanker",),
+        phases=("flight",),
+        weight=1.25,
+        example="request boom",
+        does="tanker check-in / cleared rejoin left",
+    ),
+    Intent(
+        "tanker_observation",
+        (("left observation", "observation", "on the left", "echelon left"),),
+        kind="request",
+        channels=("tanker",),
+        phases=("flight",),
+        weight=1.2,
+        example="left observation",
+        does="cleared astern; then DCS Ready pre-contact",
+    ),
+    Intent(
+        "tanker_astern",
+        (("astern", "pre contact", "precontact", "pre-contact"),),
+        kind="request",
+        channels=("tanker",),
+        phases=("flight",),
+        weight=1.2,
+        example="astern",
+        does="use DCS Ready pre-contact (cleared contact)",
+    ),
+    Intent(
+        "tanker_contact",
+        (("contact", "in contact", "boom contact", "cleared contact"),),
+        veto=("contact tower", "contact approach", "contact blackjack", "contact ground"),
+        kind="request",
+        channels=("tanker",),
+        phases=("flight",),
+        weight=1.15,
+        example="cleared contact",
+        does="use DCS tanker radio for cleared contact",
+    ),
+    Intent(
+        "tanker_disconnect",
+        (("disconnect", "request disconnect", "coming off", "abort refueling"),),
+        kind="request",
+        channels=("tanker",),
+        phases=("flight",),
+        weight=1.2,
+        example="disconnect",
+        does="use DCS Abort refueling",
+    ),
+    Intent(
+        "tanker_depart",
+        (("request departure", "cleared to depart", "done with the tanker"),),
+        kind="request",
+        channels=("tanker",),
+        phases=("flight",),
+        weight=1.15,
+        example="request departure",
+        does="use DCS tanker radio to leave",
     ),
     Intent(
         "say_again",
@@ -1478,6 +1565,7 @@ _C2_INTENT_IDS = frozenset(
         "request_bogey_dope",
         "request_declare",
         "request_alpha_check",
+        "request_tanker",
     }
 )
 
@@ -2592,6 +2680,112 @@ class Evaluation:
         return "no match — ignored"
 
 
+# After a handoff / instruction with no READ BACK card, repeating ATC must
+# not fire the next timeline step ("contact Blackjack" is the readback).
+_ECHO_MAX_AGE_S = 60.0
+_CHECKIN_NOT_READBACK = (
+    "with you",
+    "checking in",
+    "check in",
+    "airborne",
+    "initial",
+    "gear down",
+    "ready to taxi",
+    "ready for departure",
+    "in position",
+)
+_READBACK_STOP = frozenset(
+    {
+        "a",
+        "the",
+        "to",
+        "and",
+        "for",
+        "of",
+        "on",
+        "at",
+        "in",
+        "is",
+        "are",
+        "we",
+        "your",
+        "good",
+        "day",
+        "see",
+        "ya",
+        "yeah",
+        "please",
+        "nellis",
+        "one",
+        "flight",
+    }
+)
+
+
+def _catalog_intent(
+    intent_id: str, extra: tuple[Intent, ...] = ()
+) -> Intent | None:
+    for intent in tuple(INTENTS) + tuple(extra):
+        if intent.id == intent_id:
+            return intent
+    return None
+
+
+def _trigger_hits_in_text(intent: Intent, text: str) -> list[str]:
+    """Normalized trigger phrases from this intent that appear in `text`."""
+    hits: list[str] = []
+    for group in intent.groups:
+        for opt in group:
+            n = normalize(opt)
+            if n and n in text:
+                hits.append(n)
+    return hits
+
+
+def echoes_last_atc(
+    transcript: str,
+    last_tx: str,
+    *,
+    intent: Intent | None = None,
+    steps: list[dict[str, Any]] | None = None,
+    last_tx_at: float = 0.0,
+    now: float = 0.0,
+) -> bool:
+    """
+    True when the pilot is reading back the last ATC call, not making a new one.
+
+    Used when there is no formal READ BACK card (handoff, custom/file, Center).
+    A real check-in ("with you") still fires even if the last call named the
+    same agency.
+    """
+    last = normalize(last_tx)
+    text = normalize(transcript)
+    if not last or not text:
+        return False
+    if last_tx_at and now and (now - last_tx_at) > _ECHO_MAX_AGE_S:
+        return False
+    if any(cue in text and cue not in last for cue in _CHECKIN_NOT_READBACK):
+        return False
+
+    hits = _trigger_hits_in_text(intent, text) if intent is not None else []
+    if intent is not None and intent.step_id:
+        for phrase in step_voice_phrases(steps, intent.step_id):
+            n = normalize(phrase)
+            if n and n in text:
+                hits.append(n)
+    hits.sort(key=len, reverse=True)
+    for hit in hits:
+        if len(hit) >= 4 and hit in last:
+            return True
+
+    heard = [t for t in text.split() if t not in _READBACK_STOP]
+    if len(heard) < 2:
+        return False
+    said = set(last.split())
+    overlap = sum(1 for t in heard if t in said)
+    return (overlap / len(heard)) >= 0.7
+
+
 def _said_authored_phrase(
     candidate: Match | None,
     steps: list[dict[str, Any]] | None,
@@ -2624,6 +2818,8 @@ def evaluate(
     readback_items: list[dict[str, Any]] | None = None,
     steps: list[dict[str, Any]] | None = None,
     current_step_id: str = "",
+    last_tx_text: str = "",
+    last_tx_at: float = 0.0,
 ) -> Evaluation:
     """
     Decide whether a transmission is ATC business, and if so what it asks for.
@@ -2647,6 +2843,7 @@ def evaluate(
     if step_is_authored(step_by_id(steps, current_step_id)):
         expected = ""
 
+    extra_intents = step_intents(steps)
     candidate = _score_intents(
         text,
         transcript,
@@ -2657,10 +2854,31 @@ def evaluate(
         runways=runways,
         awaiting_readback=awaiting_readback,
         readback_items=readback_items,
-        extra=step_intents(steps),
+        extra=extra_intents,
         current_step_id=current_step_id,
         steps=steps,
     )
+    if (
+        candidate is not None
+        and not awaiting_readback
+        and (candidate.kind == "step" or candidate.step_id)
+        and echoes_last_atc(
+            text,
+            last_tx_text,
+            intent=_catalog_intent(candidate.intent, extra_intents),
+            steps=steps,
+            last_tx_at=last_tx_at,
+            now=time.time() if last_tx_at else 0.0,
+        )
+    ):
+        return Evaluation(
+            transcript=transcript,
+            normalized=text,
+            candidate=candidate,
+            address=address,
+            reason="readback of last ATC",
+            advice="that was the last instruction — check in when ready",
+        )
     result = Evaluation(
         transcript=transcript, normalized=text, candidate=candidate, address=address
     )
@@ -2788,6 +3006,7 @@ _AGENCY_SPOKEN: dict[str, str] = {
     "blackjack": "Blackjack",
     "bandsaw": "Bandsaw",
     "ops": "{ap} Ops",
+    "tanker": "Tanker",
     "other": "Control",
 }
 

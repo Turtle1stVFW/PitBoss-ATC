@@ -791,6 +791,8 @@ def channel_for_tuned_freq(
 
     def _channel_for_mhz(target: float) -> str | None:
         for ch in atc_phrase.CHANNELS:
+            if ch == "tanker":
+                continue
             try:
                 mhz, _mod, _name = atc_phrase.channel_radio(airport, ch)
             except Exception:  # noqa: BLE001
@@ -802,6 +804,14 @@ def channel_for_tuned_freq(
                     return str(ch)
             except (TypeError, ValueError):
                 continue
+        try:
+            import tanker as tanker_mod
+
+            for mhz in tanker_mod.tanker_freqs_mhz(cfg):
+                if abs(float(mhz) - target) <= tol:
+                    return "tanker"
+        except Exception:
+            pass
         return None
 
     if st.selected_mhz is not None:

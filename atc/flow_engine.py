@@ -387,6 +387,9 @@ class FlowEngine:
                 raise RuntimeError(f"Step {step.get('id')} is mode=file but no file set")
             code = atc_phrase.transmit_file(self.config, airport, file_path, tx_name, freq, mod)
             detail["file"] = file_path
+            # File audio has no TTS string — keep the label so a spoken
+            # readback of the instruction can be recognized as an echo.
+            detail["text"] = str(step.get("text") or step.get("label") or "")
         else:
             template = step.get("template") or "radio_check"
             custom_text = step.get("text")
@@ -427,6 +430,9 @@ class FlowEngine:
                     )
             if str(step.get("template") or "") == "bj_range_exit":
                 self.state["range_exit_approved"] = True
+            if str(step.get("template") or "") in ("approach_procedure", "approach_iaf"):
+                self.state.pop("approach_clearance_need_fix", None)
+                self.state["vectors_active"] = False
 
         detail["exit_code"] = code
         self.state["last_step_id"] = step.get("id")
@@ -748,6 +754,9 @@ class FlowEngine:
                 "clear_land",
                 "right_break",
                 "cleared_approach",
+                "approach_clearance",
+                "app_procedure",
+                "approach_iaf",
                 "app_tower",
                 "twr_clear",
                 "twr_right",

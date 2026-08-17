@@ -1024,7 +1024,13 @@ class MissionPlanner(tk.Tk):
                     state=engine.state,
                 )
             # Side-effect: clear missed-approach rearm once outside the bubble.
+            had_rearm = engine.state.get("rearm_tower_outside_nm") is not None
             atc_phrase.tower_land_gates_allowed(engine.state, dist_nm)
+            if had_rearm and engine.state.get("rearm_tower_outside_nm") is None:
+                try:
+                    engine.save_state()
+                except Exception:
+                    pass
             fire, waiting = self._position_decide(
                 step,
                 trigger,
@@ -1092,8 +1098,10 @@ class MissionPlanner(tk.Tk):
             if not ready:
                 return "", waiting
             key = f"{step_id}:approach_clearance"
-            if not tracker.fire_once(f"fire:{key}"):
+            latch = f"fire:{key}"
+            if not tracker.armed(latch):
                 return "", waiting
+            tracker.pending_latch = latch
             return step_id, waiting
 
         if trigger is None:
@@ -1611,6 +1619,11 @@ class MissionPlanner(tk.Tk):
         context["awaiting_readback"] = bool(state.get("awaiting_readback"))
         items = state.get("readback_items") or []
         context["readback_items"] = items if isinstance(items, list) else []
+        context["last_tx_text"] = str(state.get("last_tx_text") or "")
+        try:
+            context["last_tx_at"] = float(state.get("last_tx_at") or 0.0)
+        except (TypeError, ValueError):
+            context["last_tx_at"] = 0.0
         # While a readback is open, the call due is that checklist — not the
         # next timeline step (e.g. stay on taxi readback, not monitor tower).
         if context["awaiting_readback"] and state.get("last_tx_template"):
@@ -1732,6 +1745,8 @@ class MissionPlanner(tk.Tk):
                         action="voice",
                         channel=str(result.get("channel") or ""),
                     )
+                elif action == "hint":
+                    self._voice_log(f"DCS  {detail or result.get('text') or 'tanker radio'}")
                 elif action == "transmit":
                     self._voice_log(f"TX   {result.get('channel', '').upper()}  {result.get('text', '')}")
                 elif isinstance(detail, dict):
@@ -6514,6 +6529,11 @@ class MissionPlanner(tk.Tk):
         "request_low_approach": "The option",
         "request_go_around": "On the go",
         "request_handoff": "Request handoff",
+        "request_tanker": "Request tanker",
+        "tanker_check_in": "Tanker check-in",
+        "tanker_observation": "Left observation",
+        "tanker_dcs_precontact": "DCS: Ready pre-contact",
+        "tanker_dcs_abort": "DCS: Abort / disconnect",
         "clear_runway_request": "Reset runway to winds",
     }
 
@@ -6803,6 +6823,24 @@ class MissionPlanner(tk.Tk):
 
             threading.Thread(target=ho_work, daemon=True).start()
             return
+        if result.get("execute_tanker_action"):
+            action = str(result.get("execute_tanker_action") or "")
+
+            def tk_work() -> None:
+                try:
+                    played = voice_engine.execute_tanker_action(
+                        self.engine, action
+                    )
+                    self.after(0, lambda p=played: self._on_tanker_request_done(p))
+                except Exception as exc:  # noqa: BLE001
+                    err = str(exc)
+                    self.after(
+                        0,
+                        lambda m=err: messagebox.showerror("Tanker", m),
+                    )
+
+            threading.Thread(target=tk_work, daemon=True).start()
+            return
         if result.get("execute_option_full_stop"):
             def fs_work() -> None:
                 try:
@@ -6945,6 +6983,29 @@ class MissionPlanner(tk.Tk):
         )
         self.fly_log.see(tk.END)
         self._consume_position_fire_clears()
+        self._refresh_fly_status()
+
+    def _on_tanker_request_done(self, played: dict[str, Any] | None) -> None:
+        played = played or {}
+        if played.get("action") == "blocked":
+            self._note_no_tx(
+                str(played.get("detail") or "Blocked"),
+                action="tanker",
+                channel=str(played.get("channel") or ""),
+            )
+            self._refresh_fly_status()
+            return
+        if played.get("action") == "hint":
+            hint = str(played.get("detail") or played.get("text") or "DCS tanker radio")
+            self.fly_log.insert(tk.END, f"DCS  {hint}\n")
+            self.fly_log.see(tk.END)
+            self._refresh_fly_status()
+            return
+        freq = played.get("freq") or ""
+        label = played.get("text") or played.get("label") or "Tanker"
+        ch = str(played.get("channel") or "tanker").upper()
+        self.fly_log.insert(tk.END, f"TX  {label}  ·  {freq}  ·  {ch}\n")
+        self.fly_log.see(tk.END)
         self._refresh_fly_status()
 
     def _on_handoff_request_done(self, played: dict[str, Any] | None) -> None:
@@ -7608,7 +7669,7 @@ class MissionPlanner(tk.Tk):
                 [
                     ("heading", "Typical first flight"),
                     ("bullet", "1. Setup → Identity & TTS — set your Opus username (e.g. Turtle)."),
-                    ("bullet", "2. Click the green flight chip in the title bar (or Setup → Identity) — pick Opus flight, confirm callsign/FP, then Save setup."),
+                    ("bullet", "2. Title bar — type your CAOC name and click the green flight chip to pick the Opus flight. That saves immediately (no Setup Save needed)."),
                     ("bullet", "3. Setup → Airport & radios — confirm SRS host and freqs (or Pull from Opus)."),
                     ("bullet", "   Optional: Manual runway overrides flight-plan / wind selection."),
                     ("bullet", "4. Plan Flight — New… (base flow + optional Opus), or Load / Save mission."),
@@ -7746,7 +7807,8 @@ class MissionPlanner(tk.Tk):
                     ("bullet", "• Wording is loose: \u201cready for taxi\u201d, \u201crequest taxi\u201d and a misheard \u201ctaxy\u201d all work."),
                     ("bullet", "• For the call that is due, the short version is enough — \u201cGround, Fleece 1, taxi\u201d."),
                     ("bullet", "• Right after ATC speaks, a plain \u201croger\u201d also clears the readback with no agency name."),
-                    ("bullet", "• Try: request runway · say winds · request picture · bogey dope · declare · say again."),
+                    ("bullet", "• Try: request runway · say winds · request picture · bogey dope · declare · request tanker · say again."),
+                    ("bullet", "• Tanker (F-16 / KC-135 boom, not MPRS): Blackjack/Bandsaw request tanker for vectors. On tanker freq we add the missing calls (cleared rejoin left, left observation). Use DCS tanker radio for Intent to refuel, Ready pre-contact (cleared contact), and Abort — that is what moves the boom."),
                     ("bullet", "• A call that fires a step advances Fly on its own — no need to press Play."),
                     ("bullet", "• Fly splits TO ADVANCE (plays the step) from ALSO AVAILABLE (winds, picture, …). "
                      "Cues are a full call when the agency opener is required; amber is the wording that must be said."),
@@ -7840,10 +7902,13 @@ class MissionPlanner(tk.Tk):
         ttk.Label(left, text="Identity & Opus", style="Header.TLabel").pack(anchor="w", pady=(0, 8))
         lf = tk.Frame(left, bg=C_PANEL)
         lf.pack(fill=tk.X)
-        self._setup_field(lf, 0, "Opus username", self.var_user)
+        user_setup = self._setup_field(lf, 0, "Opus username", self.var_user)
+        user_setup.bind("<Return>", self._commit_identity_user)
+        user_setup.bind("<FocusOut>", self._commit_identity_user)
+        user_setup.bind("<KeyRelease>", self._schedule_identity_user_commit)
         tk.Label(
             lf,
-            text="Optional. Matches your seat on the selected flight when signed up.",
+            text="Saves as you type. Matches your seat on the selected flight when signed up.",
             bg=C_PANEL,
             fg=C_MUTED,
             font=("Segoe UI", 8),
@@ -7864,10 +7929,12 @@ class MissionPlanner(tk.Tk):
         ttk.Button(flight_row, text="Choose flight…", command=self._choose_opus_flight).pack(
             side=tk.RIGHT, padx=(8, 0)
         )
-        self._setup_field(lf, 4, "Manual callsign", self.var_callsign_override)
+        override_ent = self._setup_field(lf, 4, "Manual callsign", self.var_callsign_override)
+        override_ent.bind("<Return>", self._commit_identity_override)
+        override_ent.bind("<FocusOut>", self._commit_identity_override)
         tk.Label(
             lf,
-            text="Optional. Use alone for offline TTS (no Opus). Blank = selected flight name.",
+            text="Optional. Use alone for offline TTS (no Opus). Blank = selected flight name. Saves on Enter or leaving the field.",
             bg=C_PANEL,
             fg=C_MUTED,
             font=("Segoe UI", 8),
@@ -7878,7 +7945,7 @@ class MissionPlanner(tk.Tk):
         )
         btns = tk.Frame(lf, bg=C_PANEL)
         btns.grid(row=7, column=1, sticky="w", pady=6)
-        ttk.Button(btns, text="Refresh from Opus", command=self._refresh_callsign).pack(side=tk.LEFT)
+        ttk.Button(btns, text="Refresh from Opus", command=self._persist_identity).pack(side=tk.LEFT)
         ttk.Button(btns, text="Clear flight", command=self._clear_opus_flight).pack(side=tk.LEFT, padx=(8, 0))
         lf.columnconfigure(1, weight=1)
 
@@ -8136,7 +8203,8 @@ class MissionPlanner(tk.Tk):
         )
         ff = tk.Frame(right, bg=C_PANEL)
         ff.pack(fill=tk.X)
-        for i, ch in enumerate(atc_phrase.CHANNELS):
+        freq_channels = [ch for ch in atc_phrase.CHANNELS if ch != "tanker"]
+        for i, ch in enumerate(freq_channels):
             r, c = divmod(i, 2)
             tk.Label(ff, text=ch, bg=C_PANEL, fg=C_LABEL, font=("Segoe UI", 9), width=10, anchor="w").grid(
                 row=r, column=c * 2, sticky="w", pady=3, padx=(0, 4)
@@ -8753,13 +8821,13 @@ class MissionPlanner(tk.Tk):
         var: tk.StringVar,
         *,
         width: int = 36,
-    ) -> None:
+    ) -> ttk.Entry:
         tk.Label(parent, text=label, bg=C_PANEL, fg=C_LABEL, font=("Segoe UI", 10)).grid(
             row=row, column=0, sticky="w", pady=3
         )
-        ttk.Entry(parent, textvariable=var, width=width).grid(
-            row=row, column=1, sticky="we", pady=3, padx=(8, 0)
-        )
+        ent = ttk.Entry(parent, textvariable=var, width=width)
+        ent.grid(row=row, column=1, sticky="we", pady=3, padx=(8, 0))
+        return ent
 
     def _clear_setup_runway_override(self) -> None:
         """Blank Manual runway so wind / flight-plan selection takes over."""
@@ -9586,6 +9654,8 @@ class MissionPlanner(tk.Tk):
         # Delivery is a separate freq at Nellis — speak "Delivery", not "Ground"
         ap["clearance_consolidated_with_ground"] = False
         for ch in atc_phrase.CHANNELS:
+            if ch == "tanker":
+                continue
             try:
                 mhz = float(self.freq_vars[ch].get())
             except ValueError:
@@ -9651,6 +9721,7 @@ class MissionPlanner(tk.Tk):
         user_ent.pack(side=tk.LEFT, padx=(6, 8))
         user_ent.bind("<Return>", self._commit_identity_user)
         user_ent.bind("<FocusOut>", self._commit_identity_user)
+        user_ent.bind("<KeyRelease>", self._schedule_identity_user_commit)
 
         chip = tk.Frame(bar, bg=C_BG, cursor="hand2")
         chip.pack(side=tk.LEFT, fill=tk.X, expand=True)
@@ -9685,7 +9756,7 @@ class MissionPlanner(tk.Tk):
         """Popup: choose / refresh / clear the active Opus flight."""
         menu = tk.Menu(self, tearoff=0)
         menu.add_command(label="Choose flight…", command=self._choose_opus_flight)
-        menu.add_command(label="Refresh from Opus", command=self._refresh_callsign)
+        menu.add_command(label="Refresh from Opus", command=self._persist_identity)
         menu.add_command(label="Clear flight", command=self._clear_opus_flight)
         try:
             menu.tk_popup(event.x_root, event.y_root)
@@ -9693,16 +9764,69 @@ class MissionPlanner(tk.Tk):
             menu.grab_release()
         return "break"
 
+    def _persist_identity(self, *, refresh_opus: bool = True) -> None:
+        """
+        Write CAOC username / Opus flight to disk and resolve the callsign.
+
+        Header changes used to stay in memory until Setup → Save, so Play / voice
+        / a new FlowEngine() still loaded the old flight from config.json.
+        """
+        if hasattr(self, "var_user"):
+            self.config_data["opus_user_name"] = self.var_user.get().strip()
+        if hasattr(self, "var_backend"):
+            backend = self.var_backend.get().strip()
+            if backend:
+                self.config_data["opus_backend_url"] = backend
+        if hasattr(self, "var_callsign_override"):
+            self.config_data["callsign_override"] = self.var_callsign_override.get().strip()
+        atc_phrase.invalidate_opus_cache()
+        try:
+            save_json(CONFIG_PATH, self.config_data)
+        except OSError:
+            pass
+        if getattr(self, "engine", None) is not None:
+            self.engine.config = self.config_data
+        self._refresh_opus_identity_bar()
+        if refresh_opus:
+            self._refresh_callsign()
+
     def _commit_identity_user(self, _evt: object | None = None) -> None:
-        """Push the visible CAOC username into config (invalidates Opus/CAOC cache)."""
+        """Push the visible CAOC username into config and re-resolve Opus."""
+        pending = getattr(self, "_identity_user_after", None)
+        if pending is not None:
+            try:
+                self.after_cancel(pending)
+            except (tk.TclError, ValueError):
+                pass
+            self._identity_user_after = None
         if not hasattr(self, "var_user"):
             return
         user = self.var_user.get().strip()
         prev = str(self.config_data.get("opus_user_name") or "").strip()
-        self.config_data["opus_user_name"] = user
-        if user != prev:
-            atc_phrase.invalidate_opus_cache()
-        self._refresh_opus_identity_bar()
+        if user == prev:
+            self._refresh_opus_identity_bar()
+            return
+        self._persist_identity(refresh_opus=True)
+
+    def _commit_identity_override(self, _evt: object | None = None) -> None:
+        """Persist a manual callsign override without waiting for Save setup."""
+        if not hasattr(self, "var_callsign_override"):
+            return
+        value = self.var_callsign_override.get().strip()
+        prev = str(self.config_data.get("callsign_override") or "").strip()
+        if value == prev:
+            return
+        self._persist_identity(refresh_opus=True)
+
+    def _schedule_identity_user_commit(self, _evt: object | None = None) -> None:
+        """Debounce CAOC name typing so we save without waiting for Setup."""
+        pending = getattr(self, "_identity_user_after", None)
+        if pending is not None:
+            try:
+                self.after_cancel(pending)
+            except (tk.TclError, ValueError):
+                pass
+        self._identity_user_after = self.after(700, self._commit_identity_user)
 
     def _refresh_opus_identity_bar(self) -> None:
         """Refresh CAOC match hint from current username + flight selection."""
@@ -9770,10 +9894,9 @@ class MissionPlanner(tk.Tk):
         self.config_data.pop("opus_flight_id", None)
         self.config_data.pop("opus_seat", None)
         self.config_data.pop("opus_flight_label", None)
-        atc_phrase.invalidate_opus_cache()
         self._update_opus_flight_label()
         self.var_callsign.set("(refresh to resolve)")
-        self._refresh_opus_identity_bar()
+        self._persist_identity(refresh_opus=True)
 
     def _choose_opus_flight(
         self,
@@ -10008,11 +10131,9 @@ class MissionPlanner(tk.Tk):
             self.config_data["opus_flight_label"] = " · ".join(
                 self._opus_flight_summary_bits(row)
             )
-            atc_phrase.invalidate_opus_cache()
             self._update_opus_flight_label(row)
             dlg.destroy()
-            self._refresh_callsign()
-            self._refresh_opus_identity_bar()
+            self._persist_identity(refresh_opus=True)
             if on_done is not None:
                 try:
                     on_done()
@@ -10106,6 +10227,8 @@ class MissionPlanner(tk.Tk):
         ap["name"] = self.var_ap_name.get().strip() or key.title()
         ap["icao"] = self.var_icao.get().strip().upper()
         for ch in atc_phrase.CHANNELS:
+            if ch == "tanker":
+                continue
             try:
                 mhz = float(self.freq_vars[ch].get())
             except ValueError:
