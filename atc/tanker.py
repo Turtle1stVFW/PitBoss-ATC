@@ -3,14 +3,17 @@ Opus tanker tracks + official boom AAR comms (ATP-56 / USAF KC-135).
 
 F-16s use the KC-135 boom — not MPRS pods and not the KC-130. Blackjack /
 Bandsaw give vectors from the theater tanker list plus the live CAOC track.
-On tanker freq this app only fills what DCS does not say (rejoin left,
-observation). Cleared contact / disconnect stay on the DCS tanker radio
-so the boom AI still works.
+On tanker freq this app only fills the missing join (cleared rejoin left,
+sometimes left observation). The tanker does not "identify" the receiver.
+Observation / pre-contact / cleared contact stay on the DCS tanker radio
+so the boom AI still works. C2 gives track and BRAA; TACAN, frequency,
+and bullseye wait until asked.
 """
 
 from __future__ import annotations
 
 import math
+import random
 import re
 import time
 from typing import Any
@@ -37,6 +40,10 @@ _TANKER_STATE_KEYS = (
     "tanker_aircraft",
     "tanker_track",
     "tanker_tcn",
+    "tanker_rejoined",
+    "tanker_chat_in_range_since",
+    "tanker_chat_dwell_s",
+    "tanker_chat_auto_done",
 )
 
 # Receiver position in the boom pattern.
@@ -48,17 +55,62 @@ PHASE_CONTACT = "contact"
 PHASE_RIGHT = "right"
 PHASE_DEPARTED = "departed"
 
+# Boom / observation envelope where Texaco may start small talk.
+CHAT_MIN_NM = 0.1
+CHAT_MAX_NM = 0.5
+CHAT_REARM_NM = 1.0
+CHAT_DWELL_MIN_S = 30.0
+CHAT_DWELL_MAX_S = 60.0
+CHAT_DWELL_S = CHAT_DWELL_MIN_S
+
 
 def tanker_is_f16_boom(row: dict[str, Any] | None) -> bool:
     """True for KC-135 boom (not MPRS, not KC-130)."""
-    ac = re.sub(r"[\s_\-]+", "", str((row or {}).get("aircraft") or "").upper())
+    blobs = [
+        str((row or {}).get("aircraft") or ""),
+        str((row or {}).get("objectName") or ""),
+        str((row or {}).get("object_name") or ""),
+    ]
+    ac = re.sub(r"[\s_\-]+", "", " ".join(blobs).upper())
     if not ac:
         return False
     if "MPRS" in ac:
         return False
-    if "KC130" in ac:
+    if "KC130" in ac or re.search(r"(?<![A-Z])C130", ac):
         return False
     return "KC135" in ac
+
+
+def _unit_is_f16_boom(unit: dict[str, Any] | None) -> bool | None:
+    """Live CAOC type: True/False boom, or None if the unit is not typed."""
+    if not unit:
+        return None
+    obj = re.sub(
+        r"[\s_\-]+",
+        "",
+        str(unit.get("objectName") or unit.get("object_name") or "").upper(),
+    )
+    if not obj:
+        return None
+    if "MPRS" in obj:
+        return False
+    if "KC130" in obj or re.search(r"(?<![A-Z])C130", obj):
+        return False
+    if "KC135" in obj:
+        return True
+    return None
+
+
+def _row_is_boom(
+    row: dict[str, Any] | None,
+    unit: dict[str, Any] | None = None,
+) -> bool:
+    live = _unit_is_f16_boom(unit)
+    if live is False:
+        return False
+    if live is True:
+        return True
+    return tanker_is_f16_boom(row)
 
 
 def normalize_tanker_name(raw: str | None) -> str:
@@ -97,10 +149,17 @@ def speak_tanker_callsign(name: str | None) -> str:
 
 
 def speak_aar_track(track: str | None) -> str:
-    """'ARLNS' → 'A R L N S'; 'AR-625H/L' → letters and digits."""
+    """'AR231V' → 'A R two tree one Victor'; 'ARLNS' → 'Alpha Romeo Lima …'."""
     raw = str(track or "").strip().upper()
     if not raw:
         return ""
+    m = re.match(r"^AR[\s\-/]*(\d{1,4})[\s\-/]*([A-Z])?$", raw)
+    if m:
+        bits = ["A R", atc_phrase.speak_digits(m.group(1))]
+        letter = m.group(2)
+        if letter:
+            bits.append(_nato_letter(letter))
+        return " ".join(p for p in bits if p)
     bits: list[str] = []
     for ch in raw:
         if ch.isspace() or ch in "-_/":
@@ -108,11 +167,13 @@ def speak_aar_track(track: str | None) -> str:
         if ch.isdigit():
             bits.append(atc_phrase.speak_digits(ch))
         elif ch.isalpha():
-            if ch == "X":
-                bits.append("x-ray")
-            else:
-                bits.append(ch)
+            bits.append(_nato_letter(ch))
     return " ".join(bits)
+
+
+def _nato_letter(ch: str) -> str:
+    table = getattr(atc_phrase, "_NATO_TAXIWAY", {}) or {}
+    return str(table.get(ch.lower()) or ch)
 
 
 def speak_tacan(raw: str | None) -> str:
@@ -271,12 +332,23 @@ def _enrich_live(
         pass
     if own_ll and out.get("lat") is not None and out.get("lon") is not None:
         try:
+            import picture_labels as pl
+
             out["distance_nm"] = atc_phrase._haversine_nm(
                 own_ll[0], own_ll[1], float(out["lat"]), float(out["lon"])
             )
             out["bearing_deg"] = _bearing_deg(
                 own_ll[0], own_ll[1], float(out["lat"]), float(out["lon"])
             )
+            aspect = pl.aspect_to_fighter(
+                own_lat=own_ll[0],
+                own_lon=own_ll[1],
+                tgt_lat=float(out["lat"]),
+                tgt_lon=float(out["lon"]),
+                tgt_heading=out.get("heading_deg"),
+            )
+            if aspect:
+                out["aspect"] = aspect
         except (TypeError, ValueError):
             pass
     out["live"] = True
@@ -293,57 +365,61 @@ def _bearing_deg(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return (math.degrees(math.atan2(x, y)) + 360.0) % 360.0
 
 
-def pick_tanker(
-    config: dict[str, Any] | None,
+def _find_named_row(
+    catalog: list[dict[str, Any]],
+    want: str,
     *,
-    opus: Any = None,
-    state: dict[str, Any] | None = None,
-    name: str | None = None,
-    own_ll: tuple[float, float] | None = None,
-    boom_only: bool = True,
+    boom_only: bool,
+    units: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
-    """
-    Choose a tanker: named request, then nearest live boom KC-135, then catalog.
-    """
-    catalog = fetch_opus_tankers(config, opus=opus)
-    if not catalog:
-        return None
-    units = _caoc_tanker_units(config)
-    want = normalize_tanker_name(name)
-    if not want and isinstance(state, dict):
-        want = normalize_tanker_name(
-            str(state.get("tanker_callsign") or state.get("tanker_id") or "")
-        )
+    units = units or []
+    exact: dict[str, Any] | None = None
+    brand_hit: dict[str, Any] | None = None
+    brand = re.sub(r"\d+$", "", want)
+    for row in catalog:
+        key = normalize_tanker_name(str(row.get("callsign") or ""))
+        unit = _match_live_unit(row, units)
+        if boom_only and not _row_is_boom(row, unit):
+            continue
+        if key == want:
+            exact = row
+            break
+        if want and (want in key or key.startswith(brand)):
+            if brand_hit is None:
+                brand_hit = row
+    return exact or brand_hit
 
+
+def choose_catalog_tanker(
+    catalog: list[dict[str, Any]],
+    *,
+    name: str | None = None,
+    boom_only: bool = True,
+    units: list[dict[str, Any]] | None = None,
+    own_ll: tuple[float, float] | None = None,
+    config: dict[str, Any] | None = None,
+    opus: Any = None,
+) -> dict[str, Any] | None:
+    """Pick a catalog row. boom_only never returns KC-130 / MPRS."""
+    units = units or []
+    want = normalize_tanker_name(name)
     chosen: dict[str, Any] | None = None
     if want:
-        for row in catalog:
-            if normalize_tanker_name(str(row.get("callsign") or "")) == want:
-                chosen = row
-                break
-            if want in normalize_tanker_name(str(row.get("callsign") or "")):
-                chosen = row
-                break
-        if chosen is None:
-            # Brand only (TEXACO) — prefer boom of that brand.
-            brand = re.sub(r"\d+$", "", want)
-            for row in catalog:
-                if not normalize_tanker_name(str(row.get("callsign") or "")).startswith(
-                    brand
-                ):
-                    continue
-                if boom_only and not row.get("boom"):
-                    continue
-                chosen = row
-                break
+        chosen = _find_named_row(catalog, want, boom_only=boom_only, units=units)
 
     if chosen is None:
-        pool = [r for r in catalog if r.get("boom")] if boom_only else list(catalog)
+        pool = [
+            r
+            for r in catalog
+            if (not boom_only) or _row_is_boom(r, _match_live_unit(r, units))
+        ]
         if not pool:
-            pool = list(catalog)
+            return None
         scored: list[tuple[float, dict[str, Any]]] = []
         for row in pool:
             unit = _match_live_unit(row, units)
+            if boom_only and not _row_is_boom(row, unit):
+                continue
             if unit is None or own_ll is None:
                 continue
             live = _enrich_live(row, unit, config, opus=opus, own_ll=own_ll)
@@ -356,10 +432,52 @@ def pick_tanker(
             chosen = scored[0][1]
         else:
             chosen = pool[0]
+    return chosen
 
+
+def pick_tanker(
+    config: dict[str, Any] | None,
+    *,
+    opus: Any = None,
+    state: dict[str, Any] | None = None,
+    name: str | None = None,
+    own_ll: tuple[float, float] | None = None,
+    boom_only: bool = True,
+) -> dict[str, Any] | None:
+    """
+    Choose a tanker: named request, then nearest live boom KC-135, then catalog.
+    F-16 C2 requests never fall back to KC-130 or MPRS.
+    """
+    catalog = fetch_opus_tankers(config, opus=opus)
+    if not catalog:
+        return None
+    units = _caoc_tanker_units(config)
+    want = str(name or "").strip()
+    if not want and isinstance(state, dict):
+        remembered = str(state.get("tanker_callsign") or state.get("tanker_id") or "")
+        if remembered:
+            row = _find_named_row(
+                catalog,
+                normalize_tanker_name(remembered),
+                boom_only=boom_only,
+                units=units,
+            )
+            if row is not None:
+                want = remembered
+    chosen = choose_catalog_tanker(
+        catalog,
+        name=want or None,
+        boom_only=boom_only,
+        units=units,
+        own_ll=own_ll,
+        config=config,
+        opus=opus,
+    )
     if chosen is None:
         return None
     unit = _match_live_unit(chosen, units)
+    if boom_only and not _row_is_boom(chosen, unit):
+        return None
     return _enrich_live(chosen, unit, config, opus=opus, own_ll=own_ll)
 
 
@@ -380,7 +498,7 @@ def remember_tanker(state: dict[str, Any] | None, tanker: dict[str, Any] | None)
         state["tanker_freq_mhz"] = float(mhz) if mhz is not None else None
     except (TypeError, ValueError):
         state["tanker_freq_mhz"] = None
-    if not state.get("tanker_phase"):
+    if not state.get("tanker_phase") or state.get("tanker_phase") == PHASE_DEPARTED:
         state["tanker_phase"] = PHASE_JOIN
 
 
@@ -424,78 +542,129 @@ def extract_tanker_name(text: str) -> str | None:
     return brand
 
 
+def _tanker_altitude_speech(tanker: dict[str, Any] | None) -> str:
+    return (
+        atc_phrase.speak_altitude_value(
+            (tanker or {}).get("live_alt_ft") or (tanker or {}).get("altitude"),
+            prefer_fl_below=1000,
+        )
+        or ""
+    )
+
+
+def speak_tanker_braa(bearing: int, range_nm: int) -> str:
+    """Spoken BRAA — 'braw', not letter-by-letter B-R-A-A."""
+    brg = max(0, min(360, int(bearing))) % 360
+    rng = max(0, int(range_nm))
+    return (
+        f"braw {atc_phrase.speak_digits(f'{brg:03d}')}, "
+        f"{atc_phrase.speak_natural_number(rng)}"
+    )
+
+
+def _tanker_braa_bits(tanker: dict[str, Any] | None) -> list[str]:
+    """Bearing, range, altitude. No hot/cold aspect."""
+    row = tanker or {}
+    bits: list[str] = []
+    brg = row.get("bearing_deg")
+    rng = row.get("distance_nm")
+    try:
+        if brg is not None and rng is not None:
+            bits.append(speak_tanker_braa(int(round(float(brg))), int(round(float(rng)))))
+    except (TypeError, ValueError):
+        pass
+    alt = _tanker_altitude_speech(row)
+    if alt:
+        bits.append(alt)
+    return bits
+
+
+def _c2_tanker_open(agency: str, callsign: str, tanker: dict[str, Any] | None) -> tuple[str, str, str]:
+    cs = atc_phrase.speak_callsign(callsign)
+    ag = atc_phrase.speak_agency_name(agency)
+    tcs = speak_tanker_callsign(str((tanker or {}).get("callsign") or "tanker"))
+    return cs, ag, tcs
+
+
 def build_c2_tanker_vectors(
     agency: str,
     callsign: str,
     tanker: dict[str, Any] | None,
 ) -> str:
     """
-    Blackjack / Bandsaw vectors to the published Opus tanker.
-
-    Official C2 style: who, type, track, block, TACAN, freq, then live
-    bullseye / steer if the CAOC track is up.
+    Blackjack / Bandsaw: tanker, type, AR track, BRAA with altitude.
+    TACAN / frequency / bullseye are separate on-request calls.
     """
-    cs = atc_phrase.speak_callsign(callsign)
-    ag = atc_phrase.speak_agency_name(agency)
+    cs, ag, tcs = _c2_tanker_open(agency, callsign, tanker)
     if not tanker:
         return (
-            f"{cs}, {ag}, unable tanker, no Opus tanker published for this theater."
+            f"{cs}, {ag}, unable tanker, no KC-135 boom published for this theater."
         )
-    tcs = speak_tanker_callsign(str(tanker.get("callsign") or "tanker"))
     bits = [f"{cs}, {ag}, tanker {tcs}"]
     ac = str(tanker.get("aircraft") or "").strip()
     if ac:
-        ac_say = "KC-135" if tanker_is_f16_boom(tanker) else ac
         if tanker_is_f16_boom(tanker):
             bits.append("KC-135 boom")
         else:
-            bits.append(ac_say)
+            bits.append(ac)
     track = speak_aar_track(str(tanker.get("track") or ""))
     if track:
-        bits.append(f"air refueling track {track}")
-    alt = atc_phrase.speak_altitude_value(
-        tanker.get("live_alt_ft") or tanker.get("altitude"),
-        prefer_fl_below=1000,
-    )
-    if alt:
-        bits.append(alt)
+        bits.append(f"track {track}")
+    bits.extend(_tanker_braa_bits(tanker))
+    body = ", ".join(bits) + "."
+    return f"{body} Frequency change approved."
+
+
+def build_tanker_tacan_reply(
+    agency: str,
+    callsign: str,
+    tanker: dict[str, Any] | None,
+) -> str:
+    cs, ag, tcs = _c2_tanker_open(agency, callsign, tanker)
+    if not tanker:
+        return f"{cs}, {ag}, unable TACAN, no tanker."
     tcn = speak_tacan(str(tanker.get("tcn") or ""))
-    if tcn:
-        bits.append(f"TACAN {tcn}")
-    mhz = tanker.get("freq_mhz")
+    if not tcn:
+        return f"{cs}, {ag}, {tcs}, unable TACAN, none published."
+    return f"{cs}, {ag}, {tcs}, TACAN {tcn}."
+
+
+def build_tanker_freq_reply(
+    agency: str,
+    callsign: str,
+    tanker: dict[str, Any] | None,
+) -> str:
+    cs, ag, tcs = _c2_tanker_open(agency, callsign, tanker)
+    if not tanker:
+        return f"{cs}, {ag}, unable tanker frequency, no tanker."
     try:
-        if mhz is not None and float(mhz) > 0:
-            bits.append(f"tanker frequency {atc_phrase.speak_freq(float(mhz))}")
+        mhz = float(tanker.get("freq_mhz") or 0)
     except (TypeError, ValueError):
-        pass
+        mhz = 0.0
+    if mhz <= 0:
+        return f"{cs}, {ag}, {tcs}, unable tanker frequency, none published."
+    return f"{cs}, {ag}, {tcs}, tanker frequency {atc_phrase.speak_freq(mhz)}."
+
+
+def build_tanker_bullseye_reply(
+    agency: str,
+    callsign: str,
+    tanker: dict[str, Any] | None,
+) -> str:
+    cs, ag, tcs = _c2_tanker_open(agency, callsign, tanker)
+    if not tanker:
+        return f"{cs}, {ag}, unable tanker bullseye, no tanker."
     be = tanker.get("bullseye") if isinstance(tanker.get("bullseye"), dict) else None
     if be and be.get("spoken"):
-        bits.append(f"tanker is {be['spoken']}")
-    elif be and be.get("bearing") is not None and be.get("range_nm") is not None:
-        bits.append(
-            atc_phrase.speak_picture_bullseye(
-                str(be.get("name") or "ELVIS"),
-                int(be["bearing"]),
-                int(be["range_nm"]),
-            )
+        return f"{cs}, {ag}, {tcs} is {be['spoken']}."
+    if be and be.get("bearing") is not None and be.get("range_nm") is not None:
+        spoken = atc_phrase.speak_picture_bullseye(
+            str(be.get("name") or "ELVIS"),
+            int(be["bearing"]),
+            int(be["range_nm"]),
         )
-    hdg = tanker.get("heading_deg")
-    try:
-        if hdg is not None:
-            bits.append(f"track {atc_phrase.speak_digits(f'{int(hdg) % 360:03d}')}")
-    except (TypeError, ValueError):
-        pass
-    steer = tanker.get("bearing_deg")
-    try:
-        if steer is not None:
-            bits.append(
-                f"steer heading {atc_phrase.speak_digits(f'{int(steer) % 360:03d}')}"
-            )
-    except (TypeError, ValueError):
-        pass
-    bits.append(f"contact {tcs} when able")
-    bits.append("intent to refuel and ready pre-contact on tanker radio")
-    return ", ".join(bits) + "."
+        return f"{cs}, {ag}, {tcs} is {spoken}."
+    return f"{cs}, {ag}, {tcs}, unable bullseye, no live track."
 
 
 # DCS tanker radio owns these — SRS must not speak "cleared contact" or the
@@ -503,6 +672,7 @@ def build_c2_tanker_vectors(
 DCS_TANKER_ACTIONS = frozenset(
     {
         "tanker_astern",
+        "tanker_observation",
         "tanker_contact",
         "tanker_disconnect",
         "tanker_depart",
@@ -510,6 +680,43 @@ DCS_TANKER_ACTIONS = frozenset(
         "tanker_dcs_abort",
     }
 )
+
+C2_TANKER_INFO_ACTIONS = frozenset(
+    {"tanker_tacan", "tanker_freq", "tanker_bullseye"}
+)
+
+
+def tanker_awaiting_return(state: dict[str, Any] | None) -> bool:
+    """True after C2 sent them to the tanker, until they check back in."""
+    if not isinstance(state, dict):
+        return False
+    phase = str(state.get("tanker_phase") or "").strip()
+    return phase in {
+        PHASE_JOIN,
+        PHASE_OBSERVATION,
+        PHASE_ASTERN,
+        PHASE_CONTACT,
+        PHASE_RIGHT,
+    }
+
+
+def build_tanker_return_checkin(
+    agency: str,
+    callsign: str,
+    *,
+    alpha_bullseye: str | None = None,
+) -> str:
+    """Back on Blackjack / Bandsaw after AAR."""
+    ch = str(agency or "blackjack").strip().lower()
+    if ch == "blackjack":
+        return atc_phrase.build_blackjack_continue(
+            callsign, alpha_bullseye=alpha_bullseye
+        )
+    cs = atc_phrase.speak_callsign(callsign)
+    ag = atc_phrase.speak_agency_name(ch)
+    if alpha_bullseye:
+        return f"{cs}, {ag}, radar contact {alpha_bullseye}. Continue."
+    return f"{cs}, {ag}, radar contact. Continue."
 
 
 def dcs_tanker_radio_hint(action: str) -> str:
@@ -521,29 +728,268 @@ def dcs_tanker_radio_hint(action: str) -> str:
 
 
 def build_tanker_check_in(callsign: str, tanker: dict[str, Any] | None) -> str:
-    """
-    Missing official join call. DCS still needs Intent to refuel on its menu.
-    """
+    """Missing official join: cleared rejoin left, sometimes left observation."""
     cs = atc_phrase.speak_callsign(callsign)
     tcs = speak_tanker_callsign(str((tanker or {}).get("callsign") or "Tanker"))
-    return (
-        f"{cs}, {tcs}, identified, cleared rejoin left, "
-        f"intent to refuel on tanker radio."
+    join = atc_phrase._pick(
+        "cleared rejoin left",
+        "cleared rejoin left observation",
     )
-
-
-def build_tanker_observation(callsign: str, tanker: dict[str, Any] | None) -> str:
-    """
-    Missing official observation call. Boom clearance stays on DCS radio.
-    """
-    cs = atc_phrase.speak_callsign(callsign)
-    tcs = speak_tanker_callsign(str((tanker or {}).get("callsign") or "Tanker"))
-    return (
-        f"{cs}, {tcs}, cleared astern, proceed to pre-contact, "
-        f"ready pre-contact on tanker radio for cleared contact."
-    )
+    return f"{cs}, {tcs}, {join}."
 
 
 def apply_tanker_phase(state: dict[str, Any] | None, phase: str) -> None:
-    if isinstance(state, dict):
-        state["tanker_phase"] = phase
+    if not isinstance(state, dict):
+        return
+    state["tanker_phase"] = phase
+    if phase in {PHASE_DEPARTED, PHASE_NONE, ""}:
+        mark_rejoined(state, False)
+
+
+def mark_rejoined(state: dict[str, Any] | None, value: bool = True) -> None:
+    """Set after 'cleared rejoin left'. Cleared when they leave the tanker."""
+    if not isinstance(state, dict):
+        return
+    if value:
+        state["tanker_rejoined"] = True
+        return
+    state.pop("tanker_rejoined", None)
+    state.pop("tanker_chat_in_range_since", None)
+    state.pop("tanker_chat_dwell_s", None)
+    state.pop("tanker_chat_auto_done", None)
+
+
+def has_rejoined(state: dict[str, Any] | None) -> bool:
+    return bool(isinstance(state, dict) and state.get("tanker_rejoined"))
+
+
+def boom_chat_gate(
+    *,
+    rejoined: bool,
+    chat_open: bool,
+    dist_nm: float | None,
+    receivers: int,
+    auto_done: bool,
+    now: float,
+    in_range_since: float | None,
+    min_nm: float = CHAT_MIN_NM,
+    max_nm: float = CHAT_MAX_NM,
+    dwell_s: float = CHAT_DWELL_S,
+    rearm_nm: float = CHAT_REARM_NM,
+) -> dict[str, Any]:
+    """
+    Decide whether Texaco should start boom chat.
+
+    Ready only after rejoin, with ownship 0.1–0.5 NM from the tanker and at
+    least one fighter in that envelope (you count). Hold 30–60 s in the
+    envelope before Texaco talks. Leaving past rearm_nm clears auto_done so
+    a later plug can chat again.
+    """
+    reason = ""
+    in_range = False
+    clear_auto = False
+    set_since: float | None = in_range_since
+    ready = False
+    if chat_open:
+        return {
+            "ready": False,
+            "in_range": False,
+            "reason": "chat already open",
+            "clear_auto_done": False,
+            "in_range_since": in_range_since,
+        }
+    if not rejoined:
+        return {
+            "ready": False,
+            "in_range": False,
+            "reason": "waiting — request rejoin first",
+            "clear_auto_done": False,
+            "in_range_since": None,
+        }
+    if dist_nm is None:
+        return {
+            "ready": False,
+            "in_range": False,
+            "reason": "waiting — no tanker track",
+            "clear_auto_done": False,
+            "in_range_since": None,
+        }
+    if dist_nm > rearm_nm:
+        clear_auto = True
+        return {
+            "ready": False,
+            "in_range": False,
+            "reason": f"waiting — {dist_nm:.2f} NM from tanker",
+            "clear_auto_done": True,
+            "in_range_since": None,
+        }
+    in_range = min_nm <= dist_nm <= max_nm
+    if not in_range:
+        if dist_nm < min_nm:
+            reason = f"inside {min_nm:.1f} NM — holding"
+        else:
+            reason = f"{dist_nm:.2f} NM — close to {max_nm:.1f} NM"
+        return {
+            "ready": False,
+            "in_range": False,
+            "reason": reason,
+            "clear_auto_done": False,
+            "in_range_since": None,
+        }
+    if receivers < 1:
+        return {
+            "ready": False,
+            "in_range": True,
+            "reason": "in range, no receiver on the boom",
+            "clear_auto_done": False,
+            "in_range_since": None,
+        }
+    if auto_done:
+        return {
+            "ready": False,
+            "in_range": True,
+            "reason": f"in range {dist_nm:.2f} NM — already chatted",
+            "clear_auto_done": False,
+            "in_range_since": in_range_since,
+        }
+    if in_range_since is None:
+        set_since = now
+        return {
+            "ready": False,
+            "in_range": True,
+            "reason": f"in range {dist_nm:.2f} NM — holding {dwell_s:.0f}s",
+            "clear_auto_done": False,
+            "in_range_since": set_since,
+        }
+    held = now - float(in_range_since)
+    if held < dwell_s:
+        left = max(0.0, dwell_s - held)
+        return {
+            "ready": False,
+            "in_range": True,
+            "reason": f"in range {dist_nm:.2f} NM — {left:.0f}s",
+            "clear_auto_done": False,
+            "in_range_since": in_range_since,
+        }
+    n = int(receivers)
+    who = "receiver" if n == 1 else "receivers"
+    return {
+        "ready": True,
+        "in_range": True,
+        "reason": f"on the boom · {dist_nm:.2f} NM · {n} {who}",
+        "clear_auto_done": False,
+        "in_range_since": in_range_since,
+    }
+
+
+def _unit_latlon(
+    unit: dict[str, Any] | None,
+    config: dict[str, Any] | None,
+    *,
+    opus: Any = None,
+) -> tuple[float, float] | None:
+    if not unit:
+        return None
+    try:
+        return atc_phrase.caoc_xz_to_ll(float(unit["xMeters"]), float(unit["zMeters"]))
+    except (KeyError, TypeError, ValueError):
+        pass
+    try:
+        fix = atc_phrase.bullseye_for_caoc_unit(unit, config or {}, opus=opus)
+        if fix and fix.get("lat") is not None and fix.get("lon") is not None:
+            return (float(fix["lat"]), float(fix["lon"]))
+    except (TypeError, ValueError):
+        return None
+    return None
+
+
+def count_boom_receivers(
+    config: dict[str, Any] | None,
+    tanker: dict[str, Any] | None,
+    *,
+    own_ll: tuple[float, float] | None = None,
+    opus: Any = None,
+    max_nm: float = CHAT_MAX_NM,
+) -> int:
+    """Fighters (including you) within max_nm of the tanker."""
+    tlat = tanker.get("lat") if isinstance(tanker, dict) else None
+    tlon = tanker.get("lon") if isinstance(tanker, dict) else None
+    try:
+        tlat_f = float(tlat)
+        tlon_f = float(tlon)
+    except (TypeError, ValueError):
+        return 0
+    seen: set[tuple[float, float]] = set()
+    n = 0
+    if own_ll:
+        try:
+            d = atc_phrase._haversine_nm(own_ll[0], own_ll[1], tlat_f, tlon_f)
+            if d <= max_nm:
+                n += 1
+                seen.add((round(own_ll[0], 5), round(own_ll[1], 5)))
+        except (TypeError, ValueError):
+            pass
+    radar = atc_phrase.fetch_caoc_radar(config or {})
+    units = atc_phrase.caoc_air_units(list((radar or {}).get("units") or []))
+    for unit in units:
+        if atc_phrase.caoc_unit_is_picture_fixture(unit):
+            continue
+        ll = _unit_latlon(unit, config, opus=opus)
+        if not ll:
+            continue
+        key = (round(ll[0], 5), round(ll[1], 5))
+        if key in seen:
+            continue
+        try:
+            d = atc_phrase._haversine_nm(ll[0], ll[1], tlat_f, tlon_f)
+        except (TypeError, ValueError):
+            continue
+        if d <= max_nm:
+            n += 1
+            seen.add(key)
+    return n
+
+
+def tick_boom_chat(
+    state: dict[str, Any] | None,
+    *,
+    dist_nm: float | None,
+    receivers: int,
+    chat_open: bool,
+    now: float | None = None,
+) -> dict[str, Any]:
+    """Update dwell / re-arm flags and return boom_chat_gate result."""
+    if not isinstance(state, dict):
+        state = {}
+    now_f = time.time() if now is None else float(now)
+    since = state.get("tanker_chat_in_range_since")
+    try:
+        since_f = float(since) if since is not None else None
+    except (TypeError, ValueError):
+        since_f = None
+    try:
+        dwell = float(state.get("tanker_chat_dwell_s") or 0)
+    except (TypeError, ValueError):
+        dwell = 0.0
+    if dwell < CHAT_DWELL_MIN_S or dwell > CHAT_DWELL_MAX_S:
+        dwell = random.uniform(CHAT_DWELL_MIN_S, CHAT_DWELL_MAX_S)
+        state["tanker_chat_dwell_s"] = dwell
+    gate = boom_chat_gate(
+        rejoined=has_rejoined(state),
+        chat_open=chat_open,
+        dist_nm=dist_nm,
+        receivers=int(receivers or 0),
+        auto_done=bool(state.get("tanker_chat_auto_done")),
+        now=now_f,
+        in_range_since=since_f,
+        dwell_s=dwell,
+    )
+    if gate.get("clear_auto_done"):
+        state.pop("tanker_chat_auto_done", None)
+    if gate.get("in_range_since") is None:
+        state.pop("tanker_chat_in_range_since", None)
+        state.pop("tanker_chat_dwell_s", None)
+    else:
+        state["tanker_chat_in_range_since"] = gate["in_range_since"]
+        state["tanker_chat_dwell_s"] = dwell
+    return gate

@@ -77,5 +77,7 @@
   "voice_min_confidence": 0.6,
   "voice_require_address": true,
   "voice_ptt": [],
-  "voice_ptt_key": ""
+  "voice_ptt_key": "",
+  "tanker_chat_llm": "off",
+  "tanker_chat_llm_key": ""
 }

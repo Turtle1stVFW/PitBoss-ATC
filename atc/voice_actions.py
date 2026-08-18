@@ -157,6 +157,9 @@ def _track_dict(
     distance: float,
     declaration: str,
 ) -> dict[str, Any]:
+    uid = unit.get("id")
+    if uid is None:
+        uid = unit.get("unitId") or unit.get("unit_id")
     return {
         "bearing": int(fix["bearing"]),
         "range_nm": int(fix["range_nm"]),
@@ -171,10 +174,18 @@ def _track_dict(
         "distance_nm": float(distance),
         "declaration": declaration,
         "coalition": str(unit.get("coalition") or "").lower(),
+        "unit_id": str(uid).strip() if uid is not None else "",
     }
 
 
-def _groups_from_tracks(tracks: list[dict[str, Any]]) -> list[pl.FightGroup]:
+def _groups_from_tracks(
+    tracks: list[dict[str, Any]],
+    *,
+    memory: pl.DeclarationMemory | None = None,
+    hostile_side: str = "red",
+    upgrade_hostile: bool = False,
+) -> list[pl.FightGroup]:
+    book = memory or pl.DeclarationMemory()
     groups: list[pl.FightGroup] = []
     for cluster in _cluster(tracks):
         lead = min(
@@ -191,6 +202,28 @@ def _groups_from_tracks(tracks: list[dict[str, Any]]) -> list[pl.FightGroup]:
             x = sum(math.cos(math.radians(h)) for h in headings)
             y = sum(math.sin(math.radians(h)) for h in headings)
             mean_hdg = (math.degrees(math.atan2(y, x)) + 360.0) % 360.0
+        ids = [str(t.get("unit_id") or "") for t in cluster if t.get("unit_id")]
+        coalitions = [str(t.get("coalition") or "") for t in cluster if t.get("coalition")]
+        coal = ""
+        if coalitions:
+            # Majority coalition; enemy-side wins a tie so we don't friendly-wash.
+            red_or_blue = [c for c in coalitions if c in ("red", "blue")]
+            if hostile_side in red_or_blue:
+                coal = hostile_side
+            else:
+                coal = red_or_blue[0] if red_or_blue else coalitions[0]
+        lead_ft = int(lead["feet"]) if lead.get("feet") is not None else (
+            max(int(f) for f in feet) if feet else None
+        )
+        decl = book.assign(
+            ids,
+            brg=int(lead["bearing"]),
+            rng=int(lead["range_nm"]),
+            feet=lead_ft,
+            coalition=coal,
+            hostile_side=hostile_side,
+            upgrade_hostile=upgrade_hostile,
+        )
         groups.append(
             pl.FightGroup(
                 bearing=int(lead["bearing"]),
@@ -205,7 +238,8 @@ def _groups_from_tracks(tracks: list[dict[str, Any]]) -> list[pl.FightGroup]:
                 lon=lead.get("lon"),
                 label=str(lead.get("label") or ""),
                 object=str(lead.get("object") or ""),
-                declaration=str(lead.get("declaration") or "hostile"),
+                declaration=decl,
+                unit_ids=ids,
             )
         )
     groups.sort(key=lambda g: g.distance_nm)
@@ -217,12 +251,15 @@ def collect_hostile_groups(
     airport: dict[str, Any],
     *,
     opus: Any = None,
+    state: dict[str, Any] | None = None,
+    upgrade_hostile: bool = False,
 ) -> tuple[list[pl.FightGroup], dict[str, Any] | None, tuple[float, float] | None]:
     """
     Hostile air groups from the live CAOC feed, nearest first.
 
     Skips fixtures and groups outside picture_max_range_nm. Returns
-    (groups, own_unit, own_ll).
+    (groups, own_unit, own_ll). Declarations stick across picture / declare /
+    bogey dope until Bandsaw or the flight lead upgrades to hostile.
     """
     radar = atc_phrase.fetch_caoc_radar(config)
     if not radar:
@@ -238,6 +275,7 @@ def collect_hostile_groups(
     if own_ll is None:
         return [], own, None
 
+    book = pl.DeclarationMemory.from_state(state)
     tracks: list[dict[str, Any]] = []
     for unit in air:
         if str(unit.get("coalition") or "").lower() != hostile_side:
@@ -258,18 +296,17 @@ def collect_hostile_groups(
             continue
         if float(distance) > max_nm:
             continue
-        tracks.append(
-            _track_dict(
-                unit,
-                fix,
-                float(distance),
-                pl.declaration_for_coalition(unit.get("coalition"), hostile_side),
-            )
-        )
+        tracks.append(_track_dict(unit, fix, float(distance), ""))
     if not tracks:
         return [], own, own_ll
 
-    groups = _groups_from_tracks(tracks)
+    groups = _groups_from_tracks(
+        tracks,
+        memory=book,
+        hostile_side=hostile_side,
+        upgrade_hostile=upgrade_hostile,
+    )
+    book.to_state(state)
     pl.enrich_fight_bearings(groups, own_ll)
     return groups, own, own_ll
 
@@ -438,6 +475,8 @@ def collect_declare_groups(
     *,
     opus: Any = None,
     cue: dict[str, Any] | None = None,
+    state: dict[str, Any] | None = None,
+    upgrade_hostile: bool = False,
 ) -> tuple[list[pl.FightGroup], dict[str, Any] | None, tuple[float, float] | None]:
     """
     Air groups for DECLARE.
@@ -527,18 +566,18 @@ def collect_declare_groups(
                 continue
             distance = float(to_own)
 
-        tracks.append(
-            _track_dict(
-                unit,
-                fix,
-                float(distance),
-                pl.declaration_for_coalition(unit.get("coalition"), hostile_side),
-            )
-        )
+        tracks.append(_track_dict(unit, fix, float(distance), ""))
 
     if not tracks:
         return [], own, own_ll
-    groups = _groups_from_tracks(tracks)
+    book = pl.DeclarationMemory.from_state(state)
+    groups = _groups_from_tracks(
+        tracks,
+        memory=book,
+        hostile_side=hostile_side,
+        upgrade_hostile=upgrade_hostile,
+    )
+    book.to_state(state)
     pl.enrich_fight_bearings(groups, own_ll)
     return groups, own, own_ll
 
@@ -550,6 +589,7 @@ def build_picture_reply(
     *,
     agency: str = "Blackjack",
     opus: Any = None,
+    state: dict[str, Any] | None = None,
 ) -> tuple[str, list[pl.FightGroup]]:
     """
     AFTTP traditional-label (or core) picture call.
@@ -557,7 +597,9 @@ def build_picture_reply(
     Raises RadarUnavailable when the feed is down.
     """
     cs = atc_phrase.speak_callsign(callsign)
-    groups, _own, _own_ll = collect_hostile_groups(config, airport, opus=opus)
+    groups, _own, _own_ll = collect_hostile_groups(
+        config, airport, opus=opus, state=state
+    )
     if not groups:
         return f"{cs}, {agency}, picture clean.", []
 
@@ -599,10 +641,13 @@ def build_bogey_dope_reply(
     *,
     agency: str = "Blackjack",
     opus: Any = None,
+    state: dict[str, Any] | None = None,
 ) -> tuple[str, list[pl.FightGroup]]:
     """Ch V §11 — BRAA relative to ownship on closest hostile group."""
     cs = atc_phrase.speak_callsign(callsign)
-    groups, _own, own_ll = collect_hostile_groups(config, airport, opus=opus)
+    groups, _own, own_ll = collect_hostile_groups(
+        config, airport, opus=opus, state=state
+    )
     if own_ll is None:
         return f"{cs}, {agency}, unable bogey dope, no ownship track.", []
     if not groups:
@@ -638,19 +683,30 @@ def build_declare_reply(
     callsign: str,
     *,
     agency: str = "Blackjack",
+    channel: str = "",
     opus: Any = None,
     transcript: str | None = None,
+    state: dict[str, Any] | None = None,
 ) -> tuple[str, list[pl.FightGroup]]:
     """
     Short DECLARE reply: callsign, agency, declaration only.
 
     Matching still uses the pilot's bullseye cue when given; the response does
     not read the fix back (e.g. 'Fleece 1, Bandsaw, hostile.').
+    Bandsaw declare, or the flight lead saying hostile, upgrades that group.
     """
     cs = atc_phrase.speak_callsign(callsign)
     cue = parse_declare_cue(transcript or "", config=config)
+    upgrade = pl.agency_can_upgrade_hostile(agency, channel) or (
+        pl.transcript_upgrades_hostile(transcript)
+    )
     groups, _own, own_ll = collect_declare_groups(
-        config, airport, opus=opus, cue=cue
+        config,
+        airport,
+        opus=opus,
+        cue=cue,
+        state=state,
+        upgrade_hostile=False,
     )
     if cue is None and own_ll is None:
         return f"{cs}, {agency}, unable.", []
@@ -658,5 +714,14 @@ def build_declare_reply(
         return f"{cs}, {agency}, clean.", []
 
     g = groups[0]
+    if upgrade and pl.normalize_declaration(g.declaration) != "friendly":
+        book = pl.DeclarationMemory.from_state(state)
+        g.declaration = book.upgrade_to_hostile(
+            g.unit_ids,
+            brg=g.bearing,
+            rng=g.range_nm,
+            feet=g.feet,
+        )
+        book.to_state(state)
     decl = str(g.declaration or "bogey").strip() or "bogey"
     return f"{cs}, {agency}, {decl}.", [g]

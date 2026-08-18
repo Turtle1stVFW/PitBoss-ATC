@@ -3055,23 +3055,22 @@ PILOT_REQUESTS_BY_CHANNEL: dict[str, list[tuple[str, str]]] = {
     "approach": [],
     "blackjack": [
         ("request_tanker", "Request tanker"),
-        ("tanker_check_in", "Tanker check-in / boom"),
-        ("tanker_observation", "Left observation"),
-        ("tanker_dcs_precontact", "DCS: Ready pre-contact"),
-        ("tanker_dcs_abort", "DCS: Abort / disconnect"),
+        ("tanker_return", "Back from tanker"),
+        ("tanker_tacan", "Say TACAN"),
+        ("tanker_freq", "Say frequency"),
+        ("tanker_bullseye", "Say bullseye"),
     ],
     "bandsaw": [
         ("request_tanker", "Request tanker"),
-        ("tanker_check_in", "Tanker check-in / boom"),
-        ("tanker_observation", "Left observation"),
-        ("tanker_dcs_precontact", "DCS: Ready pre-contact"),
-        ("tanker_dcs_abort", "DCS: Abort / disconnect"),
+        ("tanker_return", "Back from tanker"),
+        ("tanker_tacan", "Say TACAN"),
+        ("tanker_freq", "Say frequency"),
+        ("tanker_bullseye", "Say bullseye"),
     ],
     "ops": [],
     "other": [],
     "tanker": [
-        ("tanker_check_in", "Tanker check-in / boom"),
-        ("tanker_observation", "Left observation"),
+        ("tanker_check_in", "Request rejoin"),
         ("tanker_dcs_precontact", "DCS: Ready pre-contact"),
         ("tanker_dcs_abort", "DCS: Abort / disconnect"),
     ],
@@ -3351,11 +3350,26 @@ def pilot_requests_for_channel(
             continue
         if key == "request_handoff" and str(template or "") not in _HANDOFF_REQUEST_TEMPLATES:
             continue
-        if key.startswith("tanker_") and not (
+        if key.startswith("tanker_") and key not in (
+            "tanker_chat_start",
+            "tanker_chat_reply",
+        ) and not key.startswith("tanker_chat_choice_") and not (
             isinstance(state, dict) and str(state.get("tanker_callsign") or "").strip()
         ):
             continue
         out.append((key, lab))
+    try:
+        import tanker_chat as tanker_chat_mod
+
+        show_boom = ch == "tanker" or tanker_chat_mod.fly_controls_visible(state)
+        if show_boom:
+            seen = {k for k, _ in out}
+            for k, lab in tanker_chat_mod.fly_request_rows(state):
+                if k not in seen:
+                    out.append((k, lab))
+                    seen.add(k)
+    except Exception:
+        pass
     # Alternate runway (e.g. 21L) — only when pilot requests it, or instrument use.
     if airport is not None and ch in _CHANNELS_WITH_RUNWAY_REQUESTS:
         seen = {k for k, _ in out}
@@ -3541,16 +3555,21 @@ def apply_pilot_request(
             "ack_kind": "",
             "execute_departure_handoff": True,
         }
-    if key in (
+    if key.startswith("tanker_chat_choice_") or key in (
         "request_tanker",
+        "tanker_return",
         "tanker_check_in",
-        "tanker_observation",
+        "tanker_tacan",
+        "tanker_freq",
+        "tanker_bullseye",
         "tanker_astern",
         "tanker_contact",
         "tanker_disconnect",
         "tanker_depart",
         "tanker_dcs_precontact",
         "tanker_dcs_abort",
+        "tanker_chat_start",
+        "tanker_chat_reply",
     ):
         return {
             "key": key,

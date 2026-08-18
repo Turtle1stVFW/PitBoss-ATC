@@ -946,11 +946,74 @@ class MissionPlanner(tk.Tk):
             self.fly_position.set(self._watch_off_position_line())
             if hasattr(self, "_fly_position_lbl"):
                 self._fly_position_lbl.configure(fg=C_MUTED)
+            self._kick_tanker_boom_watch()
             return
         if getattr(self, "_pos_busy", False):
             return
         self._pos_busy = True
         threading.Thread(target=self._position_work, daemon=True).start()
+
+    def _kick_tanker_boom_watch(self) -> None:
+        if getattr(self, "_boom_busy", False):
+            return
+        self._boom_busy = True
+        threading.Thread(target=self._tanker_boom_work, daemon=True).start()
+
+    def _set_boom_status(self, text: str, *, fire: bool = False) -> None:
+        if hasattr(self, "fly_boom"):
+            self.fly_boom.set(text)
+        if hasattr(self, "_fly_boom_lbl"):
+            self._fly_boom_lbl.configure(fg=C_GREEN if fire else (C_AMBER if text else C_MUTED))
+
+    def _tanker_boom_work(self) -> None:
+        """Texaco starts boom chat once joined and 0.1–0.5 NM with a receiver."""
+        try:
+            import tanker as tanker_mod
+            import tanker_chat as tanker_chat_mod
+
+            engine = flow_engine.FlowEngine()
+            if tanker_chat_mod.is_open(engine.state):
+                self._ui_call(lambda: self._set_boom_status("BOOM: waiting for your one-word answer"))
+                return
+            if not tanker_mod.has_rejoined(engine.state):
+                self._ui_call(lambda: self._set_boom_status(""))
+                return
+            voice = getattr(self, "_voice", None)
+            if voice is not None and getattr(voice, "ptt_held", False):
+                self._ui_call(lambda: self._set_boom_status("BOOM: waiting — you are transmitting"))
+                return
+            result = voice_engine.resolve_tanker_chat(engine)
+            boom = result.get("boom") if isinstance(result, dict) else None
+            reason = ""
+            if isinstance(boom, dict):
+                reason = str(boom.get("reason") or "")
+            if not reason:
+                reason = str((result or {}).get("detail") or "")
+            fired = bool(result and result.get("action") == "transmit" and result.get("text"))
+
+            def done() -> None:
+                line = f"BOOM: {reason}" if reason else ""
+                self._set_boom_status(line, fire=fired)
+                if fired:
+                    self._voice_log(
+                        f"TX   {str(result.get('channel') or 'tanker').upper()}  "
+                        f"{result.get('text', '')}"
+                    )
+                elif result and result.get("action") == "blocked":
+                    self._note_no_tx(
+                        str(result.get("detail") or "Blocked off frequency"),
+                        action="auto",
+                    )
+                self.engine = engine
+                if fired:
+                    self._refresh_fly_status()
+
+            self._ui_call(done)
+        except Exception as exc:  # noqa: BLE001
+            err = str(exc)
+            self._ui_call(lambda: self._set_boom_status(f"BOOM: {err}"))
+        finally:
+            self._boom_busy = False
 
     def _position_work(self) -> None:
         try:
@@ -1052,6 +1115,7 @@ class MissionPlanner(tk.Tk):
 
         self._ui_call(lambda: self._position_apply(status, fire, waiting, step, engine))
         self._pos_busy = False
+        self._kick_tanker_boom_watch()
 
     def _position_decide(
         self,
@@ -1620,6 +1684,14 @@ class MissionPlanner(tk.Tk):
         items = state.get("readback_items") or []
         context["readback_items"] = items if isinstance(items, list) else []
         context["last_tx_text"] = str(state.get("last_tx_text") or "")
+        context["last_tx_channel"] = str(state.get("last_tx_channel") or "")
+        context["last_tx_template"] = str(state.get("last_tx_template") or "")
+        try:
+            import tanker_chat as tanker_chat_mod
+
+            context["tanker_chat_choices"] = tanker_chat_mod.current_choices(state)
+        except Exception:
+            context["tanker_chat_choices"] = []
         try:
             context["last_tx_at"] = float(state.get("last_tx_at") or 0.0)
         except (TypeError, ValueError):
@@ -1760,6 +1832,8 @@ class MissionPlanner(tk.Tk):
                 deferred = result.get("deferred")
                 if isinstance(deferred, dict) and deferred.get("kind") == "unrestricted_climb":
                     self._schedule_unrestricted_climb_resolve(deferred)
+                elif isinstance(deferred, dict) and deferred.get("kind") == "tanker_chat":
+                    self._schedule_tanker_chat(deferred)
 
             self._ui_call(done)
 
@@ -1818,6 +1892,43 @@ class MissionPlanner(tk.Tk):
                     elif result.get("action") in ("play", "transmit") and result.get("text"):
                         # Approve path returned the combined clearance as text.
                         pass
+                    self.engine = engine
+                    self._refresh_fly_status()
+
+                self._ui_call(done)
+
+            threading.Thread(target=work, daemon=True).start()
+
+        self.after(delay_ms, kick)
+
+    def _schedule_tanker_chat(self, deferred: dict[str, Any]) -> None:
+        """After rejoin, Texaco comes back with boom / reform small talk."""
+        try:
+            delay_s = float(deferred.get("delay_s") or 12.0)
+        except (TypeError, ValueError):
+            delay_s = 12.0
+        delay_ms = max(4000, int(delay_s * 1000))
+
+        def kick() -> None:
+            def work() -> None:
+                try:
+                    engine = flow_engine.FlowEngine()
+                    result = voice_engine.resolve_tanker_chat(engine)
+                except Exception as exc:  # noqa: BLE001
+                    err = str(exc)
+
+                    def fail() -> None:
+                        self._voice_log(f"VOICE  tanker chat failed: {err}")
+
+                    self._ui_call(fail)
+                    return
+
+                def done() -> None:
+                    if result.get("action") == "transmit" and result.get("text"):
+                        self._voice_log(
+                            f"TX   {str(result.get('channel') or 'tanker').upper()}  "
+                            f"{result.get('text', '')}"
+                        )
                     self.engine = engine
                     self._refresh_fly_status()
 
@@ -6126,7 +6237,17 @@ class MissionPlanner(tk.Tk):
             font=("Segoe UI", 10),
             anchor="w",
         )
-        self._fly_position_lbl.pack(fill=tk.X, padx=14, pady=(0, 10))
+        self._fly_position_lbl.pack(fill=tk.X, padx=14, pady=(0, 2))
+        self.fly_boom = tk.StringVar(value="")
+        self._fly_boom_lbl = tk.Label(
+            freq_left,
+            textvariable=self.fly_boom,
+            bg="#0a0e14",
+            fg=C_MUTED,
+            font=("Segoe UI", 10),
+            anchor="w",
+        )
+        self._fly_boom_lbl.pack(fill=tk.X, padx=14, pady=(0, 10))
 
         tk.Label(
             freq_right,
@@ -6530,10 +6651,14 @@ class MissionPlanner(tk.Tk):
         "request_go_around": "On the go",
         "request_handoff": "Request handoff",
         "request_tanker": "Request tanker",
-        "tanker_check_in": "Tanker check-in",
-        "tanker_observation": "Left observation",
+        "tanker_return": "Back from tanker",
+        "tanker_check_in": "Request rejoin",
+        "tanker_tacan": "Say TACAN",
+        "tanker_freq": "Say frequency",
+        "tanker_bullseye": "Say bullseye",
         "tanker_dcs_precontact": "DCS: Ready pre-contact",
         "tanker_dcs_abort": "DCS: Abort / disconnect",
+        "tanker_chat_start": "Texaco starts chat",
         "clear_runway_request": "Reset runway to winds",
     }
 
@@ -6725,6 +6850,8 @@ class MissionPlanner(tk.Tk):
             if key == "request_landing" and awaiting_option:
                 accent = True
             if key == "request_go_around" and awaiting_option:
+                accent = True
+            if key == "tanker_chat_start":
                 accent = True
             ttk.Button(
                 self._fly_req_btns,
@@ -7007,6 +7134,9 @@ class MissionPlanner(tk.Tk):
         self.fly_log.insert(tk.END, f"TX  {label}  ·  {freq}  ·  {ch}\n")
         self.fly_log.see(tk.END)
         self._refresh_fly_status()
+        deferred = played.get("deferred")
+        if isinstance(deferred, dict) and deferred.get("kind") == "tanker_chat":
+            self._schedule_tanker_chat(deferred)
 
     def _on_handoff_request_done(self, played: dict[str, Any] | None) -> None:
         played = played or {}
@@ -7197,6 +7327,9 @@ class MissionPlanner(tk.Tk):
             readback_items=None,
             steps=context.get("steps") if isinstance(context.get("steps"), list) else None,
             current_step_id=str(context.get("current_step_id") or ""),
+            tanker_chat_choices=context.get("tanker_chat_choices")
+            if isinstance(context.get("tanker_chat_choices"), list)
+            else None,
         )
         if not lines:
             self.fly_say_frame.pack_forget()
@@ -7808,7 +7941,7 @@ class MissionPlanner(tk.Tk):
                     ("bullet", "• For the call that is due, the short version is enough — \u201cGround, Fleece 1, taxi\u201d."),
                     ("bullet", "• Right after ATC speaks, a plain \u201croger\u201d also clears the readback with no agency name."),
                     ("bullet", "• Try: request runway · say winds · request picture · bogey dope · declare · request tanker · say again."),
-                    ("bullet", "• Tanker (F-16 / KC-135 boom, not MPRS): Blackjack/Bandsaw request tanker for vectors. On tanker freq we add the missing calls (cleared rejoin left, left observation). Use DCS tanker radio for Intent to refuel, Ready pre-contact (cleared contact), and Abort — that is what moves the boom."),
+                    ("bullet", "• Tanker (F-16 / KC-135 boom — never KC-130 or MPRS): Blackjack/Bandsaw request tanker for track and braw. Reply ends with frequency change approved. Say TACAN / frequency / bullseye only when you want those. On tanker freq: request rejoin — Texaco clears rejoin left, sometimes left observation (no “identified”). After rejoin, Texaco starts boom small talk once you have been 0.1–0.5 NM from the tanker for 30–60 seconds (or press Fly Texaco starts chat — Texaco talks first). Answer with one word. Optional Gemini/OpenAI/Ollama on Setup → Airport. DCS tanker radio still owns Intent to refuel, Ready pre-contact (cleared contact), and Abort. After AAR: check back in / back from the tanker (or checking in) on Blackjack/Bandsaw."),
                     ("bullet", "• A call that fires a step advances Fly on its own — no need to press Play."),
                     ("bullet", "• Fly splits TO ADVANCE (plays the step) from ALSO AVAILABLE (winds, picture, …). "
                      "Cues are a full call when the agency opener is required; amber is the wording that must be said."),
@@ -8474,7 +8607,8 @@ class MissionPlanner(tk.Tk):
             text=(
                 "Blackjack / Bandsaw picture, bogey dope, and declare only use contacts "
                 "inside this range of your jet (AWACS and tankers are always skipped). "
-                "Raise it for testing."
+                "A group's bogey / bandit / spades / hostile call sticks until Bandsaw "
+                "or you declare it hostile. Raise the range for testing."
             ),
             bg=C_PANEL,
             fg=C_MUTED,
@@ -8505,6 +8639,76 @@ class MissionPlanner(tk.Tk):
         tk.Label(
             pic_row,
             text="default 150",
+            bg=C_PANEL,
+            fg=C_MUTED,
+            font=("Segoe UI", 8),
+        ).pack(side=tk.LEFT)
+
+        # --- Tanker boom small talk ---
+        boom = tk.Frame(panel, bg=C_PANEL, highlightbackground=C_BORDER, highlightthickness=1)
+        boom.pack(fill=tk.X, padx=14, pady=(0, 8))
+        boom_inner = tk.Frame(boom, bg=C_PANEL)
+        boom_inner.pack(fill=tk.X, padx=12, pady=10)
+        ttk.Label(boom_inner, text="Tanker boom chat", style="Header.TLabel").pack(
+            anchor="w"
+        )
+        tk.Label(
+            boom_inner,
+            text=(
+                "After you request rejoin, Texaco starts boom chat — you do not ask "
+                "first. Auto-fires after 30–60 seconds at 0.1–0.5 NM from the tanker "
+                "with a jet in that envelope (you count). Fly shows Texaco starts chat after "
+                "rejoin, even if the current step is still Blackjack. Optional: mint a "
+                "fresh A/B question with Gemini, OpenAI, or local Ollama (free, no key). "
+                "Falls back to the canned library if the model is slow or down."
+            ),
+            bg=C_PANEL,
+            fg=C_MUTED,
+            font=("Segoe UI", 8),
+            wraplength=880,
+            justify="left",
+        ).pack(anchor="w", pady=(2, 8))
+        self.var_tanker_chat_llm = tk.StringVar(
+            value=str(self.config_data.get("tanker_chat_llm") or "off").strip().lower()
+            or "off"
+        )
+        self.var_tanker_chat_llm_key = tk.StringVar(
+            value=str(self.config_data.get("tanker_chat_llm_key") or "")
+        )
+        llm_row = tk.Frame(boom_inner, bg=C_PANEL)
+        llm_row.pack(anchor="w")
+        for label, value in (
+            ("Off (library only)", "off"),
+            ("Ollama (local, free)", "ollama"),
+            ("Auto (from key)", "auto"),
+            ("Gemini", "gemini"),
+            ("OpenAI", "openai"),
+        ):
+            ttk.Radiobutton(
+                llm_row,
+                text=label,
+                variable=self.var_tanker_chat_llm,
+                value=value,
+                style="Panel.TRadiobutton",
+            ).pack(side=tk.LEFT, padx=(0, 12))
+        key_row = tk.Frame(boom_inner, bg=C_PANEL)
+        key_row.pack(anchor="w", pady=(8, 0))
+        tk.Label(
+            key_row,
+            text="API key",
+            bg=C_PANEL,
+            fg=C_LABEL,
+            font=("Segoe UI", 9),
+        ).pack(side=tk.LEFT)
+        ttk.Entry(
+            key_row,
+            textvariable=self.var_tanker_chat_llm_key,
+            width=44,
+            show="*",
+        ).pack(side=tk.LEFT, padx=(8, 6))
+        tk.Label(
+            key_row,
+            text="Gemini (AIza…) · OpenAI (sk-…) · Ollama needs none",
             bg=C_PANEL,
             fg=C_MUTED,
             font=("Segoe UI", 8),
@@ -9513,6 +9717,12 @@ class MissionPlanner(tk.Tk):
             except (TypeError, ValueError):
                 pic_nm = float(voice_actions.PICTURE_MAX_RANGE_NM)
             self.var_picture_max_range.set(f"{pic_nm:g}")
+        if hasattr(self, "var_tanker_chat_llm"):
+            mode = str(c.get("tanker_chat_llm") or "off").strip().lower() or "off"
+            if mode not in {"off", "auto", "gemini", "openai", "ollama"}:
+                mode = "off"
+            self.var_tanker_chat_llm.set(mode)
+            self.var_tanker_chat_llm_key.set(str(c.get("tanker_chat_llm_key") or ""))
         if hasattr(self, "var_auto_clearance"):
             self.var_auto_clearance.set(bool(c.get("auto_clearance_enabled")))
             self.var_auto_takeoff.set(bool(c.get("auto_takeoff_clearance", True)))
@@ -9622,6 +9832,14 @@ class MissionPlanner(tk.Tk):
                 pic_nm = float(voice_actions.PICTURE_MAX_RANGE_NM)
             self.config_data["picture_max_range_nm"] = pic_nm
             self.var_picture_max_range.set(f"{pic_nm:g}")
+        if hasattr(self, "var_tanker_chat_llm"):
+            mode = str(self.var_tanker_chat_llm.get() or "off").strip().lower() or "off"
+            if mode not in {"off", "auto", "gemini", "openai", "ollama"}:
+                mode = "off"
+            self.config_data["tanker_chat_llm"] = mode
+            self.config_data["tanker_chat_llm_key"] = (
+                self.var_tanker_chat_llm_key.get().strip()
+            )
         if hasattr(self, "var_voice_enabled"):
             self.config_data["voice_enabled"] = bool(self.var_voice_enabled.get())
             self.config_data["voice_model"] = (

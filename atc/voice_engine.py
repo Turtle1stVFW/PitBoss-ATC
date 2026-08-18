@@ -372,6 +372,11 @@ class VoiceController:
             current_step_id=str(context.get("current_step_id") or ""),
             last_tx_text=str(context.get("last_tx_text") or ""),
             last_tx_at=float(context.get("last_tx_at") or 0.0),
+            last_tx_channel=str(context.get("last_tx_channel") or ""),
+            last_tx_template=str(context.get("last_tx_template") or ""),
+            tanker_chat_choices=context.get("tanker_chat_choices")
+            if isinstance(context.get("tanker_chat_choices"), list)
+            else None,
         )
         self.on_status(f"{elapsed:.0f}ms · {text}")
         self.on_transcript(evaluation)
@@ -504,12 +509,17 @@ def execute_intent(
 
     if intent in (
         "request_tanker",
+        "tanker_return",
         "tanker_check_in",
-        "tanker_observation",
+        "tanker_tacan",
+        "tanker_freq",
+        "tanker_bullseye",
         "tanker_astern",
         "tanker_contact",
         "tanker_disconnect",
         "tanker_depart",
+        "tanker_chat_start",
+        "tanker_chat_reply",
     ):
         return execute_tanker_action(
             engine,
@@ -707,9 +717,17 @@ def execute_intent(
         # Bandsaw check-in: talk to them, but stay on the Bandsaw step until
         # checkout — picture / declare / dope happen in that window.
         if intent == "bandsaw_check_in" or match.template == "bandsaw_check_in":
+            import tanker as tanker_mod
+
             cur = engine.current_step() or {}
             if voice_intent.step_is_authored(cur):
                 return _play_step(engine, match)
+            if tanker_mod.tanker_awaiting_return(engine.state):
+                tanker_mod.apply_tanker_phase(
+                    engine.state, tanker_mod.PHASE_DEPARTED
+                )
+                if hasattr(engine, "save_state"):
+                    engine.save_state()
             alpha_spoken = None
             fix = atc_phrase.resolve_alpha_bullseye(
                 engine.config, callsign=callsign, opus=opus
@@ -732,11 +750,23 @@ def execute_intent(
             if result.get("action") == "transmit":
                 _advance_past_bandsaw(engine)
             return result
-        # Back on Blackjack after Bandsaw (or still on the range): check-in is
-        # "continue", not range exit → Approach.
+        # Back on Blackjack after Bandsaw, the tanker, or still on the range:
+        # check-in is "continue", not a second range-entry / Approach handoff.
         if intent == "range_entry" or match.template == "bj_check_in":
+            import tanker as tanker_mod
+
             cur = engine.current_step() or {}
-            if str(cur.get("template") or "") == "bj_range_exit":
+            tmpl = str(cur.get("template") or "")
+            from_tanker = tanker_mod.tanker_awaiting_return(engine.state) and (
+                tmpl != "bj_check_in"
+            )
+            if tmpl == "bj_range_exit" or from_tanker:
+                if from_tanker:
+                    tanker_mod.apply_tanker_phase(
+                        engine.state, tanker_mod.PHASE_DEPARTED
+                    )
+                    if hasattr(engine, "save_state"):
+                        engine.save_state()
                 if hasattr(engine, "acknowledge_blackjack_continue"):
                     detail = engine.acknowledge_blackjack_continue()
                     return {
@@ -1168,7 +1198,12 @@ def _speak_reply(
         try:
             if intent == "request_bogey_dope":
                 text, _groups = voice_actions.build_bogey_dope_reply(
-                    engine.config, airport, callsign, agency=agency, opus=opus
+                    engine.config,
+                    airport,
+                    callsign,
+                    agency=agency,
+                    opus=opus,
+                    state=engine.state,
                 )
             elif intent == "request_declare":
                 text, _groups = voice_actions.build_declare_reply(
@@ -1176,13 +1211,22 @@ def _speak_reply(
                     airport,
                     callsign,
                     agency=agency,
+                    channel=channel,
                     opus=opus,
                     transcript=match.normalized or match.transcript or "",
+                    state=engine.state,
                 )
             else:
                 text, _groups = voice_actions.build_picture_reply(
-                    engine.config, airport, callsign, agency=agency, opus=opus
+                    engine.config,
+                    airport,
+                    callsign,
+                    agency=agency,
+                    opus=opus,
+                    state=engine.state,
                 )
+            if hasattr(engine, "save_state"):
+                engine.save_state()
         except voice_actions.RadarUnavailable:
             if intent == "request_bogey_dope":
                 what = "bogey dope"
@@ -1264,6 +1308,7 @@ def execute_tanker_action(
 ) -> dict[str, Any]:
     """C2 vectors + missing join calls. DCS radio keeps cleared contact."""
     import tanker as tanker_mod
+    import tanker_chat as tanker_chat_mod
 
     ap = airport if isinstance(airport, dict) else engine.airport()
     if not callsign:
@@ -1276,6 +1321,115 @@ def execute_tanker_action(
                 atc_phrase.callsign_override(engine.config) or "CALLSIGN"
             )
         callsign = opus.radio_callsign
+
+    def _c2_channel() -> str:
+        channel = "blackjack"
+        if match is not None:
+            channel = _resolve_tx_channel(engine, ap, match) or channel
+        else:
+            tuned = srs_radio.channel_for_tuned_freq(ap, engine.config)
+            if tuned:
+                channel = tuned
+        if channel not in ("blackjack", "bandsaw", "ops"):
+            return "blackjack"
+        return channel
+
+    if action == "tanker_return":
+        channel = _c2_channel()
+        alpha_spoken = None
+        fix = atc_phrase.resolve_alpha_bullseye(
+            engine.config, callsign=callsign, opus=opus
+        )
+        if fix and fix.get("spoken"):
+            alpha_spoken = str(fix["spoken"])
+        text = tanker_mod.build_tanker_return_checkin(
+            channel, callsign, alpha_bullseye=alpha_spoken
+        )
+        tanker_mod.apply_tanker_phase(engine.state, tanker_mod.PHASE_DEPARTED)
+        tanker_mod.mark_rejoined(engine.state, False)
+        tanker_chat_mod.end_chat(engine.state)
+        if hasattr(engine, "save_state"):
+            engine.save_state()
+        return _transmit(engine, ap, text, channel)
+
+    if action == "tanker_chat_start" or str(action).startswith("tanker_chat_choice_"):
+        named = ""
+        own_ll = atc_phrase.ownship_latlon(
+            engine.config, callsign=callsign, opus=opus, state=engine.state
+        )
+        tanker = tanker_mod.pick_tanker(
+            engine.config,
+            opus=opus,
+            state=engine.state,
+            name=named or None,
+            own_ll=own_ll,
+            boom_only=False,
+        )
+        if tanker:
+            tanker_mod.remember_tanker(engine.state, tanker)
+        if action == "tanker_chat_start":
+            text = tanker_chat_mod.start_chat(
+                engine.state,
+                callsign,
+                tanker,
+                config=getattr(engine, "config", None),
+            )
+        else:
+            cid = str(action)[len("tanker_chat_choice_") :]
+            text = tanker_chat_mod.answer_chat(
+                engine.state, callsign, tanker, choice_id=cid
+            )
+            if not text:
+                return {"action": "none", "detail": "no matching tanker chat reply"}
+        freq = tanker_mod.tanker_target_mhz(engine.state)
+        if freq is None and tanker:
+            try:
+                freq = float(tanker.get("freq_mhz") or 0) or None
+            except (TypeError, ValueError):
+                freq = None
+        if hasattr(engine, "save_state"):
+            engine.save_state()
+        return _transmit(engine, ap, text, "tanker", freq_mhz=freq)
+
+    if action == "tanker_chat_reply":
+        named = ""
+        own_ll = atc_phrase.ownship_latlon(
+            engine.config, callsign=callsign, opus=opus, state=engine.state
+        )
+        tanker = tanker_mod.pick_tanker(
+            engine.config,
+            opus=opus,
+            state=engine.state,
+            name=None,
+            own_ll=own_ll,
+            boom_only=False,
+        )
+        if tanker:
+            tanker_mod.remember_tanker(engine.state, tanker)
+        cid = ""
+        transcript = ""
+        if match is not None:
+            cid = str((match.slots or {}).get("choice") or "")
+            transcript = str(match.normalized or match.transcript or "")
+        text = tanker_chat_mod.answer_chat(
+            engine.state,
+            callsign,
+            tanker,
+            choice_id=cid,
+            transcript=transcript,
+        )
+        if not text:
+            return {"action": "none", "detail": "no matching tanker chat reply"}
+        freq = tanker_mod.tanker_target_mhz(engine.state)
+        if freq is None and tanker:
+            try:
+                freq = float(tanker.get("freq_mhz") or 0) or None
+            except (TypeError, ValueError):
+                freq = None
+        if hasattr(engine, "save_state"):
+            engine.save_state()
+        return _transmit(engine, ap, text, "tanker", freq_mhz=freq)
+
     named = ""
     if match is not None:
         named = tanker_mod.extract_tanker_name(
@@ -1284,7 +1438,8 @@ def execute_tanker_action(
     own_ll = atc_phrase.ownship_latlon(
         engine.config, callsign=callsign, opus=opus, state=engine.state
     )
-    boom_only = action == "request_tanker" and not named
+    # F-16 C2 always wants the KC-135 boom. Named ARCO / MPRS is skipped.
+    boom_only = action == "request_tanker" or action in tanker_mod.C2_TANKER_INFO_ACTIONS
     tanker = tanker_mod.pick_tanker(
         engine.config,
         opus=opus,
@@ -1298,13 +1453,19 @@ def execute_tanker_action(
         if hasattr(engine, "save_state"):
             engine.save_state()
 
-    if action == "request_tanker":
-        channel = "blackjack"
-        if match is not None:
-            channel = _resolve_tx_channel(engine, ap, match) or channel
-        if channel not in ("blackjack", "bandsaw", "ops"):
-            channel = "blackjack"
-        text = tanker_mod.build_c2_tanker_vectors(channel, callsign, tanker)
+    if action == "request_tanker" or action in tanker_mod.C2_TANKER_INFO_ACTIONS:
+        channel = _c2_channel()
+        builders = {
+            "request_tanker": tanker_mod.build_c2_tanker_vectors,
+            "tanker_tacan": tanker_mod.build_tanker_tacan_reply,
+            "tanker_freq": tanker_mod.build_tanker_freq_reply,
+            "tanker_bullseye": tanker_mod.build_tanker_bullseye_reply,
+        }
+        text = builders[action](channel, callsign, tanker)
+        if action == "request_tanker" and tanker:
+            tanker_mod.apply_tanker_phase(engine.state, tanker_mod.PHASE_JOIN)
+            if hasattr(engine, "save_state"):
+                engine.save_state()
         return _transmit(engine, ap, text, channel)
 
     if action in tanker_mod.DCS_TANKER_ACTIONS:
@@ -1312,6 +1473,7 @@ def execute_tanker_action(
             engine.state,
             {
                 "tanker_astern": tanker_mod.PHASE_ASTERN,
+                "tanker_observation": tanker_mod.PHASE_ASTERN,
                 "tanker_contact": tanker_mod.PHASE_CONTACT,
                 "tanker_dcs_precontact": tanker_mod.PHASE_ASTERN,
                 "tanker_disconnect": tanker_mod.PHASE_RIGHT,
@@ -1319,6 +1481,12 @@ def execute_tanker_action(
                 "tanker_dcs_abort": tanker_mod.PHASE_RIGHT,
             }.get(action, tanker_mod.PHASE_ASTERN),
         )
+        if action in (
+            "tanker_disconnect",
+            "tanker_depart",
+            "tanker_dcs_abort",
+        ):
+            tanker_chat_mod.end_chat(engine.state)
         if hasattr(engine, "save_state"):
             engine.save_state()
         hint = tanker_mod.dcs_tanker_radio_hint(action)
@@ -1333,12 +1501,12 @@ def execute_tanker_action(
         engine.state,
         {
             "tanker_check_in": tanker_mod.PHASE_JOIN,
-            "tanker_observation": tanker_mod.PHASE_OBSERVATION,
         }.get(action, tanker_mod.PHASE_JOIN),
     )
+    if action == "tanker_check_in":
+        tanker_mod.mark_rejoined(engine.state, True)
     builders = {
         "tanker_check_in": tanker_mod.build_tanker_check_in,
-        "tanker_observation": tanker_mod.build_tanker_observation,
     }
     build = builders.get(action)
     if build is None:
@@ -1353,6 +1521,85 @@ def execute_tanker_action(
     if hasattr(engine, "save_state"):
         engine.save_state()
     return _transmit(engine, ap, text, "tanker", freq_mhz=freq)
+
+
+def resolve_tanker_chat(engine: Any, *, force: bool = False) -> dict[str, Any]:
+    """Texaco starts boom small talk. Auto path requires 0.1–0.5 NM after rejoin."""
+    import tanker as tanker_mod
+    import tanker_chat as tanker_chat_mod
+
+    if tanker_chat_mod.is_open(engine.state):
+        return {"action": "none", "detail": "tanker chat already open"}
+    if str((engine.state or {}).get("tanker_phase") or "") == tanker_mod.PHASE_DEPARTED:
+        return {"action": "none", "detail": "not on the tanker"}
+    if not force and not tanker_mod.has_rejoined(engine.state):
+        return {"action": "none", "detail": "waiting — request rejoin first"}
+    ap = engine.airport()
+    opus, _wx = atc_phrase.resolve_opus_and_metar(
+        engine.config, ap.get("icao") if isinstance(ap, dict) else ""
+    )
+    if not opus:
+        opus = atc_phrase.synthetic_flight_context(
+            atc_phrase.callsign_override(engine.config) or "CALLSIGN"
+        )
+    callsign = opus.radio_callsign
+    own_ll = atc_phrase.ownship_latlon(
+        engine.config, callsign=callsign, opus=opus, state=engine.state
+    )
+    tanker = tanker_mod.pick_tanker(
+        engine.config,
+        opus=opus,
+        state=engine.state,
+        own_ll=own_ll,
+        boom_only=False,
+    )
+    if tanker:
+        tanker_mod.remember_tanker(engine.state, tanker)
+    dist = None
+    if tanker and tanker.get("distance_nm") is not None:
+        try:
+            dist = float(tanker.get("distance_nm"))
+        except (TypeError, ValueError):
+            dist = None
+    receivers = 0
+    if tanker:
+        receivers = tanker_mod.count_boom_receivers(
+            engine.config, tanker, own_ll=own_ll, opus=opus
+        )
+    gate = tanker_mod.tick_boom_chat(
+        engine.state,
+        dist_nm=dist,
+        receivers=receivers,
+        chat_open=False,
+    )
+    if not force and not gate.get("ready"):
+        if hasattr(engine, "save_state"):
+            engine.save_state()
+        return {
+            "action": "none",
+            "detail": str(gate.get("reason") or "not in boom range"),
+            "boom": gate,
+        }
+    text = tanker_chat_mod.start_chat(
+        engine.state,
+        callsign,
+        tanker,
+        config=getattr(engine, "config", None),
+    )
+    if not force:
+        engine.state["tanker_chat_auto_done"] = True
+    freq = tanker_mod.tanker_target_mhz(engine.state)
+    if freq is None and tanker:
+        try:
+            freq = float(tanker.get("freq_mhz") or 0) or None
+        except (TypeError, ValueError):
+            freq = None
+    if hasattr(engine, "save_state"):
+        engine.save_state()
+    result = _transmit(engine, ap, text, "tanker", freq_mhz=freq)
+    if isinstance(result, dict):
+        result["boom"] = gate
+    return result
 
 
 def _advance_past_bandsaw(engine: Any) -> None:
@@ -1566,7 +1813,12 @@ def _resolve_tx_channel(
         addressed = str(match.slots.get("channel") or "").strip().lower()
     if addressed:
         return addressed
-    if match is not None and str(match.intent or "").startswith("tanker_"):
+    intent = str(match.intent or "") if match is not None else ""
+    if intent.startswith("tanker_") and intent not in (
+        "tanker_tacan",
+        "tanker_freq",
+        "tanker_bullseye",
+    ):
         return "tanker"
     tuned = srs_radio.channel_for_tuned_freq(airport, engine.config)
     if tuned:

@@ -129,6 +129,59 @@ def main() -> int:
     else:
         print(f"OK cue error lateral: {err2:.1f} nm")
 
+    # Sticky declarations: same group keeps its label; only Hostile upgrades.
+    mem = pl.DeclarationMemory()
+    mem.force(["u1"], "bandit", brg=56, rng=67, feet=21000)
+    d1 = mem.assign(["u1"], brg=58, rng=70, feet=20500, coalition="red", hostile_side="red")
+    d2 = mem.assign(["u1"], brg=60, rng=72, feet=20000, coalition="red", hostile_side="red")
+    d3 = mem.assign(
+        ["u1"],
+        brg=60,
+        rng=72,
+        feet=20000,
+        coalition="red",
+        hostile_side="red",
+        upgrade_hostile=True,
+    )
+    d4 = mem.assign(["u1"], brg=61, rng=73, feet=19800, coalition="red", hostile_side="red")
+    other = mem.assign(["u2"], brg=200, rng=40, feet=15000, coalition="red", hostile_side="red")
+    other2 = mem.assign(["u2"], brg=201, rng=41, feet=15100, coalition="red", hostile_side="red")
+    friendly = mem.assign(["u3"], brg=10, rng=10, feet=10000, coalition="blue", hostile_side="red")
+    bandsaw_up = pl.agency_can_upgrade_hostile("Bandsaw", "bandsaw")
+    jack_no = pl.agency_can_upgrade_hostile("Blackjack", "blackjack")
+    lead_up = pl.transcript_upgrades_hostile("Blackjack Fleece 1 declare hostile 056 67")
+    lead_plain = pl.transcript_upgrades_hostile("Blackjack Fleece 1 declare 056 67")
+    if (
+        d1 != "bandit"
+        or d2 != "bandit"
+        or d3 != "hostile"
+        or d4 != "hostile"
+        or other != other2
+        or friendly != "friendly"
+        or not bandsaw_up
+        or jack_no
+        or not lead_up
+        or lead_plain
+    ):
+        print(
+            f"FAIL sticky decl: {d1=} {d2=} {d3=} {d4=} {other=} {other2=} "
+            f"{friendly=} bandsaw={bandsaw_up} jack={jack_no} lead={lead_up}/{lead_plain}"
+        )
+        bad += 1
+    else:
+        print(f"OK sticky declarations bandit->hostile; other group {other}")
+
+    state = {}
+    mem.to_state(state)
+    again = pl.DeclarationMemory.from_state(state).assign(
+        ["u1"], brg=62, rng=74, feet=19000, coalition="red", hostile_side="red"
+    )
+    if again != "hostile":
+        print(f"FAIL declaration persisted in state: {again} state={state}")
+        bad += 1
+    else:
+        print("OK declaration memory survives state round-trip")
+
     print(f"\n{bad} failure(s)" if bad else "\nall picture label checks passed")
     return 1 if bad else 0
 

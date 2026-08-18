@@ -275,10 +275,12 @@ Calls it understands:
 | "Bandsaw, checking in" / picture / bogey dope / declare | Optional C2 on Bandsaw |
 | "Bandsaw, checking out / switch Blackjack" | Leave Bandsaw → contact Blackjack (not check-in) |
 | "Blackjack, request Bandsaw" | Push to Bandsaw (optional; you can also self-tune) |
-| "Blackjack / Bandsaw, request tanker" | Vectors to the Opus KC-135 (boom — not MPRS). Live CAOC bullseye / steer when the track is up |
-| "Texaco, request boom" | Missing official join: identified, cleared rejoin left (still use DCS **Intent to refuel**) |
-| "Left observation" | Missing official call: cleared astern, then use DCS **Ready pre-contact** |
+| "Blackjack / Bandsaw, request tanker" | Track (e.g. *track A R two tree one Victor*) + braw with altitude to the Opus **KC-135 boom** — never KC-130 or KC-135MPRS. Ends with *Frequency change approved.* |
+| "Say TACAN" / "say tanker frequency" / "say tanker bullseye" | On-request C2: TACAN, UHF, live bullseye |
+| "Texaco, request rejoin" / "request reform" | Cleared rejoin left, sometimes left observation (tanker does not say *identified*) |
+| Boom / reform small talk | After rejoin, Texaco starts an A/B question once you have been **0.1–0.5 NM** from the tanker for **30–60 seconds** with a receiver in that envelope. Fly **Texaco starts chat** (after rejoin) makes Texaco talk first — you do not ask. Answer with the short word. Optional Gemini/OpenAI/Ollama (`tanker_chat_llm`) mints a fresh question; falls back to the library. |
 | DCS tanker radio | **Ready pre-contact** → DCS *cleared contact* (boom). **Abort refueling** to disconnect. Do not use SRS for those. |
+| "Blackjack / Bandsaw, back from the tanker" / "checking in" after AAR | Radar contact, continue — you can check back in with C2 after the tanker |
 | "Blackjack, off station / range complete" | Range checkout → Approach (required after Blackjack check-in) |
 | "Approach, checking in" / "inbound" | Approach assigns recovery from METAR (VMC → VFR recovery + TAC overhead; IFR → instrument + IAF). Prefers RWY 21 |
 | "Request ARCOE / TORYE / STRYK / MINTT / overhead / instrument" | Change the assigned recovery / approach |
@@ -379,7 +381,7 @@ line up before a transmission does anything:
 
 | Check | Effect |
 |-------|--------|
-| **Who you called** | Open with the agency ("Nellis Tower, …") or at least your own callsign. Anything else is ignored. Turn off **Only act on calls addressed to ATC** to relax this. |
+| **Who you called** | Open with the agency ("Nellis Ground, …"). Your callsign alone is not enough. Readbacks after ATC speaks do not need the agency again. Turn off **Only act on calls addressed to ATC** to relax this. |
 | **Who you *didn't* call** | "Two, …", "Dash three, …", "Lead, …" is flight business and never fires — even if the rest sounds like a request. |
 | **Flight chatter** | "go button five", "fence in", "tally", "fox two", "bingo", "knock it off" and friends hard-stop the match. Ambiguous ones ("visual", "blind") only count against you when no agency was addressed. |
 | **Where you are** | "Gear down full stop" while still at clearance delivery scores too low to fire. The call ATC is currently waiting for gets a boost, so the expected reply is the easiest thing to say. |

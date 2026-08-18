@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import math
 import random
+import re
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -184,6 +186,7 @@ class FightGroup:
     label: str = ""
     object: str = ""
     declaration: str = "hostile"
+    unit_ids: list[str] = field(default_factory=list)
     # Filled by classify
     name: str = "group"
     cross_nm: float = 0.0  # + left / − right of threat axis from fighters
@@ -597,16 +600,293 @@ def _name_wall(groups: list[FightGroup], hi: str, lo: str) -> None:
 
 
 def roll_enemy_declaration() -> str:
-    """Random bandit / bogey / hostile / bogey spades for enemy-side groups."""
+    """Random bandit / bogey / hostile / bogey spades for a new enemy-side group."""
     return random.choice(_ENEMY_DECLARATIONS)
+
+
+def normalize_declaration(raw: str | None) -> str:
+    text = str(raw or "").strip().casefold()
+    text = re.sub(r"\s+", " ", text)
+    if text in ("spades", "bogey spades", "spade"):
+        return "bogey spades"
+    if text in ("hostile", "hostiles"):
+        return "hostile"
+    if text in ("bandit", "bandits"):
+        return "bandit"
+    if text in ("friendly", "friend"):
+        return "friendly"
+    if text in ("bogey", "bogie"):
+        return "bogey"
+    return text or "bogey"
+
+
+_DECL_RANK = {
+    "friendly": -1,
+    "bogey": 0,
+    "bogey spades": 1,
+    "bandit": 2,
+    "hostile": 3,
+}
+
+# How close a stored group must be (bullseye NM) when CAOC ids are missing.
+_DECL_MATCH_NM = 8.0
+_DECL_MATCH_ALT_FT = 8000
+_DECL_TTL_S = 45 * 60
+_DECL_MAX_ROWS = 64
+_STATE_KEY = "picture_declarations"
+
+
+def declaration_rank(raw: str | None) -> int:
+    return _DECL_RANK.get(normalize_declaration(raw), 0)
+
+
+def higher_declaration(a: str | None, b: str | None) -> str:
+    """Keep the higher threat label. Hostile never loses to bandit/bogey."""
+    na, nb = normalize_declaration(a), normalize_declaration(b)
+    return na if declaration_rank(na) >= declaration_rank(nb) else nb
+
+
+def agency_can_upgrade_hostile(agency: str | None = None, channel: str | None = None) -> bool:
+    """Bandsaw (AWACS) may upgrade a group to HOSTILE."""
+    blob = f"{agency or ''} {channel or ''}".casefold()
+    return any(tok in blob for tok in ("bandsaw", "ansa", "bansaw"))
+
+
+def transcript_upgrades_hostile(transcript: str | None) -> bool:
+    """Flight lead calling the contact hostile (declare hostile / that's a hostile)."""
+    text = re.sub(r"[^a-z0-9\s]", " ", str(transcript or "").casefold())
+    text = re.sub(r"\s+", " ", text).strip()
+    return bool(re.search(r"\bhostiles?\b", text))
+
+
+def bullseye_error_nm(brg: int, rng: int, other_brg: int, other_rng: int) -> float:
+    brg_err = abs(heading_delta(float(brg), float(other_brg)))
+    lateral = float(rng) * math.radians(brg_err)
+    range_err = abs(float(rng) - float(other_rng))
+    return math.hypot(lateral, range_err)
+
+
+def _id_set(raw: Any) -> set[str]:
+    if raw is None:
+        return set()
+    if isinstance(raw, (list, tuple, set)):
+        return {str(x).strip() for x in raw if str(x).strip()}
+    text = str(raw).strip()
+    return {text} if text else set()
+
+
+class DeclarationMemory:
+    """
+    Sticky C2 declarations for the sortie.
+
+    First time a group is spoken it is rolled (bogey / spades / bandit / hostile)
+    and remembered by CAOC unit id, then bullseye. Later picture / declare /
+    bogey-dope calls reuse that label. The only allowed change is an upgrade
+    to HOSTILE (Bandsaw declare, or the flight lead saying hostile).
+    """
+
+    def __init__(self, rows: list[dict[str, Any]] | None = None) -> None:
+        self.rows: list[dict[str, Any]] = []
+        for row in rows or []:
+            if isinstance(row, dict) and row.get("declaration"):
+                self.rows.append(dict(row))
+
+    @classmethod
+    def from_state(cls, state: dict[str, Any] | None) -> "DeclarationMemory":
+        rows = []
+        if isinstance(state, dict):
+            raw = state.get(_STATE_KEY)
+            if isinstance(raw, list):
+                rows = [r for r in raw if isinstance(r, dict)]
+        return cls(rows)
+
+    def to_state(self, state: dict[str, Any] | None) -> None:
+        if isinstance(state, dict):
+            state[_STATE_KEY] = self.to_rows()
+
+    def to_rows(self) -> list[dict[str, Any]]:
+        self._prune(time.time())
+        out: list[dict[str, Any]] = []
+        for row in self.rows[-_DECL_MAX_ROWS:]:
+            out.append(
+                {
+                    "ids": sorted(_id_set(row.get("ids"))),
+                    "brg": int(row.get("brg") or 0),
+                    "rng": int(row.get("rng") or 0),
+                    "feet": row.get("feet"),
+                    "declaration": normalize_declaration(row.get("declaration")),
+                    "seen": float(row.get("seen") or 0),
+                }
+            )
+        return out
+
+    def _prune(self, now: float) -> None:
+        keep: list[dict[str, Any]] = []
+        for row in self.rows:
+            seen = float(row.get("seen") or 0)
+            if seen and now - seen > _DECL_TTL_S:
+                continue
+            keep.append(row)
+        self.rows = keep[-_DECL_MAX_ROWS:]
+
+    def _hits(
+        self,
+        ids: set[str],
+        brg: int | None,
+        rng: int | None,
+        feet: int | None,
+    ) -> list[dict[str, Any]]:
+        hits: list[dict[str, Any]] = []
+        for row in self.rows:
+            row_ids = _id_set(row.get("ids"))
+            if ids and row_ids:
+                if ids & row_ids:
+                    hits.append(row)
+                continue
+            if brg is None or rng is None:
+                continue
+            try:
+                err = bullseye_error_nm(
+                    int(brg),
+                    int(rng),
+                    int(row.get("brg") or 0),
+                    int(row.get("rng") or 0),
+                )
+            except (TypeError, ValueError):
+                continue
+            if err > _DECL_MATCH_NM:
+                continue
+            row_ft = row.get("feet")
+            if feet is not None and row_ft is not None:
+                try:
+                    if abs(int(feet) - int(row_ft)) > _DECL_MATCH_ALT_FT:
+                        continue
+                except (TypeError, ValueError):
+                    pass
+            hits.append(row)
+        return hits
+
+    def lookup(
+        self,
+        ids: Any,
+        *,
+        brg: int | None = None,
+        rng: int | None = None,
+        feet: int | None = None,
+    ) -> str | None:
+        hits = self._hits(_id_set(ids), brg, rng, feet)
+        if not hits:
+            return None
+        best = hits[0]["declaration"]
+        for row in hits[1:]:
+            best = higher_declaration(best, row.get("declaration"))
+        return normalize_declaration(best)
+
+    def assign(
+        self,
+        ids: Any,
+        *,
+        brg: int | None = None,
+        rng: int | None = None,
+        feet: int | None = None,
+        coalition: str | None = None,
+        hostile_side: str = "red",
+        upgrade_hostile: bool = False,
+    ) -> str:
+        """
+        Return the sticky declaration for this group, rolling only on first sight.
+        """
+        now = time.time()
+        self._prune(now)
+        idset = _id_set(ids)
+        side = str(coalition or "").lower()
+        stored = self.lookup(idset, brg=brg, rng=rng, feet=feet)
+
+        if side in ("red", "blue") and side != str(hostile_side or "").lower():
+            decl = "friendly"
+        elif stored and stored != "friendly":
+            decl = stored
+        elif side == str(hostile_side or "").lower():
+            decl = roll_enemy_declaration()
+        else:
+            decl = stored or "bogey"
+
+        if upgrade_hostile and decl != "friendly":
+            decl = "hostile"
+        if stored == "hostile":
+            decl = "hostile"
+        decl = normalize_declaration(decl)
+        self._remember(idset, brg, rng, feet, decl, now)
+        return decl
+
+    def _remember(
+        self,
+        ids: set[str],
+        brg: int | None,
+        rng: int | None,
+        feet: int | None,
+        declaration: str,
+        now: float,
+    ) -> None:
+        hits = self._hits(ids, brg, rng, feet)
+        merged_ids = set(ids)
+        keep: list[dict[str, Any]] = []
+        used = {id(r) for r in hits}
+        for row in self.rows:
+            if id(row) in used:
+                merged_ids |= _id_set(row.get("ids"))
+                continue
+            keep.append(row)
+        keep.append(
+            {
+                "ids": sorted(merged_ids),
+                "brg": int(brg or 0),
+                "rng": int(rng or 0),
+                "feet": feet,
+                "declaration": declaration,
+                "seen": now,
+            }
+        )
+        self.rows = keep
+
+    def upgrade_to_hostile(
+        self,
+        ids: Any,
+        *,
+        brg: int | None = None,
+        rng: int | None = None,
+        feet: int | None = None,
+    ) -> str:
+        """Bandsaw / flight-lead upgrade. Never downgrade; never flip a friendly."""
+        stored = self.lookup(ids, brg=brg, rng=rng, feet=feet)
+        if stored == "friendly":
+            return "friendly"
+        self._remember(
+            _id_set(ids), brg, rng, feet, "hostile", time.time()
+        )
+        return "hostile"
+
+    def force(
+        self,
+        ids: Any,
+        declaration: str,
+        *,
+        brg: int = 0,
+        rng: int = 0,
+        feet: int | None = None,
+    ) -> str:
+        """Test helper: pin a declaration."""
+        decl = normalize_declaration(declaration)
+        self._remember(_id_set(ids), brg, rng, feet, decl, time.time())
+        return decl
 
 
 def declaration_for_coalition(coalition: str | None, hostile_side: str) -> str:
     """
-    Coalition → spoken declaration.
+    Coalition → spoken declaration (no memory).
 
-    Friendly stays friendly. Enemy-side rolls among hostile / bandit / bogey /
-    bogey spades so C2 is not locked on HOSTILE every call.
+    Prefer DeclarationMemory.assign so labels stick across picture / declare /
+    bogey dope. This remains for one-shot tests.
     """
     side = str(coalition or "").lower()
     if not side:

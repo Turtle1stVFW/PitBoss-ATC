@@ -701,22 +701,87 @@ INTENTS: tuple[Intent, ...] = (
             _ASKING + ("push", "go", "going"),
             ("tanker", "texaco", "air refuel", "air refueling", "aar"),
         ),
+        veto=(
+            "tacan",
+            "frequency",
+            "freq",
+            "bullseye",
+            "back from",
+            "off the tanker",
+            "off tanker",
+            "returning from",
+            "done with",
+        ),
         kind="request",
         channels=("blackjack", "bandsaw", "ops", "other"),
         phases=("flight",),
         weight=1.2,
         example="request tanker",
-        does="vectors to the Opus KC-135",
+        does="track and BRAA to the Opus KC-135",
+    ),
+    Intent(
+        "tanker_return",
+        (
+            (
+                "back from the tanker",
+                "off the tanker",
+                "done with the tanker",
+                "returning from the tanker",
+                "check back in",
+                "checking back in",
+                "back from tanker",
+                "off tanker",
+            ),
+        ),
+        kind="request",
+        channels=("blackjack", "bandsaw", "ops"),
+        phases=("flight",),
+        weight=1.25,
+        example="back from the tanker",
+        does="check back in after AAR",
+    ),
+    Intent(
+        "tanker_tacan",
+        (_ASKING, ("tacan", "tanker tacan", "tanker channel")),
+        kind="request",
+        channels=("blackjack", "bandsaw", "ops", "other"),
+        phases=("flight",),
+        weight=1.3,
+        example="say TACAN",
+        does="published tanker TACAN",
+    ),
+    Intent(
+        "tanker_freq",
+        (_ASKING, ("tanker frequency", "tanker freq", "frequency")),
+        kind="request",
+        channels=("blackjack", "bandsaw", "ops", "other"),
+        phases=("flight",),
+        weight=1.3,
+        example="say tanker frequency",
+        does="published tanker UHF",
+    ),
+    Intent(
+        "tanker_bullseye",
+        (_ASKING, ("tanker bullseye", "bullseye")),
+        veto=("alpha check", "alfa check", "declare"),
+        kind="request",
+        channels=("blackjack", "bandsaw", "ops", "other"),
+        phases=("flight",),
+        weight=1.15,
+        example="say tanker bullseye",
+        does="live tanker bullseye",
     ),
     Intent(
         "tanker_check_in",
         (
             (
-                "request boom",
-                "request the boom",
                 "request rejoin",
+                "request reform",
+                "request the rejoin",
+                "request the reform",
                 "cleared rejoin",
                 "rejoin left",
+                "reform left",
                 "checking in",
                 "with you",
             ),
@@ -725,22 +790,23 @@ INTENTS: tuple[Intent, ...] = (
         channels=("tanker",),
         phases=("flight",),
         weight=1.25,
-        example="request boom",
-        does="tanker check-in / cleared rejoin left",
-    ),
-    Intent(
-        "tanker_observation",
-        (("left observation", "observation", "on the left", "echelon left"),),
-        kind="request",
-        channels=("tanker",),
-        phases=("flight",),
-        weight=1.2,
-        example="left observation",
-        does="cleared astern; then DCS Ready pre-contact",
+        example="request rejoin",
+        does="cleared rejoin left (sometimes left observation)",
     ),
     Intent(
         "tanker_astern",
-        (("astern", "pre contact", "precontact", "pre-contact"),),
+        (
+            (
+                "astern",
+                "pre contact",
+                "precontact",
+                "pre-contact",
+                "left observation",
+                "observation",
+                "on the left",
+                "echelon left",
+            ),
+        ),
         kind="request",
         channels=("tanker",),
         phases=("flight",),
@@ -778,6 +844,29 @@ INTENTS: tuple[Intent, ...] = (
         weight=1.15,
         example="request departure",
         does="use DCS tanker radio to leave",
+    ),
+    Intent(
+        "tanker_chat_start",
+        (
+            (
+                "how's it going",
+                "hows it going",
+                "how you doing",
+                "how are you",
+                "you busy",
+                "pretty quiet",
+                "what's for lunch",
+                "whats for lunch",
+                "shoot the breeze",
+                "small talk",
+            ),
+        ),
+        kind="request",
+        channels=("tanker",),
+        phases=("flight",),
+        weight=1.05,
+        example="how's it going",
+        does="boom / reform small talk",
     ),
     Intent(
         "say_again",
@@ -1111,6 +1200,7 @@ INTENTS: tuple[Intent, ...] = (
                 "request the handoff",
                 "request tower",
                 "requesting tower",
+                "contact tower",
                 "airport in sight",
                 "field in sight",
                 "for the overhead",
@@ -1525,26 +1615,8 @@ def step_advance_keyword_text(
 
 def cue_needs_agency(intent: Intent, *, expected: str = "", awaiting_readback: bool = False) -> bool:
     """True when the Fly tip should show an agency opener as required."""
-    if awaiting_readback:
-        return False
-    if intent.step_id:
-        return False
-    if intent.id in _ADDRESS_OPTIONAL_INTENTS:
-        return False
-    if intent.id == "departure_check_in" and (expected or "").strip().lower() == "radar_contact":
-        return False
-    if intent.id == "in_position" and (expected or "").strip().lower() in _TAKEOFF_CLEAR_TEMPLATES:
-        return False
-    if intent.id in _TOWER_CHECKIN_INTENTS and (expected or "").strip().lower() in _TOWER_CHECKIN_TEMPLATES:
-        return False
-    if intent.id == "going_around" and (expected or "").strip().lower() in _LANDING_GO_AROUND_TEMPLATES:
-        return False
-    if (
-        intent.id == "approach_established"
-        and (expected or "").strip().lower() in _APPROACH_TOWER_HANDOFF_TEMPLATES
-    ):
-        return False
-    return True
+    _ = (intent, expected)
+    return not awaiting_readback
 
 
 def step_is_authored(step: dict[str, Any] | None) -> bool:
@@ -1566,6 +1638,10 @@ _C2_INTENT_IDS = frozenset(
         "request_declare",
         "request_alpha_check",
         "request_tanker",
+        "tanker_return",
+        "tanker_tacan",
+        "tanker_freq",
+        "tanker_bullseye",
     }
 )
 
@@ -1745,7 +1821,7 @@ def _group_hit(text: str, options: tuple[str, ...], *, fuzzy: bool = True) -> st
 # Intents that may omit the agency opener while a readback is outstanding —
 # the exchange is already open from ATC's last transmission.
 _ADDRESS_OPTIONAL_INTENTS = frozenset(
-    {"acknowledge_readback", "say_again", "at_eor"}
+    {"acknowledge_readback", "say_again"}
 )
 
 
@@ -1867,7 +1943,7 @@ def _expected_now(
     # During a readback window the pilot is answering the last clearance — not
     # asking for that step again. Otherwise "taxi via … runway 21R" re-fires taxi.
     if awaiting_readback:
-        return intent.id in _ADDRESS_OPTIONAL_INTENTS and intent.id != "at_eor"
+        return intent.id in _ADDRESS_OPTIONAL_INTENTS
     if intent.step_id and current_step_id and intent.step_id == current_step_id:
         return True
     if intent.id == "ready_departure" and expected in _DEPARTURE_READY_TEMPLATES:
@@ -2691,8 +2767,19 @@ _CHECKIN_NOT_READBACK = (
     "initial",
     "gear down",
     "ready to taxi",
+    "ready taxi",
+    "ready for taxi",
+    "request taxi",
+    "requesting taxi",
     "ready for departure",
     "in position",
+    "at eor",
+    "at the eor",
+    "end of runway",
+    "end of the runway",
+    "holding short",
+    "northwest eor",
+    "alpha south",
 )
 _READBACK_STOP = frozenset(
     {
@@ -2750,19 +2837,33 @@ def echoes_last_atc(
     steps: list[dict[str, Any]] | None = None,
     last_tx_at: float = 0.0,
     now: float = 0.0,
+    addressed: str = "",
+    last_tx_channel: str = "",
+    last_tx_template: str = "",
+    candidate_template: str = "",
+    callsign: str = "",
 ) -> bool:
     """
     True when the pilot is reading back the last ATC call, not making a new one.
 
     Used when there is no formal READ BACK card (handoff, custom/file, Center).
-    A real check-in ("with you") still fires even if the last call named the
-    same agency.
+    Repeating “contact Blackjack” on Departure is an echo. Reporting the next
+    action named in that instruction (taxi after Delivery, at EOR after taxi)
+    is not — those are a different flow step.
     """
     last = normalize(last_tx)
     text = normalize(transcript)
     if not last or not text:
         return False
     if last_tx_at and now and (now - last_tx_at) > _ECHO_MAX_AGE_S:
+        return False
+    addr = str(addressed or "").strip().lower()
+    prev = str(last_tx_channel or "").strip().lower()
+    if addr and prev and addr != prev:
+        return False
+    last_tmpl = str(last_tx_template or "").strip().lower()
+    cand_tmpl = str(candidate_template or "").strip().lower()
+    if last_tmpl and cand_tmpl and last_tmpl != cand_tmpl:
         return False
     if any(cue in text and cue not in last for cue in _CHECKIN_NOT_READBACK):
         return False
@@ -2775,10 +2876,18 @@ def echoes_last_atc(
                 hits.append(n)
     hits.sort(key=len, reverse=True)
     for hit in hits:
+        # Single words like "taxi" / "eor" appear inside the previous
+        # instruction and must not kill the next call.
+        if " " not in hit and len(hit) < 10:
+            continue
         if len(hit) >= 4 and hit in last:
             return True
 
-    heard = [t for t in text.split() if t not in _READBACK_STOP]
+    ignore = set(_READBACK_STOP)
+    ignore.update(normalize(callsign).split())
+    if prev:
+        ignore.add(prev)
+    heard = [t for t in text.split() if t not in ignore]
     if len(heard) < 2:
         return False
     said = set(last.split())
@@ -2820,6 +2929,9 @@ def evaluate(
     current_step_id: str = "",
     last_tx_text: str = "",
     last_tx_at: float = 0.0,
+    last_tx_channel: str = "",
+    last_tx_template: str = "",
+    tanker_chat_choices: list[dict[str, Any]] | None = None,
 ) -> Evaluation:
     """
     Decide whether a transmission is ATC business, and if so what it asks for.
@@ -2869,6 +2981,11 @@ def evaluate(
             steps=steps,
             last_tx_at=last_tx_at,
             now=time.time() if last_tx_at else 0.0,
+            addressed=str(address.agency or ""),
+            last_tx_channel=last_tx_channel,
+            last_tx_template=last_tx_template,
+            candidate_template=str(candidate.template or ""),
+            callsign=callsign,
         )
     ):
         return Evaluation(
@@ -2882,6 +2999,40 @@ def evaluate(
     result = Evaluation(
         transcript=transcript, normalized=text, candidate=candidate, address=address
     )
+
+    # Boom small-talk answers (Dunkin / Starbucks / …) while Texaco is waiting.
+    # Official tanker calls still win. Agency opener is optional.
+    if tanker_chat_choices and not (
+        candidate is not None
+        and candidate.intent
+        in {
+            "tanker_check_in",
+            "tanker_astern",
+            "tanker_contact",
+            "tanker_disconnect",
+            "tanker_depart",
+            "tanker_dcs_precontact",
+            "tanker_dcs_abort",
+            "say_again",
+        }
+    ):
+        try:
+            import tanker_chat as tanker_chat_mod
+
+            hit = tanker_chat_mod.match_choice(text, tanker_chat_choices)
+        except Exception:
+            hit = None
+        if hit:
+            result.match = Match(
+                intent="tanker_chat_reply",
+                kind="request",
+                template="",
+                confidence=1.0,
+                slots={"choice": str(hit.get("id") or "")},
+                transcript=transcript,
+                normalized=text,
+            )
+            return result
 
     # Wording the mission author typed for this step, said word for word. It
     # outranks the loose chatter filters — casual phrasing is the whole point of
@@ -2920,72 +3071,17 @@ def evaluate(
 
     # ATC has just spoken and is holding for an answer, so the reply it is
     # waiting on does not have to open with the agency all over again.
-    # Same for "at EOR" once the timeline is on monitor tower.
-    address_optional = (
-        awaiting_readback
-        and (
-            candidate.expected
-            or candidate.intent in _ADDRESS_OPTIONAL_INTENTS
-            or candidate.intent
-            in (
-                "request_rolling",
-                "accept_rolling",
-                "deny_rolling",
-                "request_lineup",
-                "going_around",
-            )
+    # Every other call — at EOR, taxi, check-in, in position — must address
+    # the agency, not just a couple of cue words.
+    address_optional = bool(awaiting_readback)
+    if require_address and not address_optional and not address.to_atc:
+        result.reason = "no agency addressed"
+        result.advice = (
+            "read back the highlighted items — agency name optional now"
+            if awaiting_readback
+            else "open with the agency, e.g. “Ground, …”"
         )
-    ) or (
-        candidate.intent == "at_eor"
-        and (candidate.expected or str(expected or "") == "monitor_tower")
-    ) or (
-        # Airborne check-in may omit the agency — but not once climb readback is open.
-        candidate.intent == "departure_check_in"
-        and not awaiting_readback
-        and (candidate.expected or str(expected or "") == "radar_contact")
-    ) or (
-        candidate.intent == "in_position"
-        and not awaiting_readback
-        and (
-            candidate.expected
-            or str(expected or "") in _TAKEOFF_CLEAR_TEMPLATES
-        )
-    ) or (
-        candidate.intent in _TOWER_CHECKIN_INTENTS
-        and not awaiting_readback
-        and (
-            candidate.expected
-            or str(expected or "") in _TOWER_CHECKIN_TEMPLATES
-        )
-    ) or (
-        candidate.intent == "approach_established"
-        and not awaiting_readback
-        and (
-            candidate.expected
-            or str(expected or "") in _APPROACH_TOWER_HANDOFF_TEMPLATES
-        )
-    ) or (
-        # After land / during the land readback — "going around" does not
-        # need Tower again; the exchange is already open.
-        candidate.intent == "going_around"
-        and (
-            awaiting_readback
-            or candidate.expected
-            or str(expected or "") in _LANDING_GO_AROUND_TEMPLATES
-        )
-    )
-    if require_address and not address_optional and not (
-        address.to_atc or address.own_callsign
-    ):
-        # Mission-authored phrase on the due step: the whole point is casual wording.
-        if not (authored and candidate.expected):
-            result.reason = "no agency addressed"
-            result.advice = (
-                "read back the squawk / clearance items — agency name optional now"
-                if awaiting_readback
-                else "open with the agency, e.g. “Tower, …”"
-            )
-            return result
+        return result
     if candidate.confidence < min_confidence:
         result.reason = f"low confidence ({candidate.confidence:.0%})"
         result.advice = "say the request on its own, without the extra words"
@@ -3052,6 +3148,7 @@ def suggestions(
     current_step_id: str = "",
     advance_limit: int | None = None,
     optional_limit: int | None = None,
+    tanker_chat_choices: list[dict[str, Any]] | None = None,
 ) -> list[tuple[str, str, str, bool]]:
     """
     Fly kneeboard cues: (payload, what it does, role, agency_required).
@@ -3127,7 +3224,15 @@ def suggestions(
             current_does = str(current_step.get("label") or current_does)
         take = advance_limit if advance_limit is not None else limit
         for phrase in current_phrases[:take]:
-            out.append((phrase, current_does, "advance", False))
+            out.append((phrase, current_does, "advance", True))
+
+    if tanker_chat_choices and not awaiting_readback:
+        for choice in tanker_chat_choices:
+            say = str(choice.get("say") or "").strip()
+            if say:
+                out.append(
+                    (say, "answer Texaco · agency optional", "advance", False)
+                )
 
     ranked: list[tuple[int, int, Intent, str]] = []
     # Built-in grammar only here — this step's mission phrases are already above.

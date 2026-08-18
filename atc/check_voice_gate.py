@@ -62,12 +62,21 @@ CASES = [
     ("Blackjack, Fleece 1, request tanker", "blackjack", "flight", True, "request_tanker"),
     ("Blackjack, Fleece 1, request vectors to the tanker", "blackjack", "flight", True, "request_tanker"),
     ("Bandsaw, Fleece 1, going to the tanker", "bandsaw", "flight", True, "request_tanker"),
-    ("Texaco, Fleece 1, request boom", "tanker", "flight", True, "tanker_check_in"),
-    ("Texaco 1, Fleece 1, left observation", "tanker", "flight", True, "tanker_observation"),
+    ("Blackjack, Fleece 1, back from the tanker", "blackjack", "flight", True, "tanker_return"),
+    ("Blackjack, Fleece 1, off the tanker", "blackjack", "flight", True, "tanker_return"),
+    ("Blackjack, Fleece 1, check back in", "blackjack", "flight", True, "tanker_return"),
+    ("Bandsaw, Fleece 1, returning from the tanker", "bandsaw", "flight", True, "tanker_return"),
+    ("Blackjack, Fleece 1, say TACAN", "blackjack", "flight", True, "tanker_tacan"),
+    ("Blackjack, Fleece 1, say tanker frequency", "blackjack", "flight", True, "tanker_freq"),
+    ("Blackjack, Fleece 1, say tanker bullseye", "blackjack", "flight", True, "tanker_bullseye"),
+    ("Texaco, Fleece 1, request rejoin", "tanker", "flight", True, "tanker_check_in"),
+    ("Texaco, Fleece 1, request reform", "tanker", "flight", True, "tanker_check_in"),
+    ("Texaco 1, Fleece 1, left observation", "tanker", "flight", True, "tanker_astern"),
     ("Texaco, Fleece 1, astern", "tanker", "flight", True, "tanker_astern"),
     ("Texaco, Fleece 1, contact", "tanker", "flight", True, "tanker_contact"),
     ("Texaco, Fleece 1, disconnect", "tanker", "flight", True, "tanker_disconnect"),
     ("Texaco, Fleece 1, request departure", "tanker", "flight", True, "tanker_depart"),
+    ("Texaco, Fleece 1, how's it going", "tanker", "flight", True, "tanker_chat_start"),
     ("Blackjack, Fleece 1, push Bandsaw", "blackjack", "flight", True, "request_bandsaw"),
     ("Blackjack, Fleece 1, request ANSA", "blackjack", "flight", True, "request_bandsaw"),
     ("Blackjack, Fleece 1, off station, range complete", "blackjack", "flight", True, "range_exit"),
@@ -108,16 +117,16 @@ CASES = [
     ("Tower, Fleece 1, going missed", "tower", "approach", True, "going_around"),
     ("Tower, Fleece 1, on the go", "tower", "approach", True, "going_around"),
     ("Ground, Fleece 1, clear of the runway", "ground", "approach", True, "clear_of_runway"),
-    # own callsign, no agency named — still us talking to ATC
-    ("Fleece 1, ready to taxi", "ground", "departure", True, "ready_taxi"),
-    ("Fleece 1, request the current winds", "tower", "departure", True, "request_winds"),
+    # own callsign without the agency is not a radio call
+    ("Fleece 1, ready to taxi", "ground", "departure", False, None),
+    ("Fleece 1, request the current winds", "tower", "departure", False, None),
     # Departure radar contact — airborne check-in
     ("Departure, Fleece 1, with you", "departure", "departure", True, "departure_check_in"),
     ("Nellis Departure, Fleece 1, airborne", "departure", "departure", True, "departure_check_in"),
-    ("Fleece 1, airborne", "departure", "departure", True, "departure_check_in"),
+    ("Fleece 1, airborne", "departure", "departure", False, None),
     # Unrestricted climb — Tower only, hidden from kneeboard cues
     ("Tower, Fleece 1, request unrestricted climb", "tower", "departure", True, "request_unrestricted_climb"),
-    ("Fleece 1, request unrestricted", "tower", "departure", True, "request_unrestricted_climb"),
+    ("Fleece 1, request unrestricted", "tower", "departure", False, None),
     ("Tower, Fleece 1, request rolling", "tower", "departure", True, "request_rolling"),
     ("Departure, Fleece 1, request handoff", "departure", "departure", True, "request_handoff"),
     ("Nellis Departure, Fleece 1, request blackjack", "departure", "departure", True, "request_handoff"),
@@ -747,11 +756,11 @@ def extras() -> int:
 
     # If we are Fleece 2, then Fleece 2 is us and Fleece 1 is someone else.
     as_two = voice_intent.evaluate(
-        "Fleece 2, ready to taxi", channel="ground", phase="departure",
+        "Ground, Fleece 2, ready to taxi", channel="ground", phase="departure",
         callsign="FLEECE 2", runways=RUNWAYS,
     )
     lead = voice_intent.evaluate(
-        "Fleece 1, ready to taxi", channel="ground", phase="departure",
+        "Ground, Fleece 1, ready to taxi", channel="ground", phase="departure",
         callsign="FLEECE 2", runways=RUNWAYS,
     )
     print(f"as Fleece 2 — own call fires: {as_two.fired}, call to lead fires: {lead.fired}")
@@ -944,11 +953,11 @@ def extras() -> int:
         airport_name="Nellis",
         limit=4,
     )
-    if not any(s == "with you" and not needs for s, _d, _r, needs in rc_tips):
-        print(f"  FAIL radar-contact 'with you' should be agency-optional: {rc_tips}")
+    if not any(s == "with you" and needs for s, _d, _r, needs in rc_tips):
+        print(f"  FAIL radar-contact 'with you' should require the agency: {rc_tips}")
         bad += 1
     else:
-        print("kneeboard agency-required flag — clearance yes, with-you no")
+        print("kneeboard agency-required flag — clearance yes, check-in yes")
 
     # Tuned-agency tip helper: Flight + Bandsaw tune → Bandsaw tips.
     tip_ch = voice_intent.resolve_context_channel(
@@ -995,12 +1004,11 @@ def extras() -> int:
         bad += 1
     print("tuned-frequency tip channel — ok" if tip_ch == "bandsaw" else "tuned-frequency tip channel — FAIL")
 
-    # Departure radar contact: bare "with you" / "airborne" while awaiting;
-    # winds/altimeter stay silent on that step.
+    # Departure radar contact: agency required (bare "with you" is not enough)
     for text, want in (
-        ("with you", "departure_check_in"),
-        ("airborne", "departure_check_in"),
-        ("Fleece 1, checking in", "departure_check_in"),
+        ("Departure, Fleece 1, with you", "departure_check_in"),
+        ("Departure, Fleece 1, airborne", "departure_check_in"),
+        ("Departure, Fleece 1, checking in", "departure_check_in"),
         ("Departure, Fleece 1, we are airborne", "departure_check_in"),
     ):
         ev = voice_intent.evaluate(
@@ -1031,10 +1039,22 @@ def extras() -> int:
             bad += 1
     print("departure radar contact — with you / airborne; no winds/altimeter")
 
+    for text in ("with you", "airborne", "Fleece 1, checking in"):
+        ev = voice_intent.evaluate(
+            text,
+            channel="departure",
+            phase="departure",
+            expected="radar_contact",
+            callsign=CALLSIGN,
+            runways=RUNWAYS,
+        )
+        if ev.fired:
+            print(f"  FAIL departure check-in needs the agency: {text!r} — {ev.describe()}")
+            bad += 1
+
     for text, want in (
         ("Approach, Fleece 1, request handoff", "approach_continue"),
-        ("Fleece 1, established", "approach_established"),
-        ("established", "approach_established"),
+        ("Approach, Fleece 1, established", "approach_established"),
     ):
         ev = voice_intent.evaluate(
             text,
@@ -1061,9 +1081,20 @@ def extras() -> int:
     else:
         print("contact tower — request handoff / established; not checking in")
 
+    for text in ("established", "Fleece 1, established"):
+        ev = voice_intent.evaluate(
+            text,
+            channel="approach",
+            phase="approach",
+            expected="cleared_approach",
+            callsign=CALLSIGN,
+            runways=RUNWAYS,
+        )
+        if ev.fired:
+            print(f"  FAIL established needs Approach: {text!r} — {ev.describe()}")
+            bad += 1
+
     for text, want in (
-        ("with you", "tower_check_in"),
-        ("initial", "tower_initial"),
         ("Tower, Fleece 1, with you", "tower_check_in"),
         ("Nellis Tower, Fleece 1, at initial", "tower_initial"),
     ):
@@ -1169,7 +1200,7 @@ def extras() -> int:
         print("lineup tips ready; clear_takeoff tips in position")
 
     pos_on_takeoff = voice_intent.evaluate(
-        "in position",
+        "Tower, Fleece 1, in position",
         channel="tower",
         phase="departure",
         expected="clear_takeoff",
@@ -1178,6 +1209,17 @@ def extras() -> int:
     )
     if not pos_on_takeoff.fired or pos_on_takeoff.match.intent != "in_position":
         print(f"  FAIL in position should clear takeoff: {pos_on_takeoff.describe()}")
+        bad += 1
+    bare_pos = voice_intent.evaluate(
+        "in position",
+        channel="tower",
+        phase="departure",
+        expected="clear_takeoff",
+        callsign=CALLSIGN,
+        runways=RUNWAYS,
+    )
+    if bare_pos.fired:
+        print(f"  FAIL bare in position needs Tower: {bare_pos.describe()}")
         bad += 1
     mixed = voice_intent.evaluate(
         "Nellis Tower, Fleece 1, in position ready for takeoff",
@@ -1315,18 +1357,23 @@ def extras() -> int:
         )
 
     for text in (
-        "at EOR",
-        "at E or",
-        "E or",
-        "e o r",
-        "end of runway",
+        "Ground, Fleece 1, at EOR",
+        "Ground, Fleece 1, at E or",
+        "Ground, Fleece 1, E or",
+        "Nellis Ground, Fleece 1, e o r",
+        "Ground, Fleece 1, end of runway",
         "Ground, Fleece 1, at ee or",
     ):
         result = eor_call(text)
         if not result.fired or result.match.intent != "at_eor":
             print(f"  FAIL at-EOR should fire: {text!r} — {result.describe()}")
             bad += 1
-    print("at EOR — letters, Whisper splits, or end of runway")
+    for text in ("at EOR", "at E or", "end of runway"):
+        result = eor_call(text)
+        if result.fired:
+            print(f"  FAIL at-EOR needs Ground: {text!r} — {result.describe()}")
+            bad += 1
+    print("at EOR — letters, Whisper splits, or end of runway (agency required)")
 
     takeoff_items = [
         {
@@ -1428,11 +1475,20 @@ def extras() -> int:
                 f"{text!r} — {result.describe()}"
             )
             bad += 1
-    after_rb = land_ga("going around", awaiting=False, expected="exit_runway")
+    after_rb = land_ga(
+        "Tower, Fleece 1, going around", awaiting=False, expected="exit_runway"
+    )
     if not after_rb.fired or after_rb.match.intent != "going_around":
         print(
-            f"  FAIL after land readback, bare going around should fire: "
+            f"  FAIL after land readback, going around should fire: "
             f"{after_rb.describe()}"
+        )
+        bad += 1
+    bare_ga = land_ga("going around", awaiting=False, expected="exit_runway")
+    if bare_ga.fired:
+        print(
+            f"  FAIL after land readback, bare going around needs Tower: "
+            f"{bare_ga.describe()}"
         )
         bad += 1
     land_ack_ok = True
@@ -2394,33 +2450,291 @@ def extras() -> int:
             "freq_mhz": 322.3,
             "tcn": "39X",
             "boom": True,
+            "bearing_deg": 45,
+            "distance_nm": 32,
+            "live_alt_ft": 23000,
+            "aspect": "hot",
+            "bullseye": {
+                "name": "ELVIS",
+                "bearing": 56,
+                "range_nm": 32,
+                "spoken": "ELVIS zero five six, thirty two",
+            },
         }
         vec = tanker_mod.build_c2_tanker_vectors("blackjack", "Fleece 1", tex)
         join = tanker_mod.build_tanker_check_in("Fleece 1", tex)
-        astern = tanker_mod.build_tanker_observation("Fleece 1", tex)
+        tacan = tanker_mod.build_tanker_tacan_reply("blackjack", "Fleece 1", tex)
+        freq = tanker_mod.build_tanker_freq_reply("blackjack", "Fleece 1", tex)
+        be = tanker_mod.build_tanker_bullseye_reply("blackjack", "Fleece 1", tex)
+        ret = tanker_mod.build_tanker_return_checkin("blackjack", "Fleece 1")
         dcs_contact = tanker_mod.dcs_tanker_radio_hint("tanker_contact")
         dcs_abort = tanker_mod.dcs_tanker_radio_hint("tanker_dcs_abort")
+        vec_l = vec.lower()
+        track_ar = tanker_mod.speak_aar_track("AR231V").lower()
+        catalog_pick = tanker_mod.choose_catalog_tanker(
+            [
+                {
+                    "callsign": "ARCO 1",
+                    "aircraft": "KC-130",
+                    "track": "AR231V",
+                },
+                {
+                    "callsign": "TEXACO 1",
+                    "aircraft": "KC-135",
+                    "track": "ARLNS",
+                    "boom": True,
+                },
+            ],
+            name="ARCO",
+            boom_only=True,
+        )
+        no_boom = tanker_mod.choose_catalog_tanker(
+            [{"callsign": "ARCO 1", "aircraft": "KC-130", "track": "AR231V"}],
+            boom_only=True,
+        )
         if (
             not boom_ok
             or mprs_no
             or c130_no
-            or "texaco one" not in vec.lower()
-            or "kc-135 boom" not in vec.lower()
-            or "niner x-ray" not in vec.lower()
+            or "texaco one" not in vec_l
+            or "kc-135 boom" not in vec_l
+            or "air refuel" in vec_l
+            or "track " not in vec_l
+            or "braa" in vec_l
+            or "braw" not in vec_l
+            or "hot" in vec_l
+            or "zero four fife" not in vec_l
+            or "flight level" not in vec_l
+            or "tacan" in vec_l
+            or "frequency change approved" not in vec_l
+            or "tree two two" in vec_l
+            or "elvis" in vec_l
+            or "identified" in join.lower()
             or "cleared rejoin left" not in join.lower()
-            or "cleared astern" not in astern.lower()
-            or "ready pre-contact" not in astern.lower()
+            or "niner x-ray" not in tacan.lower()
+            or "tree two two" not in freq.lower()
+            or "elvis" not in be.lower()
+            or "continue" not in ret.lower()
+            or "tanker radio" in vec_l
+            or "tanker radio" in join.lower()
             or "ready pre-contact" not in dcs_contact.lower()
             or "abort" not in dcs_abort.lower()
+            or "a r" not in track_ar
+            or "victor" not in track_ar
+            or "air refuel" in track_ar
+            or not catalog_pick
+            or str(catalog_pick.get("callsign") or "").upper() != "TEXACO 1"
+            or no_boom is not None
         ):
             print(
                 f"  FAIL tanker boom comms: boom={boom_ok} mprs={mprs_no} "
-                f"c130={c130_no} vec={vec} join={join} astern={astern} "
+                f"c130={c130_no} vec={vec} join={join} tacan={tacan} "
+                f"freq={freq} be={be} ret={ret} track={track_ar} "
+                f"pick={catalog_pick} no_boom={no_boom} "
                 f"dcs={dcs_contact} abort={dcs_abort}"
             )
             bad += 1
         else:
-            print("tanker — F-16 KC-135 boom vectors + DCS cleared contact")
+            print("tanker — F-16 KC-135 track/braw + check-in after AAR")
+
+        joins = [
+            tanker_mod.build_tanker_check_in("Fleece 1", tex).lower()
+            for _ in range(40)
+        ]
+        if (
+            any("identified" in j for j in joins)
+            or not any("left observation" in j for j in joins)
+            or not any(
+                "cleared rejoin left" in j and "observation" not in j for j in joins
+            )
+        ):
+            print(f"  FAIL tanker rejoin variants: {joins[:6]}")
+            bad += 1
+        else:
+            print("tanker rejoin — left / left observation, never identified")
+
+        import tanker_chat as tanker_chat_mod
+
+        st = {}
+        opener = tanker_chat_mod.start_chat(
+            st, "Fleece 1", {"callsign": "TEXACO 1"}, thread_id="dunkin_starbucks"
+        )
+        dunk = tanker_chat_mod.answer_chat(
+            st, "Fleece 1", {"callsign": "TEXACO 1"}, choice_id="dunkin"
+        )
+        st2 = {}
+        tanker_chat_mod.start_chat(
+            st2, "Fleece 1", {"callsign": "TEXACO 1"}, thread_id="dunkin_starbucks"
+        )
+        choices = tanker_chat_mod.current_choices(st2)
+        bare = voice_intent.evaluate(
+            "Dunkin",
+            channel="tanker",
+            phase="flight",
+            callsign=CALLSIGN,
+            runways=RUNWAYS,
+            tanker_chat_choices=choices,
+        )
+        silent = voice_intent.evaluate(
+            "Dunkin",
+            channel="tanker",
+            phase="flight",
+            callsign=CALLSIGN,
+            runways=RUNWAYS,
+        )
+        if (
+            "identified" in (opener or "").lower()
+            or "dunkin or starbucks" not in (opener or "").lower()
+            or not dunk
+            or "dunkin" not in dunk.lower()
+            or "keurig" not in dunk.lower()
+            or not tanker_chat_mod.is_open(st)
+            or not bare.fired
+            or bare.match.intent != "tanker_chat_reply"
+            or str((bare.match.slots or {}).get("choice") or "") != "dunkin"
+            or silent.fired
+        ):
+            print(
+                f"  FAIL tanker chat: opener={opener!r} dunk={dunk!r} "
+                f"bare={bare.describe()} silent={silent.describe()} open={st}"
+            )
+            bad += 1
+        else:
+            print("tanker chat — Dunkin/Starbucks, one-word answer, agency optional")
+
+        import tanker_chat_library as tanker_chat_lib
+
+        lib_n = tanker_chat_lib.library_size()
+        ids = [str(t.get("id") or "") for t in tanker_chat_lib.THREADS]
+        if lib_n < 50 or len(set(ids)) != lib_n or "dunkin_starbucks" not in ids:
+            print(f"  FAIL tanker chat library size/ids: n={lib_n} unique={len(set(ids))}")
+            bad += 1
+        else:
+            print(f"tanker chat library — {lib_n} unique A/B threads")
+
+        llm_ok = tanker_chat_mod.normalize_llm_thread(
+            {
+                "opener": "Coffee or tea while you hang out?",
+                "choices": [
+                    {"say": "Coffee", "reply": "Coffee, copy. Boom approved."},
+                    {"say": "Tea", "reply": "Tea, copy. Fancy."},
+                ],
+            }
+        )
+        llm_bad = tanker_chat_mod.normalize_llm_thread(
+            {"opener": "hi", "choices": [{"say": "Rejoin", "reply": "nope"}]}
+        )
+        llm_off = tanker_chat_mod.resolve_llm_provider(
+            {"tanker_chat_llm": "gemini", "tanker_chat_llm_key": ""}
+        )
+        llm_auto = tanker_chat_mod.resolve_llm_provider(
+            {"tanker_chat_llm": "auto", "tanker_chat_llm_key": "sk-test"}
+        )
+        st_llm = {}
+        pinned = tanker_chat_mod.start_chat(
+            st_llm,
+            "Fleece 1",
+            {"callsign": "TEXACO 1"},
+            thread_id="dunkin_starbucks",
+            config={"tanker_chat_llm": "gemini", "tanker_chat_llm_key": "AIza-fake"},
+        )
+        if (
+            not llm_ok
+            or "{cs}" not in str(llm_ok.get("opener") or "")
+            or len(llm_ok.get("choices") or []) != 2
+            or "coffee" not in (llm_ok["choices"][0].get("hits") or ())
+            or llm_bad is not None
+            or llm_off is not None
+            or llm_auto != ("openai", "sk-test")
+            or "dunkin or starbucks" not in (pinned or "").lower()
+        ):
+            print(
+                f"  FAIL tanker chat LLM normalize: ok={llm_ok} bad={llm_bad} "
+                f"off={llm_off} auto={llm_auto} pinned={pinned!r}"
+            )
+            bad += 1
+        else:
+            print("tanker chat LLM — normalize, fallback, pin dunkin even if LLM is on")
+
+        import tanker as tanker_mod
+
+        early = tanker_mod.boom_chat_gate(
+            rejoined=True,
+            chat_open=False,
+            dist_nm=5.0,
+            receivers=1,
+            auto_done=False,
+            now=100.0,
+            in_range_since=None,
+        )
+        hold = tanker_mod.boom_chat_gate(
+            rejoined=True,
+            chat_open=False,
+            dist_nm=0.3,
+            receivers=1,
+            auto_done=False,
+            now=100.0,
+            in_range_since=None,
+        )
+        too_soon = tanker_mod.boom_chat_gate(
+            rejoined=True,
+            chat_open=False,
+            dist_nm=0.3,
+            receivers=1,
+            auto_done=False,
+            now=120.0,
+            in_range_since=100.0,
+            dwell_s=45.0,
+        )
+        ready_g = tanker_mod.boom_chat_gate(
+            rejoined=True,
+            chat_open=False,
+            dist_nm=0.3,
+            receivers=1,
+            auto_done=False,
+            now=160.0,
+            in_range_since=100.0,
+            dwell_s=45.0,
+        )
+        nojoin = tanker_mod.boom_chat_gate(
+            rejoined=False,
+            chat_open=False,
+            dist_nm=0.3,
+            receivers=1,
+            auto_done=False,
+            now=110.0,
+            in_range_since=100.0,
+        )
+        st_vis = {}
+        tanker_mod.mark_rejoined(st_vis, True)
+        rows = tanker_chat_mod.fly_request_rows(st_vis)
+        boom_on_c2 = atc_phrase.pilot_requests_for_channel(
+            "blackjack", st_vis, airport=nellis, phase="flight"
+        )
+        ollama = tanker_chat_mod.resolve_llm_provider({"tanker_chat_llm": "ollama"})
+        if (
+            early.get("ready")
+            or hold.get("ready")
+            or too_soon.get("ready")
+            or not ready_g.get("ready")
+            or nojoin.get("ready")
+            or not tanker_chat_mod.fly_controls_visible(st_vis)
+            or rows[0][0] != "tanker_chat_start"
+            or "texaco" not in str(rows[0][1] or "").lower()
+            or not any(k == "tanker_chat_start" for k, _ in boom_on_c2)
+            or ollama != ("ollama", "")
+        ):
+            print(
+                f"  FAIL tanker boom gate: early={early} hold={hold} soon={too_soon} "
+                f"ready={ready_g} nojoin={nojoin} rows={rows} c2={boom_on_c2} "
+                f"ollama={ollama}"
+            )
+            bad += 1
+        else:
+            print(
+                "tanker boom chat — Texaco starts after 30–60s in 0.1–0.5 NM; "
+                "Fly button visible on Blackjack"
+            )
 
         trig18 = rp.resolve_step_trigger(
             {
@@ -2621,8 +2935,8 @@ def step_phrases() -> int:
         expected="clearance",
         step_id="del_clearance",
     )
-    if not bare.fired or not str(bare.match.intent).startswith("step:"):
-        print(f"  FAIL authored phrase on the due step needs no agency: {bare.describe()}")
+    if bare.fired:
+        print(f"  FAIL authored phrase still needs the agency: {bare.describe()}")
         bad += 1
 
     wrong_step = run(
@@ -2910,15 +3224,160 @@ def instruction_readback_echo() -> int:
         expected="cleared_approach",
         callsign=CALLSIGN,
         last_tx_text=tower_last,
+        last_tx_channel="approach",
     )
     if tower_echo.fired:
         print(f"  FAIL tower-handoff readback must not fire: {tower_echo.describe()}")
         bad += 1
 
+    delivery_last = (
+        "Fleece one, Nellis Delivery, readback correct, "
+        "contact ground when ready for taxi."
+    )
+    taxi = voice_intent.evaluate(
+        "Nellis Ground, Fleece 1, ready taxi",
+        channel="ground",
+        phase="departure",
+        expected="taxi",
+        callsign=CALLSIGN,
+        last_tx_text=delivery_last,
+        last_tx_channel="delivery",
+    )
+    if not taxi.fired or taxi.match.intent != "ready_taxi":
+        print(
+            f"  FAIL Ground ready-taxi after Delivery must fire, not echo: "
+            f"{taxi.describe()}"
+        )
+        bad += 1
+
+    taxi_no_ch = voice_intent.evaluate(
+        "Nellis Ground, Fleece 1, ready taxi",
+        channel="ground",
+        phase="departure",
+        expected="taxi",
+        callsign=CALLSIGN,
+        last_tx_text=delivery_last,
+    )
+    if not taxi_no_ch.fired or taxi_no_ch.match.intent != "ready_taxi":
+        print(
+            f"  FAIL ready taxi must not look like Delivery readback: "
+            f"{taxi_no_ch.describe()}"
+        )
+        bad += 1
+
+    taxi_last = (
+        "Fleece one, Nellis Ground, runway two one right, "
+        "taxi northwest EOR via Foxtrot Echo, Nellis altimeter two niner niner two."
+    )
+    eor = voice_intent.evaluate(
+        "Nellis Ground, Fleece 1 is at the EOR",
+        channel="ground",
+        phase="departure",
+        expected="monitor_tower",
+        callsign=CALLSIGN,
+        last_tx_text=taxi_last,
+        last_tx_channel="ground",
+        last_tx_template="taxi",
+    )
+    if not eor.fired or eor.match.intent != "at_eor":
+        print(f"  FAIL at EOR after taxi must fire, not echo: {eor.describe()}")
+        bad += 1
+
+    eor_short = voice_intent.evaluate(
+        "Nellis Ground, Fleece 1, at the EOR",
+        channel="ground",
+        phase="departure",
+        expected="monitor_tower",
+        callsign=CALLSIGN,
+        last_tx_text=taxi_last,
+        last_tx_channel="ground",
+        last_tx_template="taxi",
+    )
+    if not eor_short.fired or eor_short.match.intent != "at_eor":
+        print(f"  FAIL at the EOR after taxi must fire: {eor_short.describe()}")
+        bad += 1
+
+    luaw_last = "Fleece one, Nellis Tower, runway two one right, line up-and wait."
+    in_pos = voice_intent.evaluate(
+        "Tower, Fleece 1, in position",
+        channel="tower",
+        phase="departure",
+        expected="clear_takeoff",
+        callsign=CALLSIGN,
+        last_tx_text=luaw_last,
+        last_tx_channel="tower",
+        last_tx_template="lineup",
+    )
+    if not in_pos.fired or in_pos.match.intent != "in_position":
+        print(f"  FAIL in position after LUAW must fire, not echo: {in_pos.describe()}")
+        bad += 1
+
+    takeoff_last = (
+        "Fleece one, Nellis Tower, runway two one right, cleared for takeoff, "
+        "switch to departure."
+    )
+    airborne = voice_intent.evaluate(
+        "Departure, Fleece 1, airborne",
+        channel="departure",
+        phase="departure",
+        expected="radar_contact",
+        callsign=CALLSIGN,
+        last_tx_text=takeoff_last,
+        last_tx_channel="tower",
+        last_tx_template="clear_takeoff",
+    )
+    if not airborne.fired or airborne.match.intent != "departure_check_in":
+        print(
+            f"  FAIL airborne after takeoff must fire, not echo: "
+            f"{airborne.describe()}"
+        )
+        bad += 1
+
+    range_last = (
+        "Fleece one, Blackjack, range exit approved, proceed direct Arcoe, "
+        "contact Approach Local six, good day."
+    )
+    inbound = voice_intent.evaluate(
+        "Approach, Fleece 1, checking in",
+        channel="approach",
+        phase="approach",
+        expected="approach_check_in",
+        callsign=CALLSIGN,
+        last_tx_text=range_last,
+        last_tx_channel="blackjack",
+        last_tx_template="bj_range_exit",
+    )
+    if not inbound.fired or inbound.match.intent != "inbound_recovery":
+        print(
+            f"  FAIL Approach check-in after range exit must fire: "
+            f"{inbound.describe()}"
+        )
+        bad += 1
+
+    land_last = (
+        "Fleece one, Nellis Tower, wind two one zero at fife, "
+        "runway two one right, cleared to land, check gear down."
+    )
+    clear = voice_intent.evaluate(
+        "Ground, Fleece 1, clear of the runway",
+        channel="ground",
+        phase="approach",
+        expected="taxi_in",
+        callsign=CALLSIGN,
+        last_tx_text=land_last,
+        last_tx_channel="tower",
+        last_tx_template="clear_land",
+    )
+    if not clear.fired or clear.match.intent != "clear_of_runway":
+        print(
+            f"  FAIL clear of runway after land must fire: {clear.describe()}"
+        )
+        bad += 1
+
     if bad:
         print(f"instruction readback echo — {bad} problem(s)")
     else:
-        print("instruction readback echo — handoff readback silent; with you still fires")
+        print("instruction readback echo — next-step calls fire; handoff echoes stay silent")
     return bad
 
 
