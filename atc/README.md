@@ -25,7 +25,8 @@ Default role is still **Solo** — one PC, same as today. To run ATC for several
 
 1. Pick **one** machine as Host (the Windows DCS dedicated server is fine). It needs **Python 3.10+ with tcl/tk** — the `.cmd` files find `python.exe` without the `py` launcher. Setup → **Squadron** → Host. Save. Allow Windows inbound on the ATC port (default `8766`). That box needs ExternalAudio + TTS and network to the squadron SRS server.
 2. Put the same **shared token** on every PC.
-3. Each pilot: Setup → Squadron → Client, host LAN IP, same token, their Opus identity. Save. Voice/PTT stay on their PC; the host speaks on SRS.
+3. Each pilot: Setup → Squadron → **Client**, **Host address = the server LAN IP** shown in green on the Host after Save (not `127.0.0.1`), ATC port **8766** (not SRS 5002), same token. Click **Test connection**, then Save. Voice/PTT stay on their PC; the host speaks on SRS.
+4. Timed out = Windows Firewall on the Host dropped the packets. Allow inbound TCP 8766, or allow python.exe when Windows asks. Connection refused = Host is not listening on that port.
 4. Host **Traffic** tab shows who is connected, which frequency is talking, and the per-channel queue.
 
 Ground talks to one jet at a time. Tower / Blackjack can talk at the same time as Ground. Pilots never transmit ATC from their own ExternalAudio.

@@ -125,6 +125,7 @@ class AtcServer:
         self._thread: threading.Thread | None = None
         self.bind_host = "0.0.0.0"
         self.port = int(config.get("atc_port") or atc_net.DEFAULT_ATC_PORT)
+        self.firewall_status = ""
 
     def start(self, host: str | None = None, port: int | None = None) -> None:
         self.bind_host = host or "0.0.0.0"
@@ -135,7 +136,13 @@ class AtcServer:
             target=self._httpd.serve_forever, name="atc-host", daemon=True
         )
         self._thread.start()
+        urls = "  ".join(atc_net.listen_urls(self.port))
         print(f"ATC host listening on http://{self.bind_host}:{self.port}")
+        print(f"Clients use a LAN URL, not 127.0.0.1: {urls}")
+        fw = atc_net.ensure_inbound_tcp_firewall(self.port)
+        if fw:
+            print(f"ATC host {fw}")
+        self.firewall_status = fw
 
     def stop(self) -> None:
         self.hub.stop()

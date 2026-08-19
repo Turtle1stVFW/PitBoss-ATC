@@ -1109,9 +1109,16 @@ class MissionPlanner(tk.Tk):
                 self._atc_server.start(
                     port=int(self.config_data.get("atc_port") or atc_net.DEFAULT_ATC_PORT)
                 )
-                self._set_net_status(
-                    f"HOST  :{self._atc_server.port}  ·  token set  ·  waiting for pilots"
-                )
+                lan = atc_net.lan_ipv4_addresses()
+                lan_txt = ", ".join(lan) if lan else "(no LAN IP found)"
+                fw = getattr(self._atc_server, "firewall_status", "") or ""
+                bits = [
+                    f"HOST  listen {lan_txt}:{self._atc_server.port}",
+                    "clients use that LAN IP — not 127.0.0.1",
+                ]
+                if fw:
+                    bits.append(fw)
+                self._set_net_status("  ·  ".join(bits))
             except OSError as exc:
                 self._atc_server = None
                 self._set_net_status(f"HOST failed: {exc}")
@@ -8314,7 +8321,9 @@ class MissionPlanner(tk.Tk):
             return
         data = self._atc_server.traffic()
         lines = [
-            f"Host :{data.get('port')}  ·  {len(data.get('sessions') or [])} pilots",
+            f"Host listen {', '.join(atc_net.lan_ipv4_addresses()) or '?'}:{data.get('port')}",
+            "Clients use that LAN IP + this port (not 127.0.0.1, not SRS).",
+            f"{len(data.get('sessions') or [])} pilots",
             "",
         ]
         queues = data.get("queues") or {}
@@ -8731,9 +8740,17 @@ class MissionPlanner(tk.Tk):
         ttk.Button(token_row, text="Generate", command=self._fill_atc_token).pack(
             side=tk.LEFT, padx=(8, 0)
         )
+        ttk.Button(
+            token_row, text="Test connection", command=self._test_atc_host_connection
+        ).pack(side=tk.LEFT, padx=(8, 0))
         tk.Label(
             lf,
-            text="Host creates this on Save if blank. Clients paste the same string. Leave 127.0.0.1 for one-PC tests. Do not send the Google JSON — only this token.",
+            text=(
+                "Clients: Host address = the server's LAN IP from the green line after Host Save "
+                f"(ATC port {atc_net.DEFAULT_ATC_PORT}, not SRS 5002). "
+                "127.0.0.1 is only for fake-pilot tests on the Host PC itself. "
+                "Same token on every machine. Never share the Google JSON."
+            ),
             bg=C_PANEL,
             fg=C_MUTED,
             font=("Segoe UI", 8),
@@ -8756,6 +8773,65 @@ class MissionPlanner(tk.Tk):
 
     def _fill_atc_token(self) -> None:
         self.var_atc_token.set(self._new_atc_token())
+
+    def _test_atc_host_connection(self) -> None:
+        """Ping the configured Host URL. Use this on the client PC."""
+        host = (
+            self.var_atc_host.get().strip()
+            if hasattr(self, "var_atc_host")
+            else str(self.config_data.get("atc_host") or "")
+        )
+        try:
+            port = int(
+                self.var_atc_port.get()
+                if hasattr(self, "var_atc_port")
+                else self.config_data.get("atc_port")
+                or atc_net.DEFAULT_ATC_PORT
+            )
+        except (TypeError, ValueError):
+            port = atc_net.DEFAULT_ATC_PORT
+        token = (
+            self.var_atc_token.get().strip()
+            if hasattr(self, "var_atc_token")
+            else atc_net.token_of(self.config_data)
+        )
+        cfg = {
+            "atc_host": host or "127.0.0.1",
+            "atc_port": port,
+            "atc_token": token,
+        }
+        client = atc_client.AtcClient(cfg)
+        try:
+            health_url = client.probe_health()
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror(
+                "ATC Host",
+                f"Cannot reach the Host.\n\n{exc}\n\n"
+                "Check:\n"
+                "• Host PC: Setup → Squadron → Host → Save, green line shows a LAN IP\n"
+                f"• This PC: that LAN IP in Host address, port {atc_net.DEFAULT_ATC_PORT} "
+                "(not SRS 5002, not 127.0.0.1)\n"
+                "• Host Windows Firewall: allow inbound TCP on that port / python.exe",
+            )
+            self._set_net_status(str(exc))
+            return
+        try:
+            hello = client.hello()
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showwarning(
+                "ATC Host",
+                f"Reached {health_url} but login failed.\n\n{exc}\n\n"
+                "The port is open. Copy the Host's shared token exactly.",
+            )
+            self._set_net_status(str(exc))
+            return
+        cs = hello.get("callsign") or "connected"
+        messagebox.showinfo(
+            "ATC Host",
+            f"Connected.\n\n{health_url}\n{cs}\n\n"
+            "Save setup on this PC so voice/hotkeys keep using this Host.",
+        )
+        self._set_net_status(f"CLIENT  {health_url}  ·  {cs}")
 
     def _on_atc_role_change(self) -> None:
         if hasattr(self, "var_tts_provider"):

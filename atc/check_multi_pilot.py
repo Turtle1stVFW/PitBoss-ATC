@@ -191,6 +191,27 @@ def test_session_key() -> list[str]:
     return fails
 
 
+def test_connect_error_hints() -> list[str]:
+    fails: list[str] = []
+    timed = atc_net.describe_connect_failure(
+        TimeoutError("timed out"), "http://192.168.1.9:8766/v1/intent"
+    )
+    if "timed out" not in timed or "Firewall" not in timed:
+        fails.append(f"timeout hint: {timed}")
+    loop = atc_net.describe_connect_failure(
+        TimeoutError("timed out"), "http://127.0.0.1:8766/v1/health"
+    )
+    if "this pc" not in loop.casefold():
+        fails.append(f"loopback hint: {loop}")
+    refused = atc_net.describe_connect_failure(
+        OSError("[WinError 10061] connection refused"),
+        "http://10.0.0.5:8766/v1/hello",
+    )
+    if "refused" not in refused.casefold():
+        fails.append(f"refused hint: {refused}")
+    return fails
+
+
 def test_persist_state_off() -> list[str]:
     fails: list[str] = []
     cfg = _host_config()
@@ -278,6 +299,7 @@ def test_secret_redaction_and_session_tts_cap() -> list[str]:
 def main() -> int:
     tests = (
         test_session_key,
+        test_connect_error_hints,
         test_persist_state_off,
         test_injected_radio_gate,
         test_channel_parallel_and_fifo,

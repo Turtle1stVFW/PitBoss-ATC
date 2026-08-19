@@ -66,6 +66,8 @@ class AtcClient:
         return data
 
     def post_intent(self, match: voice_intent.Match) -> dict[str, Any]:
+        if not self.session_id:
+            self.hello()
         body = {
             "session_id": self.session_id,
             "intent": match.intent,
@@ -125,9 +127,8 @@ class AtcClient:
         if headers:
             hdrs.update(headers)
         data = None if body is None or method == "GET" else json.dumps(body).encode("utf-8")
-        req = urllib.request.Request(
-            self.base_url + path, data=data, method=method, headers=hdrs
-        )
+        url = self.base_url + path
+        req = urllib.request.Request(url, data=data, method=method, headers=hdrs)
         try:
             with urllib.request.urlopen(req, timeout=8) as resp:
                 raw = resp.read().decode("utf-8")
@@ -138,13 +139,41 @@ class AtcClient:
                 msg = str(parsed.get("error") or detail)
             except Exception:
                 msg = detail or str(exc)
-            raise AtcClientError(f"{exc.code} {msg}") from exc
+            raise AtcClientError(f"{exc.code} {msg} [{url}]") from exc
         except urllib.error.URLError as exc:
-            raise AtcClientError(f"host unreachable ({exc.reason})") from exc
+            raise AtcClientError(
+                atc_net.describe_connect_failure(exc.reason, url)
+            ) from exc
+        except TimeoutError as exc:
+            raise AtcClientError(
+                atc_net.describe_connect_failure(exc, url)
+            ) from exc
         payload = json.loads(raw or "{}")
         if not isinstance(payload, dict):
             raise AtcClientError("host returned non-object JSON")
         return payload
+
+    def probe_health(self) -> str:
+        """GET /v1/health (no token). Raises AtcClientError if the Host is unreachable."""
+        url = self.base_url + "/v1/health"
+        req = urllib.request.Request(url, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=4) as resp:
+                raw = resp.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            raise AtcClientError(f"{exc.code} from {url}") from exc
+        except urllib.error.URLError as exc:
+            raise AtcClientError(
+                atc_net.describe_connect_failure(exc.reason, url)
+            ) from exc
+        except TimeoutError as exc:
+            raise AtcClientError(
+                atc_net.describe_connect_failure(exc, url)
+            ) from exc
+        payload = json.loads(raw or "{}")
+        if not isinstance(payload, dict) or not payload.get("ok"):
+            raise AtcClientError(f"unexpected health from {url}")
+        return url
 
 
 class ClientEngineProxy:
