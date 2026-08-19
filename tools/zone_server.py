@@ -98,7 +98,7 @@ def _config() -> dict[str, Any]:
         return {}
 
 
-def _airport_keys(data: dict[str, Any]) -> list[dict[str, str]]:
+def _airport_keys(data: dict[str, Any]) -> list[dict[str, str | bool]]:
     return [
         {
             "key": key,
@@ -119,7 +119,8 @@ def _state(airport_key: str) -> dict[str, Any]:
     data = zone_geo.load_airports()
     cfg = _config()
     key = airport_key or str(cfg.get("default_airport") or "") or next(iter(data), "")
-    airport = data.get(key) if isinstance(data.get(key), dict) else {}
+    raw = data.get(key)
+    airport: dict[str, Any] = raw if isinstance(raw, dict) else {}
     lat, lon = zone_geo.airport_centre_ll(airport)
     return {
         "airports": _airport_keys(data),
@@ -304,10 +305,10 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "ZoneEditor/1.0"
     protocol_version = "HTTP/1.1"
 
-    def log_message(self, fmt: str, *args: Any) -> None:
+    def log_message(self, format: str, *args: Any) -> None:
         if "/api/tracks" in str(args[0] if args else ""):
             return  # polls every second; would bury anything worth reading
-        super().log_message(fmt, *args)
+        super().log_message(format, *args)
 
     def do_GET(self) -> None:  # noqa: N802
         url = urlparse(self.path)

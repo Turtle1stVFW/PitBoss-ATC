@@ -11,8 +11,41 @@ drawing the areas that fire steps automatically — the app has a button for it 
 ## Tabs
 1. **Plan Flight** — build the full sortie timeline (TTS template, custom text, or MP3/OGG). No JSON editing.
 2. **Fly** — big Next / Back / Reset / Flip for mid-flight.
-3. **Setup** — Opus username, voice, airport freqs, SRS host, TTS provider, optional runway override, and **Controls** (HOTAS / hotkeys / voice).
-4. **Help** — in-app how-tos (Getting started, Google JSON setup, Plan Flight tips, troubleshooting). Also the top-right **Help** button.
+3. **Traffic** — connected pilots and per-frequency TX queues (Host role).
+4. **Setup** — Opus username, voice, airport freqs, SRS host, TTS provider, optional runway override, **Squadron** (solo/host/client), and **Controls** (HOTAS / hotkeys / voice).
+5. **Help** — in-app how-tos (Getting started, Google JSON setup, Plan Flight tips, troubleshooting). Also the top-right **Help** button.
+
+## Multi-pilot (optional, this branch)
+
+Default role is still **Solo** — one PC, same as today. To run ATC for several pilots:
+
+1. Pick **one** machine as Host (a spare PC is ideal). Setup → **Squadron** → Host. Save. Allow Windows inbound on the ATC port (default `8766`). That box needs ExternalAudio + TTS and network to the squadron SRS server.
+2. Put the same **shared token** on every PC.
+3. Each pilot: Setup → Squadron → Client, host LAN IP, same token, their Opus identity. Save. Voice/PTT stay on their PC; the host speaks on SRS.
+4. Host **Traffic** tab shows who is connected, which frequency is talking, and the per-channel queue.
+
+Ground talks to one jet at a time. Tower / Blackjack can talk at the same time as Ground. Pilots never transmit ATC from their own ExternalAudio.
+
+### Google TTS key (Host only)
+
+The Host is the only PC that should hold `atc/secrets/google-tts.json`. Clients never receive it over the LAN API. Setup copies a browsed/pasted JSON into that gitignored folder (so it is not left in Downloads or iCloud).
+
+Share the **squadron token**, not the Google file. Usage is counted on the Host: free-tier fallback at 90%, plus a per-pilot cap (default 80,000 characters/month, then that jet uses Windows voices).
+
+Do not copy `atc/secrets/` onto pilot PCs.
+
+### Test on one PC
+
+You do not need a second computer.
+
+1. Double-click `Open-ATC-Setup.cmd`
+2. Setup → **Squadron** → **Host** → Save
+3. Open the **Traffic** tab
+4. Double-click `Test-Fake-Pilots.cmd` (or `py -3 fake_pilots.py`)
+
+That registers **Fleece 1** and **Viper 3** and has both Advance. Traffic should list both; Delivery should queue them one after the other. If SRS is running on this PC you will hear two Delivery calls in order. The script keeps them connected for 20 seconds so you can watch the tab.
+
+`check_multi_pilot.py` is the offline unit test (no UI, no SRS).
 
 ## Typical workflow
 1. Title bar — type your CAOC name and click the green flight chip to pick the
@@ -462,13 +495,15 @@ Server ATIS is unchanged (still server-side).
 ### Free tier notes
 - Google gives a monthly free character allowance for WaveNet / Neural2 (see current Google TTS pricing).
 - Phrase-board usage is tiny; you will rarely leave the free tier.
+- Host: JSON stays in `atc/secrets/` (gitignored). Clients never receive it. Per-pilot cap defaults to 80,000 chars/month (`tts_session_char_cap`; `0` disables).
 - If credentials are missing/invalid, transmits fail with a clear error instead of falling back silently.
 
 ### Config keys (`config.json`)
 | Key | Example | Meaning |
 |-----|---------|---------|
 | `tts_provider` | `"google"` or `"windows"` | Which engine ExternalAudio uses |
-| `google_credentials` | `C:\\Users\\you\\...\\google-tts.json` | Path to service-account JSON |
+| `google_credentials` | `atc/secrets/google-tts.json` | Path to service-account JSON (Host/Solo only) |
+| `tts_session_char_cap` | `80000` | Per-pilot Google chars/month on the Host (`0` = no per-pilot cap) |
 | `tts_voices` | `"en-US-Neural2-D"` etc. | Per-agency Google voice ids |
 
 Voice catalog: https://cloud.google.com/text-to-speech/docs/voices

@@ -283,7 +283,7 @@ def fly_request_rows(state: dict[str, Any] | None) -> list[tuple[str, str]]:
 
 
 def fly_controls_visible(state: dict[str, Any] | None) -> bool:
-    """Show boom-chat buttons after rejoin, even if the cursor is not on tanker."""
+    """Stop/answer boom-chat buttons after rejoin; start-chat stays tanker-freq only."""
     if is_session_active(state):
         return True
     try:

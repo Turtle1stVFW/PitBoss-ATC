@@ -616,7 +616,7 @@ def on_frequency(
         # In a unit but no readable radios — treat as unknown (allow)
         if st.source == "dcs":
             return "unknown"
-        return "mismatch" if st.source in ("eam", "srs") else "unknown"
+        return "mismatch" if st.source in ("eam", "srs", "client") else "unknown"
     tol = max(0.001, float(tol_mhz))
     try:
         target = float(target_mhz)
@@ -650,12 +650,14 @@ def check_freq_gate(
     target_mhz: float | None = None,
     channel: str | None = None,
     state: dict[str, Any] | None = None,
+    radio: RadioState | None = None,
 ) -> tuple[bool, str, MatchResult]:
     """
     Returns (allowed, status_message, match_result).
 
     Unknown / gate disabled → allowed.
     Mismatch → not allowed.
+    Pass `radio` to use a client's snapshot instead of the local DCS/SRS bank.
     """
     if not bool(config.get("freq_gate_enabled", True)):
         return True, "Freq gate off", "unknown"
@@ -664,7 +666,8 @@ def check_freq_gate(
 
     tol = float(config.get("freq_gate_tolerance_mhz") or DEFAULT_TOL_MHZ)
     stale = float(config.get("freq_gate_stale_s") or DEFAULT_STALE_S)
-    radio = current_radio_state(config, stale_s=stale)
+    if radio is None:
+        radio = current_radio_state(config, stale_s=stale)
 
     ch = channel or ""
     freq = target_mhz

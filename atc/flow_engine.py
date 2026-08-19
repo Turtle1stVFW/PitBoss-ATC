@@ -6,6 +6,7 @@ Mission flight flow engine: next/back/reset/flip/play + localhost HTTP control.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import random
 import sys
@@ -106,17 +107,40 @@ def normalize_mission_to_steps(mission: dict[str, Any]) -> dict[str, Any]:
 
 
 class FlowEngine:
-    def __init__(self, config: dict[str, Any] | None = None, dry_run: bool = False) -> None:
+    def __init__(
+        self,
+        config: dict[str, Any] | None = None,
+        dry_run: bool = False,
+        *,
+        persist_state: bool = True,
+        initial_state: dict[str, Any] | None = None,
+        mission: dict[str, Any] | None = None,
+        airports: dict[str, Any] | None = None,
+    ) -> None:
         self.config = dict(config or load_json(CONFIG_PATH))
         if dry_run:
             self.config["dry_run"] = True
         srs_radio.apply_config(self.config)
-        self.airports = load_json(AIRPORTS_PATH)
-        self.mission = load_json(resolve_flow_path(self.config))
+        self.persist_state = bool(persist_state)
+        self.airports = dict(airports) if airports is not None else load_json(AIRPORTS_PATH)
+        if mission is not None:
+            self.mission = copy.deepcopy(mission)
+        else:
+            self.mission = load_json(resolve_flow_path(self.config))
         # In-memory unify; disk migrates on next UI save
         if "steps" not in self.mission and ("outbound" in self.mission or "inbound" in self.mission):
             self.mission["steps"] = mission_steps(self.mission)
-        self.state = self._load_state()
+        if initial_state is not None:
+            self.state = dict(initial_state)
+        elif self.persist_state:
+            self.state = self._load_state()
+        else:
+            self.state = self._blank_state()
+        # Client-injected radios for a host with no local DCS/SRS.
+        self.remote_radios: srs_radio.RadioState | None = None
+        # Host queues TX per channel; mutation still runs immediately.
+        self.defer_tx = False
+        self.pending_tx: dict[str, Any] | None = None
         self.sync_requested_runway_from_mission()
         # Persist cleared/restored runway so a stale flow_state.json does not linger.
         try:
@@ -124,12 +148,8 @@ class FlowEngine:
         except Exception:
             pass
 
-    def _load_state(self) -> dict[str, Any]:
-        if STATE_PATH.is_file():
-            try:
-                return load_json(STATE_PATH)
-            except json.JSONDecodeError:
-                pass
+    @staticmethod
+    def _blank_state() -> dict[str, Any]:
         return {
             "index": 0,
             "last_step_id": None,
@@ -137,6 +157,83 @@ class FlowEngine:
             "pending_takeoff_offer": None,
             "takeoff_offer_rolled": False,
         }
+
+    def _load_state(self) -> dict[str, Any]:
+        if STATE_PATH.is_file():
+            try:
+                return load_json(STATE_PATH)
+            except json.JSONDecodeError:
+                pass
+        return self._blank_state()
+
+    def set_remote_radios(
+        self,
+        freqs_mhz: list[float] | None,
+        *,
+        fresh: bool = True,
+        selected_mhz: float | None = None,
+    ) -> None:
+        """Use a client's tuned radios instead of the host's local SRS/DCS."""
+        if freqs_mhz is None:
+            self.remote_radios = None
+            return
+        self.remote_radios = srs_radio.RadioState(
+            source="client",
+            freqs_mhz=[float(f) for f in freqs_mhz],
+            selected_mhz=selected_mhz,
+            unit="client",
+            age_s=0.0,
+            fresh=bool(fresh),
+        )
+
+    def emit_radio(
+        self,
+        *,
+        text: str = "",
+        file_path: str = "",
+        tx_name: str,
+        freq: float,
+        mod: str,
+        channel: str | None = None,
+        voice_override: str | None = None,
+        step: dict[str, Any] | None = None,
+    ) -> int:
+        """TX on SRS, or stash the payload when the host is queueing the channel."""
+        payload: dict[str, Any] = {
+            "text": text,
+            "file_path": file_path,
+            "tx_name": tx_name,
+            "freq": freq,
+            "mod": mod,
+            "channel": str(channel or "other"),
+            "voice": voice_override,
+            "step": step,
+            "config": self.config,
+            "airport": self.airport(),
+        }
+        if self.defer_tx:
+            self.pending_tx = payload
+            return 0
+        if file_path:
+            return atc_phrase.transmit_file(
+                self.config, self.airport(), file_path, tx_name, freq, mod
+            )
+        return atc_phrase.transmit(
+            self.config,
+            self.airport(),
+            text,
+            tx_name,
+            freq,
+            mod,
+            channel=channel,
+            voice_override=voice_override,
+            step=step,
+        )
+
+    def take_pending_tx(self) -> dict[str, Any] | None:
+        job = self.pending_tx
+        self.pending_tx = None
+        return job
 
     def sync_requested_runway_from_mission(self) -> None:
         """
@@ -157,6 +254,8 @@ class FlowEngine:
     def save_state(self) -> None:
         # Drop legacy direction from state if present
         self.state.pop("direction", None)
+        if not self.persist_state:
+            return
         save_json(STATE_PATH, self.state)
 
     def _advance_past_skippable(self) -> None:
@@ -258,6 +357,9 @@ class FlowEngine:
         self._maybe_roll_takeoff_offer(step)
 
     def reload(self) -> None:
+        if not self.persist_state:
+            # Multi-pilot sessions own their config/mission; do not clobber from disk.
+            return
         self.config = load_json(CONFIG_PATH)
         if self.config.get("dry_run"):
             pass
@@ -415,7 +517,13 @@ class FlowEngine:
             file_path = step.get("file")
             if not file_path:
                 raise RuntimeError(f"Step {step.get('id')} is mode=file but no file set")
-            code = atc_phrase.transmit_file(self.config, airport, file_path, tx_name, freq, mod)
+            code = self.emit_radio(
+                file_path=str(file_path),
+                tx_name=tx_name,
+                freq=freq,
+                mod=mod,
+                channel=channel,
+            )
             detail["file"] = file_path
             # File audio has no TTS string — keep the label so a spoken
             # readback of the instruction can be recognized as an echo.
@@ -438,13 +546,11 @@ class FlowEngine:
                 config=self.config,
             )
             # Prefer per-step freq/mod (e.g. unique "other" freqs) over airport defaults
-            code = atc_phrase.transmit(
-                self.config,
-                airport,
-                text,
-                tx_name,
-                freq,
-                mod,
+            code = self.emit_radio(
+                text=text,
+                tx_name=tx_name,
+                freq=freq,
+                mod=mod,
                 channel=channel,
                 voice_override=voice_name,
                 step=step,
@@ -615,7 +721,11 @@ class FlowEngine:
             return
         srs_radio.apply_config(self.config)
         allowed, msg, _result = srs_radio.check_freq_gate(
-            self.config, self.airport(), step, state=self.state
+            self.config,
+            self.airport(),
+            step,
+            state=self.state,
+            radio=self.remote_radios,
         )
         if not allowed:
             raise RuntimeError(msg)
@@ -766,13 +876,11 @@ class FlowEngine:
         }
         self._freq_gate_or_raise(step, bypass=bypass_freq_gate)
         voice_name, _ = atc_phrase.voice_for_step(self.config, channel, step)
-        code = atc_phrase.transmit(
-            self.config,
-            airport,
-            text,
-            tx_name,
-            freq,
-            mod,
+        code = self.emit_radio(
+            text=text,
+            tx_name=tx_name,
+            freq=freq,
+            mod=mod,
             channel=channel,
             voice_override=voice_name,
             step=step,
@@ -925,13 +1033,11 @@ class FlowEngine:
         self._freq_gate_or_raise(step, bypass=bypass_freq_gate)
         freq, mod, tx_name = atc_phrase.step_radio(airport, channel, None)
         voice_name, _ = atc_phrase.voice_for_step(self.config, channel, step)
-        code = atc_phrase.transmit(
-            self.config,
-            airport,
-            text,
-            tx_name,
-            freq,
-            mod,
+        code = self.emit_radio(
+            text=text,
+            tx_name=tx_name,
+            freq=freq,
+            mod=mod,
             channel=channel,
             voice_override=voice_name,
             step=step,
@@ -989,13 +1095,11 @@ class FlowEngine:
         self._freq_gate_or_raise(step, bypass=bypass_freq_gate)
         freq, mod, tx_name = atc_phrase.step_radio(airport, channel, None)
         voice_name, _ = atc_phrase.voice_for_step(self.config, channel, step)
-        code = atc_phrase.transmit(
-            self.config,
-            airport,
-            text,
-            tx_name,
-            freq,
-            mod,
+        code = self.emit_radio(
+            text=text,
+            tx_name=tx_name,
+            freq=freq,
+            mod=mod,
             channel=channel,
             voice_override=voice_name,
             step=step,
@@ -1070,13 +1174,11 @@ class FlowEngine:
         self._freq_gate_or_raise(step, bypass=bypass_freq_gate)
         freq, mod, tx_name = atc_phrase.step_radio(airport, channel, None)
         voice_name, _ = atc_phrase.voice_for_step(self.config, channel, step)
-        code = atc_phrase.transmit(
-            self.config,
-            airport,
-            text,
-            tx_name,
-            freq,
-            mod,
+        code = self.emit_radio(
+            text=text,
+            tx_name=tx_name,
+            freq=freq,
+            mod=mod,
             channel=channel,
             voice_override=voice_name,
             step=step,

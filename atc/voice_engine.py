@@ -1312,12 +1312,14 @@ def _transmit(
     freq_mhz: float | None = None,
 ) -> dict[str, Any]:
     srs_radio.apply_config(engine.config)
+    remote = getattr(engine, "remote_radios", None)
     allowed, msg, _result = srs_radio.check_freq_gate(
         engine.config,
         airport,
         None,
         channel=channel,
         target_mhz=freq_mhz,
+        radio=remote if isinstance(remote, srs_radio.RadioState) else None,
     )
     if not allowed:
         return {"action": "blocked", "detail": msg, "channel": channel}
@@ -1339,16 +1341,26 @@ def _transmit(
         except Exception:
             pass
     voice_name, _ = atc_phrase.voice_for_step(engine.config, channel, None)
-    code = atc_phrase.transmit(
-        engine.config,
-        airport,
-        text,
-        tx_name,
-        freq,
-        mod,
-        channel=channel,
-        voice_override=voice_name,
-    )
+    if hasattr(engine, "emit_radio"):
+        code = engine.emit_radio(
+            text=text,
+            tx_name=tx_name,
+            freq=freq,
+            mod=mod,
+            channel=channel,
+            voice_override=voice_name,
+        )
+    else:
+        code = atc_phrase.transmit(
+            engine.config,
+            airport,
+            text,
+            tx_name,
+            freq,
+            mod,
+            channel=channel,
+            voice_override=voice_name,
+        )
     st = getattr(engine, "state", None)
     if isinstance(st, dict) and str(text or "").strip():
         st["last_tx_text"] = text

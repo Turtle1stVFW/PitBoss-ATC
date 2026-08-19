@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -37,6 +38,24 @@ AIRPORTS_PATH = HERE / "airports.json"
 STATE_PATH = HERE / "state.json"
 CONFIG_PATH = HERE / "config.json"
 TTS_USAGE_PATH = HERE / "tts_usage.json"
+SECRETS_DIR = HERE / "secrets"
+DEFAULT_GOOGLE_CREDS_FILE = SECRETS_DIR / "google-tts.json"
+# Tests may point the monthly counter at a temp file.
+_tts_usage_path_override: Path | None = None
+_TTS_USAGE_LOCK = threading.Lock()
+
+# Never put these on the wire (LAN /v1 responses, logs, copied client configs).
+SECRET_CONFIG_KEYS = frozenset(
+    {
+        "google_credentials",
+        "tanker_chat_llm_key",
+        "atc_token",
+        "private_key",
+        "private_key_id",
+        "client_email",
+        "client_id",
+    }
+)
 
 # Google Cloud TTS free monthly characters + overage USD per 1M (see cloud pricing)
 TTS_FREE_CHARS_PER_MONTH: dict[str, int] = {
@@ -57,9 +76,13 @@ TTS_USD_PER_MILLION: dict[str, float] = {
 }
 # Rough chars for one full Nellis default sortie (for estimator copy)
 TTS_CHARS_PER_SORTIE_EST = 1400
+# Per-pilot Google cap on the Host so one client cannot drain the shared key.
+# ~80k ≈ 57 full sorties. 0 in config disables the per-pilot cap.
+TTS_CHARS_PER_SESSION_MONTH = 80_000
 # Auto-fallback when a family's free tier is nearly exhausted (avoid paid overage)
 TTS_FREE_TIER_WARN_PCT = 0.90
 TTS_FAMILY_FALLBACK_ORDER = ("chirp", "neural2", "wavenet")
+WINDOWS_FALLBACK_VOICE = "Microsoft Zira Desktop"
 
 DIGIT_WORDS = {
     "0": "zero",
@@ -3413,6 +3436,8 @@ def pilot_requests_for_channel(
         if show_boom:
             seen = {k for k, _ in out}
             for k, lab in tanker_chat_mod.fly_request_rows(state):
+                if k == "tanker_chat_start" and ch != "tanker":
+                    continue
                 if k not in seen:
                     out.append((k, lab))
                     seen.add(k)
@@ -6830,7 +6855,10 @@ def build_readback_checklist(
         )
 
     if tmpl == "clearance":
-        if opus and opus.has_filed_plan and opus.arr_icao:
+        if not opus or not opus.has_filed_plan:
+            # Nothing to copy — Delivery did not issue an IFR clearance.
+            return items
+        if opus.arr_icao:
             dest = speak_icao_or_name(opus.arr_icao, airport)
             add("destination", "Cleared to", str(opus.arr_icao).upper(), dest)
         dep_via = speak_departure_clearance(airport, opus.fp_route_string if opus else None)
@@ -7311,21 +7339,15 @@ def build_clearance_delivery(
       With SID/Flex: Cleared to DEST via the [procedure], then as filed, …
       No procedure:  Cleared to DEST as filed, …
       Then climb / expect / departure channel / squawk.
+      No flight plan: advise nothing is on file — do not invent a climb or IFR.
 
-    Returns (phrase, climb_feet_used).
+    Returns (phrase, climb_feet_used). Climb is 0 when no plan is on file.
     """
     del weather  # clearance does not include altimeter
     del runway
     name = airport["name"]
     agency = clearance_spoken_agency(airport, channel=channel or "delivery")
     cs = speak_callsign(callsign)
-    filed_alt = speak_filed_altitude(opus.fp_altitude if opus else None)
-    squawk = squawk_clearance_phrase(opus)
-    dep_clause = speak_departure_freq_or_local(airport)
-    climb_ft = random_initial_climb_feet(initial_climb_ft)
-    climb = speak_altitude_value(str(climb_ft), prefer_fl_below=1000)
-    minutes = expect_minutes_value(airport)
-    natural = speak_minutes_natural(minutes)
 
     if not opus or not opus.has_filed_plan:
         no_fp = _pick(
@@ -7333,13 +7355,16 @@ def build_clearance_delivery(
             "negative flight plan on file",
             "I have no flight plan on file",
         )
-        parts = [f"{cs}, {name} {agency}, {no_fp}"]
-        if climb:
-            parts.append(f"climb and maintain {climb}")
-        parts.append(dep_clause)
-        if squawk:
-            parts.append(squawk)
-        return f"{', '.join(parts)}.", climb_ft
+        remain = _pick("remain this frequency", "say intentions")
+        return f"{cs}, {name} {agency}, {no_fp}, {remain}.", 0
+
+    filed_alt = speak_filed_altitude(opus.fp_altitude if opus else None)
+    squawk = squawk_clearance_phrase(opus)
+    dep_clause = speak_departure_freq_or_local(airport)
+    climb_ft = random_initial_climb_feet(initial_climb_ft)
+    climb = speak_altitude_value(str(climb_ft), prefer_fl_below=1000)
+    minutes = expect_minutes_value(airport)
+    natural = speak_minutes_natural(minutes)
 
     dest = speak_icao_or_name(opus.arr_icao, airport)
     dep_match = match_departure(airport, opus.fp_route_string)
@@ -7405,6 +7430,7 @@ def build_clearance_readback(
     weather: Weather,
     runway: str,
     channel: str | None = None,
+    opus: OpusFlightContext | None = None,
 ) -> str:
     """
     After pilot readback — Delivery hands off to Ground:
@@ -7414,6 +7440,13 @@ def build_clearance_readback(
     name = airport["name"]
     agency = clearance_spoken_agency(airport, channel=channel or "delivery")
     cs = speak_callsign(callsign)
+    if not opus or not opus.has_filed_plan:
+        no_fp = _pick(
+            "I show no flight plan on file",
+            "negative flight plan on file",
+            "unable, no flight plan on file",
+        )
+        return f"{cs}, {name} {agency}, {no_fp}, remain this frequency."
     ground = speak_ground_contact_target(airport)
     return (
         f"{cs}, {name} {agency}, readback correct, "
@@ -8474,6 +8507,49 @@ def google_credentials_path(config: dict[str, Any]) -> Path | None:
     return resolve_repo_path(raw)
 
 
+def tts_session_id(config: dict[str, Any] | None) -> str:
+    """Host stamps this on each pilot session so Google usage is attributed."""
+    return str((config or {}).get("_tts_session_id") or "").strip()
+
+
+def redact_secrets(value: Any) -> Any:
+    """Copy of a JSON-ish object with credential fields removed."""
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for key, item in value.items():
+            if str(key) in SECRET_CONFIG_KEYS:
+                continue
+            out[str(key)] = redact_secrets(item)
+        return out
+    if isinstance(value, list):
+        return [redact_secrets(item) for item in value]
+    return value
+
+
+def pin_google_credentials_to_secrets(src: Path | str) -> Path:
+    """
+    Copy a service-account JSON into atc/secrets/google-tts.json when it lives
+    elsewhere (Downloads, iCloud, Desktop). Already-under-secrets paths stay.
+    """
+    path = Path(src).expanduser()
+    if not path.is_file():
+        raise FileNotFoundError(f"Google credentials file not found: {path}")
+    resolved = path.resolve()
+    secrets = SECRETS_DIR.resolve()
+    try:
+        resolved.relative_to(secrets)
+        return resolved
+    except ValueError:
+        pass
+    secrets.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(resolved, DEFAULT_GOOGLE_CREDS_FILE)
+    return DEFAULT_GOOGLE_CREDS_FILE.resolve()
+
+
+def windows_fallback_voice() -> str:
+    return WINDOWS_FALLBACK_VOICE
+
+
 def is_google_voice_name(voice_name: str) -> bool:
     low = voice_name.casefold()
     return any(x in low for x in ("neural2", "wavenet", "chirp", "studio", "standard"))
@@ -8637,12 +8713,17 @@ def build_template_text(
             initial_climb_ft=initial_climb_ft,
             channel=channel or "delivery",
         )
-        if climb_ft_out is not None:
+        if climb_ft_out is not None and used_climb:
             climb_ft_out.append(used_climb)
         return text
     if template == "clearance_readback":
         return build_clearance_readback(
-            airport, callsign, weather, runway, channel=channel or "delivery"
+            airport,
+            callsign,
+            weather,
+            runway,
+            channel=channel or "delivery",
+            opus=opus,
         )
 
     # Takeoff: mention VFR Flex west when route/departure match is Flex west
@@ -9273,6 +9354,12 @@ def tts_usage_month_key(when: float | None = None) -> str:
     return time.strftime("%Y-%m", time.localtime(when if when is not None else time.time()))
 
 
+def tts_usage_file() -> Path:
+    if _tts_usage_path_override is not None:
+        return _tts_usage_path_override
+    return TTS_USAGE_PATH
+
+
 def load_tts_usage() -> dict[str, Any]:
     """Load local usage file, auto-resetting when the calendar month rolls over."""
     month = tts_usage_month_key()
@@ -9281,45 +9368,86 @@ def load_tts_usage() -> dict[str, Any]:
         "total_chars": 0,
         "calls": 0,
         "by_family": {},
+        "by_session": {},
     }
-    if not TTS_USAGE_PATH.is_file():
+    path = tts_usage_file()
+    if not path.is_file():
         return empty
     try:
-        data = json.loads(TTS_USAGE_PATH.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return empty
     if not isinstance(data, dict) or str(data.get("month") or "") != month:
         return empty
     by_family = data.get("by_family") if isinstance(data.get("by_family"), dict) else {}
+    by_session = data.get("by_session") if isinstance(data.get("by_session"), dict) else {}
     return {
         "month": month,
         "total_chars": int(data.get("total_chars") or 0),
         "calls": int(data.get("calls") or 0),
         "by_family": {str(k): int(v or 0) for k, v in by_family.items()},
+        "by_session": {str(k): int(v or 0) for k, v in by_session.items()},
     }
 
 
 def save_tts_usage(data: dict[str, Any]) -> None:
-    TTS_USAGE_PATH.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    tts_usage_file().write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
-def record_google_tts_usage(voice: str, text: str) -> dict[str, Any]:
+def record_google_tts_usage(
+    voice: str, text: str, *, session_id: str = ""
+) -> dict[str, Any]:
     """Increment local monthly character counter after a successful Google synth."""
     chars = len(text or "")
     if chars <= 0:
         return load_tts_usage()
-    data = load_tts_usage()
-    family = voice_billing_family(voice)
-    by_family = data.setdefault("by_family", {})
-    by_family[family] = int(by_family.get(family) or 0) + chars
-    data["total_chars"] = int(data.get("total_chars") or 0) + chars
-    data["calls"] = int(data.get("calls") or 0) + 1
-    data["month"] = tts_usage_month_key()
+    with _TTS_USAGE_LOCK:
+        data = load_tts_usage()
+        family = voice_billing_family(voice)
+        by_family = data.setdefault("by_family", {})
+        by_family[family] = int(by_family.get(family) or 0) + chars
+        sid = str(session_id or "").strip()
+        if sid:
+            by_session = data.setdefault("by_session", {})
+            by_session[sid] = int(by_session.get(sid) or 0) + chars
+        data["total_chars"] = int(data.get("total_chars") or 0) + chars
+        data["calls"] = int(data.get("calls") or 0) + 1
+        data["month"] = tts_usage_month_key()
+        try:
+            save_tts_usage(data)
+        except OSError as exc:
+            print(f"WARNING: could not save TTS usage: {exc}", file=sys.stderr)
+        return data
+
+
+def session_char_cap(config: dict[str, Any] | None = None) -> int:
+    """Monthly Google chars allowed per pilot session on the Host. 0 = no per-pilot cap."""
+    raw = (config or {}).get("tts_session_char_cap")
+    if raw is None or str(raw).strip() == "":
+        return TTS_CHARS_PER_SESSION_MONTH
     try:
-        save_tts_usage(data)
-    except OSError as exc:
-        print(f"WARNING: could not save TTS usage: {exc}", file=sys.stderr)
-    return data
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return TTS_CHARS_PER_SESSION_MONTH
+
+
+def session_google_chars(session_id: str) -> int:
+    sid = str(session_id or "").strip()
+    if not sid:
+        return 0
+    data = load_tts_usage()
+    return int((data.get("by_session") or {}).get(sid) or 0)
+
+
+def session_over_google_cap(
+    session_id: str, config: dict[str, Any] | None = None
+) -> bool:
+    """True when this pilot has used their share of the Host's Google key this month."""
+    sid = str(session_id or "").strip()
+    cap = session_char_cap(config)
+    if not sid or cap <= 0:
+        return False
+    return session_google_chars(sid) >= cap
 
 
 def estimate_tts_overage_usd(family: str, chars: int) -> float:
@@ -9389,6 +9517,11 @@ def format_tts_usage_lines(summary: dict[str, Any] | None = None) -> list[str]:
     lines.append(
         f"Estimated bill this month: ${s['est_usd']:.2f} "
         "(local counter; Cloud Billing is authoritative)"
+    )
+    cap = TTS_CHARS_PER_SESSION_MONTH
+    lines.append(
+        f"Per-pilot Google cap (Host): {cap:,} chars/month "
+        "(that jet falls back to Windows; others keep Google)"
     )
     return lines
 
@@ -10163,6 +10296,8 @@ def synthesize_google_tts(
     voice: str,
     text: str,
     speed: float | int | None = None,
+    *,
+    session_id: str = "",
 ) -> Path:
     """Synthesize text with Google Cloud TTS to a temp LINEAR16 WAV path."""
     voice = (voice or "").strip()
@@ -10290,7 +10425,7 @@ def synthesize_google_tts(
     except OSError as exc:
         print(f"WARNING: could not cache TTS WAV: {exc}", file=sys.stderr)
 
-    record_google_tts_usage(voice, plain)
+    record_google_tts_usage(voice, plain, session_id=session_id)
     return out
 
 
@@ -10318,6 +10453,94 @@ def preview_google_voice_local(
             pass
 
 
+def synthesize_windows_tts(
+    voice: str,
+    text: str,
+    *,
+    volume: float = 0.8,
+    speed: float | int | None = None,
+) -> Path:
+    """Synthesize Windows SAPI speech to a temp WAV (does not play)."""
+    voice = (voice or "").strip()
+    spoken = prepare_radio_tts_text(text, voice=voice)
+    if not spoken:
+        raise ValueError("Preview text is empty.")
+    fd, tmp = tempfile.mkstemp(prefix="atc_sapi_", suffix=".wav")
+    os.close(fd)
+    out = Path(tmp)
+    safe_voice = voice.replace("'", "''")
+    safe_text = spoken.replace("'", "''").replace("\r", " ").replace("\n", " ")
+    safe_path = str(out).replace("'", "''")
+    vol = max(0, min(100, int(float(volume) * 100)))
+    rate = tts_speed(speed=speed)
+    ps = f"""
+Add-Type -AssemblyName System.Speech
+$s = New-Object System.Speech.Synthesis.SpeechSynthesizer
+if ('{safe_voice}') {{ $s.SelectVoice('{safe_voice}') }}
+$s.Volume = {vol}
+$s.Rate = {rate}
+$s.SetOutputToWaveFile('{safe_path}')
+$s.Speak('{safe_text}')
+$s.Dispose()
+"""
+    try:
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps],
+            capture_output=True,
+            text=True,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
+            check=False,
+            timeout=60,
+        )
+        if proc.returncode != 0 or not out.is_file() or out.stat().st_size < 44:
+            detail = (proc.stderr or proc.stdout or "").strip()[:300]
+            raise RuntimeError(detail or f"SAPI WAV synth failed (exit {proc.returncode})")
+        return out
+    except Exception:
+        try:
+            out.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
+def synthesize_tts_wav(
+    config: dict[str, Any],
+    text: str,
+    *,
+    channel: str | None = None,
+    voice_override: str | None = None,
+    step: dict[str, Any] | None = None,
+) -> Path:
+    """Pre-render TTS to a WAV for queued SRS transmit."""
+    if voice_override and str(voice_override).strip():
+        voice = str(voice_override).strip()
+    else:
+        voice, _gender = voice_for_channel(config, channel)
+    speed = tts_speed_for_step(config, step=step)
+    provider = tts_provider(config)
+    sid = tts_session_id(config)
+    want_google = provider == "google" or is_google_voice_name(voice)
+    if want_google and sid and session_over_google_cap(sid, config):
+        print(
+            f"WARNING: Google TTS cap reached for {sid} — "
+            "Windows voice for this jet to protect the Host key",
+            file=sys.stderr,
+        )
+        want_google = False
+        voice = windows_fallback_voice()
+    if want_google:
+        creds = google_credentials_path(config)
+        if creds is None or not creds.is_file():
+            raise RuntimeError("Google TTS pre-render needs google_credentials in Setup.")
+        return synthesize_google_tts(
+            creds, voice, text, speed=speed, session_id=sid
+        )
+    return synthesize_windows_tts(
+        voice, text, volume=float(config.get("tts_volume", 0.8)), speed=speed
+    )
+
+
 def preview_voice_local(
     voice: str,
     text: str,
@@ -10332,14 +10555,16 @@ def preview_voice_local(
     creds: Path | None = None
     if google_credentials:
         creds = Path(google_credentials)
-    if creds is not None or is_google_voice_name(voice):
-        if creds is None or not creds.is_file():
+    if creds is not None:
+        if not creds.is_file():
             raise RuntimeError(
                 "Google voice preview needs a valid google_credentials JSON path in Setup."
             )
         # Pass original phrase so synthesize can place SSML breaks on commas
         preview_google_voice_local(creds, voice, text, volume=volume, speed=speed)
         return
+    if is_google_voice_name(voice):
+        voice = windows_fallback_voice()
 
     spoken = prepare_radio_tts_text(text, voice=voice)
     if not spoken:
@@ -10462,6 +10687,16 @@ def transmit(
     else:
         voice, gender = voice_for_channel(config, channel)
     speed = tts_speed_for_step(config, step=step, speed=speed_override)
+    sid = tts_session_id(config)
+    if provider == "google" and sid and session_over_google_cap(sid, config):
+        print(
+            f"WARNING: Google TTS cap reached for {sid} — "
+            "Windows voice for this jet to protect the Host key",
+            file=sys.stderr,
+        )
+        provider = "windows"
+        voice = windows_fallback_voice()
+        gender = voice_gender(voice)
 
     # Google: synthesize locally (same path as Hear locally), then TX as WAV.
     # Avoids ExternalAudio Google/gRPC hangs that left ghost SRS clients.
@@ -10488,7 +10723,7 @@ def transmit(
         wav_path: Path | None = None
         try:
             wav_path = synthesize_google_tts(
-                google_creds, voice, text, speed=speed
+                google_creds, voice, text, speed=speed, session_id=sid
             )
             return transmit_file(config, airport, str(wav_path), tx_name, freq, mod)
         except Exception as exc:  # noqa: BLE001

@@ -3297,6 +3297,9 @@ def extras() -> int:
         boom_on_c2 = atc_phrase.pilot_requests_for_channel(
             "blackjack", st_vis, airport=nellis, phase="flight"
         )
+        boom_on_tanker = atc_phrase.pilot_requests_for_channel(
+            "tanker", st_vis, airport=nellis, phase="flight"
+        )
         ollama = tanker_chat_mod.resolve_llm_provider({"tanker_chat_llm": "ollama"})
         if (
             early.get("ready")
@@ -3307,19 +3310,20 @@ def extras() -> int:
             or not tanker_chat_mod.fly_controls_visible(st_vis)
             or rows[0][0] != "tanker_chat_start"
             or "texaco" not in str(rows[0][1] or "").lower()
-            or not any(k == "tanker_chat_start" for k, _ in boom_on_c2)
+            or any(k == "tanker_chat_start" for k, _ in boom_on_c2)
+            or not any(k == "tanker_chat_start" for k, _ in boom_on_tanker)
             or ollama != ("ollama", "")
         ):
             print(
                 f"  FAIL tanker boom gate: early={early} hold={hold} soon={too_soon} "
                 f"ready={ready_g} nojoin={nojoin} rows={rows} c2={boom_on_c2} "
-                f"ollama={ollama}"
+                f"tanker={boom_on_tanker} ollama={ollama}"
             )
             bad += 1
         else:
             print(
                 "tanker boom chat — Texaco starts after 30–60s in 0.1–0.5 NM; "
-                "Fly button visible on Blackjack"
+                "Fly start-chat button only on tanker freq"
             )
 
         import voice_nlu
@@ -3453,6 +3457,42 @@ def extras() -> int:
             bad += 1
         else:
             print("climb to cruise — auto beyond 10 NM (filed, not the 15k interim)")
+
+        no_fp_opus = atc_phrase.synthetic_flight_context("Fleece 1")
+        wx = atc_phrase.Weather(210, 5, 29.92, "")
+        no_fp_txt, no_fp_climb = atc_phrase.build_clearance_delivery(
+            nellis,
+            "Fleece 1",
+            wx,
+            "21R",
+            no_fp_opus,
+            initial_climb_ft=12000,
+            channel="delivery",
+        )
+        no_fp_low = no_fp_txt.lower()
+        no_fp_rb = atc_phrase.build_readback_checklist(
+            "clearance", nellis, no_fp_opus, wx, "21R", climb_ft=12000
+        )
+        no_fp_confirm = atc_phrase.build_clearance_readback(
+            nellis, "Fleece 1", wx, "21R", channel="delivery", opus=no_fp_opus
+        ).lower()
+        if (
+            "flight plan on file" not in no_fp_low
+            or "climb" in no_fp_low
+            or "maintain" in no_fp_low
+            or no_fp_climb
+            or no_fp_rb
+            or "readback correct" in no_fp_confirm
+            or "contact" in no_fp_confirm
+        ):
+            print(
+                f"  FAIL no-FP clearance must not assign a climb: "
+                f"txt={no_fp_txt!r} climb={no_fp_climb} rb={no_fp_rb} "
+                f"confirm={no_fp_confirm!r}"
+            )
+            bad += 1
+        else:
+            print("no flight plan — Delivery does not invent climb / IFR")
 
         hold_rb = atc_phrase.auto_tx_hold_reason(
             {"awaiting_readback": True, "readback_items": [{"key": "climb"}]}
