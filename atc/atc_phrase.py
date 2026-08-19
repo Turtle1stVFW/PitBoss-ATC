@@ -5010,15 +5010,56 @@ def speak_bullseye_fix(name: str) -> str:
     return text if text else "bullseye"
 
 
-def speak_alpha_bullseye(name: str, bearing_deg: int, range_nm: int) -> str:
+def caoc_unit_alt_ft(unit: dict[str, Any] | None) -> int | None:
+    """CAOC track altitude in feet, or None if the feed has no height."""
+    if not isinstance(unit, dict):
+        return None
+    raw = unit.get("altMeters")
+    if raw is None:
+        raw = unit.get("alt_m")
+    try:
+        alt_m = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if alt_m <= 0:
+        return None
+    return int(round(alt_m * 3.28084))
+
+
+def speak_angels(alt_ft: int | float | None) -> str:
+    """
+    Fighter C2 altitude in thousands of feet, one or two digits:
+
+      6,000  → angels six
+      18,000 → angels one eight
+      24,000 → angels two four
+    """
+    try:
+        feet = int(round(float(alt_ft)))
+    except (TypeError, ValueError):
+        return ""
+    if feet < 500:
+        return ""
+    thousands = max(1, min(99, int(round(feet / 1000.0))))
+    return f"angels {speak_digits(str(thousands))}"
+
+
+def speak_alpha_bullseye(
+    name: str,
+    bearing_deg: int,
+    range_nm: int,
+    alt_ft: int | float | None = None,
+) -> str:
     """
     Alpha-check bullseye speech:
-      'ELVIS three zero fife twenty five'
+      'ELVIS three zero fife twenty five, angels two four'
     """
     be = speak_bullseye_fix(name)
     brg = max(0, min(360, int(bearing_deg))) % 360
     rng = max(0, int(range_nm))
-    return f"{be} {speak_digits(f'{brg:03d}')} {speak_natural_number(rng)}"
+    loc = f"{be} {speak_digits(f'{brg:03d}')} {speak_natural_number(rng)}"
+    angels = speak_angels(alt_ft)
+    return f"{loc}, {angels}" if angels else loc
 
 
 def speak_picture_bullseye(name: str, bearing_deg: int, range_nm: int) -> str:
@@ -5347,6 +5388,7 @@ def bullseye_for_caoc_unit(
     radio_cs = radio_callsign_from_caoc_unit(unit)
     unit_name = unit.get("name") or unit.get("groupName")
 
+    alt_ft = caoc_unit_alt_ft(unit)
     unit_lat: float | None = None
     unit_lon: float | None = None
     try:
@@ -5362,13 +5404,14 @@ def bullseye_for_caoc_unit(
             "bearing": brg,
             "range_nm": rng,
             "display": format_caoc_bullseye_display(name, brg, rng),
-            "spoken": speak_alpha_bullseye(name, brg, rng),
+            "spoken": speak_alpha_bullseye(name, brg, rng, alt_ft=alt_ft),
             "unit_name": unit_name,
             "radio_callsign": radio_cs,
             "label": label,
             "pilot_name": unit.get("pilotName"),
             "object_name": unit.get("objectName"),
             "unit_id": unit.get("id"),
+            "alt_ft": alt_ft,
         }
         if unit_lat is not None and unit_lon is not None:
             out["lat"] = unit_lat
@@ -5399,7 +5442,7 @@ def bullseye_for_caoc_unit(
         "bearing": brg,
         "range_nm": rng,
         "display": format_caoc_bullseye_display(name, brg, rng),
-        "spoken": speak_alpha_bullseye(name, brg, rng),
+        "spoken": speak_alpha_bullseye(name, brg, rng, alt_ft=alt_ft),
         "unit_name": unit_name,
         "radio_callsign": radio_cs,
         "label": label,
@@ -5408,15 +5451,22 @@ def bullseye_for_caoc_unit(
         "unit_id": unit.get("id"),
         "lat": unit_lat,
         "lon": unit_lon,
+        "alt_ft": alt_ft,
     }
 
 
-def build_standalone_alpha_check(callsign: str, alpha_bullseye: str | None = None) -> str:
-    """On-demand Blackjack alpha check (any time, any matched track)."""
+def build_standalone_alpha_check(
+    callsign: str,
+    alpha_bullseye: str | None = None,
+    *,
+    agency: str = "blackjack",
+) -> str:
+    """On-demand Blackjack / Bandsaw alpha check (any time, any matched track)."""
     cs = speak_callsign(callsign)
+    ag = speak_agency_name(agency or "blackjack")
     if alpha_bullseye:
-        return f"{cs}, Blackjack, alpha check {alpha_bullseye}."
-    return f"{cs}, Blackjack, alpha check."
+        return f"{cs}, {ag}, alpha check {alpha_bullseye}."
+    return f"{cs}, {ag}, alpha check."
 
 
 def list_caoc_air_bullseyes(
@@ -8355,6 +8405,7 @@ DEFAULT_GOOGLE_VOICES: dict[str, str] = {
     "blackjack": "en-US-Neural2-I",
     "bandsaw": "en-US-Neural2-J",
     "ops": "en-US-Neural2-F",
+    "tanker": "en-US-Chirp3-HD-Kore",
     "other": "en-US-Neural2-D",
 }
 
@@ -8459,6 +8510,41 @@ def voice_label(voice_name: str) -> str:
     return f"{name}  ·  {voice_gender(name)}"
 
 
+FEMALE_LOCKED_CHANNELS = frozenset({"tanker"})
+
+
+def channel_requires_female(channel: str | None) -> bool:
+    return str(channel or "").strip().lower() in FEMALE_LOCKED_CHANNELS
+
+
+def ensure_female_voice(config: dict[str, Any] | None, voice_name: str) -> str:
+    """Map a voice id onto a female voice (same family when possible)."""
+    cfg = config if isinstance(config, dict) else {}
+    name = str(voice_name or "").strip()
+    if tts_provider(cfg) == "google":
+        if name:
+            name, _note = resolve_retired_google_voice(name)
+        if name and voice_gender(name) == "female":
+            return name
+        fam = voice_billing_family(name) if name else ""
+        picked = pick_voice_for_family(fam, prefer_gender="female") if fam else None
+        if picked and voice_gender(picked) == "female":
+            return picked
+        fallback = str(DEFAULT_GOOGLE_VOICES.get("tanker") or "en-US-Neural2-C")
+        if voice_gender(fallback) != "female":
+            fallback = "en-US-Neural2-C"
+        return fallback
+    if name and voice_gender(name) == "female":
+        return name
+    try:
+        for item in list_windows_voices():
+            if voice_gender(item) == "female":
+                return item
+    except Exception:
+        pass
+    return "Microsoft Zira Desktop"
+
+
 def voice_for_channel(config: dict[str, Any], channel: str | None) -> tuple[str, str]:
     """Return (voice_name, gender) for an agency channel."""
     voices = config.get("tts_voices") or {}
@@ -8475,6 +8561,14 @@ def voice_for_channel(config: dict[str, Any], channel: str | None) -> tuple[str,
         name = str(voices.get("default") or default).strip() or default
     if tts_provider(config) == "google":
         name, _note = resolve_retired_google_voice(name)
+    if channel_requires_female(channel):
+        if not name:
+            name = (
+                DEFAULT_GOOGLE_VOICES.get("tanker", "")
+                if tts_provider(config) == "google"
+                else "Microsoft Zira Desktop"
+            )
+        name = ensure_female_voice(config, name)
     gender = voice_gender(name)
     return name, gender
 
@@ -8485,13 +8579,18 @@ def voice_for_step(
     step: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
     """Per-step voice override (step['voice']) or agency default."""
+    ch = str(channel or "").strip().lower()
+    if not ch and isinstance(step, dict):
+        ch = str(step.get("channel") or "").strip().lower()
     if step:
         override = str(step.get("voice") or "").strip()
         if override:
             if tts_provider(config) == "google":
                 override, _note = resolve_retired_google_voice(override)
+            if channel_requires_female(ch):
+                override = ensure_female_voice(config, override)
             return override, voice_gender(override)
-    return voice_for_channel(config, channel)
+    return voice_for_channel(config, ch or channel)
 
 
 def build_template_text(

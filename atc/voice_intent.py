@@ -1675,7 +1675,11 @@ def step_holds_after_play(step: dict[str, Any] | None) -> bool:
         return bool(step.get("hold"))
     if step_is_authored(step):
         return False
-    return str(step.get("template") or "").strip().lower() == "bandsaw_check_in"
+    tmpl = str(step.get("template") or "").strip().lower()
+    if tmpl == "bandsaw_check_in":
+        return True
+    # Tanker is a side trip: Play stays on AAR until they retune C2.
+    return str(step.get("channel") or "").strip().lower() == "tanker"
 
 
 def step_expected_template(step: dict[str, Any] | None) -> str:
@@ -3047,7 +3051,9 @@ def evaluate(
                 else None
             )
             if hit is None and (
-                tanker_chat_awaiting_react or tanker_chat_freeform
+                tanker_chat_awaiting_react
+                or tanker_chat_freeform
+                or tanker_chat_session
             ) and text.strip():
                 echo_state = {
                     "tanker_chat_last_spoke": tanker_chat_last_spoke,
@@ -3187,6 +3193,8 @@ def suggestions(
     advance_limit: int | None = None,
     optional_limit: int | None = None,
     tanker_chat_choices: list[dict[str, Any]] | None = None,
+    tanker_chat_session: bool = False,
+    tanker_chat_last_spoke: str = "",
 ) -> list[tuple[str, str, str, bool]]:
     """
     Fly kneeboard cues: (payload, what it does, role, agency_required).
@@ -3205,7 +3213,7 @@ def suggestions(
     Authored (custom/file) steps never inherit leftover template cues such as
     "with you" — only that step's `voice_phrases` appear under TO ADVANCE.
     """
-    _ = (callsign, airport_name)  # kept for call-site compatibility
+    _ = (callsign, airport_name, tanker_chat_last_spoke)  # last_spoke is Fly BOOM, not a cue
     out: list[tuple[str, str, str, bool]] = []
     channel_l = (channel or "").strip().lower()
     phase_l = normalize_mission_phase(phase, channel=channel_l)
@@ -3253,7 +3261,15 @@ def suggestions(
                     "advance",
                     False,
                 )
-            )
+                )
+
+    if tanker_chat_session and not awaiting_readback and not tanker_chat_choices:
+        out.append(
+            ("say anything", "boom small talk — answer Texaco", "advance", False)
+        )
+        out.append(
+            ("talk later", "stop boom chat", "advance", False)
+        )
 
     current_phrases = step_voice_phrases(steps, current_id)
     current_does = "run this step"
@@ -3269,10 +3285,10 @@ def suggestions(
             say = str(choice.get("say") or "").strip()
             if say:
                 out.append(
-                    (say, "answer Texaco · agency optional", "advance", False)
+                    (say, "answer Texaco", "advance", False)
                 )
         out.append(
-            ("talk later", "stop boom chat · agency optional", "advance", False)
+            ("talk later", "stop boom chat", "advance", False)
         )
 
     ranked: list[tuple[int, int, Intent, str]] = []

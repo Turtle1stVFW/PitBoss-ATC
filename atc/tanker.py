@@ -44,6 +44,12 @@ _TANKER_STATE_KEYS = (
     "tanker_chat_in_range_since",
     "tanker_chat_dwell_s",
     "tanker_chat_auto_done",
+    "tanker_overlay",
+    "tanker_resume_index",
+    "tanker_resume_step_id",
+    "tanker_resume_channel",
+    "tanker_seen_tune",
+    "tanker_needs_c2_checkin",
 )
 
 # Receiver position in the boom pattern.
@@ -711,6 +717,8 @@ def tanker_awaiting_return(state: dict[str, Any] | None) -> bool:
     """True after C2 sent them to the tanker, until they check back in."""
     if not isinstance(state, dict):
         return False
+    if tanker_needs_c2_checkin(state):
+        return True
     phase = str(state.get("tanker_phase") or "").strip()
     return phase in {
         PHASE_JOIN,
@@ -719,6 +727,171 @@ def tanker_awaiting_return(state: dict[str, Any] | None) -> bool:
         PHASE_CONTACT,
         PHASE_RIGHT,
     }
+
+
+def tanker_needs_c2_checkin(state: dict[str, Any] | None) -> bool:
+    """C2 sent them to AAR; they still owe Blackjack / Bandsaw a check-in."""
+    return bool(isinstance(state, dict) and state.get("tanker_needs_c2_checkin"))
+
+
+def tanker_overlay_active(state: dict[str, Any] | None) -> bool:
+    """True while the tanker is a side trip parked off the C2 timeline."""
+    return bool(isinstance(state, dict) and state.get("tanker_overlay"))
+
+
+def is_tanker_step(step: dict[str, Any] | None) -> bool:
+    """Timeline parking spot for AAR — not part of the C2 sequence."""
+    if not isinstance(step, dict):
+        return False
+    if str(step.get("channel") or "").strip().lower() == "tanker":
+        return True
+    tmpl = str(step.get("template") or "").strip().lower()
+    return tmpl == "tanker" or tmpl.startswith("tanker_")
+
+
+def should_skip_tanker_step(
+    step: dict[str, Any] | None,
+    state: dict[str, Any] | None = None,
+) -> bool:
+    """
+    Skip tanker timeline steps unless this sortie is actually on AAR.
+
+    Request tanker jumps onto the parking spot; Next after Blackjack must not
+    land there and demand Texaco's UHF before Bandsaw / range exit.
+    """
+    if not is_tanker_step(step):
+        return False
+    return not tanker_overlay_active(state)
+
+
+def enter_tanker_overlay(engine: Any) -> None:
+    """
+    Leave the C2 cursor parked and sit on the tanker step (if the flow has one).
+
+    The tanker is a side trip: Blackjack / Bandsaw stay where they were until
+    the jet retunes or checks back in.
+    """
+    if engine is None:
+        return
+    state = engine.state if isinstance(getattr(engine, "state", None), dict) else None
+    if state is None:
+        return
+    steps = list(getattr(engine, "steps", None) or [])
+    idx = int(state.get("index") or 0)
+    cur = steps[idx] if 0 <= idx < len(steps) else None
+    already = tanker_overlay_active(state)
+    state["tanker_overlay"] = True
+    state["tanker_needs_c2_checkin"] = True
+    if not already and not is_tanker_step(cur):
+        state["tanker_resume_index"] = idx
+        state["tanker_resume_step_id"] = str((cur or {}).get("id") or "")
+        state["tanker_resume_channel"] = str((cur or {}).get("channel") or "")
+    for i, step in enumerate(steps):
+        if is_tanker_step(step):
+            state["index"] = i
+            break
+    if hasattr(engine, "save_state"):
+        engine.save_state()
+
+
+def leave_tanker_overlay(
+    engine: Any,
+    agency: str | None = None,
+    *,
+    checkin: bool = False,
+) -> str:
+    """
+    End the tanker side trip and land on Blackjack or Bandsaw.
+
+    `agency` is the live radio (tune or addressed). Checking in clears the
+    AAR flag; a tune-only return keeps it so C2 still gets a continue call.
+    """
+    if engine is None:
+        return str(agency or "blackjack").strip().lower() or "blackjack"
+    state = engine.state if isinstance(getattr(engine, "state", None), dict) else {}
+    steps = list(getattr(engine, "steps", None) or [])
+    resume = state.pop("tanker_resume_index", None)
+    state.pop("tanker_resume_step_id", None)
+    resume_ch = str(state.pop("tanker_resume_channel", "") or "").strip().lower()
+    state["tanker_overlay"] = False
+    state.pop("tanker_seen_tune", None)
+    ch = str(agency or "").strip().lower()
+    if ch not in ("blackjack", "bandsaw"):
+        ch = resume_ch if resume_ch in ("blackjack", "bandsaw") else "blackjack"
+    if checkin:
+        state["tanker_needs_c2_checkin"] = False
+        apply_tanker_phase(state, PHASE_DEPARTED)
+        mark_rejoined(state, False)
+
+    def _seek_template(name: str) -> bool:
+        want = str(name or "").strip()
+        if not want:
+            return False
+        for i, step in enumerate(steps):
+            if str(step.get("template") or "") == want:
+                state["index"] = i
+                return True
+        return False
+
+    def _seek_channel(
+        want: str, *, avoid_templates: frozenset[str] = frozenset()
+    ) -> bool:
+        for i, step in enumerate(steps):
+            if is_tanker_step(step):
+                continue
+            if str(step.get("channel") or "").strip().lower() != want:
+                continue
+            tmpl = str(step.get("template") or "")
+            if tmpl in avoid_templates:
+                continue
+            state["index"] = i
+            return True
+        return False
+
+    if ch == "bandsaw":
+        if not _seek_template("bandsaw_check_in"):
+            _seek_channel("bandsaw")
+    else:
+        restored = False
+        try:
+            ri = int(resume) if resume is not None else None
+        except (TypeError, ValueError):
+            ri = None
+        if ri is not None and 0 <= ri < len(steps):
+            rstep = steps[ri]
+            rch = str(rstep.get("channel") or "").strip().lower()
+            if rch == "blackjack" and not is_tanker_step(rstep):
+                state["index"] = ri
+                restored = True
+        if not restored:
+            if not _seek_template("bj_check_in"):
+                _seek_channel(
+                    "blackjack",
+                    avoid_templates=frozenset({"bj_range_exit"}),
+                )
+    if hasattr(engine, "_advance_past_skippable"):
+        engine._advance_past_skippable()
+    if hasattr(engine, "save_state"):
+        engine.save_state()
+    return ch
+
+
+def note_tanker_tune(state: dict[str, Any] | None, tuned: str | None) -> bool:
+    """
+    Follow the radio during an AAR side trip.
+
+    Returns True when the cursor should leave tanker for Blackjack / Bandsaw
+    (they have been on tanker UHF, then retuned to C2).
+    """
+    if not tanker_overlay_active(state):
+        return False
+    ch = str(tuned or "").strip().lower()
+    if ch == "tanker":
+        state["tanker_seen_tune"] = True
+        return False
+    if ch not in ("blackjack", "bandsaw"):
+        return False
+    return bool(state.get("tanker_seen_tune"))
 
 
 def build_tanker_return_checkin(

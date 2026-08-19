@@ -76,6 +76,7 @@
   "voice_mic_device": -1,
   "voice_min_confidence": 0.6,
   "voice_require_address": true,
+  "voice_nlu_enabled": true,
   "voice_ptt": [],
   "voice_ptt_key": "",
   "tanker_chat_llm": "off",

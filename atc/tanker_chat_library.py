@@ -7,7 +7,8 @@ Mix of:
   • open questions — answer in your own words
 
 Keep hits away from official tanker words (rejoin, contact, disconnect,
-observation).
+observation). Boom operator is enlisted talking to an F-16 officer —
+respectful, not peer-to-peer.
 """
 
 from __future__ import annotations
@@ -1959,6 +1960,66 @@ THREADS: list[dict[str, Any]] = [
             "back seat",
             "backseater",
             "guy in back",
+        ),
+    ),
+    Open(
+        "riddle_offer",
+        "Got a short riddle while the gas flows — want it, or you too busy flying?",
+        R(
+            "want",
+            "Alright. I have cities but no houses, forests but no trees, "
+            "water but no fish — what am I?",
+            "want",
+            "sure",
+            "hit me",
+            "riddle",
+            "yes",
+        ),
+        R(
+            "busy",
+            "Fair. I'll just sit here and look professional. Boring.",
+            "busy",
+            "later",
+            "no",
+            "flying",
+        ),
+    ),
+    T(
+        "food_from_home",
+        "First stop when you get home — Chick-fil-A, Whataburger, or you pretending salad?",
+        C(
+            "Chick-fil-A",
+            "Copy. That's the one. We talk about it up here like it's a religion.",
+            "chick",
+            "fil-a",
+            "fila",
+            "cfa",
+        ),
+        C(
+            "Whataburger",
+            "Whataburger, copy. That's a Texas problem and I respect it.",
+            "whataburger",
+            "whata",
+        ),
+    ),
+    Open(
+        "worse_seat",
+        "Be honest — Viper seat for an hour, or the boom pad staring at your intake. Who's more uncomfortable?",
+        R(
+            "viper",
+            "Viper, copy. At least you can see where you're going. I get a close-up of your paint.",
+            "viper",
+            "fighter",
+            "jet",
+            "ejection",
+        ),
+        R(
+            "boom",
+            "Boom pad, copy. We lie on our stomachs and call it a career. Respect.",
+            "boom",
+            "pad",
+            "pod",
+            "tanker",
         ),
     ),
 ]

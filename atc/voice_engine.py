@@ -3,8 +3,9 @@ Voice control: hold the SRS PTT, talk, and ATC answers.
 
 Pipeline — PTT press marks the mic ring buffer, PTT release hands the captured
 audio to faster-whisper on a worker thread, the transcript goes through the
-keyword grammar in `voice_intent`, and a confident match is executed against
-the flow engine.
+keyword grammar in `voice_intent`. If that misses, `voice_nlu` may map an
+addressed call onto an allowed intent using the boom-chat LLM; it never writes
+a new clearance. A match is then executed against the flow engine.
 
 Whisper runs on CPU int8 on purpose: base.en costs ~350 ms for a typical radio
 call and leaves the GPU entirely to DCS. The model is loaded once at startup so
@@ -196,6 +197,7 @@ class VoiceController:
         self._held = 0
         self._lock = threading.Lock()
         self.last_error = ""
+        self._config: dict[str, Any] = {}
 
     # ---- lifecycle -------------------------------------------------------
 
@@ -205,6 +207,7 @@ class VoiceController:
         warnings: list[str] = []
         if not config.get("voice_enabled"):
             return warnings
+        self._config = dict(config)
         if np is None:
             return ["Voice control needs numpy — run: pip install faster-whisper numpy"]
         if not mic_capture.supported():
@@ -385,7 +388,38 @@ class VoiceController:
             tanker_chat_last_spoke=str(context.get("tanker_chat_last_spoke") or ""),
             tanker_chat_guard_until=float(context.get("tanker_chat_guard_until") or 0),
         )
-        self.on_status(f"{elapsed:.0f}ms · {text}")
+        if evaluation.match is None:
+            try:
+                import voice_nlu
+
+                nlu_match = voice_nlu.classify(
+                    evaluation,
+                    config=self._config,
+                    channel=str(context.get("channel") or ""),
+                    phase=str(context.get("phase") or ""),
+                    expected=str(context.get("expected") or ""),
+                    callsign=str(context.get("callsign") or ""),
+                    runways=context.get("runways")
+                    if isinstance(context.get("runways"), list)
+                    else None,
+                    awaiting_readback=bool(context.get("awaiting_readback")),
+                    steps=context.get("steps")
+                    if isinstance(context.get("steps"), list)
+                    else None,
+                    current_step_id=str(context.get("current_step_id") or ""),
+                )
+            except Exception:
+                nlu_match = None
+            if nlu_match is not None:
+                evaluation.match = nlu_match
+                evaluation.reason = ""
+                evaluation.advice = "understood via LLM"
+                nlu_ms = (time.perf_counter() - started) * 1000
+                self.on_status(f"{elapsed:.0f}ms + NLU {nlu_ms - elapsed:.0f}ms · {text}")
+            else:
+                self.on_status(f"{elapsed:.0f}ms · {text}")
+        else:
+            self.on_status(f"{elapsed:.0f}ms · {text}")
         self.on_transcript(evaluation)
         if evaluation.match:
             self.on_intent(evaluation.match)
@@ -609,12 +643,12 @@ def execute_intent(
 
     if intent == "request_alpha_check":
         fix = atc_phrase.resolve_alpha_bullseye(config, callsign=callsign, opus=opus)
-        text = atc_phrase.build_standalone_alpha_check(
-            callsign, (fix or {}).get("spoken")
-        )
         channel = _resolve_tx_channel(engine, airport, match)
         if channel not in ("blackjack", "bandsaw", "ops", "other"):
             channel = "blackjack"
+        text = atc_phrase.build_standalone_alpha_check(
+            callsign, (fix or {}).get("spoken"), agency=channel
+        )
         return _transmit(engine, airport, text, channel)
 
     if intent == "acknowledge_readback":
@@ -726,14 +760,18 @@ def execute_intent(
         # checkout — picture / declare / dope happen in that window.
         if intent == "bandsaw_check_in" or match.template == "bandsaw_check_in":
             import tanker as tanker_mod
+            import tanker_chat as tanker_chat_mod
 
             cur = engine.current_step() or {}
             if voice_intent.step_is_authored(cur):
                 return _play_step(engine, match)
-            if tanker_mod.tanker_awaiting_return(engine.state):
-                tanker_mod.apply_tanker_phase(
-                    engine.state, tanker_mod.PHASE_DEPARTED
+            if tanker_mod.tanker_needs_c2_checkin(
+                engine.state
+            ) or tanker_mod.tanker_overlay_active(engine.state):
+                tanker_mod.leave_tanker_overlay(
+                    engine, "bandsaw", checkin=True
                 )
+                tanker_chat_mod.end_chat(engine.state)
                 if hasattr(engine, "save_state"):
                     engine.save_state()
             alpha_spoken = None
@@ -762,21 +800,25 @@ def execute_intent(
         # check-in is "continue", not a second range-entry / Approach handoff.
         if intent == "range_entry" or match.template == "bj_check_in":
             import tanker as tanker_mod
+            import tanker_chat as tanker_chat_mod
 
             cur = engine.current_step() or {}
             tmpl = str(cur.get("template") or "")
-            from_tanker = tanker_mod.tanker_awaiting_return(engine.state) and (
-                tmpl != "bj_check_in"
-            )
+            from_tanker = tanker_mod.tanker_needs_c2_checkin(
+                engine.state
+            ) or tanker_mod.tanker_overlay_active(engine.state)
             if tmpl == "bj_range_exit" or from_tanker:
                 if from_tanker:
-                    tanker_mod.apply_tanker_phase(
-                        engine.state, tanker_mod.PHASE_DEPARTED
+                    tanker_mod.leave_tanker_overlay(
+                        engine, "blackjack", checkin=True
                     )
+                    tanker_chat_mod.end_chat(engine.state)
                     if hasattr(engine, "save_state"):
                         engine.save_state()
                 if hasattr(engine, "acknowledge_blackjack_continue"):
-                    detail = engine.acknowledge_blackjack_continue()
+                    detail = engine.acknowledge_blackjack_continue(
+                        seek_range_exit=not from_tanker
+                    )
                     return {
                         "action": "play",
                         "text": detail.get("text"),
@@ -1307,6 +1349,14 @@ def _transmit(
         channel=channel,
         voice_override=voice_name,
     )
+    st = getattr(engine, "state", None)
+    if isinstance(st, dict) and str(text or "").strip():
+        st["last_tx_text"] = text
+        st["last_tx_channel"] = str(channel or "")
+        st["last_tx_at"] = time.time()
+        # Boom / ad-hoc TX is not a clearance hinge — don't invent a template.
+        if not st.get("awaiting_readback"):
+            st["last_tx_template"] = ""
     return {
         "action": "transmit",
         "text": text,
@@ -1361,12 +1411,11 @@ def execute_tanker_action(
         )
         if fix and fix.get("spoken"):
             alpha_spoken = str(fix["spoken"])
+        tanker_mod.leave_tanker_overlay(engine, channel, checkin=True)
+        tanker_chat_mod.end_chat(engine.state)
         text = tanker_mod.build_tanker_return_checkin(
             channel, callsign, alpha_bullseye=alpha_spoken
         )
-        tanker_mod.apply_tanker_phase(engine.state, tanker_mod.PHASE_DEPARTED)
-        tanker_mod.mark_rejoined(engine.state, False)
-        tanker_chat_mod.end_chat(engine.state)
         if hasattr(engine, "save_state"):
             engine.save_state()
         return _transmit(engine, ap, text, channel)
@@ -1482,6 +1531,7 @@ def execute_tanker_action(
         text = builders[action](channel, callsign, tanker)
         if action == "request_tanker" and tanker:
             tanker_mod.apply_tanker_phase(engine.state, tanker_mod.PHASE_JOIN)
+            tanker_mod.enter_tanker_overlay(engine)
             if hasattr(engine, "save_state"):
                 engine.save_state()
         return _transmit(engine, ap, text, channel)

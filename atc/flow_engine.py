@@ -167,21 +167,23 @@ class FlowEngine:
         idx = int(self.state.get("index") or 0)
         if idx < 0:
             idx = 0
-        while idx < len(steps) and (
-            atc_phrase.should_skip_takeoff_step(steps[idx], self.mission, self.state)
-            or atc_phrase.should_skip_approach_step(steps[idx], self.mission, self.state)
-            or atc_phrase.should_skip_cruise_climb_step(
-                steps[idx], self.mission, self.state
-            )
-        ):
+        while idx < len(steps) and self._step_is_skippable(steps[idx]):
             idx += 1
         self.state["index"] = idx
 
     def _step_is_skippable(self, step: dict[str, Any] | None) -> bool:
         if not step:
             return False
+        tanker_skip = False
+        try:
+            import tanker as tanker_mod
+
+            tanker_skip = tanker_mod.should_skip_tanker_step(step, self.state)
+        except Exception:
+            tanker_skip = False
         return bool(
-            atc_phrase.should_skip_takeoff_step(step, self.mission, self.state)
+            tanker_skip
+            or atc_phrase.should_skip_takeoff_step(step, self.mission, self.state)
             or atc_phrase.should_skip_approach_step(step, self.mission, self.state)
             or atc_phrase.should_skip_cruise_climb_step(step, self.mission, self.state)
         )
@@ -889,7 +891,7 @@ class FlowEngine:
             return True, ""
         return False, " · ".join(waiting_bits) or "need closer to range exit"
     def acknowledge_blackjack_continue(
-        self, *, bypass_freq_gate: bool = False
+        self, *, bypass_freq_gate: bool = False, seek_range_exit: bool = True
     ) -> dict[str, Any]:
         """Radar contact / remain this freq — not range exit yet."""
         airport = self.airport()
@@ -934,8 +936,9 @@ class FlowEngine:
             voice_override=voice_name,
             step=step,
         )
-        # Stay on bj_range_exit until inside the Approach gate.
-        if not self._seek_template("bj_range_exit"):
+        # Stay on bj_range_exit until inside the Approach gate — unless this
+        # continue is a tanker return, which parks back on Blackjack C2.
+        if seek_range_exit and not self._seek_template("bj_range_exit"):
             pass
         self.state["last_step_id"] = "bj_continue"
         self.state["last_tx_text"] = text

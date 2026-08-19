@@ -275,12 +275,12 @@ Calls it understands:
 | "Bandsaw, checking in" / picture / bogey dope / declare | Optional C2 on Bandsaw |
 | "Bandsaw, checking out / switch Blackjack" | Leave Bandsaw → contact Blackjack (not check-in) |
 | "Blackjack, request Bandsaw" | Push to Bandsaw (optional; you can also self-tune) |
-| "Blackjack / Bandsaw, request tanker" | Track (e.g. *track A R two tree one Victor*) + braw with altitude to the Opus **KC-135 boom** — never KC-130 or KC-135MPRS. Ends with *Frequency change approved.* |
+| "Blackjack / Bandsaw, request tanker" | Track (e.g. *track A R two tree one Victor*) + braw with altitude to the Opus **KC-135 boom** — never KC-130 or KC-135MPRS. Ends with *Frequency change approved.* AAR is a **side trip**: the cursor jumps to Tanker, then when you retune **Blackjack or Bandsaw** (or check back in) it returns to that agency — not the next timeline step. |
 | "Say TACAN" / "say tanker frequency" / "say tanker bullseye" | On-request C2: TACAN, UHF, live bullseye |
 | "Texaco, request rejoin" / "request reform" | Cleared rejoin left, sometimes left observation (tanker does not say *identified*) |
 | Boom / reform small talk | After rejoin, Texaco starts boom chat once you have been **0.1–0.5 NM** from the tanker for **30–60 seconds** with a receiver in that envelope. Fly **Texaco starts chat** makes Texaco talk first. Mix of A/B polls, open questions, and random riffs — answer in a word, say anything, or just listen. With Ollama/Gemini/OpenAI on, freeform replies get a **live riff** (not locked to the two buttons). Texaco keeps chatting with short breaks until you **stop chat** / say *talk later* / *standing by*, or leave the tanker. LLM falls back to the library if slow. |
 | DCS tanker radio | **Ready pre-contact** → DCS *cleared contact* (boom). **Abort refueling** to disconnect. Do not use SRS for those. |
-| "Blackjack / Bandsaw, back from the tanker" / "checking in" after AAR | Radar contact, continue — you can check back in with C2 after the tanker |
+| "Blackjack / Bandsaw, back from the tanker" / "checking in" after AAR | Radar contact, continue — returns to **whichever C2 freq you tuned** (Blackjack or Bandsaw) |
 | "Blackjack, off station / range complete" | Range checkout → Approach (required after Blackjack check-in) |
 | "Approach, checking in" / "inbound" | Approach assigns recovery from METAR (VMC → VFR recovery + TAC overhead; IFR → instrument + IAF). Prefers RWY 21 |
 | "Request ARCOE / TORYE / STRYK / MINTT / overhead / instrument" | Change the assigned recovery / approach |
@@ -291,6 +291,8 @@ Calls it understands:
 | "We'll take the rolling" / "unable rolling" | Accepts or declines the rolling departure. After Tower asks, **Next / Advance accepts** and **Previous declines** (HOTAS, hotkey, Stream Deck) — no voice or alt-tab needed. |
 | "Gear down full stop" / "going around" / "clear of the runway" | Fires the matching step |
 | "Say again" | Replays the last transmission |
+
+Voice **Understand messy radio (LLM)** (Setup → Controls) uses the same Ollama/Gemini/OpenAI setting as boom chat. The keyword grammar still wins; the model only maps a missed, addressed call onto an allowed intent. It never writes a new clearance.
 
 The mission timeline uses three **mission phases** (separate from the radio agency):
 

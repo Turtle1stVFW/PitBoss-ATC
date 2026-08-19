@@ -2747,6 +2747,106 @@ def extras() -> int:
         else:
             print("tanker chat riff — freeform react keeps the bit open")
 
+        session_only = voice_intent.evaluate(
+            "Where do you see that?",
+            channel="blackjack",
+            phase="flight",
+            callsign=CALLSIGN,
+            runways=RUNWAYS,
+            tanker_chat_session=True,
+        )
+        no_session = voice_intent.evaluate(
+            "Where do you see that?",
+            channel="blackjack",
+            phase="flight",
+            callsign=CALLSIGN,
+            runways=RUNWAYS,
+        )
+        if (
+            not session_only.fired
+            or session_only.match.intent != "tanker_chat_reply"
+            or no_session.fired
+        ):
+            print(
+                f"  FAIL tanker chat session-only reply: "
+                f"session={session_only.describe()} none={no_session.describe()}"
+            )
+            bad += 1
+        else:
+            print("tanker chat session — freeform reply without A/B or freeform flag")
+
+        ram = tanker_chat_mod._fill("Ram two, altitude and airspeed.")
+        if ram.lower().startswith("ram") or not tanker_chat_mod.looks_like_official_tanker(
+            "Ram two, altitude and airspeed."
+        ):
+            print(f"  FAIL tanker chat official-radio strip: {ram!r}")
+            bad += 1
+        else:
+            print("tanker chat — strips callsign / flags official tanker radio")
+
+        if (
+            tanker_chat_mod.invites_reply("Sun is low on the ridge tonight")
+            or not tanker_chat_mod.invites_reply(
+                "Sun is low on the ridge — you ever get that view from the Viper?"
+            )
+            or not tanker_chat_mod.invites_reply("Dunkin or Starbucks?")
+        ):
+            print("  FAIL tanker chat invites_reply gate")
+            bad += 1
+        else:
+            print("tanker chat — statements rejected, questions/hooks invited")
+
+        if not tanker_chat_mod.looks_like_airline(
+            "Folks we'll be cruising at thirty thousand with beverage service."
+        ) or tanker_chat_mod.looks_like_airline(
+            "You ever get bored on the boom during a range day?"
+        ):
+            print("  FAIL tanker chat airline vs military gate")
+            bad += 1
+        else:
+            print("tanker chat — rejects airline talk, keeps military small talk")
+
+        male_cfg = {
+            "tts_provider": "google",
+            "tts_voice": "en-US-Neural2-D",
+            "tts_voices": {"tanker": "en-US-Neural2-D"},
+        }
+        tanker_v, tanker_g = atc_phrase.voice_for_channel(male_cfg, "tanker")
+        step_v, step_g = atc_phrase.voice_for_step(
+            male_cfg, "tanker", {"voice": "en-US-Neural2-I", "channel": "tanker"}
+        )
+        ground_v, ground_g = atc_phrase.voice_for_channel(male_cfg, "ground")
+        if (
+            tanker_g != "female"
+            or atc_phrase.voice_gender(tanker_v) != "female"
+            or step_g != "female"
+            or ground_g != "male"
+        ):
+            print(
+                f"  FAIL tanker voice must be female: tanker={tanker_v!r}/{tanker_g} "
+                f"step={step_v!r}/{step_g} ground={ground_v!r}/{ground_g}"
+            )
+            bad += 1
+        else:
+            print(f"tanker voice — always female ({tanker_v})")
+
+        st_cap = {
+            "tanker_chat": {
+                "session": True,
+                "awaiting": "react",
+                "opener": "Is it weird that the desert can look so peaceful from up here?",
+            },
+            "tanker_chat_last_spoke": (
+                "Is it weird that the desert can look so peaceful from up here?"
+            ),
+        }
+        cap = tanker_chat_mod.fly_boom_caption(st_cap, "say anything")
+        if "TEXACO:" not in cap or "desert" not in cap.lower():
+            print(f"  FAIL tanker chat boom caption: {cap!r}")
+            bad += 1
+        else:
+            print("tanker chat Fly caption keeps Texaco's line")
+
         llm_ok = tanker_chat_mod.normalize_llm_thread(
             {
                 "opener": "Coffee or tea while you hang out?",
@@ -2984,6 +3084,13 @@ def extras() -> int:
             or "Starbucks" not in hist_blob
             or not cool
             or "exhausted" not in prompt_ban.casefold()
+            or "enlisted" not in prompt_ban.casefold()
+            or "officer" not in prompt_ban.casefold()
+            or "invite a reply" not in prompt_ban.casefold()
+            or "not an airliner" not in prompt_ban.casefold()
+            or "military" not in prompt_ban.casefold()
+            or "gas-up chatter" not in prompt_ban.casefold()
+            or "you are the kc-135 boom operator" not in prompt_ban.casefold()
             or "Recent chat:" not in prompt_ban
             or coffee_picks > 0
             or "Dunkin" not in hist_after
@@ -3016,6 +3123,102 @@ def extras() -> int:
             bad += 1
         else:
             print(f"tanker chat Ollama empty — {note}")
+
+        captured: dict = {}
+
+        def _fake_http(url, payload, headers, timeout=6.5):
+            captured["url"] = str(url)
+            captured["payload"] = dict(payload)
+            captured["timeout"] = timeout
+            return {
+                "message": {
+                    "content": '{"id":"llm_x","kind":"open","opener":"Sun is low on the ridge tonight — you ever get that view from the Viper?"}'
+                }
+            }
+
+        real_http = tanker_chat_mod._http_json
+        tanker_chat_mod._http_json = _fake_http  # type: ignore[assignment]
+        tanker_chat_mod.list_ollama_models = lambda config=None: ["llama3.2:latest"]  # type: ignore[assignment]
+        tanker_chat_mod._OLLAMA_MODELS_CACHE["t"] = 0.0
+        tanker_chat_mod._OLLAMA_MODELS_CACHE["names"] = ["llama3.2:latest"]
+        st_nat: dict = {}
+        try:
+            node_nat = tanker_chat_mod.try_llm_thread(
+                {"tanker_chat_llm": "ollama"}, [], state=st_nat
+            )
+        finally:
+            tanker_chat_mod._http_json = real_http  # type: ignore[assignment]
+            tanker_chat_mod.list_ollama_models = real_models  # type: ignore[assignment]
+        opts = (captured.get("payload") or {}).get("options") or {}
+        if (
+            "/api/chat" not in str(captured.get("url") or "")
+            or int(opts.get("num_predict") or 0) < 40
+            or not node_nat
+            or str(node_nat.get("source") or "") != "ollama"
+            or "sun is low" not in str(node_nat.get("opener") or "").lower()
+        ):
+            print(
+                f"  FAIL ollama native chat: url={captured.get('url')!r} "
+                f"opts={opts} node={node_nat}"
+            )
+            bad += 1
+        else:
+            print("tanker chat Ollama native — /api/chat with short num_predict")
+
+        scripted = (
+            "Sir, I think it's the angle of the Viper's nose cone, plus the "
+            "seat's a lot wider than my pad. Pilot: really?"
+        )
+        stripped = tanker_chat_mod.strip_scripted_dialogue(scripted)
+        cleaned_script = tanker_chat_mod._clean_llm_plain(scripted)
+        salvage_script = tanker_chat_mod._salvage_riff_text(
+            "Boom: Boom pad or Viper seat, who got robbed?\nPilot: the pad"
+        )
+        llm_hist = tanker_chat_mod.format_history_for_llm(
+            {
+                "tanker_chat_history": [
+                    {"role": "boom", "text": "Boom pad or Viper seat?"},
+                    {"role": "pilot", "text": "You got a better view."},
+                ]
+            }
+        )
+        sys_plain = tanker_chat_mod._boom_llm_system(json_out=False)
+        react_p = tanker_chat_mod._llm_react_prompt(
+            "Boom pad or Viper seat?",
+            "You got a better view of it than I do.",
+        )
+        keep_q = tanker_chat_mod.strip_scripted_dialogue(
+            "You ever get bored on the boom during a range day?"
+        )
+        stop_list = list(
+            ((captured.get("payload") or {}).get("options") or {}).get("stop") or []
+        )
+        if (
+            "pilot:" in stripped.casefold()
+            or "really" in stripped.casefold()
+            or "wider than my pad" not in stripped.casefold()
+            or not cleaned_script
+            or "pilot:" in cleaned_script.casefold()
+            or not salvage_script
+            or "pilot:" in str(salvage_script.get("opener") or "").casefold()
+            or "who got robbed" not in str(salvage_script.get("opener") or "").casefold()
+            or "YOU (boom operator)" not in llm_hist
+            or "F-16 (them" not in llm_hist
+            or "Pilot:" in llm_hist
+            or "you are the kc-135 boom operator" not in sys_plain.casefold()
+            or "pilot: really" not in sys_plain.casefold()
+            or "do not write a pilot:" not in react_p.casefold()
+            or "end with a question mark" not in react_p.casefold()
+            or "you ever get bored" not in keep_q.casefold()
+            or "Pilot:" not in stop_list
+        ):
+            print(
+                f"  FAIL boom operator dialogue lock: stripped={stripped!r} "
+                f"clean={cleaned_script!r} salvage={salvage_script} hist={llm_hist!r}"
+            )
+            bad += 1
+        else:
+            print("tanker chat — boom speaks, never writes the pilot's line")
 
         # Echo of Texaco's own TX must not trigger a freeform LLM reply.
         st_echo = {}
@@ -3117,6 +3320,64 @@ def extras() -> int:
             print(
                 "tanker boom chat — Texaco starts after 30–60s in 0.1–0.5 NM; "
                 "Fly button visible on Blackjack"
+            )
+
+        import voice_nlu
+
+        ev_miss = voice_intent.evaluate(
+            "Nellis Ground, Fleece 1, permission to leave the ramp",
+            channel="ground",
+            phase="departure",
+            callsign=CALLSIGN,
+            runways=RUNWAYS,
+        )
+        ev_chatter = voice_intent.evaluate(
+            "Two, go button five",
+            channel="ground",
+            phase="departure",
+            callsign=CALLSIGN,
+            runways=RUNWAYS,
+        )
+        gnd = voice_nlu.allowed_intents(channel="ground", phase="departure")
+        gnd_ids = {i.id for i in gnd}
+        parsed_ok = voice_nlu.parse_choice({"intent": "ready_taxi"}, gnd)
+        parsed_c2 = voice_nlu.parse_choice({"intent": "request_picture"}, gnd)
+        parsed_none = voice_nlu.parse_choice({"intent": "none"}, gnd)
+        nlu_match = voice_nlu.match_from_choice(
+            "ready_taxi",
+            {},
+            transcript="Nellis Ground, Fleece 1, permission to leave the ramp",
+            allowed=gnd,
+            addressed="ground",
+        )
+        nlu_off = voice_nlu.nlu_enabled(
+            {"voice_nlu_enabled": False, "tanker_chat_llm": "ollama"}
+        )
+        nlu_on = voice_nlu.nlu_enabled({"tanker_chat_llm": "ollama"})
+        if (
+            ev_miss.fired
+            or not voice_nlu.should_try(ev_miss)
+            or voice_nlu.should_try(ev_chatter)
+            or "ready_taxi" not in gnd_ids
+            or "request_picture" in gnd_ids
+            or parsed_ok is None
+            or parsed_ok[0] != "ready_taxi"
+            or parsed_c2 is not None
+            or parsed_none is not None
+            or nlu_match is None
+            or nlu_match.intent != "ready_taxi"
+            or nlu_off
+            or not nlu_on
+        ):
+            print(
+                f"  FAIL voice NLU: miss={ev_miss.describe()} chatter={ev_chatter.describe()} "
+                f"ids={sorted(gnd_ids)} ok={parsed_ok} c2={parsed_c2} none={parsed_none} "
+                f"match={nlu_match} off={nlu_off} on={nlu_on}"
+            )
+            bad += 1
+        else:
+            print(
+                "voice NLU — allowed intents only; chatter skipped; no network"
             )
 
         trig18 = rp.resolve_step_trigger(
@@ -3261,6 +3522,137 @@ def extras() -> int:
             bad += 1
         else:
             print("departure Request handoff — only on the handoff step")
+
+        # Alpha check: altitude in thousands — 6k / 18k / 24k → angels 6 / 18 / 24.
+        if atc_phrase.speak_angels(6000) != "angels six":
+            print(f"  FAIL angels 6000: {atc_phrase.speak_angels(6000)!r}")
+            bad += 1
+        elif atc_phrase.speak_angels(18000) != "angels one eight":
+            print(f"  FAIL angels 18000: {atc_phrase.speak_angels(18000)!r}")
+            bad += 1
+        elif atc_phrase.speak_angels(24000) != "angels two four":
+            print(f"  FAIL angels 24000: {atc_phrase.speak_angels(24000)!r}")
+            bad += 1
+        spoken_alpha = atc_phrase.speak_alpha_bullseye("ELVIS", 305, 25, alt_ft=24000)
+        if "angels two four" not in spoken_alpha or "zero" in spoken_alpha.split("angels", 1)[-1]:
+            print(f"  FAIL alpha speech angels: {spoken_alpha!r}")
+            bad += 1
+        bj = atc_phrase.build_standalone_alpha_check("Fleece 1", spoken_alpha)
+        bs = atc_phrase.build_standalone_alpha_check(
+            "Fleece 1", spoken_alpha, agency="bandsaw"
+        )
+        cin = atc_phrase.build_bandsaw_check_in(
+            "Fleece 1", alpha_bullseye=spoken_alpha
+        )
+        unit = {
+            "name": "FLEECE 1",
+            "flightLabel": "FLEECE 1",
+            "xMeters": 0,
+            "zMeters": 0,
+            "altMeters": 24000 / 3.28084,
+            "atcPosition": "ELVIS 305 25",
+        }
+        fix = atc_phrase.bullseye_for_caoc_unit(unit, {})
+        spoken_fix = str((fix or {}).get("spoken") or "")
+        if "Blackjack" not in bj or "angels two four" not in bj:
+            print(f"  FAIL blackjack alpha check: {bj!r}")
+            bad += 1
+        elif "Bandsaw" not in bs or "angels two four" not in bs:
+            print(f"  FAIL bandsaw alpha check: {bs!r}")
+            bad += 1
+        elif "angels two four" not in cin:
+            print(f"  FAIL bandsaw check-in alpha: {cin!r}")
+            bad += 1
+        elif "angels two four" not in spoken_fix or "zero" in spoken_fix.split("angels", 1)[-1]:
+            print(f"  FAIL CAOC alpha altitude: {fix}")
+            bad += 1
+        else:
+            print("alpha check — Angels 24 (two four) from Blackjack and Bandsaw")
+
+        import tanker as tanker_mod
+
+        class _TankerEng:
+            def __init__(self) -> None:
+                self.steps = [
+                    {
+                        "id": "bj",
+                        "channel": "blackjack",
+                        "template": "bj_check_in",
+                    },
+                    {
+                        "id": "tk",
+                        "channel": "tanker",
+                        "template": "radio_check",
+                    },
+                    {
+                        "id": "bs",
+                        "channel": "bandsaw",
+                        "template": "bandsaw_check_in",
+                    },
+                    {
+                        "id": "ex",
+                        "channel": "blackjack",
+                        "template": "bj_range_exit",
+                    },
+                ]
+                self.state: dict = {"index": 0}
+
+            def save_state(self) -> None:
+                return None
+
+            def _advance_past_skippable(self) -> None:
+                idx = int(self.state.get("index") or 0)
+                while idx < len(self.steps) and tanker_mod.should_skip_tanker_step(
+                    self.steps[idx], self.state
+                ):
+                    idx += 1
+                self.state["index"] = idx
+
+        eng = _TankerEng()
+        skip_idle = tanker_mod.should_skip_tanker_step(eng.steps[1], eng.state)
+        tanker_mod.enter_tanker_overlay(eng)
+        skip_aar = tanker_mod.should_skip_tanker_step(
+            eng.steps[int(eng.state["index"])], eng.state
+        )
+        on_tk = str(eng.steps[int(eng.state["index"])].get("id")) == "tk"
+        eng.state["tanker_seen_tune"] = True
+        leave_bs = tanker_mod.leave_tanker_overlay(eng, "bandsaw", checkin=True)
+        on_bs = str(eng.steps[int(eng.state["index"])].get("id")) == "bs"
+        eng2 = _TankerEng()
+        tanker_mod.enter_tanker_overlay(eng2)
+        eng2.state["tanker_seen_tune"] = True
+        tanker_mod.leave_tanker_overlay(eng2, "blackjack", checkin=True)
+        on_bj = str(eng2.steps[int(eng2.state["index"])].get("id")) == "bj"
+        hold_tk = voice_intent.step_holds_after_play(eng.steps[1])
+        follow = tanker_mod.note_tanker_tune(
+            {"tanker_overlay": True, "tanker_seen_tune": True},
+            "blackjack",
+        )
+        stay = tanker_mod.note_tanker_tune(
+            {"tanker_overlay": True}, "blackjack"
+        )
+        if (
+            not skip_idle
+            or skip_aar
+            or not on_tk
+            or leave_bs != "bandsaw"
+            or not on_bs
+            or not on_bj
+            or not hold_tk
+            or not follow
+            or stay
+        ):
+            print(
+                f"  FAIL tanker side trip: skip_idle={skip_idle} skip_aar={skip_aar} "
+                f"on_tk={on_tk} leave_bs={leave_bs} on_bs={on_bs} on_bj={on_bj} "
+                f"hold={hold_tk} follow={follow} stay={stay}"
+            )
+            bad += 1
+        else:
+            print(
+                "tanker side trip — skip in timeline; request parks on tanker; "
+                "return follows Blackjack or Bandsaw"
+            )
 
     return bad
 
