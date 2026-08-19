@@ -649,6 +649,7 @@ def check_freq_gate(
     *,
     target_mhz: float | None = None,
     channel: str | None = None,
+    state: dict[str, Any] | None = None,
 ) -> tuple[bool, str, MatchResult]:
     """
     Returns (allowed, status_message, match_result).
@@ -663,14 +664,16 @@ def check_freq_gate(
 
     tol = float(config.get("freq_gate_tolerance_mhz") or DEFAULT_TOL_MHZ)
     stale = float(config.get("freq_gate_stale_s") or DEFAULT_STALE_S)
-    state = current_radio_state(config, stale_s=stale)
+    radio = current_radio_state(config, stale_s=stale)
 
     ch = channel or ""
     freq = target_mhz
     if freq is None and step is not None:
         ch = ch or str(step.get("channel") or step.get("phase") or "other")
         try:
-            freq, _mod, _name = atc_phrase.step_radio(airport, ch, step)
+            freq, _mod, _name = atc_phrase.step_radio(
+                airport, ch, step, state=state, config=config
+            )
         except Exception:  # noqa: BLE001
             freq = None
     elif freq is None and ch:
@@ -678,21 +681,30 @@ def check_freq_gate(
             freq, _mod, _name = atc_phrase.channel_radio(airport, ch)
         except Exception:  # noqa: BLE001
             freq = None
+        if str(ch).strip().lower() == "tanker" and freq is not None:
+            try:
+                import tanker as tanker_mod
+
+                live = tanker_mod.effective_tanker_mhz(state, config)
+                if live is not None:
+                    freq = float(live)
+            except Exception:
+                pass
 
     if freq is None:
         return True, "Freq gate: no target freq", "unknown"
 
-    result = on_frequency(float(freq), state, tol_mhz=tol, config=config)
+    result = on_frequency(float(freq), radio, tol_mhz=tol, config=config)
     label = (ch or "step").upper()
     target = format_mhz(freq)
     if result == "match":
-        src = state.source.upper()
+        src = radio.source.upper()
         return True, f"On freq {target} ({label}) [{src}]", result
     if result == "unknown":
         return True, "Radio tune unknown — gate open", result
     return (
         False,
-        f"Blocked: tune {target} ({label}) — radios {format_freqs(state.freqs_mhz)}",
+        f"Blocked: tune {target} ({label}) — radios {format_freqs(radio.freqs_mhz)}",
         result,
     )
 
@@ -701,9 +713,11 @@ def gate_status_line(
     config: dict[str, Any],
     airport: dict[str, Any],
     step: dict[str, Any] | None,
+    *,
+    state: dict[str, Any] | None = None,
 ) -> str:
     """Short Fly-tab status for the current step."""
-    _allowed, msg, _result = check_freq_gate(config, airport, step)
+    _allowed, msg, _result = check_freq_gate(config, airport, step, state=state)
     return msg
 
 
@@ -727,21 +741,46 @@ def format_you_are_on(
     airport: dict[str, Any] | None = None,
     *,
     tol_mhz: float = DEFAULT_TOL_MHZ,
+    config: dict[str, Any] | None = None,
+    flow_state: dict[str, Any] | None = None,
 ) -> str:
     """
     Fly 'YOU ARE ON' line: every tuned radio, with TX on the keyed one.
 
     Intra-flight VHF still shows, but no longer hides UHF agencies.
+    Live tanker UHF (remembered / Opus) is labeled TANKER even when it differs
+    from the airports.json placeholder.
     """
     if not state.freqs_mhz:
         return ""
     import atc_phrase  # local import — avoid circular at module load
 
     tol = max(0.001, float(tol_mhz))
+    tanker_targets: list[float] = []
+    try:
+        import tanker as tanker_mod
+
+        live = tanker_mod.effective_tanker_mhz(flow_state, config)
+        if live is not None:
+            tanker_targets.append(float(live))
+        for mhz in tanker_mod.tanker_freqs_mhz(config):
+            try:
+                val = float(mhz)
+            except (TypeError, ValueError):
+                continue
+            if val > 0 and not any(abs(val - x) <= tol for x in tanker_targets):
+                tanker_targets.append(val)
+    except Exception:
+        pass
+
     parts: list[str] = []
     for freq in state.freqs_mhz:
         label = format_mhz(freq)
-        if airport:
+        matched = False
+        if any(abs(float(t) - freq) <= tol for t in tanker_targets):
+            label = f"TANKER {format_mhz(freq)}"
+            matched = True
+        if not matched and airport:
             for ch in atc_phrase.CHANNELS:
                 try:
                     mhz, _mod, _name = atc_phrase.channel_radio(airport, ch)
@@ -751,6 +790,14 @@ def format_you_are_on(
                     continue
                 try:
                     if abs(float(mhz) - freq) <= tol:
+                        # Don't brand the static 251 placeholder as TANKER when
+                        # a live tanker UHF is already known and different.
+                        if (
+                            str(ch).lower() == "tanker"
+                            and tanker_targets
+                            and not any(abs(float(mhz) - t) <= tol for t in tanker_targets)
+                        ):
+                            continue
                         label = f"{str(ch).upper()} {format_mhz(freq)}"
                         break
                 except (TypeError, ValueError):

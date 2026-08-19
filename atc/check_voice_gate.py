@@ -496,9 +496,11 @@ def extras() -> int:
         bad += 1
 
     # Position decides the plate when nothing is filed or requested.
+    # Only outer range-gate IAFs (ARCOE / DUDBE) — never SHEET/5k on ILS X.
     for label, pos, want_inst, want_iaf in (
         ("north (Arcoe side)", (36.90, -114.90), "ILS_Z_21L", "ARCOE"),
         ("west (Dudbe side)", (36.40, -115.90), "HI_TACAN_Y_21L", "DUDBE"),
+        ("near Sheet (still Arcoe gate)", (36.45, -114.85), "ILS_Z_21L", "ARCOE"),
     ):
         p_pos = atc_phrase.assign_approach_plan(
             nellis, ifr, state={}, force=True, position=pos
@@ -512,7 +514,68 @@ def extras() -> int:
         elif p_pos.get("iaf_source") != "position":
             print(f"  FAIL position-picked IAF should be labelled: {p_pos}")
             bad += 1
-    print("approach position pick — north gets ARCOE, west gets DUDBE")
+        elif want_iaf == "ARCOE" and int(p_pos.get("descend_ft") or 0) != 15000:
+            print(f"  FAIL Arcoe gate must be 15000: {p_pos}")
+            bad += 1
+    print("approach position pick — north/near-Sheet gets ARCOE, west gets DUDBE")
+
+    # Blackjack IMC exit must match Approach (ARCOE/15k), not SHEET/5k.
+    st_imc = {}
+    plan_near_sheet = atc_phrase.assign_approach_plan(
+        nellis, ifr, state=st_imc, force=True, position=(36.45, -114.85)
+    )
+    bj_imc = atc_phrase.build_blackjack_range_exit(
+        nellis, "Fleece 1", plan=plan_near_sheet
+    )
+    clear_near = atc_phrase.build_iaf_clearance(
+        nellis, "Fleece 1", plan=plan_near_sheet
+    )
+    if plan_near_sheet.get("iaf") != "ARCOE" or int(plan_near_sheet.get("descend_ft") or 0) != 15000:
+        print(f"  FAIL IMC near Sheet must plan ARCOE/15k: {plan_near_sheet}")
+        bad += 1
+    elif "sheet" in bj_imc.lower() or "five thousand" in bj_imc.lower():
+        print(f"  FAIL Blackjack must not clear SHEET/5k in IMC: {bj_imc}")
+        bad += 1
+    elif "proceed direct arcoe" not in bj_imc.lower():
+        print(f"  FAIL Blackjack IMC exit should proceed direct Arcoe: {bj_imc}")
+        bad += 1
+    elif "cross arcoe" not in clear_near.lower():
+        print(f"  FAIL Approach clearance should match Blackjack gate: {clear_near}")
+        bad += 1
+    elif "fifteen thousand" not in bj_imc.lower() and "one fife" not in bj_imc.lower():
+        print(f"  FAIL Blackjack IMC descend should be 15k: {bj_imc}")
+        bad += 1
+    else:
+        print(f"blackjack/approach IMC align — {bj_imc}")
+
+    # Sticky SHEET leftover from an old position pick must rebuild to the gate.
+    st_sheet = {
+        "approach_assigned": True,
+        "approach_plan": {
+            "pattern": "instrument",
+            "runway": "21L",
+            "instrument_id": "ILS_X_21L",
+            "instrument_say": "ILS X-ray runway two one left",
+            "iaf": "SHEET",
+            "iaf_say": "Sheet",
+            "iaf_source": "position",
+            "descend_ft": 5000,
+            "iaf_altitude_type": "at_or_above",
+            "vmc": False,
+            "source": "position",
+        },
+        "active_recovery": "instrument",
+        "ownship_ll": [36.45, -114.85],
+        "ownship_ll_t": __import__("time").time(),
+    }
+    plan_fixed_sheet = atc_phrase.assign_approach_plan(
+        nellis, ifr, state=st_sheet, force=False
+    )
+    if plan_fixed_sheet.get("iaf") != "ARCOE" or int(plan_fixed_sheet.get("descend_ft") or 0) != 15000:
+        print(f"  FAIL sticky SHEET must rebuild to ARCOE/15k: {plan_fixed_sheet}")
+        bad += 1
+    else:
+        print("approach sticky SHEET rebuild — ARCOE / 15000")
 
     # VMC: the VFR recovery follows the range you are coming home from.
     vmc_03 = atc_phrase.Weather(30, 12, 29.92, "KLSV 03012KT 10SM", visibility_sm=10)
@@ -2586,8 +2649,9 @@ def extras() -> int:
             "identified" in (opener or "").lower()
             or "dunkin or starbucks" not in (opener or "").lower()
             or not dunk
-            or "dunkin" not in dunk.lower()
             or "keurig" not in dunk.lower()
+            or dunk.lower().startswith("dunkin, copy")
+            or dunk.lower().startswith("copy dunkin")
             or not tanker_chat_mod.is_open(st)
             or not bare.fired
             or bare.match.intent != "tanker_chat_reply"
@@ -2600,7 +2664,31 @@ def extras() -> int:
             )
             bad += 1
         else:
-            print("tanker chat — Dunkin/Starbucks, one-word answer, agency optional")
+            print("tanker chat — Dunkin/Starbucks, reply without parroted copy")
+
+        soft = tanker_chat_mod.naturalize_reply(
+            "Navy, copy. Correct. They show up like a boat.", force=True
+        )
+        if soft.lower().startswith("navy") or "copy" in soft.lower().split(",")[0]:
+            print(f"  FAIL naturalize_reply still echoes: {soft!r}")
+            bad += 1
+        else:
+            print(f"tanker chat naturalize — {soft}")
+
+        forty = tanker_chat_mod._fill("I'm good for someone over 40.")
+        prepared = atc_phrase.prepare_radio_tts_text(forty)
+        if (
+            "four zero" in forty.casefold()
+            or "forty" not in forty.casefold()
+            or "four zero" in prepared.casefold()
+        ):
+            print(
+                f"  FAIL boom chat should say forty not four zero: "
+                f"{forty!r} → {prepared!r}"
+            )
+            bad += 1
+        else:
+            print(f"tanker chat casual numbers — {forty}")
 
         import tanker_chat_library as tanker_chat_lib
 
@@ -2609,8 +2697,55 @@ def extras() -> int:
         if lib_n < 50 or len(set(ids)) != lib_n or "dunkin_starbucks" not in ids:
             print(f"  FAIL tanker chat library size/ids: n={lib_n} unique={len(set(ids))}")
             bad += 1
+        elif "desert_glow" not in ids or "weirdest_cockpit" not in ids:
+            print(f"  FAIL tanker chat library missing riff/open bits: {ids[-10:]}")
+            bad += 1
         else:
-            print(f"tanker chat library — {lib_n} unique A/B threads")
+            print(f"tanker chat library — {lib_n} unique bits (A/B + riff + open)")
+
+        st_riff = {}
+        riff_open = tanker_chat_mod.start_chat(
+            st_riff, "Fleece 1", {"callsign": "TEXACO 1"}, thread_id="desert_glow"
+        )
+        riff_waiting = (
+            tanker_chat_mod.is_awaiting_react(st_riff)
+            and not tanker_chat_mod.current_choices(st_riff)
+        )
+        riff_ans = tanker_chat_mod.answer_chat(
+            st_riff,
+            "Fleece 1",
+            {"callsign": "TEXACO 1"},
+            transcript="yeah that is pretty",
+        )
+        free = voice_intent.evaluate(
+            "ha yeah pretty out here",
+            channel="tanker",
+            phase="flight",
+            callsign=CALLSIGN,
+            runways=RUNWAYS,
+            tanker_chat_session=True,
+            tanker_chat_awaiting_react=True,
+        )
+        if (
+            not riff_open
+            or "fleece" in (riff_open or "").lower()
+            or "texaco" in (riff_open or "").lower()
+            or not riff_waiting
+            or not riff_ans
+            or not tanker_chat_mod.is_session_active(st_riff)
+            or not tanker_chat_mod.is_awaiting_react(st_riff)
+            or int((st_riff.get("tanker_chat") or {}).get("turns") or 0) < 1
+            or not free.fired
+            or free.match.intent != "tanker_chat_reply"
+        ):
+            print(
+                f"  FAIL tanker riff chat: open={riff_open!r} ans={riff_ans!r} "
+                f"waiting={riff_waiting} free={free.describe()} "
+                f"state={st_riff.get('tanker_chat')}"
+            )
+            bad += 1
+        else:
+            print("tanker chat riff — freeform react keeps the bit open")
 
         llm_ok = tanker_chat_mod.normalize_llm_thread(
             {
@@ -2620,6 +2755,22 @@ def extras() -> int:
                     {"say": "Tea", "reply": "Tea, copy. Fancy."},
                 ],
             }
+        )
+        llm_riff = tanker_chat_mod.normalize_llm_thread(
+            {
+                "kind": "riff",
+                "opener": "Desert looks like a glowing parking lot from up here tonight.",
+            }
+        )
+        llm_demote = tanker_chat_mod.normalize_llm_thread(
+            {
+                "kind": "ab",
+                "opener": "Anybody else cold on the boom today up here?",
+                "choices": [{"say": "Yes", "reply": "Yep."}],
+            }
+        )
+        llm_salvage = tanker_chat_mod.normalize_llm_thread(
+            "Man, the desert looks like a glowing parking lot from up here."
         )
         llm_bad = tanker_chat_mod.normalize_llm_thread(
             {"opener": "hi", "choices": [{"say": "Rejoin", "reply": "nope"}]}
@@ -2640,21 +2791,253 @@ def extras() -> int:
         )
         if (
             not llm_ok
-            or "{cs}" not in str(llm_ok.get("opener") or "")
+            or "{cs}" in str(llm_ok.get("opener") or "").lower()
+            or "fleece" in str(llm_ok.get("opener") or "").lower()
             or len(llm_ok.get("choices") or []) != 2
             or "coffee" not in (llm_ok["choices"][0].get("hits") or ())
+            or not llm_riff
+            or llm_riff.get("kind") != "riff"
+            or not llm_demote
+            or llm_demote.get("kind") != "riff"
+            or not llm_salvage
+            or llm_salvage.get("kind") != "riff"
             or llm_bad is not None
             or llm_off is not None
             or llm_auto != ("openai", "sk-test")
             or "dunkin or starbucks" not in (pinned or "").lower()
+            or "fleece" in (pinned or "").lower()
+            or "texaco" in (pinned or "").lower()
         ):
             print(
-                f"  FAIL tanker chat LLM normalize: ok={llm_ok} bad={llm_bad} "
-                f"off={llm_off} auto={llm_auto} pinned={pinned!r}"
+                f"  FAIL tanker chat LLM normalize: ok={llm_ok} riff={llm_riff} "
+                f"demote={llm_demote} salvage={llm_salvage} "
+                f"bad={llm_bad} off={llm_off} auto={llm_auto} pinned={pinned!r}"
             )
             bad += 1
         else:
-            print("tanker chat LLM — normalize, fallback, pin dunkin even if LLM is on")
+            print("tanker chat LLM — normalize A/B + riff/demote/salvage, pin dunkin")
+
+        multi = (
+            '{"id":1234,"kind":"riff","opener":"Still getting used to these new headphones."} '
+            '{"id":1235,"kind":"ab","opener":"Favorite snack?","choices":[{"say":"Trail mix","reply":"ok"}]}'
+        )
+        multi_node = tanker_chat_mod.normalize_llm_thread(multi)
+        raw_json_salvage = tanker_chat_mod._salvage_riff_text(
+            '{"id":1,"kind":"riff","opener":"Orbit boredom hits different at sunset."}'
+        )
+        if (
+            not multi_node
+            or multi_node.get("kind") != "riff"
+            or "headphones" not in str(multi_node.get("opener") or "").lower()
+            or str(multi_node.get("opener") or "").lstrip().startswith("{")
+            or not raw_json_salvage
+            or "sunset" not in str(raw_json_salvage.get("opener") or "").lower()
+            or str(raw_json_salvage.get("opener") or "").lstrip().startswith("{")
+        ):
+            print(
+                f"  FAIL tanker LLM multi-object parse: multi={multi_node} "
+                f"salvage={raw_json_salvage}"
+            )
+            bad += 1
+        else:
+            print("tanker chat LLM — multi-object JSON takes first opener only")
+
+        # With LLM on, freeform speech can riff — not locked to A/B buttons.
+        st_live = {}
+        tanker_chat_mod.start_chat(
+            st_live, "Fleece 1", {"callsign": "TEXACO 1"}, thread_id="dunkin_starbucks"
+        )
+        live_cfg = {"tanker_chat_llm": "ollama"}
+        real_try = tanker_chat_mod.try_llm_react
+        real_models = tanker_chat_mod.list_ollama_models
+
+        def _fake_react(config, *, opener, pilot, state=None):
+            assert "coffee" in (opener or "").lower() or "dunkin" in (opener or "").lower()
+            assert "hate both" in (pilot or "").lower()
+            return "Ha — pick neither, then. Boom crew respects chaos."
+
+        tanker_chat_mod.try_llm_react = _fake_react  # type: ignore[assignment]
+        tanker_chat_mod.list_ollama_models = lambda config=None: ["llama3.2"]  # type: ignore[assignment]
+        try:
+            live_reply = tanker_chat_mod.answer_chat(
+                st_live,
+                "Fleece 1",
+                {"callsign": "TEXACO 1"},
+                transcript="I hate both of them honestly",
+                config=live_cfg,
+            )
+            free_live = voice_intent.evaluate(
+                "I hate both of them honestly",
+                channel="tanker",
+                phase="flight",
+                callsign=CALLSIGN,
+                runways=RUNWAYS,
+                tanker_chat_choices=tanker_chat_mod.current_choices(
+                    {"tanker_chat": {"choices": [{"id": "dunkin", "say": "Dunkin", "hits": ("dunkin",)}]}}
+                ),
+                tanker_chat_freeform=True,
+            )
+        finally:
+            tanker_chat_mod.try_llm_react = real_try  # type: ignore[assignment]
+            tanker_chat_mod.list_ollama_models = real_models  # type: ignore[assignment]
+        if (
+            not live_reply
+            or "chaos" not in live_reply.lower()
+            or live_reply.lower().startswith("dunkin")
+            or not free_live.fired
+            or free_live.match.intent != "tanker_chat_reply"
+            or not tanker_chat_mod.is_awaiting_react(st_live)
+        ):
+            print(
+                f"  FAIL tanker LLM freeform riff: reply={live_reply!r} "
+                f"free={free_live.describe()} state={st_live.get('tanker_chat')}"
+            )
+            bad += 1
+        else:
+            print("tanker chat LLM freeform — riff beyond A/B choices")
+
+        # Long / question speech must not get trapped in a one-word A/B canned reply.
+        st_q = {}
+        tanker_chat_mod.start_chat(
+            st_q, "Fleece 1", {"callsign": "TEXACO 1"}, thread_id="dunkin_starbucks"
+        )
+        saw = {"pilot": ""}
+
+        def _fake_answer(config, *, opener, pilot, state=None):
+            saw["pilot"] = str(pilot or "")
+            return "Mostly sandwiches — catering surprises us on Fridays."
+
+        tanker_chat_mod.try_llm_react = _fake_answer  # type: ignore[assignment]
+        tanker_chat_mod.list_ollama_models = lambda config=None: ["llama3.2"]  # type: ignore[assignment]
+        try:
+            q_reply = tanker_chat_mod.answer_chat(
+                st_q,
+                "Fleece 1",
+                {"callsign": "TEXACO 1"},
+                transcript="Dunkin is fine, but what do you guys actually eat for lunch?",
+                config={"tanker_chat_llm": "ollama"},
+            )
+        finally:
+            tanker_chat_mod.try_llm_react = real_try  # type: ignore[assignment]
+            tanker_chat_mod.list_ollama_models = real_models  # type: ignore[assignment]
+        if (
+            not tanker_chat_mod.looks_like_question_or_chat(
+                "Dunkin is fine, but what do you guys actually eat for lunch?"
+            )
+            or not q_reply
+            or "sandwich" not in q_reply.lower()
+            or "keurig" in q_reply.lower()
+            or "lunch" not in saw["pilot"].lower()
+            or (st_q.get("tanker_chat") or {}).get("opener", "").lower().startswith("dunkin")
+        ):
+            # After a live answer, opener should track her last reply, not the A/B poll.
+            print(
+                f"  FAIL tanker question should bypass A/B: reply={q_reply!r} "
+                f"saw={saw} state={st_q.get('tanker_chat')}"
+            )
+            bad += 1
+        else:
+            print("tanker chat questions — bypass A/B canned reply, answer live")
+
+        # No models → clear note, library fallback (do not pretend Ollama fired).
+        st_mem = {}
+        tanker_chat_mod.append_history(
+            st_mem, "boom", "Dunkin or Starbucks — boom poll, go."
+        )
+        tanker_chat_mod.append_history(st_mem, "pilot", "Starbucks, easy.")
+        tanker_chat_mod.append_history(
+            st_mem, "boom", "Starbucks it is — I'll pretend the Keurig agrees."
+        )
+        hist_blob = tanker_chat_mod.format_history(st_mem)
+        cool = tanker_chat_mod.coffee_on_cooldown(st_mem)
+        prompt_ban = tanker_chat_mod._llm_prompt(
+            [], history=hist_blob, ban_coffee=True
+        )
+        coffee_picks = 0
+        for _ in range(24):
+            node = tanker_chat_mod._pick_library_for_state(st_mem, [], None)
+            opener_n = str(node.get("opener") or "")
+            tid_n = str(node.get("id") or "")
+            if tanker_chat_mod._mentions_coffee(opener_n) or tanker_chat_mod._mentions_coffee(
+                tid_n
+            ):
+                coffee_picks += 1
+        st_hist_chat = {}
+        tanker_chat_mod.start_chat(
+            st_hist_chat,
+            "Fleece 1",
+            {"callsign": "TEXACO 1"},
+            thread_id="dunkin_starbucks",
+            config={"tanker_chat_llm": "off"},
+        )
+        tanker_chat_mod.answer_chat(
+            st_hist_chat,
+            "Fleece 1",
+            {"callsign": "TEXACO 1"},
+            choice_id="starbucks",
+            config={"tanker_chat_llm": "off"},
+        )
+        hist_after = tanker_chat_mod.format_history(st_hist_chat)
+        if (
+            "Boom:" not in hist_blob
+            or "Pilot:" not in hist_blob
+            or "Starbucks" not in hist_blob
+            or not cool
+            or "exhausted" not in prompt_ban.casefold()
+            or "Recent chat:" not in prompt_ban
+            or coffee_picks > 0
+            or "Dunkin" not in hist_after
+            or "Pilot:" not in hist_after
+        ):
+            print(
+                f"  FAIL tanker chat memory/coffee: hist={hist_blob!r} cool={cool} "
+                f"coffee_picks={coffee_picks} after={hist_after!r}"
+            )
+            bad += 1
+        else:
+            print("tanker chat memory — history + coffee cooldown skips coffee bits")
+
+        # No models → clear note, library fallback (do not pretend Ollama fired).
+        st_empty = {}
+        tanker_chat_mod._set_llm_error("", st_empty)
+        tanker_chat_mod.list_ollama_models = lambda config=None: []  # type: ignore[assignment]
+        try:
+            tanker_chat_mod.start_chat(
+                st_empty,
+                "Fleece 1",
+                {"callsign": "TEXACO 1"},
+                config={"tanker_chat_llm": "ollama"},
+            )
+            note = tanker_chat_mod.llm_note(st_empty)
+        finally:
+            tanker_chat_mod.list_ollama_models = real_models  # type: ignore[assignment]
+        if "pull llama" not in note.lower() and "no ollama" not in note.lower():
+            print(f"  FAIL ollama empty models should note pull: {note!r}")
+            bad += 1
+        else:
+            print(f"tanker chat Ollama empty — {note}")
+
+        # Echo of Texaco's own TX must not trigger a freeform LLM reply.
+        st_echo = {}
+        tanker_chat_mod.start_chat(
+            st_echo, "Fleece 1", {"callsign": "TEXACO 1"}, thread_id="desert_glow"
+        )
+        opener_echo = str((st_echo.get("tanker_chat") or {}).get("opener") or "")
+        tanker_chat_mod.arm_tx_guard(st_echo, opener_echo)
+        echoed = tanker_chat_mod.answer_chat(
+            st_echo,
+            "Fleece 1",
+            {"callsign": "TEXACO 1"},
+            transcript=opener_echo,
+            config={"tanker_chat_llm": "off"},
+        )
+        if echoed is not None or not tanker_chat_mod.looks_like_own_echo(
+            opener_echo, st_echo
+        ):
+            print(f"  FAIL boom echo should be ignored: echoed={echoed!r}")
+            bad += 1
+        else:
+            print("tanker chat echo guard — ignores Texaco talking to herself")
 
         import tanker as tanker_mod
 

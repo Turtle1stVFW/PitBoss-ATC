@@ -1,9 +1,13 @@
 """
 Canned boom / reform small-talk threads.
 
-Each thread is a short A/B question with one-word answers so the pilot can
-reply on the boom without a full radio call. Keep hits away from official
-tanker words (rejoin, contact, disconnect, observation).
+Mix of:
+  • A/B (or A/B/C) polls — one-word answers
+  • riffs — observations / banter; optional freeform react
+  • open questions — answer in your own words
+
+Keep hits away from official tanker words (rejoin, contact, disconnect,
+observation).
 """
 
 from __future__ import annotations
@@ -39,12 +43,57 @@ def C(
     return row
 
 
+def R(
+    say: str,
+    reply: str,
+    *hits: str,
+    follow: dict[str, Any] | None = None,
+    cid: str | None = None,
+) -> dict[str, Any]:
+    """Patterned freeform react for a riff / open bit."""
+    return C(say, reply, *hits, follow=follow, cid=cid)
+
+
 def F(opener: str, a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
-    return {"id": "follow", "opener": opener, "choices": [a, b]}
+    return {"id": "follow", "kind": "ab", "opener": opener, "choices": [a, b]}
 
 
 def T(tid: str, opener: str, a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
-    return {"id": tid, "opener": opener, "choices": [a, b]}
+    return {"id": tid, "kind": "ab", "opener": opener, "choices": [a, b]}
+
+
+def Riff(
+    tid: str,
+    opener: str,
+    *reacts: dict[str, Any],
+) -> dict[str, Any]:
+    """Observation / banter — no forced A/B. Optional patterned reacts."""
+    row: dict[str, Any] = {
+        "id": tid,
+        "kind": "riff",
+        "opener": opener,
+        "choices": [],
+    }
+    if reacts:
+        row["reacts"] = list(reacts)
+    return row
+
+
+def Open(
+    tid: str,
+    opener: str,
+    *reacts: dict[str, Any],
+) -> dict[str, Any]:
+    """Open question — pilot answers in their own words."""
+    row: dict[str, Any] = {
+        "id": tid,
+        "kind": "open",
+        "opener": opener,
+        "choices": [],
+    }
+    if reacts:
+        row["reacts"] = list(reacts)
+    return row
 
 
 THREADS: list[dict[str, Any]] = [
@@ -1422,6 +1471,494 @@ THREADS: list[dict[str, Any]] = [
             "snack",
             "food",
             "bar",
+        ),
+    ),
+    # ---- Riffs / open small talk (not every bit is an A/B poll) --------------
+    Riff(
+        "desert_glow",
+        "Man, the desert looks like a glowing parking lot from up here. "
+        "Whole valley just sitting there like it paid rent.",
+        R(
+            "Pretty",
+            "Pretty, copy. Big windows, bad coffee, better scenery. Fair trade.",
+            "pretty",
+            "beautiful",
+            "nice",
+            "wow",
+        ),
+        R(
+            "Boring",
+            "Boring, copy. Yeah, after the tenth orbit it's just brown. "
+            "Still beats the paperwork.",
+            "boring",
+            "meh",
+            "whatever",
+            "same",
+        ),
+    ),
+    Riff(
+        "boom_coffee_story",
+        "Random boom fact while you're hanging out — somebody brought a French press "
+        "up here once. Lasted three sorties. Then gravity won. Now it's Keurig and denial.",
+        R(
+            "Classic",
+            "Classic, copy. We still talk about that press like it was a fallen hero.",
+            "classic",
+            "lol",
+            "haha",
+            "ha",
+            "funny",
+        ),
+    ),
+    Riff(
+        "quiet_night",
+        "Kinda quiet on the frequency tonight. Just us, the boom, and whatever song "
+        "the navigator is humming that is definitely not in key.",
+        R(
+            "I hear it",
+            "You hear it, copy. Tell him we said stop. He will not stop.",
+            "hear",
+            "hearing",
+            "song",
+            "music",
+        ),
+        R(
+            "Peaceful",
+            "Peaceful, copy. Good day for gas. Don't jinx it.",
+            "peaceful",
+            "quiet",
+            "nice",
+            "calm",
+        ),
+    ),
+    Riff(
+        "stable_looking",
+        "You're looking real stable from here. Sit there, drink whatever counts as coffee "
+        "in a Viper, and let us do the boring part.",
+    ),
+    Riff(
+        "snack_jealousy",
+        "Not gonna lie — if you've got a Pop-Tart down there, the boom crew is jealous. "
+        "We can smell crumbs through the radio. Science.",
+        R(
+            "No crumbs",
+            "No crumbs, copy. Responsible. We respect that and then eat yours in our heads.",
+            "no",
+            "none",
+            "empty",
+            "out",
+        ),
+        R(
+            "Got one",
+            "Got one, copy. Protect it. Do not crush it in the bag. That's a war crime.",
+            "got",
+            "have",
+            "yes",
+            "pop",
+            "tart",
+        ),
+    ),
+    Riff(
+        "orbit_thoughts",
+        "We've been drawing circles up here so long the autopilot filed for overtime. "
+        "You're the entertainment. Try not to make it too interesting.",
+    ),
+    Riff(
+        "window_seat",
+        "Best seat on the jet is the boom — terrible coffee, excellent gossip, "
+        "and a free show every time somebody joins. You're doing great, by the way.",
+        R(
+            "Thanks",
+            "You bet. Keep it easy. We'll keep her steady.",
+            "thanks",
+            "thank",
+            "appreciate",
+            "cheers",
+        ),
+    ),
+    Open(
+        "weirdest_cockpit",
+        "Open question while the gas is flowing — weirdest thing currently in your cockpit. "
+        "Go.",
+        R(
+            "Snacks",
+            "Snacks, copy. That's not weird, that's survival. Approved loadout.",
+            "snack",
+            "snacks",
+            "food",
+            "bar",
+            "tart",
+            "nugget",
+        ),
+        R(
+            "Nothing",
+            "Nothing, copy. Clean cockpit energy. Respect. Also suspicious.",
+            "nothing",
+            "empty",
+            "clean",
+            "none",
+        ),
+        R(
+            "Phone",
+            "Phone, copy. Don't drop it. We are not diving for a phone.",
+            "phone",
+            "cell",
+            "iphone",
+        ),
+    ),
+    Open(
+        "after_this",
+        "After this, what's the move — food, sleep, or pretending you still have hobbies?",
+        R(
+            "Food",
+            "Food, copy. Correct priority. Tell the snack bar the boom sent you.",
+            "food",
+            "eat",
+            "hungry",
+            "taco",
+            "burger",
+            "pizza",
+        ),
+        R(
+            "Sleep",
+            "Sleep, copy. Autopilot and a dream. We'll keep the boom quiet.",
+            "sleep",
+            "nap",
+            "bed",
+            "rack",
+            "tired",
+        ),
+        R(
+            "Hobbies",
+            "Hobbies, copy. Bold claim at this hour. We believe in you for about ten minutes.",
+            "hobby",
+            "hobbies",
+            "pretend",
+            "gaming",
+            "gym",
+        ),
+    ),
+    Open(
+        "song_stuck",
+        "What's the song stuck in your head right now? Be honest. The boom already knows if it's bad.",
+        R(
+            "Nothing",
+            "Nothing, copy. Lucky. Ours is the navigator's off-key humming on loop.",
+            "nothing",
+            "none",
+            "blank",
+            "empty",
+        ),
+        R(
+            "Country",
+            "Country, copy. That's a long orbit song. Approved.",
+            "country",
+            "nashville",
+        ),
+        R(
+            "Metal",
+            "Metal, copy. Keep the volume where we can't hear the headbanging on the boom.",
+            "metal",
+            "rock",
+            "heavy",
+        ),
+    ),
+    Open(
+        "best_gas_station",
+        "Serious research question — best gas station snack of all time. We need data.",
+        R(
+            "Jerky",
+            "Jerky, copy. Classic boom fuel. Chewy. Dependable. Judgmental.",
+            "jerky",
+            "beef",
+        ),
+        R(
+            "Candy",
+            "Candy, copy. Sugar and spite. Sustainable.",
+            "candy",
+            "chocolate",
+            "skittles",
+            "sour",
+        ),
+        R(
+            "Chips",
+            "Chips, copy. Loud bag, zero stealth. We still support this.",
+            "chips",
+            "chip",
+            "doritos",
+            "lays",
+        ),
+    ),
+    Riff(
+        "weather_report",
+        "Unofficial weather from twenty-six thousand — clear, a little bumpy on the edges, "
+        "and one hundred percent chance of somebody asking about coffee again.",
+    ),
+    Riff(
+        "almost_done",
+        "You're almost topped off from what we can see. Hang out, stay boring, "
+        "and we'll get you back to collecting stories for the debrief.",
+        R(
+            "Copy",
+            "Copy. Looking good. Almost there.",
+            "copy",
+            "roger",
+            "wilco",
+        ),
+    ),
+    # ---- Community rivalry (Navy / Mudhen / Eagle) — boom-crew approved -----
+    T(
+        "navy_or_air_force",
+        "{cs}, {tcs}, serious boom poll. Who's harder to gas — Navy guys, or you lot?",
+        C(
+            "Navy",
+            "Navy, copy. Correct. They show up like it's a boat and we're a floating pier. "
+            "You're doing fine. Don't tell them we said that.",
+            "navy",
+            "naval",
+            "boat",
+            "carrier",
+            "hornet",
+            "super hornet",
+        ),
+        C(
+            "Us",
+            "Us, copy. Honesty. Rare on this freq. Still easier than a Mudhen "
+            "who brought the whole jet and half the squadron's feelings.",
+            "us",
+            "vipers",
+            "viper",
+            "air force",
+            "af",
+            "me",
+        ),
+    ),
+    T(
+        "mudhen_or_eagle",
+        "{cs}, {tcs}, boom crew argument. Who complains more on the radio — "
+        "Mudhens or Eagles?",
+        C(
+            "Mudhens",
+            "Mudhens, copy. Two seats, twice the opinions. We measured. "
+            "Science is settled.",
+            "mudhen",
+            "mudhens",
+            "strike eagle",
+            "f fifteen e",
+            "fifteen e",
+        ),
+        C(
+            "Eagles",
+            "Eagles, copy. One seat, infinite superiority. They gas like the "
+            "boom owes them rent.",
+            "eagle",
+            "eagles",
+            "f fifteen",
+            "fifteen c",
+            "fast eagle",
+        ),
+    ),
+    T(
+        "boat_vs_boom",
+        "{cs}, {tcs}, if you had to pick — trap on a boat in the weather, "
+        "or hang on our boom with this coffee?",
+        C(
+            "Boat",
+            "Boat, copy. Bold. Tell the Navy we said hi and that their "
+            "wiring diagrams still look like spaghetti.",
+            "boat",
+            "trap",
+            "carrier",
+            "boat trap",
+            "deck",
+        ),
+        C(
+            "Boom",
+            "Boom, copy. Smart. Warm gas, bad jokes, no salt water. "
+            "You're among friends.",
+            "boom",
+            "here",
+            "yours",
+            "tanker",
+            "this",
+        ),
+    ),
+    Riff(
+        "navy_join",
+        "Had a Navy guy on the boom last week. Asked if we had a 'ready deck.' "
+        "Buddy, this is a KC-135. The deck is wherever the coffee spills.",
+        R(
+            "Classic",
+            "Classic, copy. We still tell that story. They still don't get it.",
+            "classic",
+            "lol",
+            "haha",
+            "ha",
+            "funny",
+        ),
+        R(
+            "Heard worse",
+            "Heard worse, copy. Hornet drivers invent new radio procedures mid-join. "
+            "Keeps us young.",
+            "worse",
+            "heard",
+            "hornet",
+            "navy",
+        ),
+    ),
+    Riff(
+        "mudhen_opinions",
+        "Unpopular boom opinion — Mudhens don't need two radios. They need one "
+        "radio and a mute switch for the back seat. Don't quote me. Quote me.",
+        R(
+            "Facts",
+            "Facts, copy. WSO's got the map, the jet, and the lecture. "
+            "Pilot's just driving the gas station.",
+            "facts",
+            "true",
+            "fact",
+            "yes",
+        ),
+        R(
+            "Harsh",
+            "Harsh, copy. Fair. We'll still gas 'em. Slowly. With commentary.",
+            "harsh",
+            "mean",
+            "ouch",
+            "rude",
+        ),
+    ),
+    Riff(
+        "eagle_superiority",
+        "Eagle pilots gas like they're doing us a favor. Big jet energy. "
+        "Tiny patience. We smile, push gas, and save the jokes for after they're gone.",
+        R(
+            "Accurate",
+            "Accurate, copy. Fast jet, faster ego. Still family. Distant family.",
+            "accurate",
+            "true",
+            "yes",
+            "facts",
+        ),
+        R(
+            "Be nice",
+            "Be nice, copy. Fine. They're pretty. The jet, I mean. Mostly the jet.",
+            "nice",
+            "be nice",
+            "kind",
+            "easy",
+        ),
+    ),
+    Riff(
+        "viper_favorite",
+        "Between us — Vipers are our favorite. Quiet-ish, don't call the boom a "
+        "'probe,' and you actually say thanks sometimes. Navy files that under optional.",
+        R(
+            "Thanks",
+            "See? There it is. Written up. Boom crew morale just went up one percent.",
+            "thanks",
+            "thank",
+            "appreciate",
+            "cheers",
+        ),
+        R(
+            "Don't tell Navy",
+            "Don't tell Navy, copy. Too late. They're already writing a NATOPS change.",
+            "navy",
+            "don't",
+            "secret",
+            "quiet",
+        ),
+    ),
+    Open(
+        "worst_join_story",
+        "Open mic — worst community join you've seen. Navy, Mudhen, Eagle, or "
+        "somebody who shall remain nameless. Boom is taking notes.",
+        R(
+            "Navy",
+            "Navy, copy. Filed under 'boat procedures, land edition.' "
+            "We still laugh about it on the long orbits.",
+            "navy",
+            "boat",
+            "hornet",
+            "carrier",
+        ),
+        R(
+            "Mudhen",
+            "Mudhen, copy. Two voices, three directions, one confused boom operator. "
+            "Classic Strike Eagle theater.",
+            "mudhen",
+            "mudhens",
+            "strike",
+            "wso",
+        ),
+        R(
+            "Eagle",
+            "Eagle, copy. Showed up already superior. Left still superior. "
+            "Gas was the only thing that changed.",
+            "eagle",
+            "eagles",
+            "fifteen",
+        ),
+    ),
+    Open(
+        "who_youd_gas_last",
+        "Honest boom question — if fuel was short, who are you gassing last: "
+        "Navy, Mudhen, or Eagle?",
+        R(
+            "Navy",
+            "Navy last, copy. They can hold. Or find a boat. Not our problem. "
+            "Mostly kidding. Mostly.",
+            "navy",
+            "boat",
+            "hornet",
+        ),
+        R(
+            "Mudhen",
+            "Mudhen last, copy. They'll discuss it as a crew for twenty minutes "
+            "anyway. Buys us time.",
+            "mudhen",
+            "mudhens",
+            "strike",
+        ),
+        R(
+            "Eagle",
+            "Eagle last, copy. They'll claim they didn't need it. "
+            "Then ask for more. Then claim they didn't need it.",
+            "eagle",
+            "eagles",
+        ),
+    ),
+    Riff(
+        "navy_callsigns",
+        "Navy callsigns sound like a bar fight and a boat manual had a baby. "
+        "Meanwhile you're over here just trying to drink cold coffee and not hit us. Respect.",
+    ),
+    Riff(
+        "eagle_paint",
+        "Saw an Eagle yesterday with paint so clean it looked offended to be on our boom. "
+        "We gave him gas anyway. Charity work.",
+        R(
+            "Ha",
+            "Ha, copy. Pretty jet, fragile ego, full tanks. Everybody wins.",
+            "ha",
+            "haha",
+            "lol",
+            "funny",
+        ),
+    ),
+    Riff(
+        "mudhen_map",
+        "Mudhen back-seater once asked if we could 'hold the boom a second' while "
+        "they folded a map. Sir. This is aviation. The map lost.",
+        R(
+            "WSO",
+            "WSO, copy. Loves the jet, loves the fight, mildly confused by gas stations "
+            "that fly. We get it.",
+            "wso",
+            "back seat",
+            "backseater",
+            "guy in back",
         ),
     ),
 ]

@@ -1,11 +1,17 @@
 """
 Boom / reform small talk on tanker freq (ATP-56 join is separate).
 
-Texaco starts a short A/B question while the receiver is in reform or on the
-boom. The pilot answers with one word — Dunkin, Starbucks, morning, quiet —
-no agency opener required. A large canned library is always available; an
-optional LLM can mint a fresh thread mid-sortie and falls back if it is slow
-or down.
+Texaco keeps an informal side-channel going while the receiver is in reform or
+on the boom — no callsign addressing. Bits are mixed:
+
+  • ab   — short A/B (or A/B/C) poll; one-word answers
+  • riff — observation / banter; optional freeform react, then auto-continues
+  • open — open question; freeform reply, then continues
+
+Not every turn is Ask → Answer → Respond. Replies can run a couple sentences,
+and a choice can chain into another bit. After a turn Texaco pauses, then comes
+back until the pilot stops the chat or leaves the tanker. Canned library always
+available; optional LLM mints fresh bits and falls back if slow or down.
 """
 
 from __future__ import annotations
@@ -14,6 +20,7 @@ import copy
 import json
 import random
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -25,10 +32,43 @@ import tanker_chat_library as chat_lib
 _STATE_KEY = "tanker_chat"
 _LAST_KEY = "tanker_chat_last_id"
 _RECENT_KEY = "tanker_chat_recent"
-_RECENT_MAX = 12
+_HISTORY_KEY = "tanker_chat_history"
+_HISTORY_MAX = 8
+_RECENT_MAX = 28
 _LLM_TIMEOUT_S = 6.5
+_OLLAMA_TIMEOUT_S = 22.0
+_OLLAMA_REACT_TIMEOUT_S = 12.0
+_LLM_NOTE_KEY = "tanker_chat_llm_note"
+_GUARD_UNTIL_KEY = "tanker_chat_guard_until"
+_LAST_SPOKE_KEY = "tanker_chat_last_spoke"
+_MAX_FREEFORM_TURNS = 6
+_ECHO_GUARD_S = 5.0
 
-# Soft acks close the thread without picking a side.
+_COFFEE_WORDS = (
+    "coffee",
+    "keurig",
+    "dunkin",
+    "starbucks",
+    "espresso",
+    "caffeine",
+    "latte",
+    "cappuccino",
+    "french press",
+    "k cup",
+    "brew",
+)
+
+# Pause between one answered bit and the next question (ongoing session).
+_BREAK_MIN_S = 14.0
+_BREAK_MAX_S = 36.0
+# Shorter gaps when a live model is driving the chat.
+_LLM_BREAK_MIN_S = 8.0
+_LLM_BREAK_MAX_S = 22.0
+
+# Last Ollama/Gemini/OpenAI failure (for Fly status / logs).
+_LAST_LLM_ERROR: str = ""
+
+# Soft acks acknowledge without picking a side — still keep the session going.
 _SOFT_ACK = (
     "roger",
     "copy",
@@ -38,6 +78,94 @@ _SOFT_ACK = (
     "affirm",
     "affirmative",
     "got it",
+)
+
+# Pilot ends the conversation (checkout / "enough").
+_STOP_HITS = (
+    "talk later",
+    "talk to you later",
+    "catch you later",
+    "gotta go",
+    "got to go",
+    "gotta run",
+    "check out",
+    "checking out",
+    "stop chatting",
+    "stop the chat",
+    "end chat",
+    "enough chat",
+    "enough talking",
+    "quiet for a bit",
+    "standing by",
+    "back to work",
+    "that'll be all",
+    "that will be all",
+    "later texaco",
+    "see you later",
+)
+
+_STOP_REPLY = "Standing by — looking good."
+
+# Freeform / soft reacts — skip the endless "copy" chorus.
+_DEFAULT_REACT_REPLIES = (
+    "Ha — looking good on the boom.",
+    "We'll keep her steady.",
+    "Yeah, fair. You're looking stable from here.",
+    "Good day for gas.",
+    "Alright. Stay boring.",
+    "True. Hang in there.",
+    "Fair enough.",
+    "That tracks.",
+)
+
+_QUESTION_CUES = {
+    "what",
+    "what's",
+    "whats",
+    "why",
+    "how",
+    "when",
+    "where",
+    "who",
+    "which",
+    "whose",
+    "do",
+    "does",
+    "did",
+    "is",
+    "are",
+    "was",
+    "were",
+    "can",
+    "could",
+    "would",
+    "will",
+    "have",
+    "has",
+    "any",
+    "ever",
+    "got",
+    "prefer",
+    "better",
+    "think",
+    "know",
+    "tell",
+    "ask",
+}
+
+
+# "Dunkin, copy. …" / "Copy Dunkin. …" / "Copy that. …" — usually drop the echo.
+_ECHO_LEAD = re.compile(
+    r"""^
+    (?:
+        [\w']+(?:\s+[\w']+){0,3},?\s+(?:copy|roger)\.?\s+
+      | Copy\s+[\w']+(?:\s+[\w']+){0,2}\.?\s+
+      | Copy(?:\s+that)?\.?\s+
+      | Roger(?:\s+that)?\.?\s+
+      | Ha\s*[—\-]+\s*copy(?:\s+that)?\.?\s+
+    )
+    """,
+    re.IGNORECASE | re.VERBOSE,
 )
 
 _BAN_HITS = {
@@ -64,22 +192,66 @@ _DEFAULT_OLLAMA_MODEL = "llama3.2"
 _DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434/v1/chat/completions"
 
 
+def _row(state: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(state, dict):
+        return None
+    row = state.get(_STATE_KEY)
+    return row if isinstance(row, dict) else None
+
+
+def is_awaiting_react(state: dict[str, Any] | None) -> bool:
+    """True while a riff/open bit is waiting on any freeform / soft reply."""
+    row = _row(state)
+    return bool(row and str(row.get("awaiting") or "") == "react")
+
+
 def is_open(state: dict[str, Any] | None) -> bool:
-    row = (state or {}).get(_STATE_KEY) if isinstance(state, dict) else None
-    return isinstance(row, dict) and bool(row.get("choices"))
+    """True while Texaco is waiting on an A/B pick or a freeform react."""
+    row = _row(state)
+    if not row:
+        return False
+    if row.get("choices"):
+        return True
+    return str(row.get("awaiting") or "") == "react"
+
+
+def is_session_active(state: dict[str, Any] | None) -> bool:
+    """True for the whole chat — open bit or short break between bits."""
+    row = _row(state)
+    if not row:
+        return False
+    if row.get("choices") or str(row.get("awaiting") or "") == "react":
+        return True
+    return bool(row.get("session"))
 
 
 def current_choices(state: dict[str, Any] | None) -> list[dict[str, Any]]:
-    row = (state or {}).get(_STATE_KEY) if isinstance(state, dict) else None
-    if not isinstance(row, dict):
+    row = _row(state)
+    if not row:
         return []
     raw = row.get("choices") or []
     return [c for c in raw if isinstance(c, dict) and c.get("id")]
 
 
+def current_reacts(state: dict[str, Any] | None) -> list[dict[str, Any]]:
+    row = _row(state)
+    if not row:
+        return []
+    raw = row.get("reacts") or []
+    return [c for c in raw if isinstance(c, dict)]
+
+
 def fly_request_rows(state: dict[str, Any] | None) -> list[tuple[str, str]]:
-    """Fly buttons: Texaco starts the question; A/B answers while one is out."""
-    rows: list[tuple[str, str]] = [("tanker_chat_start", "Texaco starts chat")]
+    """Fly buttons: Texaco starts / answers / stop while a session is live."""
+    rows: list[tuple[str, str]] = []
+    if is_session_active(state):
+        if not is_open(state):
+            rows.append(("tanker_chat_start", "Texaco next bit"))
+        elif is_awaiting_react(state) and not current_choices(state):
+            rows.append(("tanker_chat_choice__ack", "Roger"))
+        rows.append(("tanker_chat_stop", "Stop chat"))
+    else:
+        rows.append(("tanker_chat_start", "Texaco starts chat"))
     for choice in current_choices(state):
         say = str(choice.get("say") or choice.get("id") or "").strip()
         cid = str(choice.get("id") or "").strip()
@@ -90,7 +262,7 @@ def fly_request_rows(state: dict[str, Any] | None) -> list[tuple[str, str]]:
 
 def fly_controls_visible(state: dict[str, Any] | None) -> bool:
     """Show boom-chat buttons after rejoin, even if the cursor is not on tanker."""
-    if is_open(state):
+    if is_session_active(state):
         return True
     try:
         import tanker as tanker_mod
@@ -103,6 +275,227 @@ def fly_controls_visible(state: dict[str, Any] | None) -> bool:
 def end_chat(state: dict[str, Any] | None) -> None:
     if isinstance(state, dict):
         state.pop(_STATE_KEY, None)
+        state.pop(_HISTORY_KEY, None)
+        state.pop(_GUARD_UNTIL_KEY, None)
+        state.pop(_LAST_SPOKE_KEY, None)
+        state.pop(_LLM_NOTE_KEY, None)
+
+
+def last_llm_error() -> str:
+    return str(_LAST_LLM_ERROR or "").strip()
+
+
+def llm_note(state: dict[str, Any] | None) -> str:
+    if not isinstance(state, dict):
+        return last_llm_error()
+    return str(state.get(_LLM_NOTE_KEY) or last_llm_error() or "").strip()
+
+
+def _set_llm_error(msg: str, state: dict[str, Any] | None = None) -> None:
+    global _LAST_LLM_ERROR
+    text = str(msg or "").strip()
+    _LAST_LLM_ERROR = text
+    if isinstance(state, dict):
+        if text:
+            state[_LLM_NOTE_KEY] = text
+        else:
+            state.pop(_LLM_NOTE_KEY, None)
+
+
+def arm_tx_guard(state: dict[str, Any] | None, text: str = "") -> None:
+    """
+    After Texaco transmits, ignore freeform 'replies' for a few seconds.
+
+    SRS playback into the mic was making Ollama answer itself, hang, then fall
+    back to the offline library.
+    """
+    if not isinstance(state, dict):
+        return
+    state[_GUARD_UNTIL_KEY] = time.time() + _ECHO_GUARD_S
+    spoke = " ".join(str(text or "").split()).strip()
+    if spoke:
+        state[_LAST_SPOKE_KEY] = spoke[:420]
+
+
+def _word_set(text: str) -> set[str]:
+    return {
+        w
+        for w in re.findall(r"[a-z0-9']+", str(text or "").casefold())
+        if len(w) > 2 and w not in {"the", "and", "for", "you", "that", "this"}
+    }
+
+
+def looks_like_own_echo(transcript: str, state: dict[str, Any] | None) -> bool:
+    """True when the 'pilot' line is probably Texaco's last boom TX."""
+    if not isinstance(state, dict):
+        return False
+    blob = " ".join(str(transcript or "").split()).strip()
+    if len(blob) < 4:
+        return True
+    try:
+        guard_until = float(state.get(_GUARD_UNTIL_KEY) or 0)
+    except (TypeError, ValueError):
+        guard_until = 0.0
+    in_guard = time.time() < guard_until
+    spoke = str(state.get(_LAST_SPOKE_KEY) or "").strip()
+    row = _row(state) or {}
+    if not spoke:
+        spoke = str(row.get("opener") or state.get("last_tx_text") or "").strip()
+    if not spoke:
+        return bool(in_guard)
+    wb = _word_set(blob)
+    ws = _word_set(spoke)
+    if not wb:
+        return True
+    if not ws:
+        return bool(in_guard)
+    overlap = len(wb & ws) / float(max(1, min(len(wb), len(ws))))
+    # During the post-TX guard, be aggressive — mic often hears the boom play back.
+    if in_guard and overlap >= 0.28:
+        return True
+    if overlap >= 0.55:
+        return True
+    # Near-substring echo of the opener / last line.
+    compact_b = re.sub(r"[^a-z0-9]+", "", blob.casefold())
+    compact_s = re.sub(r"[^a-z0-9]+", "", spoke.casefold())
+    if len(compact_b) >= 12 and (
+        compact_b in compact_s or compact_s in compact_b
+    ):
+        return True
+    return False
+
+
+def _pick_break_s(*, llm: bool = False) -> float:
+    if llm:
+        return random.uniform(_LLM_BREAK_MIN_S, _LLM_BREAK_MAX_S)
+    return random.uniform(_BREAK_MIN_S, _BREAK_MAX_S)
+
+
+def schedule_next_question(
+    state: dict[str, Any],
+    *,
+    delay_s: float | None = None,
+    llm: bool = False,
+) -> float:
+    """Keep the session, clear the open bit, and time the next opener."""
+    wait = float(delay_s) if delay_s is not None else _pick_break_s(llm=llm)
+    wait = max(6.0, wait)
+    prev = _row(state) or {}
+    state[_STATE_KEY] = {
+        "id": str(prev.get("id") or ""),
+        "choices": [],
+        "reacts": [],
+        "awaiting": None,
+        "kind": None,
+        "opener": "",
+        "turns": 0,
+        "session": True,
+        "next_at": time.time() + wait,
+        "break_s": wait,
+    }
+    return wait
+
+
+def continuation_delay_s(state: dict[str, Any] | None) -> float | None:
+    """Seconds until the next bit, or None if not waiting on a break/riff timer."""
+    row = _row(state)
+    if not row or not row.get("session"):
+        return None
+    # A/B still waiting on a pick — do not auto-advance.
+    if row.get("choices"):
+        return None
+    try:
+        next_at = float(row.get("next_at") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if next_at <= 0:
+        return None
+    return max(0.0, next_at - time.time())
+
+
+def continuation_due(state: dict[str, Any] | None, *, now: float | None = None) -> bool:
+    delay = continuation_delay_s(state)
+    if delay is None:
+        return False
+    return delay <= 0.0
+
+
+def match_stop(text: str) -> bool:
+    try:
+        import voice_intent
+
+        blob = voice_intent.normalize(text)
+    except Exception:
+        blob = str(text or "").casefold()
+    if not blob:
+        return False
+    for hit in _STOP_HITS:
+        token = hit.casefold()
+        if re.search(rf"(?<!\w){re.escape(token)}(?!\w)", blob):
+            return True
+    return False
+
+
+def stop_chat(
+    state: dict[str, Any] | None,
+    callsign: str,
+    tanker: dict[str, Any] | None,
+) -> str:
+    """Pilot closes the conversation. Returns Texaco's sign-off (no callsigns)."""
+    del callsign, tanker  # boom chat stays informal
+    end_chat(state)
+    return _STOP_REPLY
+
+
+def naturalize_reply(reply: str, *, force: bool = False) -> str:
+    """
+    Drop the habitual 'Dunkin, copy.' / 'Copy that.' lead-in most of the time.
+
+    Boom chat should react, not parrot the pilot's answer back every turn.
+    """
+    text = " ".join(str(reply or "").split()).strip()
+    if not text:
+        return text
+    # Keep the echo rarely so it still sounds like radio once in a while.
+    if not force and random.random() < 0.12:
+        return text
+    stripped = _ECHO_LEAD.sub("", text, count=1).strip(" ,")
+    if len(stripped) < 8:
+        return text
+    return stripped[0].upper() + stripped[1:]
+
+
+def looks_like_question_or_chat(text: str) -> bool:
+    """
+    True when the pilot said more than a one-word A/B pick.
+
+    Long / question-shaped speech should go to the live LLM instead of a
+    canned A/B reply that ignores what they actually asked.
+    """
+    blob = " ".join(str(text or "").split()).strip()
+    if not blob:
+        return False
+    if "?" in blob:
+        return True
+    words = re.findall(r"[a-z0-9']+", blob.casefold())
+    if len(words) >= 4:
+        return True
+    if len(words) >= 2 and any(w in _QUESTION_CUES for w in words):
+        return True
+    return False
+
+
+def last_boom_line(state: dict[str, Any] | None, fallback: str = "") -> str:
+    if isinstance(state, dict):
+        for row in reversed(list(state.get(_HISTORY_KEY) or [])):
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("role") or "") != "boom":
+                continue
+            text = str(row.get("text") or "").strip()
+            if text:
+                return text
+    return str(fallback or "").strip()
 
 
 def match_choice(
@@ -132,9 +525,58 @@ def match_choice(
             return {
                 "id": "_ack",
                 "say": "Roger",
-                "reply": "Copy that. You're looking good.",
+                "reply": random.choice(_DEFAULT_REACT_REPLIES),
             }
     return None
+
+
+def match_react(
+    text: str, reacts: list[dict[str, Any]] | None
+) -> dict[str, Any]:
+    """
+    Freeform boom reply for a riff / open bit.
+
+    Prefer a patterned react when the pilot hit a known phrase; otherwise any
+    speech (including soft ack) gets a short default react so the chat keeps
+    moving without forcing A/B buttons.
+    """
+    try:
+        import voice_intent
+
+        blob = voice_intent.normalize(text)
+    except Exception:
+        blob = str(text or "").casefold()
+    ranked: list[tuple[int, dict[str, Any]]] = []
+    for react in reacts or []:
+        if not isinstance(react, dict):
+            continue
+        for hit in react.get("hits") or ():
+            token = str(hit or "").strip().casefold()
+            if not token:
+                continue
+            if blob and re.search(rf"(?<!\w){re.escape(token)}(?!\w)", blob):
+                ranked.append((len(token), react))
+    if ranked:
+        ranked.sort(key=lambda x: x[0], reverse=True)
+        hit = ranked[0][1]
+        return {
+            "id": str(hit.get("id") or _slug(str(hit.get("say") or "react"))),
+            "say": str(hit.get("say") or "Roger"),
+            "reply": str(hit.get("reply") or random.choice(_DEFAULT_REACT_REPLIES)),
+            "follow": hit.get("follow") if isinstance(hit.get("follow"), dict) else None,
+        }
+    for ack in _SOFT_ACK:
+        if blob and re.search(rf"(?<!\w){re.escape(ack)}(?!\w)", blob):
+            return {
+                "id": "_ack",
+                "say": "Roger",
+                "reply": random.choice(_DEFAULT_REACT_REPLIES),
+            }
+    return {
+        "id": "_any",
+        "say": "Roger",
+        "reply": random.choice(_DEFAULT_REACT_REPLIES),
+    }
 
 
 def _names(callsign: str, tanker: dict[str, Any] | None) -> tuple[str, str]:
@@ -150,8 +592,71 @@ def _names(callsign: str, tanker: dict[str, Any] | None) -> tuple[str, str]:
     return cs, tcs
 
 
-def _fill(template: str, cs: str, tcs: str) -> str:
-    return str(template or "").replace("{cs}", cs).replace("{tcs}", tcs).strip()
+def _speak_casual_numbers(text: str) -> str:
+    """
+    Boom chat is conversational — say 'forty', not ICAO 'four zero'.
+
+    Formal ATC TX still digit-expands bare numerals in prepare_radio_*; this
+    path pre-expands so Chirp never list-reads ages/counts on small talk.
+    """
+
+    def _one(match: re.Match[str]) -> str:
+        raw = match.group(0)
+        if len(raw) > 1 and raw.startswith("0"):
+            return atc_phrase.speak_digits(raw)
+        try:
+            n = int(raw)
+        except ValueError:
+            return raw
+        return atc_phrase.speak_natural_number(n)
+
+    return re.sub(r"\d+", _one, str(text or ""))
+
+
+def _fill(template: str, cs: str = "", tcs: str = "") -> str:
+    """
+    Expand a boom-chat template.
+
+    Small talk is informal side-channel chatter — strip formal
+    "{cs}, {tcs}," addressing even when the library still has it. Directive
+    tanker calls (rejoin / contact / etc.) live outside this module.
+    """
+    text = str(template or "")
+    # Drop the formal opener patterns before substituting leftovers.
+    text = re.sub(
+        r"\{cs\}\s*,\s*\{tcs\}\s*,?\s*",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"\{tcs\}\s*,\s*\{cs\}\s*,?\s*",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if cs:
+        text = text.replace("{cs}", cs)
+    else:
+        text = text.replace("{cs}", "")
+    if tcs:
+        text = text.replace("{tcs}", tcs)
+    else:
+        text = text.replace("{tcs}", "")
+    # If spoken callsigns somehow landed in the string, peel a leading
+    # "Burner four, Texaco fife," style address.
+    if cs and tcs:
+        text = re.sub(
+            rf"^\s*{re.escape(cs)}\s*,\s*{re.escape(tcs)}\s*,?\s*",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        )
+    text = re.sub(r"\s+", " ", text).strip(" ,")
+    text = _speak_casual_numbers(text)
+    if text:
+        text = text[0].upper() + text[1:]
+    return text
 
 
 def _remember(state: dict[str, Any], tid: str) -> None:
@@ -176,6 +681,75 @@ def _recent_ids(state: dict[str, Any]) -> list[str]:
     if last and last not in out:
         out.append(last)
     return out
+
+
+def append_history(
+    state: dict[str, Any] | None, role: str, text: str
+) -> None:
+    """Keep a short boom/pilot transcript so Ollama can continue the thread."""
+    if not isinstance(state, dict):
+        return
+    line = " ".join(str(text or "").split()).strip()
+    if not line:
+        return
+    who = "pilot" if str(role or "").casefold().startswith("p") else "boom"
+    hist = [
+        row
+        for row in (state.get(_HISTORY_KEY) or [])
+        if isinstance(row, dict) and row.get("text")
+    ]
+    hist.append({"role": who, "text": line[:260]})
+    state[_HISTORY_KEY] = hist[-_HISTORY_MAX:]
+
+
+def format_history(state: dict[str, Any] | None) -> str:
+    if not isinstance(state, dict):
+        return "(new conversation)"
+    lines: list[str] = []
+    for row in state.get(_HISTORY_KEY) or []:
+        if not isinstance(row, dict):
+            continue
+        text = str(row.get("text") or "").strip()
+        if not text:
+            continue
+        who = "Pilot" if str(row.get("role") or "") == "pilot" else "Boom"
+        lines.append(f"{who}: {text}")
+    return "\n".join(lines) if lines else "(new conversation)"
+
+
+def _mentions_coffee(text: str) -> bool:
+    blob = str(text or "").casefold()
+    return any(word in blob for word in _COFFEE_WORDS)
+
+
+def coffee_on_cooldown(state: dict[str, Any] | None) -> bool:
+    """True when recent boom chat already leaned on coffee — ban the next bit."""
+    if not isinstance(state, dict):
+        return False
+    recent_lines = [
+        str(row.get("text") or "")
+        for row in (state.get(_HISTORY_KEY) or [])[-5:]
+        if isinstance(row, dict)
+    ]
+    hits = sum(1 for line in recent_lines if _mentions_coffee(line))
+    if hits >= 1:
+        return True
+    # Library / LLM ids that are coffee-flavored.
+    for tid in _recent_ids(state)[-8:]:
+        low = tid.casefold()
+        if any(
+            key in low
+            for key in (
+                "coffee",
+                "dunkin",
+                "starbucks",
+                "keurig",
+                "espresso",
+                "caffeine",
+            )
+        ):
+            return True
+    return False
 
 
 def _slug(text: str) -> str:
@@ -204,8 +778,8 @@ def _clean_choice(raw: Any) -> dict[str, Any] | None:
     reply = str(raw.get("reply") or "").strip()
     if not say or not reply:
         return None
-    say = " ".join(say.split())[:32]
-    reply = " ".join(reply.split())[:280]
+    say = " ".join(say.split())[:40]
+    reply = " ".join(reply.split())[:480]
     cid = _slug(str(raw.get("id") or say))
     extra = raw.get("hits") if isinstance(raw.get("hits"), (list, tuple)) else ()
     hits = _hits_from_say(say, extra)
@@ -220,32 +794,153 @@ def _clean_choice(raw: Any) -> dict[str, Any] | None:
     follow = raw.get("follow")
     if isinstance(follow, dict):
         cleaned = normalize_llm_thread(follow, allow_follow=False)
-        if cleaned and cleaned.get("choices"):
-            row["follow"] = {
-                "id": str(cleaned.get("id") or "follow"),
-                "opener": str(cleaned.get("opener") or "").strip(),
-                "choices": list(cleaned.get("choices") or []),
-            }
+        if cleaned and (cleaned.get("choices") or cleaned.get("kind") in {"riff", "open"}):
+            row["follow"] = cleaned
     return row
+
+
+def _clean_react(raw: Any) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    reply = str(raw.get("reply") or "").strip()
+    if not reply:
+        return None
+    say = str(raw.get("say") or raw.get("id") or "Roger").strip() or "Roger"
+    say = " ".join(say.split())[:40]
+    reply = " ".join(reply.split())[:480]
+    extra = raw.get("hits") if isinstance(raw.get("hits"), (list, tuple)) else ()
+    hits = _hits_from_say(say, extra)
+    row: dict[str, Any] = {
+        "id": _slug(str(raw.get("id") or say)),
+        "say": say,
+        "hits": tuple(hits),
+        "reply": reply,
+    }
+    follow = raw.get("follow")
+    if isinstance(follow, dict):
+        cleaned = normalize_llm_thread(follow, allow_follow=False)
+        if cleaned:
+            row["follow"] = cleaned
+    return row
+
+
+def _salvage_riff_text(text: str) -> dict[str, Any] | None:
+    """Turn messy model prose into a usable riff opener."""
+    blob = str(text or "").strip()
+    if not blob:
+        return None
+    if blob.startswith("```"):
+        blob = re.sub(r"^```(?:\w+)?\s*", "", blob, flags=re.I)
+        blob = re.sub(r"\s*```$", "", blob)
+
+    # Prefer a real opener field from broken / multi-object JSON dumps.
+    parsed = _parse_json_blob(blob)
+    if isinstance(parsed, dict):
+        opener = str(
+            parsed.get("opener")
+            or parsed.get("question")
+            or parsed.get("line")
+            or parsed.get("text")
+            or ""
+        ).strip()
+        opener = " ".join(opener.split())
+        if len(opener) >= 12 and not _opener_looks_like_json(opener):
+            kind = str(parsed.get("kind") or "riff").strip().casefold() or "riff"
+            if kind not in {"ab", "riff", "open"}:
+                kind = "riff"
+            tid = _slug(str(parsed.get("id") or opener))
+            if not tid.startswith("llm"):
+                tid = f"llm_{tid}"
+            return {
+                "id": tid[:40],
+                "kind": "riff" if kind == "ab" else kind,
+                "opener": _fill(opener)[:420],
+                "choices": [],
+            }
+    extracted = _extract_quoted_opener(blob)
+    if extracted:
+        blob = extracted
+    elif _opener_looks_like_json(blob):
+        # Never speak raw JSON on freq.
+        return None
+
+    # Drop obvious JSON leftovers / labels.
+    blob = re.sub(
+        r'^(?:opener|question|line|text)\s*[:=]\s*["\']?',
+        "",
+        blob,
+        flags=re.I,
+    )
+    blob = " ".join(blob.split()).strip().strip('"').strip("'")
+    blob = _fill(blob)
+    # If the model wrote a fake two-sided bit, keep the first boom line.
+    for sep in ("\nPilot:", "\nFighter:", "\nYou:", "\nViper:"):
+        if sep.casefold() in f"\n{blob}".casefold():
+            blob = blob.split(sep[1:], 1)[0].strip()
+            break
+    if len(blob) < 12 or _opener_looks_like_json(blob):
+        return None
+    tid = _slug(blob)
+    if not tid.startswith("llm"):
+        tid = f"llm_{tid}"
+    return {
+        "id": tid[:40],
+        "kind": "riff",
+        "opener": blob[:420],
+        "choices": [],
+    }
+
+
+def _opener_looks_like_json(text: str) -> bool:
+    blob = str(text or "").strip()
+    if not blob:
+        return False
+    if blob.startswith("{") or blob.startswith("["):
+        return True
+    head = blob[:160].casefold()
+    return '"opener"' in head or '"kind"' in head or '"choices"' in head
+
+
+def _extract_quoted_opener(text: str) -> str | None:
+    match = re.search(r'"opener"\s*:\s*"((?:\\.|[^"\\])*)"', str(text or ""), flags=re.I)
+    if not match:
+        return None
+    try:
+        return str(json.loads(f'"{match.group(1)}"')).strip()
+    except json.JSONDecodeError:
+        return match.group(1).replace('\\"', '"').strip() or None
 
 
 def normalize_llm_thread(
     raw: Any, *, allow_follow: bool = True
 ) -> dict[str, Any] | None:
-    """Turn model JSON (or a dict) into a library-shaped thread, or None."""
+    """Turn model JSON (or a dict / plain prose) into a library-shaped thread."""
+    original = raw
     if isinstance(raw, str):
-        raw = _parse_json_blob(raw)
+        parsed = _parse_json_blob(raw)
+        raw = parsed if parsed is not None else raw
     if not isinstance(raw, dict):
+        if isinstance(original, str):
+            return _salvage_riff_text(original)
+        if isinstance(raw, str):
+            return _salvage_riff_text(raw)
         return None
-    opener = str(raw.get("opener") or raw.get("question") or "").strip()
+    opener = str(
+        raw.get("opener") or raw.get("question") or raw.get("line") or raw.get("text") or ""
+    ).strip()
     opener = " ".join(opener.split())
-    if len(opener) < 12:
-        return None
-    if "{cs}" not in opener:
-        opener = "{cs}, {tcs}, " + opener.lstrip(", ")
+    if len(opener) < 12 or _opener_looks_like_json(opener):
+        # Broken A/B JSON with a usable nested string — last resort salvage.
+        return _salvage_riff_text(str(original if isinstance(original, str) else opener))
+    # Boom chat is informal — strip any formal address the model added.
+    opener = _fill(opener)
+    kind = str(raw.get("kind") or "").strip().casefold()
+    if kind not in {"ab", "riff", "open"}:
+        kind = ""
+
     choices_raw = raw.get("choices") or raw.get("options") or []
     if not isinstance(choices_raw, list):
-        return None
+        choices_raw = []
     choices: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     for item in choices_raw:
@@ -261,32 +956,75 @@ def normalize_llm_thread(
             choice["id"] = cid
         seen_ids.add(cid)
         choices.append(choice)
-        if len(choices) >= 2:
+        if len(choices) >= 3:
             break
-    if len(choices) < 2:
-        return None
+
+    reacts_raw = raw.get("reacts") or raw.get("reactions") or []
+    if not isinstance(reacts_raw, list):
+        reacts_raw = []
+    reacts: list[dict[str, Any]] = []
+    for item in reacts_raw:
+        if not allow_follow and isinstance(item, dict):
+            item = dict(item)
+            item.pop("follow", None)
+        react = _clean_react(item)
+        if react:
+            reacts.append(react)
+        if len(reacts) >= 4:
+            break
+
+    if not kind:
+        if len(choices) >= 2:
+            kind = "ab"
+        else:
+            kind = "riff"
+
+    # Incomplete A/B from small local models → keep the opener as a riff.
+    if kind == "ab" and len(choices) < 2:
+        kind = "riff"
+        choices = []
+    if kind in {"riff", "open"} and choices:
+        choices = choices[:2]
+
     tid = _slug(str(raw.get("id") or opener.split(",")[-1][:40] or "llm"))
     if not tid.startswith("llm"):
         tid = f"llm_{tid}"
-    return {"id": tid[:40], "opener": opener[:360], "choices": choices}
+    out: dict[str, Any] = {
+        "id": tid[:40],
+        "kind": kind,
+        "opener": opener[:420],
+        "choices": choices,
+    }
+    if reacts:
+        out["reacts"] = reacts
+    return out
 
 
 def _parse_json_blob(text: str) -> Any:
+    """Parse model JSON, including concatenated multi-object dumps (take the first)."""
     blob = str(text or "").strip()
     if blob.startswith("```"):
         blob = re.sub(r"^```(?:json)?\s*", "", blob, flags=re.I)
         blob = re.sub(r"\s*```$", "", blob)
     try:
-        return json.loads(blob)
+        data = json.loads(blob)
+        if isinstance(data, list) and data and isinstance(data[0], dict):
+            return data[0]
+        return data
     except json.JSONDecodeError:
         pass
-    start = blob.find("{")
-    end = blob.rfind("}")
-    if start >= 0 and end > start:
+    decoder = json.JSONDecoder()
+    for idx, ch in enumerate(blob):
+        if ch != "{":
+            continue
         try:
-            return json.loads(blob[start : end + 1])
+            obj, _end = decoder.raw_decode(blob, idx)
         except json.JSONDecodeError:
-            return None
+            continue
+        if isinstance(obj, dict):
+            return obj
+        if isinstance(obj, list) and obj and isinstance(obj[0], dict):
+            return obj[0]
     return None
 
 
@@ -321,21 +1059,135 @@ def resolve_llm_provider(config: dict[str, Any] | None) -> tuple[str, str] | Non
     return None
 
 
-def _llm_prompt(recent: list[str]) -> str:
+def _llm_prompt(
+    recent: list[str],
+    *,
+    history: str = "",
+    ban_coffee: bool = False,
+) -> str:
     avoid = ", ".join(recent[-8:]) if recent else "(none yet)"
+    coffee_rule = (
+        "Do NOT mention coffee, Keurig, Dunkin, Starbucks, caffeine, or brewing — "
+        "that topic is exhausted for now. "
+        if ban_coffee
+        else "Coffee is allowed only rarely — prefer other topics. "
+    )
+    hist = (history or "").strip() or "(new conversation)"
     return (
         "You write one short boom-operator radio bit for a KC-135 refueling an F-16. "
-        "Dry, funny, professional. Never mention DCS, AI, games, or that you are a model. "
+        "Dry, funny, professional. Informal small talk on a side frequency — "
+        "do NOT use callsigns, do NOT say the fighter name or Texaco/tanker name, "
+        "do NOT open with 'X, Y,'. Never mention DCS, AI, games, or that you are a model. "
         "Never use official tanker phraseology (rejoin, contact, disconnect, abort, "
-        "observation, identified). Ask exactly one A/B question the pilot can answer "
-        "with one or two words. Topics: coffee, food, pets, sports, cars, weather, "
-        "weekends, cockpit life, movies, snacks. Avoid these recent ids: "
-        f"{avoid}. Return JSON only with keys: id, opener, choices. opener uses "
-        "{cs} and {tcs} as the fighter and tanker callsigns. choices is an array of "
-        "exactly two objects with say (1-3 words), hits (short spoken aliases), "
-        "reply (one or two boom-operator sentences). Optional follow on one choice: "
-        "{opener, choices} with two more A/B options. Keep every line radio-short."
+        "observation, identified). Mix it up — not every bit is an A/B poll. Pick kind: "
+        "'riff' (observation / story / banter, no forced answer), "
+        "'open' (open question the pilot can answer in their own words), or "
+        "'ab' (short A/B or A/B/C poll). Replies may be one or two short sentences. "
+        "Continue the same conversation when history exists — reference what was just "
+        "said instead of starting a brand-new random topic. "
+        f"{coffee_rule}"
+        "Good topic pool (rotate): Navy / Mudhen / Eagle jokes, pets, sports, cars, "
+        "weather, weekends, movies, music, snacks/food (not coffee), cockpit life, "
+        "sleep, boredom on orbit, desert scenery, random observations. "
+        "Avoid these recent ids: "
+        f"{avoid}.\n\nRecent chat:\n{hist}\n\n"
+        "Return JSON only with keys: "
+        "id, kind, opener, and when useful choices and/or reacts. opener is the spoken "
+        "line with no callsigns. For kind=ab, choices is 2-3 objects with say (1-3 words), "
+        "hits, reply. For kind=riff/open, choices may be empty; optional reacts are "
+        "patterned freeform replies with hits + reply. Keep it radio-short but human. "
+        "Important: do NOT start every reply with the pilot's answer plus 'copy' "
+        "(avoid 'Dunkin, copy.' / 'Navy, copy.'). Just react — joke first, ack optional. "
+        "opener is ONLY Texaco's next line — never invent a pilot answer in the opener. "
+        "Prefer kind=riff or open most of the time; use ab less often. "
+        "Return exactly one JSON object — never two objects back-to-back."
     )
+
+
+def _llm_riff_prompt(
+    recent: list[str],
+    *,
+    history: str = "",
+    ban_coffee: bool = False,
+) -> str:
+    avoid = ", ".join(recent[-8:]) if recent else "(none yet)"
+    coffee_rule = (
+        "No coffee/caffeine jokes this turn. "
+        if ban_coffee
+        else "Skip coffee unless it clearly continues the last line. "
+    )
+    hist = (history or "").strip() or "(new conversation)"
+    return (
+        "Write one short KC-135 boom-operator radio line for an F-16. "
+        "Dry, funny, informal. No callsigns. No official tanker words "
+        "(rejoin, contact, disconnect, abort, observation). "
+        "Continue the recent chat when there is history. "
+        f"{coffee_rule}"
+        "Topics: Navy/Mudhen/Eagle jokes, snacks, weather, boredom, pets, sports, "
+        "movies, cockpit life, desert view — rotate away from coffee. "
+        f"Avoid sounding like these recent ids: {avoid}.\n\n"
+        f"Recent chat:\n{hist}\n\n"
+        "Return JSON only: {\"id\":\"...\",\"kind\":\"riff\",\"opener\":\"...\"}."
+    )
+
+
+def _llm_react_prompt(
+    opener: str,
+    pilot: str,
+    *,
+    history: str = "",
+    ban_coffee: bool = False,
+) -> str:
+    coffee_rule = (
+        "Do not bring up coffee or caffeine. "
+        if ban_coffee
+        else ""
+    )
+    hist = (history or "").strip() or "(no earlier lines)"
+    return (
+        "You are a KC-135 boom operator on informal small-talk with an F-16. "
+        "Dry, funny, professional. No callsigns, no Texaco/fighter names, "
+        "no official tanker phraseology (rejoin, contact, disconnect, abort, "
+        "observation, identified). Do not parrot the pilot with 'X, copy.' "
+        f"{coffee_rule}"
+        "MOST IMPORTANT: respond to what the pilot just said. "
+        "If they asked a question, answer that question first in plain words. "
+        "If they made a point or joke, acknowledge that point — do not change "
+        "the subject to desert sunsets, random orbit banter, or a new poll. "
+        "Stay on their topic; history is only for continuity.\n\n"
+        f"Earlier chat:\n{hist}\n\n"
+        "Your previous line (context only):\n"
+        f"{opener.strip() or '(small talk)'}\n\n"
+        "Pilot just said (answer THIS):\n"
+        f"{pilot.strip() or '(roger)'}\n\n"
+        "Reply with one or two short radio sentences that directly address "
+        "the pilot's latest line. Plain text only — no JSON, no markdown."
+    )
+
+
+def _llm_answer_prompt(
+    pilot: str,
+    *,
+    history: str = "",
+    ban_coffee: bool = False,
+) -> str:
+    """Stricter second-chance prompt when the first react wandered off topic."""
+    coffee_rule = (
+        "Do not mention coffee or caffeine. "
+        if ban_coffee
+        else ""
+    )
+    hist = (history or "").strip() or "(none)"
+    return (
+        "KC-135 boom operator. Short informal radio reply. "
+        "Answer the pilot's question or remark directly. "
+        "Do not start a new topic. No callsigns. No official tanker words. "
+        f"{coffee_rule}"
+        f"Earlier chat:\n{hist}\n\n"
+        f"Pilot said: {pilot.strip() or '(roger)'}\n\n"
+        "One or two short sentences. Plain text only."
+    )
+
 
 
 def _http_json(
@@ -361,7 +1213,14 @@ def _http_json(
     return data
 
 
-def _gemini_thread(config: dict[str, Any], key: str, recent: list[str]) -> dict[str, Any] | None:
+def _gemini_thread(
+    config: dict[str, Any],
+    key: str,
+    recent: list[str],
+    *,
+    history: str = "",
+    ban_coffee: bool = False,
+) -> dict[str, Any] | None:
     model = str(config.get("tanker_chat_llm_model") or _DEFAULT_GEMINI_MODEL).strip()
     model = model or _DEFAULT_GEMINI_MODEL
     url = (
@@ -369,9 +1228,19 @@ def _gemini_thread(config: dict[str, Any], key: str, recent: list[str]) -> dict[
         f"{urllib.parse.quote(model)}:generateContent?key={urllib.parse.quote(key)}"
     )
     payload = {
-        "contents": [{"parts": [{"text": _llm_prompt(recent)}]}],
+        "contents": [
+            {
+                "parts": [
+                    {
+                        "text": _llm_prompt(
+                            recent, history=history, ban_coffee=ban_coffee
+                        )
+                    }
+                ]
+            }
+        ],
         "generationConfig": {
-            "temperature": 1.15,
+            "temperature": 1.05,
             "maxOutputTokens": 700,
             "responseMimeType": "application/json",
         },
@@ -388,7 +1257,10 @@ def _gemini_thread(config: dict[str, Any], key: str, recent: list[str]) -> dict[
     for part in parts:
         if isinstance(part, dict) and part.get("text"):
             text += str(part.get("text") or "")
-    return normalize_llm_thread(text or data)
+    node = normalize_llm_thread(text or data)
+    if node is None and text.strip():
+        node = _salvage_riff_text(text)
+    return node
 
 
 def _openai_compatible_thread(
@@ -399,17 +1271,29 @@ def _openai_compatible_thread(
     model: str,
     recent: list[str],
     json_mode: bool = True,
+    timeout: float = _LLM_TIMEOUT_S,
+    temperature: float = 1.15,
+    prompt: str | None = None,
+    history: str = "",
+    ban_coffee: bool = False,
 ) -> dict[str, Any] | None:
     payload: dict[str, Any] = {
         "model": model,
-        "temperature": 1.15,
+        "temperature": temperature,
         "max_tokens": 700,
         "messages": [
             {
                 "role": "system",
-                "content": "Return one JSON object only. No markdown.",
+                "content": (
+                    "Return exactly one JSON object only. "
+                    "Never concatenate multiple objects. No markdown."
+                ),
             },
-            {"role": "user", "content": _llm_prompt(recent)},
+            {
+                "role": "user",
+                "content": prompt
+                or _llm_prompt(recent, history=history, ban_coffee=ban_coffee),
+            },
         ],
     }
     if json_mode:
@@ -417,12 +1301,22 @@ def _openai_compatible_thread(
     headers = {"Content-Type": "application/json"}
     if key:
         headers["Authorization"] = f"Bearer {key}"
-    data = _http_json(url, payload, headers)
+    data = _http_json(url, payload, headers, timeout=timeout)
     text = str(((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "")
-    return normalize_llm_thread(text)
+    node = normalize_llm_thread(text)
+    if node is None and text.strip():
+        node = _salvage_riff_text(text)
+    return node
 
 
-def _openai_thread(config: dict[str, Any], key: str, recent: list[str]) -> dict[str, Any] | None:
+def _openai_thread(
+    config: dict[str, Any],
+    key: str,
+    recent: list[str],
+    *,
+    history: str = "",
+    ban_coffee: bool = False,
+) -> dict[str, Any] | None:
     model = str(config.get("tanker_chat_llm_model") or _DEFAULT_OPENAI_MODEL).strip()
     model = model or _DEFAULT_OPENAI_MODEL
     return _openai_compatible_thread(
@@ -432,16 +1326,92 @@ def _openai_thread(config: dict[str, Any], key: str, recent: list[str]) -> dict[
         model=model,
         recent=recent,
         json_mode=True,
+        history=history,
+        ban_coffee=ban_coffee,
     )
 
 
-def _ollama_thread(config: dict[str, Any], recent: list[str]) -> dict[str, Any] | None:
-    model = str(config.get("tanker_chat_llm_model") or _DEFAULT_OLLAMA_MODEL).strip()
-    model = model or _DEFAULT_OLLAMA_MODEL
+def _ollama_base_url(config: dict[str, Any]) -> str:
     url = str(config.get("tanker_chat_llm_url") or _DEFAULT_OLLAMA_URL).strip()
     url = url or _DEFAULT_OLLAMA_URL
-    if not url.endswith("/chat/completions"):
-        url = url.rstrip("/") + "/v1/chat/completions"
+    # Accept either .../v1/chat/completions or the Ollama root.
+    if url.endswith("/chat/completions"):
+        url = url[: -len("/chat/completions")]
+    if url.endswith("/v1"):
+        url = url[: -len("/v1")]
+    return url.rstrip("/")
+
+
+def list_ollama_models(config: dict[str, Any] | None = None) -> list[str]:
+    """Installed Ollama model names, or [] if the daemon is down / empty."""
+    cfg = config if isinstance(config, dict) else {}
+    base = _ollama_base_url(cfg)
+    try:
+        with urllib.request.urlopen(f"{base}/api/tags", timeout=3.0) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+        data = json.loads(raw) if raw else {}
+    except Exception:
+        return []
+    out: list[str] = []
+    for row in (data.get("models") or []) if isinstance(data, dict) else []:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or row.get("model") or "").strip()
+        if name and name not in out:
+            out.append(name)
+    return out
+
+
+def resolve_ollama_model(config: dict[str, Any]) -> str | None:
+    """
+    Pick an installed Ollama model.
+
+    Prefers tanker_chat_llm_model / llama3.2 when present; otherwise the first
+    installed model. Returns None when the daemon has nothing pulled.
+    """
+    want = str(config.get("tanker_chat_llm_model") or _DEFAULT_OLLAMA_MODEL).strip()
+    want = want or _DEFAULT_OLLAMA_MODEL
+    models = list_ollama_models(config)
+    if not models:
+        return None
+    if want in models:
+        return want
+    # Tags often look like llama3.2:latest
+    for name in models:
+        if name == want or name.startswith(want + ":") or name.startswith(want + "-"):
+            return name
+    return models[0]
+
+
+def _ollama_thread(
+    config: dict[str, Any],
+    recent: list[str],
+    *,
+    history: str = "",
+    ban_coffee: bool = False,
+) -> dict[str, Any] | None:
+    model = resolve_ollama_model(config)
+    if not model:
+        raise RuntimeError(
+            "No Ollama models installed — run: ollama pull llama3.2"
+        )
+    base = _ollama_base_url(config)
+    url = f"{base}/v1/chat/completions"
+    node = _openai_compatible_thread(
+        config,
+        url=url,
+        key="",
+        model=model,
+        recent=recent,
+        json_mode=False,
+        timeout=_OLLAMA_TIMEOUT_S,
+        temperature=0.7,
+        history=history,
+        ban_coffee=ban_coffee,
+    )
+    if node is not None and not (ban_coffee and _mentions_coffee(str(node.get("opener") or ""))):
+        return node
+    # Second chance: simplest riff-only schema (and hard coffee ban if needed).
     return _openai_compatible_thread(
         config,
         url=url,
@@ -449,26 +1419,314 @@ def _ollama_thread(config: dict[str, Any], recent: list[str]) -> dict[str, Any] 
         model=model,
         recent=recent,
         json_mode=False,
+        timeout=_OLLAMA_TIMEOUT_S,
+        temperature=0.55,
+        prompt=_llm_riff_prompt(
+            recent, history=history, ban_coffee=ban_coffee
+        ),
+        history=history,
+        ban_coffee=ban_coffee,
     )
 
 
 def try_llm_thread(
-    config: dict[str, Any] | None, recent: list[str]
+    config: dict[str, Any] | None,
+    recent: list[str],
+    *,
+    state: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     resolved = resolve_llm_provider(config)
     if not resolved or not isinstance(config, dict):
         return None
     provider, key = resolved
+    history = format_history(state)
+    ban_coffee = coffee_on_cooldown(state)
     try:
         if provider == "gemini":
-            return _gemini_thread(config, key, recent)
-        if provider == "openai":
-            return _openai_thread(config, key, recent)
-        if provider == "ollama":
-            return _ollama_thread(config, recent)
-    except Exception:
+            node = _gemini_thread(
+                config, key, recent, history=history, ban_coffee=ban_coffee
+            )
+        elif provider == "openai":
+            node = _openai_thread(
+                config, key, recent, history=history, ban_coffee=ban_coffee
+            )
+        elif provider == "ollama":
+            node = _ollama_thread(
+                config, recent, history=history, ban_coffee=ban_coffee
+            )
+        else:
+            node = None
+    except Exception as exc:
+        _set_llm_error(f"{provider}: {exc}", state)
         return None
-    return None
+    if node is None:
+        _set_llm_error(f"{provider}: bad/empty response — using library", state)
+        return None
+    if ban_coffee and _mentions_coffee(str(node.get("opener") or "")):
+        _set_llm_error(f"{provider}: coffee cooldown — using library", state)
+        return None
+    _set_llm_error("", state)
+    node = dict(node)
+    node["source"] = provider
+    if provider == "ollama":
+        node["model"] = resolve_ollama_model(config) or ""
+    return node
+
+
+def llm_live_enabled(config: dict[str, Any] | None) -> bool:
+    """True when Ollama / Gemini / OpenAI can mint live freeform reacts."""
+    if resolve_llm_provider(config) is None:
+        return False
+    if not isinstance(config, dict):
+        return False
+    if _llm_mode(config) in {"ollama", "local"}:
+        # Don't advertise freeform if nothing is pulled — avoids silent no-ops.
+        return bool(list_ollama_models(config))
+    return True
+
+
+def _clean_llm_plain(text: str) -> str | None:
+    blob = str(text or "").strip()
+    if blob.startswith("```"):
+        blob = re.sub(r"^```(?:\w+)?\s*", "", blob, flags=re.I)
+        blob = re.sub(r"\s*```$", "", blob)
+    # Prefer a JSON {"reply": "..."} if the model wrapped it.
+    parsed = _parse_json_blob(blob)
+    if isinstance(parsed, dict):
+        for key in ("reply", "text", "line", "response"):
+            if parsed.get(key):
+                blob = str(parsed.get(key) or "")
+                break
+    blob = " ".join(blob.split()).strip().strip('"').strip("'")
+    blob = _fill(blob)
+    if len(blob) < 6:
+        return None
+    return blob[:480]
+
+
+def _gemini_react(
+    config: dict[str, Any],
+    key: str,
+    opener: str,
+    pilot: str,
+    *,
+    history: str = "",
+    ban_coffee: bool = False,
+    prompt: str | None = None,
+) -> str | None:
+    model = str(config.get("tanker_chat_llm_model") or _DEFAULT_GEMINI_MODEL).strip()
+    model = model or _DEFAULT_GEMINI_MODEL
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{urllib.parse.quote(model)}:generateContent?key={urllib.parse.quote(key)}"
+    )
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {
+                        "text": prompt
+                        or _llm_react_prompt(
+                            opener,
+                            pilot,
+                            history=history,
+                            ban_coffee=ban_coffee,
+                        )
+                    }
+                ]
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0.65,
+            "maxOutputTokens": 220,
+        },
+    }
+    data = _http_json(url, payload, {"Content-Type": "application/json"}, timeout=5.5)
+    parts = (
+        (((data.get("candidates") or [{}])[0].get("content") or {}).get("parts")) or []
+    )
+    text = ""
+    for part in parts:
+        if isinstance(part, dict) and part.get("text"):
+            text += str(part.get("text") or "")
+    return _clean_llm_plain(text)
+
+
+def _openai_compatible_react(
+    config: dict[str, Any],
+    *,
+    url: str,
+    key: str,
+    model: str,
+    opener: str,
+    pilot: str,
+    timeout: float = 5.5,
+    history: str = "",
+    ban_coffee: bool = False,
+    temperature: float = 0.65,
+    prompt: str | None = None,
+) -> str | None:
+    payload: dict[str, Any] = {
+        "model": model,
+        "temperature": temperature,
+        "max_tokens": 220,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "Answer the pilot directly and stay on their topic. "
+                    "Plain radio text only. No JSON. No markdown."
+                ),
+            },
+            {
+                "role": "user",
+                "content": prompt
+                or _llm_react_prompt(
+                    opener, pilot, history=history, ban_coffee=ban_coffee
+                ),
+            },
+        ],
+    }
+    headers = {"Content-Type": "application/json"}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    data = _http_json(url, payload, headers, timeout=timeout)
+    text = str(((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "")
+    return _clean_llm_plain(text)
+
+
+def _react_prompt_for_pilot(
+    opener: str,
+    pilot: str,
+    *,
+    history: str = "",
+    ban_coffee: bool = False,
+) -> str:
+    if looks_like_question_or_chat(pilot):
+        return _llm_answer_prompt(pilot, history=history, ban_coffee=ban_coffee)
+    return _llm_react_prompt(
+        opener, pilot, history=history, ban_coffee=ban_coffee
+    )
+
+
+def _history_without_trailing_pilot(state: dict[str, Any] | None) -> str:
+    """Prior chat only — current pilot line is passed separately to the model."""
+    if not isinstance(state, dict):
+        return "(no earlier lines)"
+    rows = [
+        row
+        for row in (state.get(_HISTORY_KEY) or [])
+        if isinstance(row, dict) and str(row.get("text") or "").strip()
+    ]
+    if rows and str(rows[-1].get("role") or "") == "pilot":
+        rows = rows[:-1]
+    if not rows:
+        return "(no earlier lines)"
+    lines: list[str] = []
+    for row in rows:
+        who = "Pilot" if str(row.get("role") or "") == "pilot" else "Boom"
+        lines.append(f"{who}: {str(row.get('text') or '').strip()}")
+    return "\n".join(lines)
+
+
+def try_llm_react(
+    config: dict[str, Any] | None,
+    *,
+    opener: str,
+    pilot: str,
+    state: dict[str, Any] | None = None,
+) -> str | None:
+    """Live freeform boom reply to whatever the pilot just said."""
+    resolved = resolve_llm_provider(config)
+    if not resolved or not isinstance(config, dict):
+        return None
+    provider, key = resolved
+    boom_line = last_boom_line(state, opener)
+    history = _history_without_trailing_pilot(state)
+    ban_coffee = (
+        coffee_on_cooldown(state)
+        or _mentions_coffee(opener)
+        or _mentions_coffee(boom_line)
+    )
+    prompt = _react_prompt_for_pilot(
+        boom_line, pilot, history=history, ban_coffee=ban_coffee
+    )
+
+    def _call(active_prompt: str, *, ban: bool) -> str | None:
+        if provider == "gemini":
+            return _gemini_react(
+                config,
+                key,
+                boom_line,
+                pilot,
+                history=history,
+                ban_coffee=ban,
+                prompt=active_prompt,
+            )
+        if provider == "openai":
+            model = str(
+                config.get("tanker_chat_llm_model") or _DEFAULT_OPENAI_MODEL
+            ).strip()
+            return _openai_compatible_react(
+                config,
+                url="https://api.openai.com/v1/chat/completions",
+                key=key,
+                model=model or _DEFAULT_OPENAI_MODEL,
+                opener=boom_line,
+                pilot=pilot,
+                history=history,
+                ban_coffee=ban,
+                prompt=active_prompt,
+            )
+        if provider == "ollama":
+            model = resolve_ollama_model(config)
+            if not model:
+                raise RuntimeError(
+                    "No Ollama models installed — run: ollama pull llama3.2"
+                )
+            base = _ollama_base_url(config)
+            return _openai_compatible_react(
+                config,
+                url=f"{base}/v1/chat/completions",
+                key="",
+                model=model,
+                opener=boom_line,
+                pilot=pilot,
+                timeout=_OLLAMA_REACT_TIMEOUT_S,
+                history=history,
+                ban_coffee=ban,
+                prompt=active_prompt,
+            )
+        return None
+
+    try:
+        text = _call(prompt, ban=ban_coffee)
+        if not text and looks_like_question_or_chat(pilot):
+            text = _call(
+                _llm_answer_prompt(pilot, history=history, ban_coffee=True),
+                ban=True,
+            )
+    except Exception as exc:
+        _set_llm_error(f"{provider} react: {exc}", state)
+        return None
+    if not text:
+        _set_llm_error(f"{provider} react: empty reply", state)
+        return None
+    if ban_coffee and _mentions_coffee(text):
+        try:
+            retry = _call(
+                _llm_answer_prompt(pilot, history=history, ban_coffee=True),
+                ban=True,
+            )
+        except Exception:
+            retry = None
+        if retry and not _mentions_coffee(retry):
+            text = retry
+        elif _mentions_coffee(text):
+            # Keep something on-topic-ish rather than a coffee canned line.
+            text = "Ha — fair point. Hang tight."
+    _set_llm_error("", state)
+    return text
 
 
 def _pick_library(avoid: list[str], thread_id: str | None) -> dict[str, Any]:
@@ -483,6 +1741,79 @@ def _pick_library(avoid: list[str], thread_id: str | None) -> dict[str, Any]:
     return copy.deepcopy(random.choice(pool))
 
 
+def _pick_library_for_state(
+    state: dict[str, Any], avoid: list[str], thread_id: str | None
+) -> dict[str, Any]:
+    """Library fallback that skips coffee bits while coffee is on cooldown."""
+    node = _pick_library(avoid, thread_id)
+    if thread_id or not coffee_on_cooldown(state):
+        return node
+    skip = set(avoid)
+    pool = []
+    for t in chat_lib.THREADS:
+        tid = str(t.get("id") or "")
+        if tid in skip:
+            continue
+        opener = str(t.get("opener") or "")
+        if _mentions_coffee(opener) or _mentions_coffee(tid):
+            continue
+        pool.append(t)
+    if not pool:
+        return node
+    return copy.deepcopy(random.choice(pool))
+
+
+def _apply_open_bit(
+    state: dict[str, Any],
+    node: dict[str, Any],
+    *,
+    schedule_auto: bool,
+    opener: str = "",
+) -> None:
+    """Store an open riff/open/ab bit. Riffs auto-continue if the pilot stays quiet."""
+    kind = str(node.get("kind") or "").strip().casefold()
+    choices = list(node.get("choices") or [])
+    if not kind:
+        kind = "ab" if len(choices) >= 2 else "riff"
+    tid = str(node.get("id") or "")
+    reacts = list(node.get("reacts") or [])
+    spoken = str(opener or node.get("opener") or "").strip()
+    source = str(node.get("source") or "").strip()
+    if kind in {"riff", "open"}:
+        # Library riffs may auto-continue if the pilot stays quiet. Live LLM
+        # bits wait for the pilot — auto-continue made Texaco answer herself.
+        wait = None
+        if schedule_auto and kind == "riff" and not source:
+            wait = _pick_break_s(llm=False)
+        state[_STATE_KEY] = {
+            "id": tid,
+            "kind": kind,
+            "opener": spoken,
+            "source": source,
+            "choices": choices[:2] if choices else [],
+            "reacts": reacts,
+            "awaiting": "react",
+            "turns": 0,
+            "session": True,
+            "next_at": (time.time() + wait) if wait is not None else None,
+            "break_s": wait,
+        }
+    else:
+        state[_STATE_KEY] = {
+            "id": tid,
+            "kind": "ab",
+            "opener": spoken,
+            "source": source,
+            "choices": choices,
+            "reacts": [],
+            "awaiting": None,
+            "turns": 0,
+            "session": True,
+            "next_at": None,
+            "break_s": None,
+        }
+
+
 def start_chat(
     state: dict[str, Any] | None,
     callsign: str,
@@ -491,24 +1822,56 @@ def start_chat(
     thread_id: str | None = None,
     config: dict[str, Any] | None = None,
 ) -> str:
-    """Texaco asks an A/B question. Returns spoken text."""
+    """Texaco opens a boom bit (A/B, riff, or open). Keeps the session going."""
     if not isinstance(state, dict):
         state = {}
     recent = _recent_ids(state)
     node: dict[str, Any] | None = None
     if not thread_id:
-        node = try_llm_thread(config, recent)
+        node = try_llm_thread(config, recent, state=state)
     if node is None:
-        node = _pick_library(recent, thread_id)
+        node = _pick_library_for_state(state, recent, thread_id)
+        if not thread_id and resolve_llm_provider(config) is not None and not last_llm_error():
+            _set_llm_error("LLM off-line — library bit", state)
+    else:
+        _set_llm_error("", state)
+        if node.get("source") == "ollama" and node.get("model"):
+            state[_LLM_NOTE_KEY] = f"Ollama · {node.get('model')}"
+        elif node.get("source"):
+            state[_LLM_NOTE_KEY] = str(node.get("source"))
     cs, tcs = _names(callsign, tanker)
     opener = _fill(str(node.get("opener") or ""), cs, tcs)
     tid = str(node.get("id") or "")
-    state[_STATE_KEY] = {
-        "id": tid,
-        "choices": list(node.get("choices") or []),
-    }
+    _apply_open_bit(state, node, schedule_auto=True, opener=opener)
     _remember(state, tid)
+    append_history(state, "boom", opener)
     return opener
+
+
+def _keep_react_open(
+    state: dict[str, Any],
+    *,
+    opener: str,
+    turns: int,
+    llm: bool,
+) -> None:
+    """Stay on the same bit so the pilot can keep riffing (no auto-advance)."""
+    del llm  # reserved if we later soft-timeout live chats
+    prev = _row(state) or {}
+    state[_STATE_KEY] = {
+        "id": str(prev.get("id") or ""),
+        "kind": str(prev.get("kind") or "open") or "open",
+        "opener": opener,
+        "source": str(prev.get("source") or ""),
+        "choices": [],
+        "reacts": list(prev.get("reacts") or []),
+        "awaiting": "react",
+        "turns": turns,
+        "session": True,
+        # Wait for the pilot — do not fire a new opener mid-conversation.
+        "next_at": None,
+        "break_s": None,
+    }
 
 
 def answer_chat(
@@ -518,32 +1881,151 @@ def answer_chat(
     *,
     choice_id: str = "",
     transcript: str = "",
+    config: dict[str, Any] | None = None,
 ) -> str | None:
-    """Pilot picked a side (or roger). Returns tanker reply, or None if no match."""
+    """
+    Pilot answered an A/B, soft-acked, or freeform-reacted.
+
+    With Ollama/Gemini/OpenAI on, freeform speech can riff live — you do not
+    have to pick one of the two buttons. Freeform turns stay on the same bit
+    for a few exchanges before Texaco rotates to a new opener.
+    """
     if not isinstance(state, dict) or not is_open(state):
         return None
     choices = current_choices(state)
+    awaiting = is_awaiting_react(state)
+    row = _row(state) or {}
+    opener = str(row.get("opener") or "").strip()
+    turns = int(row.get("turns") or 0)
+    live_on = llm_live_enabled(config)
     choice: dict[str, Any] | None = None
     want = str(choice_id or "").strip()
-    if want:
-        choice = next((c for c in choices if str(c.get("id") or "") == want), None)
-    if choice is None and transcript:
-        choice = match_choice(transcript, choices)
-    if choice is None:
-        return None
-    cs, tcs = _names(callsign, tanker)
-    if str(choice.get("id") or "") == "_ack":
-        end_chat(state)
-        return str(choice.get("reply") or "Copy.")
-    reply = str(choice.get("reply") or "Copy.")
-    follow = choice.get("follow") if isinstance(choice.get("follow"), dict) else None
-    if follow and follow.get("choices"):
-        follow_open = _fill(str(follow.get("opener") or ""), cs, tcs)
-        state[_STATE_KEY] = {
-            "id": str(follow.get("id") or state.get(_STATE_KEY, {}).get("id") or ""),
-            "choices": list(follow.get("choices") or []),
+    freeform = False
+    chatty = looks_like_question_or_chat(transcript)
+    if want and want in {"_ack", "ack"}:
+        choice = {
+            "id": "_ack",
+            "say": "Roger",
+            "reply": random.choice(_DEFAULT_REACT_REPLIES),
         }
-        body = f"{reply} {follow_open}".strip()
-        return body
-    end_chat(state)
+        freeform = True
+    elif want and want not in {"_any", "any"}:
+        choice = next((c for c in choices if str(c.get("id") or "") == want), None)
+    elif want in {"_any", "any"}:
+        freeform = True
+    if choice is None and transcript and choices:
+        choice = match_choice(transcript, choices)
+        if choice and str(choice.get("id") or "") == "_ack":
+            freeform = True
+    # Real questions / multi-word chat must not get trapped in a one-word A/B
+    # canned reply when the live LLM is available.
+    if (
+        live_on
+        and transcript.strip()
+        and chatty
+        and choice is not None
+        and str(choice.get("id") or "") not in {"_ack", "ack"}
+    ):
+        choice = None
+        freeform = True
+    # Freeform when awaiting a react, or with live LLM (even over A/B buttons).
+    # Echo of Texaco's own TX is rejected below so she doesn't answer herself.
+    if choice is None and transcript.strip() and (awaiting or live_on or chatty):
+        freeform = True
+    if choice is None and awaiting and not live_on:
+        choice = match_react(transcript or "roger", current_reacts(state))
+    if choice is None and not freeform:
+        return None
+    if freeform and looks_like_own_echo(transcript, state):
+        return None
+
+    cs, tcs = _names(callsign, tanker)
+    if transcript.strip():
+        append_history(state, "pilot", transcript)
+    elif choice is not None and not freeform:
+        said = str(choice.get("say") or choice.get("id") or "").strip()
+        if said:
+            append_history(state, "pilot", said)
+    reply = ""
+    follow = None
+    used_live = False
+    if freeform and transcript.strip() and live_on:
+        live = try_llm_react(
+            config, opener=opener, pilot=transcript, state=state
+        )
+        if live:
+            reply = naturalize_reply(_fill(live, cs, tcs))
+            used_live = True
+    if not reply and choice is not None and not freeform:
+        reply = naturalize_reply(
+            _fill(str(choice.get("reply") or "Fair enough."), cs, tcs),
+            force=True,
+        )
+        follow = choice.get("follow") if isinstance(choice.get("follow"), dict) else None
+    if not reply and freeform:
+        # Prefer a soft on-topic hedge over a random coffee canned line.
+        if chatty:
+            soft = "Ha — fair question. Hang on, boom's thinking."
+        else:
+            reacted = match_react(transcript or "roger", current_reacts(state))
+            soft = str(
+                reacted.get("reply") or random.choice(_DEFAULT_REACT_REPLIES)
+            )
+            follow = (
+                reacted.get("follow")
+                if isinstance(reacted.get("follow"), dict)
+                else None
+            )
+        reply = naturalize_reply(_fill(soft, cs, tcs), force=True)
+    if not reply and choice is not None:
+        reply = naturalize_reply(
+            _fill(str(choice.get("reply") or "Fair enough."), cs, tcs),
+            force=True,
+        )
+        follow = choice.get("follow") if isinstance(choice.get("follow"), dict) else None
+    if not reply:
+        return None
+    append_history(state, "boom", reply)
+    if follow and (follow.get("choices") or follow.get("kind") in {"riff", "open"}):
+        follow_open = _fill(str(follow.get("opener") or ""), cs, tcs)
+        _apply_open_bit(state, follow, schedule_auto=True, opener=follow_open)
+        append_history(state, "boom", follow_open)
+        return f"{reply} {follow_open}".strip()
+
+    # Keep the same bit open for a few freeform / live exchanges.
+    if freeform and (used_live or live_on or awaiting or chatty):
+        nxt = turns + 1
+        if nxt < _MAX_FREEFORM_TURNS:
+            _keep_react_open(
+                state,
+                opener=reply or opener,
+                turns=nxt,
+                llm=used_live or live_on,
+            )
+            return reply
+
+    wait = schedule_next_question(state, llm=used_live or live_on)
+    state[_STATE_KEY]["break_s"] = wait
     return reply
+
+
+def attach_continuation_deferred(
+    result: dict[str, Any], state: dict[str, Any] | None
+) -> dict[str, Any]:
+    """If a break / riff timer is armed, tell the UI when to fire the next bit."""
+    if not isinstance(result, dict):
+        return result
+    delay = continuation_delay_s(state)
+    if delay is None:
+        return result
+    row = _row(state) or {}
+    try:
+        stored = float(row.get("break_s") or 0)
+    except (TypeError, ValueError):
+        stored = 0.0
+    wait = stored if stored >= 6.0 else max(delay, _BREAK_MIN_S)
+    result["deferred"] = {
+        "kind": "tanker_chat_continue",
+        "delay_s": wait,
+    }
+    return result

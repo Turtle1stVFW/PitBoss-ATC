@@ -2932,6 +2932,11 @@ def evaluate(
     last_tx_channel: str = "",
     last_tx_template: str = "",
     tanker_chat_choices: list[dict[str, Any]] | None = None,
+    tanker_chat_session: bool = False,
+    tanker_chat_awaiting_react: bool = False,
+    tanker_chat_freeform: bool = False,
+    tanker_chat_last_spoke: str = "",
+    tanker_chat_guard_until: float = 0.0,
 ) -> Evaluation:
     """
     Decide whether a transmission is ATC business, and if so what it asks for.
@@ -3000,9 +3005,15 @@ def evaluate(
         transcript=transcript, normalized=text, candidate=candidate, address=address
     )
 
-    # Boom small-talk answers (Dunkin / Starbucks / …) while Texaco is waiting.
+    # Boom small-talk answers (Dunkin / Starbucks / freeform riff reacts) while
+    # Texaco is waiting, or a stop phrase while a chat session is still live.
     # Official tanker calls still win. Agency opener is optional.
-    if tanker_chat_choices and not (
+    if (
+        tanker_chat_choices
+        or tanker_chat_session
+        or tanker_chat_awaiting_react
+        or tanker_chat_freeform
+    ) and not (
         candidate is not None
         and candidate.intent
         in {
@@ -3019,7 +3030,34 @@ def evaluate(
         try:
             import tanker_chat as tanker_chat_mod
 
-            hit = tanker_chat_mod.match_choice(text, tanker_chat_choices)
+            if tanker_chat_mod.match_stop(text):
+                result.match = Match(
+                    intent="tanker_chat_stop",
+                    kind="request",
+                    template="",
+                    confidence=1.0,
+                    slots={},
+                    transcript=transcript,
+                    normalized=text,
+                )
+                return result
+            hit = (
+                tanker_chat_mod.match_choice(text, tanker_chat_choices)
+                if tanker_chat_choices
+                else None
+            )
+            if hit is None and (
+                tanker_chat_awaiting_react or tanker_chat_freeform
+            ) and text.strip():
+                echo_state = {
+                    "tanker_chat_last_spoke": tanker_chat_last_spoke,
+                    "tanker_chat_guard_until": tanker_chat_guard_until,
+                }
+                if tanker_chat_mod.looks_like_own_echo(text, echo_state):
+                    result.reason = "boom chat echo (ignored)"
+                    return result
+                # Freeform / soft react — riff with Ollama when live LLM is on.
+                hit = {"id": "_any"}
         except Exception:
             hit = None
         if hit:
@@ -3233,6 +3271,9 @@ def suggestions(
                 out.append(
                     (say, "answer Texaco · agency optional", "advance", False)
                 )
+        out.append(
+            ("talk later", "stop boom chat · agency optional", "advance", False)
+        )
 
     ranked: list[tuple[int, int, Intent, str]] = []
     # Built-in grammar only here — this step's mission phrases are already above.

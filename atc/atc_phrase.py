@@ -1344,6 +1344,29 @@ def _ownship_fix_is_fresh(state: dict[str, Any] | None) -> bool:
         return False
 
 
+def _iaf_is_range_gate(iaf_entry: dict[str, Any] | None) -> bool:
+    """
+    Outer recovery IAF for Blackjack / Approach (not an intermediate plate fix).
+
+    SHEET / KRYSS / HULPU sit on the ILS inside the ARCOE/DUDBE gate altitudes.
+    Position picks must not clear a jet direct those and down to 5–8k when Approach
+    will still expect the HI ILS via ARCOE at or above 15k.
+    """
+    if not isinstance(iaf_entry, dict):
+        return False
+    flag = iaf_entry.get("range_gate")
+    if flag is False:
+        return False
+    if flag is True:
+        return True
+    if iaf_entry.get("via"):
+        return True
+    try:
+        return int(iaf_entry.get("altitude_ft") or 0) >= 10000
+    except (TypeError, ValueError):
+        return False
+
+
 def nearest_instrument_for_position(
     catalog: dict[str, Any] | None,
     position: Any,
@@ -1351,10 +1374,10 @@ def nearest_instrument_for_position(
     runway: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]] | None:
     """
-    Closest published IAF to the aircraft, restricted to the landing runway.
+    Closest outer (range-gate) IAF to the aircraft on the landing runway.
 
-    Keeps arrivals from the north on the ARCOE plates and arrivals from the
-    west on DUDBE instead of always handing out the first plate in the catalog.
+    Keeps arrivals from the north on ARCOE / HI ILS Z and from the west on
+    DUDBE instead of the geographically nearest intermediate fix (SHEET, HULPU).
     Returns (instrument, iaf) or None when nothing has coordinates.
     """
     pos = coerce_latlon(position)
@@ -1369,6 +1392,8 @@ def nearest_instrument_for_position(
         if side and _runway_side(er) != side:
             continue
         for iaf_entry in inst.get("iaf") or []:
+            if not isinstance(iaf_entry, dict) or not _iaf_is_range_gate(iaf_entry):
+                continue
             ll = _entry_latlon(iaf_entry)
             if ll is None:
                 continue
@@ -1645,6 +1670,28 @@ def assign_approach_plan(
                     opus=opus,
                     force=True,
                     recovery=str(plan.get("pattern") or "") or None,
+                    position=position,
+                )
+        # Drop a position pick that used an intermediate IAF (SHEET/5k) so
+        # Approach stays on the same outer gate Blackjack should have used.
+        if (
+            normalize_recovery_key(plan.get("pattern")) == "instrument"
+            and str(plan.get("iaf_source") or "") == "position"
+            and str(plan.get("iaf") or "")
+        ):
+            inst = find_instrument_approach(
+                catalog, token=str(plan.get("instrument_id") or "")
+            )
+            iaf_entry = find_iaf(inst, str(plan.get("iaf"))) if inst else None
+            if iaf_entry is not None and not _iaf_is_range_gate(iaf_entry):
+                return assign_approach_plan(
+                    airport,
+                    weather,
+                    mission=mission,
+                    state=state,
+                    opus=opus,
+                    force=True,
+                    recovery="instrument",
                     position=position,
                 )
         return plan
@@ -3353,6 +3400,7 @@ def pilot_requests_for_channel(
         if key.startswith("tanker_") and key not in (
             "tanker_chat_start",
             "tanker_chat_reply",
+            "tanker_chat_stop",
         ) and not key.startswith("tanker_chat_choice_") and not (
             isinstance(state, dict) and str(state.get("tanker_callsign") or "").strip()
         ):
@@ -3570,6 +3618,7 @@ def apply_pilot_request(
         "tanker_dcs_abort",
         "tanker_chat_start",
         "tanker_chat_reply",
+        "tanker_chat_stop",
     ):
         return {
             "key": key,
@@ -7751,20 +7800,37 @@ def step_radio(
     airport: dict[str, Any],
     channel: str,
     step: dict[str, Any] | None = None,
+    *,
+    state: dict[str, Any] | None = None,
+    config: dict[str, Any] | None = None,
 ) -> tuple[float, str, str]:
     """
     Airport channel freq/mod, with optional per-step overrides.
+
     Step keys: freq_mhz, mod (commonly used for channel=other).
+    For tanker, prefers the live Opus / remembered tanker UHF over the static
+    airports.json placeholder (often 251.0).
     """
     freq, mod, tx_name = channel_radio(airport, channel)
-    if not step:
-        return freq, mod, tx_name
-    override = _parse_mhz(step.get("freq_mhz"))
-    if override is not None:
-        freq = override
-    step_mod = str(step.get("mod") or "").strip()
-    if step_mod:
-        mod = step_mod
+    if step:
+        override = _parse_mhz(step.get("freq_mhz"))
+        if override is not None:
+            freq = override
+        step_mod = str(step.get("mod") or "").strip()
+        if step_mod:
+            mod = step_mod
+    if str(channel or "").strip().lower() == "tanker":
+        # Explicit step override still wins; otherwise use the live tanker.
+        step_override = _parse_mhz(step.get("freq_mhz")) if step else None
+        if step_override is None:
+            try:
+                import tanker as tanker_mod
+
+                live = tanker_mod.effective_tanker_mhz(state, config)
+                if live is not None:
+                    freq = float(live)
+            except Exception:
+                pass
     return freq, mod, tx_name
 
 

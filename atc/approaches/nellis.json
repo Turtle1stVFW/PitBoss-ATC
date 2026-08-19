@@ -109,7 +109,7 @@
       "radial_ref": "LAS 349°/38 NM"
     }
   ],
-  "_instrument_comment": "IAFs and crossing altitudes from the KLSV CIFP procedure records. '+' constraints are at-or-above. ILS and LOC are separate procedures on the same plate — only one is ever assigned.",
+  "_instrument_comment": "IAFs and crossing altitudes from the KLSV CIFP procedure records. '+' constraints are at-or-above. ILS and LOC are separate procedures on the same plate — only one is ever assigned. range_gate IAFs (ARCOE/DUDBE/LUCIL) are the only ones position-based recoveries may pick — intermediate fixes like SHEET stay request/route-only.",
   "instrument": [
     {
       "id": "ILS_Z_21L",
@@ -135,6 +135,7 @@
           "say": "Arcoe",
           "altitude_ft": 15000,
           "altitude_type": "at_or_above",
+          "range_gate": true,
           "via": "RONKY, WISTO, D024U, D033U",
           "lat": 36.737683,
           "lon": -114.917067
@@ -149,6 +150,7 @@
           "say": "Kryss",
           "altitude_ft": 8800,
           "altitude_type": "at_or_above",
+          "range_gate": false,
           "lat": 36.506156,
           "lon": -114.736508
         }
@@ -175,6 +177,7 @@
           "say": "Kryss",
           "altitude_ft": 8800,
           "altitude_type": "at_or_above",
+          "range_gate": false,
           "lat": 36.506156,
           "lon": -114.736508
         },
@@ -187,6 +190,7 @@
           "say": "Sheet",
           "altitude_ft": 5000,
           "altitude_type": "at_or_above",
+          "range_gate": false,
           "lat": 36.408861,
           "lon": -114.844194
         }
@@ -253,6 +257,7 @@
           "say": "Dudbe",
           "altitude_ft": 15000,
           "altitude_type": "at_or_above",
+          "range_gate": true,
           "via": "SECRT, D314M, D332M, D350M, D020M, D031M",
           "lat": 36.364142,
           "lon": -115.343022
@@ -266,6 +271,7 @@
           "say": "Hulpu",
           "altitude_ft": 5500,
           "altitude_type": "at_or_above",
+          "range_gate": false,
           "lat": 36.405761,
           "lon": -114.845483
         }
@@ -293,6 +299,7 @@
           "say": "Arcoe",
           "altitude_ft": 15000,
           "altitude_type": "at_or_above",
+          "range_gate": true,
           "via": "RONKY, WISTO, D024U, D033U",
           "lat": 36.737683,
           "lon": -114.917067
@@ -371,6 +378,7 @@
           "say": "Lucil",
           "altitude_ft": 10300,
           "altitude_type": "at_or_above",
+          "range_gate": true,
           "lat": 35.979794,
           "lon": -115.308
         },
@@ -383,6 +391,7 @@
           "say": "Husts",
           "altitude_ft": 6300,
           "altitude_type": "at_or_above",
+          "range_gate": false,
           "lat": 36.047967,
           "lon": -115.235431
         }

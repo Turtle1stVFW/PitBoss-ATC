@@ -127,8 +127,22 @@ class MissionPlanner(tk.Tk):
         self.engine.mission = self.mission
         self.config_data = self.engine.config
         # Google retired en-CA WaveNet; rewrite saved ids before anything synthesizes.
-        for note in atc_phrase.migrate_retired_google_voices(self.config_data):
+        voice_notes = atc_phrase.migrate_retired_google_voices(self.config_data)
+        for note in voice_notes:
             print(note, file=sys.stderr)
+        # Persist a repaired flow_file (or retired-voice remap) so the next launch
+        # does not hit the same missing-mission crash.
+        repaired = bool(self.config_data.pop("_flow_file_repaired", False))
+        if voice_notes or repaired:
+            try:
+                save_json(CONFIG_PATH, self.config_data)
+            except Exception:
+                pass
+            if repaired:
+                print(
+                    f"Restored missing mission → {self.config_data.get('flow_file')}",
+                    file=sys.stderr,
+                )
         self.airports = self.engine.airports
         self.selected_index: int | None = None
         self._loading = False
@@ -499,8 +513,9 @@ class MissionPlanner(tk.Tk):
         self._sync_eam_freqs_to_config()
         srs_radio.apply_config(self.config_data)
         step = None
+        eng = getattr(self, "engine", None)
+        flow_state = getattr(eng, "state", None) if eng is not None else None
         try:
-            eng = getattr(self, "engine", None)
             if eng is not None:
                 # Answering a live rolling offer TXes on Tower — not the
                 # previous step Back would otherwise replay.
@@ -517,7 +532,12 @@ class MissionPlanner(tk.Tk):
                 airport = self._airport()
         except Exception:  # noqa: BLE001
             airport = self._airport()
-        allowed, msg, _result = srs_radio.check_freq_gate(self.config_data, airport, step)
+        allowed, msg, _result = srs_radio.check_freq_gate(
+            self.config_data,
+            airport,
+            step,
+            state=flow_state,
+        )
         return allowed, msg
 
     def _sync_eam_freqs_to_config(self) -> None:
@@ -787,7 +807,12 @@ class MissionPlanner(tk.Tk):
             airport = self.engine.airport()
         except Exception:  # noqa: BLE001
             airport = self._airport()
-        _ok, msg, result = srs_radio.check_freq_gate(self.config_data, airport, step)
+        _ok, msg, result = srs_radio.check_freq_gate(
+            self.config_data,
+            airport,
+            step,
+            state=getattr(self.engine, "state", None),
+        )
         # Richer Fly lines: live tune vs next-step agency / mission phase.
         tuned_line, next_line, gate_line, gate_color = self._fly_radio_status_lines(
             airport, step, gate_msg=msg, gate_result=result
@@ -831,7 +856,13 @@ class MissionPlanner(tk.Tk):
                 tol = float(self.config_data.get("freq_gate_tolerance_mhz") or 0.05)
             except (TypeError, ValueError):
                 tol = 0.05
-            tuned_line = srs_radio.format_you_are_on(state, airport, tol_mhz=tol)
+            tuned_line = srs_radio.format_you_are_on(
+                state,
+                airport,
+                tol_mhz=tol,
+                config=self.config_data,
+                flow_state=getattr(self.engine, "state", None),
+            )
         else:
             udp = srs_radio.srs_udp_status()
             hint = ""
@@ -849,7 +880,13 @@ class MissionPlanner(tk.Tk):
             phase_lbl = voice_intent.MISSION_PHASE_LABELS.get(phase, phase or "?")
             label = str(step.get("label") or step.get("id") or ch).strip()
             try:
-                need_mhz, _mod, _ = atc_phrase.step_radio(airport, ch, step)
+                need_mhz, _mod, _ = atc_phrase.step_radio(
+                    airport,
+                    ch,
+                    step,
+                    state=getattr(self.engine, "state", None),
+                    config=self.config_data,
+                )
                 need = srs_radio.format_mhz(need_mhz)
             except Exception:  # noqa: BLE001
                 need = "—"
@@ -966,14 +1003,122 @@ class MissionPlanner(tk.Tk):
             self._fly_boom_lbl.configure(fg=C_GREEN if fire else (C_AMBER if text else C_MUTED))
 
     def _tanker_boom_work(self) -> None:
-        """Texaco starts boom chat once joined and 0.1–0.5 NM with a receiver."""
+        """Texaco starts / continues boom chat once joined and in range."""
         try:
             import tanker as tanker_mod
             import tanker_chat as tanker_chat_mod
 
             engine = flow_engine.FlowEngine()
-            if tanker_chat_mod.is_open(engine.state):
-                self._ui_call(lambda: self._set_boom_status("BOOM: waiting for your one-word answer"))
+            if tanker_chat_mod.current_choices(engine.state):
+                note = tanker_chat_mod.llm_note(engine.state)
+                msg = "BOOM: waiting for your answer"
+                if note:
+                    msg = f"{msg} ({note})"
+                self._ui_call(lambda m=msg: self._set_boom_status(m))
+                return
+            if tanker_chat_mod.is_awaiting_react(engine.state):
+                if tanker_chat_mod.continuation_due(engine.state):
+                    result = voice_engine.resolve_tanker_chat(
+                        engine, continue_session=True
+                    )
+                    boom = result.get("boom") if isinstance(result, dict) else None
+                    reason = ""
+                    if isinstance(boom, dict):
+                        reason = str(boom.get("reason") or "")
+                    if not reason:
+                        reason = str((result or {}).get("detail") or "")
+                    note = tanker_chat_mod.llm_note(engine.state)
+                    if note and not reason:
+                        reason = note
+                    elif note and reason and note not in reason:
+                        reason = f"{reason} · {note}"
+                    fired = bool(
+                        result and result.get("action") == "transmit" and result.get("text")
+                    )
+
+                    def riff_cont_done() -> None:
+                        line = f"BOOM: {reason}" if reason else ""
+                        self._set_boom_status(line, fire=fired)
+                        if fired:
+                            self._voice_log(
+                                f"TX   {str(result.get('channel') or 'tanker').upper()}  "
+                                f"{result.get('text', '')}"
+                            )
+                            if note:
+                                self._voice_log(f"BOOM  {note}")
+                        self.engine = engine
+                        if fired:
+                            self._refresh_fly_status()
+                        again = result.get("deferred") if isinstance(result, dict) else None
+                        if (
+                            isinstance(again, dict)
+                            and again.get("kind") == "tanker_chat_continue"
+                        ):
+                            self._schedule_tanker_chat(again)
+
+                    self._ui_call(riff_cont_done)
+                    return
+                delay = tanker_chat_mod.continuation_delay_s(engine.state)
+                if delay is not None:
+                    msg = f"BOOM: chatting — say anything, or next bit in {delay:.0f}s"
+                else:
+                    msg = "BOOM: chatting — say anything"
+                note = tanker_chat_mod.llm_note(engine.state)
+                if note:
+                    msg = f"{msg} · {note}"
+                self._ui_call(lambda m=msg: self._set_boom_status(m))
+                return
+            if tanker_chat_mod.is_session_active(engine.state):
+                if tanker_chat_mod.continuation_due(engine.state):
+                    result = voice_engine.resolve_tanker_chat(
+                        engine, continue_session=True
+                    )
+                    boom = result.get("boom") if isinstance(result, dict) else None
+                    reason = ""
+                    if isinstance(boom, dict):
+                        reason = str(boom.get("reason") or "")
+                    if not reason:
+                        reason = str((result or {}).get("detail") or "")
+                    note = tanker_chat_mod.llm_note(engine.state)
+                    if note and reason and note not in reason:
+                        reason = f"{reason} · {note}"
+                    elif note and not reason:
+                        reason = note
+                    fired = bool(
+                        result and result.get("action") == "transmit" and result.get("text")
+                    )
+
+                    def cont_done() -> None:
+                        line = f"BOOM: {reason}" if reason else ""
+                        self._set_boom_status(line, fire=fired)
+                        if fired:
+                            self._voice_log(
+                                f"TX   {str(result.get('channel') or 'tanker').upper()}  "
+                                f"{result.get('text', '')}"
+                            )
+                            if note:
+                                self._voice_log(f"BOOM  {note}")
+                        self.engine = engine
+                        if fired:
+                            self._refresh_fly_status()
+                        again = result.get("deferred") if isinstance(result, dict) else None
+                        if (
+                            isinstance(again, dict)
+                            and again.get("kind") == "tanker_chat_continue"
+                        ):
+                            self._schedule_tanker_chat(again)
+
+                    self._ui_call(cont_done)
+                    return
+                delay = tanker_chat_mod.continuation_delay_s(engine.state)
+                if delay is not None:
+                    msg = f"BOOM: chatting — next bit in {delay:.0f}s"
+                else:
+                    msg = "BOOM: chatting"
+                note = tanker_chat_mod.llm_note(engine.state)
+                if note:
+                    msg = f"{msg} · {note}"
+                self._ui_call(lambda m=msg: self._set_boom_status(m))
                 return
             if not tanker_mod.has_rejoined(engine.state):
                 self._ui_call(lambda: self._set_boom_status(""))
@@ -1690,8 +1835,33 @@ class MissionPlanner(tk.Tk):
             import tanker_chat as tanker_chat_mod
 
             context["tanker_chat_choices"] = tanker_chat_mod.current_choices(state)
+            context["tanker_chat_session"] = tanker_chat_mod.is_session_active(state)
+            context["tanker_chat_awaiting_react"] = tanker_chat_mod.is_awaiting_react(
+                state
+            )
+            context["tanker_chat_freeform"] = bool(
+                context["tanker_chat_awaiting_react"]
+                or (
+                    tanker_chat_mod.is_open(state)
+                    and tanker_chat_mod.llm_live_enabled(self.config_data)
+                )
+            )
+            context["tanker_chat_last_spoke"] = str(
+                state.get("tanker_chat_last_spoke") or ""
+            )
+            try:
+                context["tanker_chat_guard_until"] = float(
+                    state.get("tanker_chat_guard_until") or 0
+                )
+            except (TypeError, ValueError):
+                context["tanker_chat_guard_until"] = 0.0
         except Exception:
             context["tanker_chat_choices"] = []
+            context["tanker_chat_session"] = False
+            context["tanker_chat_awaiting_react"] = False
+            context["tanker_chat_freeform"] = False
+            context["tanker_chat_last_spoke"] = ""
+            context["tanker_chat_guard_until"] = 0.0
         try:
             context["last_tx_at"] = float(state.get("last_tx_at") or 0.0)
         except (TypeError, ValueError):
@@ -1832,7 +2002,10 @@ class MissionPlanner(tk.Tk):
                 deferred = result.get("deferred")
                 if isinstance(deferred, dict) and deferred.get("kind") == "unrestricted_climb":
                     self._schedule_unrestricted_climb_resolve(deferred)
-                elif isinstance(deferred, dict) and deferred.get("kind") == "tanker_chat":
+                elif isinstance(deferred, dict) and deferred.get("kind") in (
+                    "tanker_chat",
+                    "tanker_chat_continue",
+                ):
                     self._schedule_tanker_chat(deferred)
 
             self._ui_call(done)
@@ -1902,18 +2075,24 @@ class MissionPlanner(tk.Tk):
         self.after(delay_ms, kick)
 
     def _schedule_tanker_chat(self, deferred: dict[str, Any]) -> None:
-        """After rejoin, Texaco comes back with boom / reform small talk."""
+        """After rejoin (or between answers), Texaco comes back with boom small talk."""
+        kind = str(deferred.get("kind") or "tanker_chat")
         try:
             delay_s = float(deferred.get("delay_s") or 12.0)
         except (TypeError, ValueError):
             delay_s = 12.0
-        delay_ms = max(4000, int(delay_s * 1000))
+        # Continuations are already a deliberate pause — allow shorter floors.
+        floor_ms = 2500 if kind == "tanker_chat_continue" else 4000
+        delay_ms = max(floor_ms, int(delay_s * 1000))
+        continue_session = kind == "tanker_chat_continue"
 
         def kick() -> None:
             def work() -> None:
                 try:
                     engine = flow_engine.FlowEngine()
-                    result = voice_engine.resolve_tanker_chat(engine)
+                    result = voice_engine.resolve_tanker_chat(
+                        engine, continue_session=continue_session
+                    )
                 except Exception as exc:  # noqa: BLE001
                     err = str(exc)
 
@@ -1929,8 +2108,25 @@ class MissionPlanner(tk.Tk):
                             f"TX   {str(result.get('channel') or 'tanker').upper()}  "
                             f"{result.get('text', '')}"
                         )
+                        note = ""
+                        try:
+                            import tanker_chat as tanker_chat_mod
+
+                            note = tanker_chat_mod.llm_note(engine.state)
+                        except Exception:
+                            note = ""
+                        if note:
+                            self._voice_log(f"BOOM  {note}")
                     self.engine = engine
                     self._refresh_fly_status()
+                    # Always re-arm the next bit timer (riff auto-continue or
+                    # post-answer gap) — including after a successful TX.
+                    again = result.get("deferred") if isinstance(result, dict) else None
+                    if (
+                        isinstance(again, dict)
+                        and again.get("kind") == "tanker_chat_continue"
+                    ):
+                        self._schedule_tanker_chat(again)
 
                 self._ui_call(done)
 
@@ -6558,7 +6754,13 @@ class MissionPlanner(tk.Tk):
         except Exception:
             key = self.mission.get("airport") or self.config_data.get("default_airport") or "nellis"
             ap = self.airports.get(key) or next(iter(self.airports.values()))
-        freq, mod, tx_name = atc_phrase.step_radio(ap, channel, step)
+        freq, mod, tx_name = atc_phrase.step_radio(
+            ap,
+            channel,
+            step,
+            state=getattr(self.engine, "state", None),
+            config=self.config_data,
+        )
         # UHF/VFR style: always three decimals for glanceable kneeboard read
         freq_disp = f"{float(freq):.3f}"
         ch_label = channel.upper()
@@ -6659,6 +6861,7 @@ class MissionPlanner(tk.Tk):
         "tanker_dcs_precontact": "DCS: Ready pre-contact",
         "tanker_dcs_abort": "DCS: Abort / disconnect",
         "tanker_chat_start": "Texaco starts chat",
+        "tanker_chat_stop": "Stop chat",
         "clear_runway_request": "Reset runway to winds",
     }
 
@@ -6853,6 +7056,9 @@ class MissionPlanner(tk.Tk):
                 accent = True
             if key == "tanker_chat_start":
                 accent = True
+            if key == "tanker_chat_stop":
+                accent = False
+                short = "Stop chat"
             ttk.Button(
                 self._fly_req_btns,
                 text=short,
@@ -7135,7 +7341,10 @@ class MissionPlanner(tk.Tk):
         self.fly_log.see(tk.END)
         self._refresh_fly_status()
         deferred = played.get("deferred")
-        if isinstance(deferred, dict) and deferred.get("kind") == "tanker_chat":
+        if isinstance(deferred, dict) and deferred.get("kind") in (
+            "tanker_chat",
+            "tanker_chat_continue",
+        ):
             self._schedule_tanker_chat(deferred)
 
     def _on_handoff_request_done(self, played: dict[str, Any] | None) -> None:
@@ -7941,7 +8150,7 @@ class MissionPlanner(tk.Tk):
                     ("bullet", "• For the call that is due, the short version is enough — \u201cGround, Fleece 1, taxi\u201d."),
                     ("bullet", "• Right after ATC speaks, a plain \u201croger\u201d also clears the readback with no agency name."),
                     ("bullet", "• Try: request runway · say winds · request picture · bogey dope · declare · request tanker · say again."),
-                    ("bullet", "• Tanker (F-16 / KC-135 boom — never KC-130 or MPRS): Blackjack/Bandsaw request tanker for track and braw. Reply ends with frequency change approved. Say TACAN / frequency / bullseye only when you want those. On tanker freq: request rejoin — Texaco clears rejoin left, sometimes left observation (no “identified”). After rejoin, Texaco starts boom small talk once you have been 0.1–0.5 NM from the tanker for 30–60 seconds (or press Fly Texaco starts chat — Texaco talks first). Answer with one word. Optional Gemini/OpenAI/Ollama on Setup → Airport. DCS tanker radio still owns Intent to refuel, Ready pre-contact (cleared contact), and Abort. After AAR: check back in / back from the tanker (or checking in) on Blackjack/Bandsaw."),
+                    ("bullet", "• Tanker (F-16 / KC-135 boom — never KC-130 or MPRS): Blackjack/Bandsaw request tanker for track and braw. Reply ends with frequency change approved. Say TACAN / frequency / bullseye only when you want those. On tanker freq: request rejoin — Texaco clears rejoin left, sometimes left observation (no “identified”). After rejoin, Texaco starts boom small talk once you have been 0.1–0.5 NM from the tanker for 30–60 seconds (or press Fly Texaco starts chat — Texaco talks first). Mix of A/B polls, open questions, and random riffs — answer in a word, say anything, or just listen; Texaco keeps chatting with short breaks until you Stop chat / say “talk later”, or leave the tanker. Optional Gemini/OpenAI/Ollama on Setup → Airport. DCS tanker radio still owns Intent to refuel, Ready pre-contact (cleared contact), and Abort. After AAR: check back in / back from the tanker (or checking in) on Blackjack/Bandsaw."),
                     ("bullet", "• A call that fires a step advances Fly on its own — no need to press Play."),
                     ("bullet", "• Fly splits TO ADVANCE (plays the step) from ALSO AVAILABLE (winds, picture, …). "
                      "Cues are a full call when the agency opener is required; amber is the wording that must be said."),
@@ -8657,10 +8866,15 @@ class MissionPlanner(tk.Tk):
             text=(
                 "After you request rejoin, Texaco starts boom chat — you do not ask "
                 "first. Auto-fires after 30–60 seconds at 0.1–0.5 NM from the tanker "
-                "with a jet in that envelope (you count). Fly shows Texaco starts chat after "
-                "rejoin, even if the current step is still Blackjack. Optional: mint a "
-                "fresh A/B question with Gemini, OpenAI, or local Ollama (free, no key). "
-                "Falls back to the canned library if the model is slow or down."
+                "with a jet in that envelope (you count). Mix of A/B polls, open "
+                "questions, and random small-talk riffs — answer in a word, say "
+                "anything, or just listen; Texaco keeps going with short breaks until "
+                "you Stop chat / say “talk later”, or leave the tanker. With Ollama / "
+                "Gemini / OpenAI on, you can freestyle past the A/B buttons and Texaco "
+                "riffs live on what you said for a few turns, then rotates. Ollama needs "
+                "a pulled model (e.g. ollama pull llama3.2) — Fly shows when it falls "
+                "back to the library. Fly shows Texaco starts chat after rejoin, even if "
+                "the current step is still Blackjack."
             ),
             bg=C_PANEL,
             fg=C_MUTED,
@@ -10540,7 +10754,18 @@ class MissionPlanner(tk.Tk):
 
 
 def main() -> int:
-    app = MissionPlanner()
+    try:
+        app = MissionPlanner()
+    except Exception as exc:  # noqa: BLE001
+        # start "" hides the console — surface the crash so it is not a silent blink.
+        try:
+            root = tk.Tk()
+            root.withdraw()
+            messagebox.showerror("Mission Flow Planner", f"Could not start:\n\n{exc}")
+            root.destroy()
+        except Exception:
+            print(f"Could not start: {exc}", file=sys.stderr)
+        return 1
     app.mainloop()
     return 0
 

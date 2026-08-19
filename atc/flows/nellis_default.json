@@ -19,7 +19,7 @@
       "file": null,
       "enabled": true,
       "text": null,
-      "initial_climb_ft": 15000
+      "initial_climb_ft": 13000
     },
     {
       "id": "del_readback",
@@ -105,7 +105,7 @@
       "file": null,
       "enabled": true,
       "text": null,
-      "initial_climb_ft": 15000
+      "initial_climb_ft": 13000
     },
     {
       "id": "dep_cruise",
@@ -165,6 +165,20 @@
       "file": null,
       "enabled": true,
       "text": null
+    },
+    {
+      "id": "new_step_3b0a8c",
+      "phase": "flight",
+      "label": "Tanker",
+      "channel": "tanker",
+      "mode": "tts",
+      "template": "radio_check",
+      "file": null,
+      "text": null,
+      "enabled": true,
+      "locked": false,
+      "c2": false,
+      "hold": false
     },
     {
       "id": "bs_checkout",
@@ -293,5 +307,5 @@
   ],
   "active_takeoff_mode": "lineup",
   "landing_intent": "full_stop",
-  "initial_climb_ft": 15000
+  "initial_climb_ft": 13000
 }

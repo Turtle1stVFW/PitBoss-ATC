@@ -377,6 +377,13 @@ class VoiceController:
             tanker_chat_choices=context.get("tanker_chat_choices")
             if isinstance(context.get("tanker_chat_choices"), list)
             else None,
+            tanker_chat_session=bool(context.get("tanker_chat_session")),
+            tanker_chat_awaiting_react=bool(
+                context.get("tanker_chat_awaiting_react")
+            ),
+            tanker_chat_freeform=bool(context.get("tanker_chat_freeform")),
+            tanker_chat_last_spoke=str(context.get("tanker_chat_last_spoke") or ""),
+            tanker_chat_guard_until=float(context.get("tanker_chat_guard_until") or 0),
         )
         self.on_status(f"{elapsed:.0f}ms · {text}")
         self.on_transcript(evaluation)
@@ -520,6 +527,7 @@ def execute_intent(
         "tanker_depart",
         "tanker_chat_start",
         "tanker_chat_reply",
+        "tanker_chat_stop",
     ):
         return execute_tanker_action(
             engine,
@@ -1277,6 +1285,17 @@ def _transmit(
             freq = float(freq_mhz)
         except (TypeError, ValueError):
             pass
+    elif str(channel or "").strip().lower() == "tanker":
+        try:
+            import tanker as tanker_mod
+
+            live = tanker_mod.effective_tanker_mhz(
+                getattr(engine, "state", None), getattr(engine, "config", None)
+            )
+            if live is not None:
+                freq = float(live)
+        except Exception:
+            pass
     voice_name, _ = atc_phrase.voice_for_step(engine.config, channel, None)
     code = atc_phrase.transmit(
         engine.config,
@@ -1352,7 +1371,10 @@ def execute_tanker_action(
             engine.save_state()
         return _transmit(engine, ap, text, channel)
 
-    if action == "tanker_chat_start" or str(action).startswith("tanker_chat_choice_"):
+    if (
+        action in ("tanker_chat_start", "tanker_chat_reply", "tanker_chat_stop")
+        or str(action).startswith("tanker_chat_choice_")
+    ):
         named = ""
         own_ll = atc_phrase.ownship_latlon(
             engine.config, callsign=callsign, opus=opus, state=engine.state
@@ -1367,68 +1389,64 @@ def execute_tanker_action(
         )
         if tanker:
             tanker_mod.remember_tanker(engine.state, tanker)
-        if action == "tanker_chat_start":
+        text = ""
+        schedule_break = False
+        if action == "tanker_chat_stop":
+            text = tanker_chat_mod.stop_chat(engine.state, callsign, tanker)
+        elif action == "tanker_chat_start":
             text = tanker_chat_mod.start_chat(
                 engine.state,
                 callsign,
                 tanker,
                 config=getattr(engine, "config", None),
             )
-        else:
-            cid = str(action)[len("tanker_chat_choice_") :]
-            text = tanker_chat_mod.answer_chat(
-                engine.state, callsign, tanker, choice_id=cid
+            schedule_break = True
+        elif action == "tanker_chat_reply" or str(action).startswith(
+            "tanker_chat_choice_"
+        ):
+            cid = ""
+            transcript = ""
+            if str(action).startswith("tanker_chat_choice_"):
+                cid = str(action)[len("tanker_chat_choice_") :]
+            elif match is not None:
+                cid = str((match.slots or {}).get("choice") or "")
+                transcript = str(match.normalized or match.transcript or "")
+            # Stop phrases win even while an A/B is outstanding.
+            if transcript and tanker_chat_mod.match_stop(transcript):
+                text = tanker_chat_mod.stop_chat(engine.state, callsign, tanker)
+            else:
+                text = tanker_chat_mod.answer_chat(
+                    engine.state,
+                    callsign,
+                    tanker,
+                    choice_id=cid,
+                    transcript=transcript,
+                    config=getattr(engine, "config", None),
+                )
+                if not text:
+                    return {
+                        "action": "none",
+                        "detail": "no matching tanker chat reply",
+                    }
+                schedule_break = True
+        freq = tanker_mod.tanker_target_mhz(engine.state)
+        if freq is None and tanker:
+            try:
+                freq = float(tanker.get("freq_mhz") or 0) or None
+            except (TypeError, ValueError):
+                freq = None
+        if hasattr(engine, "save_state"):
+            engine.save_state()
+        result = _transmit(engine, ap, text, "tanker", freq_mhz=freq)
+        tanker_chat_mod.arm_tx_guard(engine.state, text)
+        if hasattr(engine, "save_state"):
+            engine.save_state()
+        if schedule_break:
+            result = tanker_chat_mod.attach_continuation_deferred(
+                result if isinstance(result, dict) else {"action": "transmit"},
+                engine.state,
             )
-            if not text:
-                return {"action": "none", "detail": "no matching tanker chat reply"}
-        freq = tanker_mod.tanker_target_mhz(engine.state)
-        if freq is None and tanker:
-            try:
-                freq = float(tanker.get("freq_mhz") or 0) or None
-            except (TypeError, ValueError):
-                freq = None
-        if hasattr(engine, "save_state"):
-            engine.save_state()
-        return _transmit(engine, ap, text, "tanker", freq_mhz=freq)
-
-    if action == "tanker_chat_reply":
-        named = ""
-        own_ll = atc_phrase.ownship_latlon(
-            engine.config, callsign=callsign, opus=opus, state=engine.state
-        )
-        tanker = tanker_mod.pick_tanker(
-            engine.config,
-            opus=opus,
-            state=engine.state,
-            name=None,
-            own_ll=own_ll,
-            boom_only=False,
-        )
-        if tanker:
-            tanker_mod.remember_tanker(engine.state, tanker)
-        cid = ""
-        transcript = ""
-        if match is not None:
-            cid = str((match.slots or {}).get("choice") or "")
-            transcript = str(match.normalized or match.transcript or "")
-        text = tanker_chat_mod.answer_chat(
-            engine.state,
-            callsign,
-            tanker,
-            choice_id=cid,
-            transcript=transcript,
-        )
-        if not text:
-            return {"action": "none", "detail": "no matching tanker chat reply"}
-        freq = tanker_mod.tanker_target_mhz(engine.state)
-        if freq is None and tanker:
-            try:
-                freq = float(tanker.get("freq_mhz") or 0) or None
-            except (TypeError, ValueError):
-                freq = None
-        if hasattr(engine, "save_state"):
-            engine.save_state()
-        return _transmit(engine, ap, text, "tanker", freq_mhz=freq)
+        return result
 
     named = ""
     if match is not None:
@@ -1523,17 +1541,60 @@ def execute_tanker_action(
     return _transmit(engine, ap, text, "tanker", freq_mhz=freq)
 
 
-def resolve_tanker_chat(engine: Any, *, force: bool = False) -> dict[str, Any]:
-    """Texaco starts boom small talk. Auto path requires 0.1–0.5 NM after rejoin."""
+def resolve_tanker_chat(
+    engine: Any, *, force: bool = False, continue_session: bool = False
+) -> dict[str, Any]:
+    """
+    Texaco starts (or continues) boom small talk.
+
+    Auto first-open requires 0.1–0.5 NM after rejoin. Continuations inside an
+    active session skip the range dwell — the chat already earned its seat.
+    """
     import tanker as tanker_mod
     import tanker_chat as tanker_chat_mod
 
-    if tanker_chat_mod.is_open(engine.state):
+    if tanker_chat_mod.current_choices(engine.state):
         return {"action": "none", "detail": "tanker chat already open"}
+    if (
+        tanker_chat_mod.is_awaiting_react(engine.state)
+        and not continue_session
+        and not force
+    ):
+        delay = tanker_chat_mod.continuation_delay_s(engine.state)
+        if delay is not None:
+            return {
+                "action": "none",
+                "detail": f"chatting — next bit in {delay:.0f}s",
+                "deferred": {
+                    "kind": "tanker_chat_continue",
+                    "delay_s": max(1.0, delay),
+                },
+            }
+        return {"action": "none", "detail": "waiting on boom chat reply"}
     if str((engine.state or {}).get("tanker_phase") or "") == tanker_mod.PHASE_DEPARTED:
+        tanker_chat_mod.end_chat(engine.state)
+        if hasattr(engine, "save_state"):
+            engine.save_state()
         return {"action": "none", "detail": "not on the tanker"}
-    if not force and not tanker_mod.has_rejoined(engine.state):
+    session = tanker_chat_mod.is_session_active(engine.state)
+    continuing = continue_session or (
+        session and tanker_chat_mod.continuation_due(engine.state)
+    )
+    if continuing and not session:
+        return {"action": "none", "detail": "no tanker chat session"}
+    if not force and not continuing and not tanker_mod.has_rejoined(engine.state):
         return {"action": "none", "detail": "waiting — request rejoin first"}
+    if session and not continuing and not force:
+        delay = tanker_chat_mod.continuation_delay_s(engine.state)
+        if delay is not None:
+            return {
+                "action": "none",
+                "detail": f"chatting — next bit in {delay:.0f}s",
+                "deferred": {
+                    "kind": "tanker_chat_continue",
+                    "delay_s": max(1.0, delay),
+                },
+            }
     ap = engine.airport()
     opus, _wx = atc_phrase.resolve_opus_and_metar(
         engine.config, ap.get("icao") if isinstance(ap, dict) else ""
@@ -1555,38 +1616,40 @@ def resolve_tanker_chat(engine: Any, *, force: bool = False) -> dict[str, Any]:
     )
     if tanker:
         tanker_mod.remember_tanker(engine.state, tanker)
-    dist = None
-    if tanker and tanker.get("distance_nm") is not None:
-        try:
-            dist = float(tanker.get("distance_nm"))
-        except (TypeError, ValueError):
-            dist = None
-    receivers = 0
-    if tanker:
-        receivers = tanker_mod.count_boom_receivers(
-            engine.config, tanker, own_ll=own_ll, opus=opus
+    gate: dict[str, Any] | None = None
+    if not force and not continuing:
+        dist = None
+        if tanker and tanker.get("distance_nm") is not None:
+            try:
+                dist = float(tanker.get("distance_nm"))
+            except (TypeError, ValueError):
+                dist = None
+        receivers = 0
+        if tanker:
+            receivers = tanker_mod.count_boom_receivers(
+                engine.config, tanker, own_ll=own_ll, opus=opus
+            )
+        gate = tanker_mod.tick_boom_chat(
+            engine.state,
+            dist_nm=dist,
+            receivers=receivers,
+            chat_open=tanker_chat_mod.is_session_active(engine.state),
         )
-    gate = tanker_mod.tick_boom_chat(
-        engine.state,
-        dist_nm=dist,
-        receivers=receivers,
-        chat_open=False,
-    )
-    if not force and not gate.get("ready"):
-        if hasattr(engine, "save_state"):
-            engine.save_state()
-        return {
-            "action": "none",
-            "detail": str(gate.get("reason") or "not in boom range"),
-            "boom": gate,
-        }
+        if not gate.get("ready"):
+            if hasattr(engine, "save_state"):
+                engine.save_state()
+            return {
+                "action": "none",
+                "detail": str(gate.get("reason") or "not in boom range"),
+                "boom": gate,
+            }
     text = tanker_chat_mod.start_chat(
         engine.state,
         callsign,
         tanker,
         config=getattr(engine, "config", None),
     )
-    if not force:
+    if not force and not continuing:
         engine.state["tanker_chat_auto_done"] = True
     freq = tanker_mod.tanker_target_mhz(engine.state)
     if freq is None and tanker:
@@ -1597,8 +1660,15 @@ def resolve_tanker_chat(engine: Any, *, force: bool = False) -> dict[str, Any]:
     if hasattr(engine, "save_state"):
         engine.save_state()
     result = _transmit(engine, ap, text, "tanker", freq_mhz=freq)
-    if isinstance(result, dict):
+    tanker_chat_mod.arm_tx_guard(engine.state, text)
+    if hasattr(engine, "save_state"):
+        engine.save_state()
+    if isinstance(result, dict) and gate is not None:
         result["boom"] = gate
+    result = tanker_chat_mod.attach_continuation_deferred(
+        result if isinstance(result, dict) else {"action": "transmit"},
+        engine.state,
+    )
     return result
 
 

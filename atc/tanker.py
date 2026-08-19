@@ -513,6 +513,27 @@ def tanker_target_mhz(state: dict[str, Any] | None) -> float | None:
     return mhz if mhz > 0 else None
 
 
+def effective_tanker_mhz(
+    state: dict[str, Any] | None = None,
+    config: dict[str, Any] | None = None,
+) -> float | None:
+    """
+    Frequency the pilot should be on for the active / nearest tanker.
+
+    Prefers the remembered Opus tanker from the last request / rejoin, then any
+    live published tanker UHF. Falls through to None so callers can keep the
+    airports.json placeholder.
+    """
+    live = tanker_target_mhz(state)
+    if live is not None:
+        return live
+    try:
+        freqs = tanker_freqs_mhz(config)
+    except Exception:
+        freqs = []
+    return float(freqs[0]) if freqs else None
+
+
 def extract_tanker_name(text: str) -> str | None:
     """Pull 'texaco 1' / 'shell' from a transcript."""
     blob = re.sub(r"[^a-z0-9\s]", " ", (text or "").casefold())

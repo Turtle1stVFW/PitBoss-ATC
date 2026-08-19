@@ -39,11 +39,37 @@ def save_json(path: Path, data: Any) -> None:
         f.write("\n")
 
 
-def resolve_flow_path(config: dict[str, Any]) -> Path:
-    rel = config.get("flow_file") or "flows/nellis_default.json"
+_DEFAULT_FLOW_REL = "flows/nellis_default.json"
+
+
+def resolve_flow_path(config: dict[str, Any], *, repair: bool = True) -> Path:
+    """
+    Active mission path from config.
+
+    If the saved flow_file is missing (renamed / deleted) and repair=True, fall
+    back to the Nellis base template and rewrite config['flow_file'] so the app
+    still opens instead of crashing on launch.
+    """
+    rel = str(config.get("flow_file") or "").strip() or _DEFAULT_FLOW_REL
     path = Path(rel)
     if not path.is_absolute():
         path = HERE / path
+    if path.is_file():
+        return path
+    fallback = HERE / _DEFAULT_FLOW_REL
+    if (
+        repair
+        and fallback.is_file()
+        and fallback.resolve() != path.resolve()
+    ):
+        print(
+            f"WARNING: flow file missing ({path}); using {_DEFAULT_FLOW_REL}",
+            file=sys.stderr,
+        )
+        if isinstance(config, dict):
+            config["flow_file"] = _DEFAULT_FLOW_REL
+            config["_flow_file_repaired"] = True
+        return fallback
     return path
 
 
@@ -363,7 +389,9 @@ class FlowEngine:
             state=self.state,
             template=step.get("template"),
         )
-        freq, mod, tx_name = atc_phrase.step_radio(airport, channel, step)
+        freq, mod, tx_name = atc_phrase.step_radio(
+            airport, channel, step, state=self.state, config=self.config
+        )
         mode = (step.get("mode") or "tts").lower()
         voice_name, _ = atc_phrase.voice_for_step(self.config, channel, step)
 
@@ -584,7 +612,9 @@ class FlowEngine:
         if bypass:
             return
         srs_radio.apply_config(self.config)
-        allowed, msg, _result = srs_radio.check_freq_gate(self.config, self.airport(), step)
+        allowed, msg, _result = srs_radio.check_freq_gate(
+            self.config, self.airport(), step, state=self.state
+        )
         if not allowed:
             raise RuntimeError(msg)
 
