@@ -1,5 +1,7 @@
 @echo off
 cd /d "%~dp0"
-py -3 fake_pilots.py %*
+call "%~dp0_find_python.cmd"
+if errorlevel 1 exit /b 1
+"%ATC_PYTHON%" fake_pilots.py %*
 echo.
 pause

@@ -1,5 +1,5 @@
 @echo off
-REM Dedicated-server / Host launcher. Does not require the "py" launcher.
+REM Same as Open-ATC-Setup.cmd — named for the dedicated-server Host box.
 cd /d "%~dp0"
 call "%~dp0_find_python.cmd"
 if errorlevel 1 exit /b 1

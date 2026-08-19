@@ -40,6 +40,35 @@ def save_json(path: Path, data: Any) -> None:
         f.write("\n")
 
 
+def load_app_config(path: Path | None = None) -> dict[str, Any]:
+    """
+    Load config.json, creating it from config.example.json on first run.
+
+    Dedicated-server copies often have no config.json yet; the example is enough
+    to open Setup and switch the role to Host.
+    """
+    cfg_path = path or CONFIG_PATH
+    if cfg_path.is_file():
+        data = load_json(cfg_path)
+        if isinstance(data, dict):
+            return data
+        raise ValueError(f"{cfg_path.name} is not a JSON object")
+    example = cfg_path.parent / "config.example.json"
+    if example.is_file():
+        data = load_json(example)
+        if not isinstance(data, dict):
+            raise ValueError("config.example.json is not a JSON object")
+        try:
+            save_json(cfg_path, data)
+            print(f"Created {cfg_path.name} from config.example.json", file=sys.stderr)
+        except OSError as exc:
+            print(f"WARNING: could not write {cfg_path.name}: {exc}", file=sys.stderr)
+        return data
+    raise FileNotFoundError(
+        f"Missing {cfg_path.name}. Copy config.example.json to config.json."
+    )
+
+
 _DEFAULT_FLOW_REL = "flows/nellis_default.json"
 
 
@@ -117,7 +146,7 @@ class FlowEngine:
         mission: dict[str, Any] | None = None,
         airports: dict[str, Any] | None = None,
     ) -> None:
-        self.config = dict(config or load_json(CONFIG_PATH))
+        self.config = dict(config or load_app_config())
         if dry_run:
             self.config["dry_run"] = True
         srs_radio.apply_config(self.config)
@@ -360,7 +389,7 @@ class FlowEngine:
         if not self.persist_state:
             # Multi-pilot sessions own their config/mission; do not clobber from disk.
             return
-        self.config = load_json(CONFIG_PATH)
+        self.config = load_app_config()
         if self.config.get("dry_run"):
             pass
         self.airports = load_json(AIRPORTS_PATH)

@@ -5,5 +5,7 @@ REM   Install-DCS-Radio-Export.cmd
 REM   Install-DCS-Radio-Export.cmd --status
 REM   Install-DCS-Radio-Export.cmd --uninstall
 cd /d "%~dp0"
-py -3 "%~dp0install_dcs_radio_export.py" %*
+call "%~dp0_find_python.cmd"
+if errorlevel 1 exit /b 1
+"%ATC_PYTHON%" "%~dp0install_dcs_radio_export.py" %*
 exit /b %ERRORLEVEL%

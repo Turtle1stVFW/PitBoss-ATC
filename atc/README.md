@@ -4,6 +4,10 @@
 Double-click either:
 - `Open-ATC-Setup.cmd`
 - `Open-Flight-Flow.cmd`
+- `Start-ATC-Host.cmd` (same UI; use this on the dedicated-server Host)
+
+They locate `python.exe` even when the `py` launcher is missing. If Python is not
+installed, the window tells you to install it from python.org with tcl/tk.
 
 Both open the same polished UI. `Open-Zone-Editor.cmd` is the separate map for
 drawing the areas that fire steps automatically — the app has a button for it too.
@@ -19,7 +23,7 @@ drawing the areas that fire steps automatically — the app has a button for it 
 
 Default role is still **Solo** — one PC, same as today. To run ATC for several pilots:
 
-1. Pick **one** machine as Host (a spare PC is ideal). Setup → **Squadron** → Host. Save. Allow Windows inbound on the ATC port (default `8766`). That box needs ExternalAudio + TTS and network to the squadron SRS server.
+1. Pick **one** machine as Host (the Windows DCS dedicated server is fine). It needs **Python 3.10+ with tcl/tk** — the `.cmd` files find `python.exe` without the `py` launcher. Setup → **Squadron** → Host. Save. Allow Windows inbound on the ATC port (default `8766`). That box needs ExternalAudio + TTS and network to the squadron SRS server.
 2. Put the same **shared token** on every PC.
 3. Each pilot: Setup → Squadron → Client, host LAN IP, same token, their Opus identity. Save. Voice/PTT stay on their PC; the host speaks on SRS.
 4. Host **Traffic** tab shows who is connected, which frequency is talking, and the per-channel queue.
