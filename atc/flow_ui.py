@@ -864,6 +864,10 @@ class MissionPlanner(tk.Tk):
 
     def _maybe_follow_tanker_tune(self, tuned: str) -> None:
         """AAR is a side trip — after tanker UHF, retune Blackjack or Bandsaw to resume C2."""
+        if self._atc_role() == "client":
+            # Host heartbeat owns per-element overlay so dash-3 leaving
+            # tanker does not yank dash-1 off Bandsaw.
+            return
         try:
             import tanker as tanker_mod
         except Exception:
@@ -1109,12 +1113,11 @@ class MissionPlanner(tk.Tk):
                 self._atc_server.start(
                     port=int(self.config_data.get("atc_port") or atc_net.DEFAULT_ATC_PORT)
                 )
-                lan = atc_net.lan_ipv4_addresses()
-                lan_txt = ", ".join(lan) if lan else "(no LAN IP found)"
+                lan_txt = atc_net.format_listen_summary(self._atc_server.port)
                 fw = getattr(self._atc_server, "firewall_status", "") or ""
                 bits = [
-                    f"HOST  listen {lan_txt}:{self._atc_server.port}",
-                    "clients use that LAN IP — not 127.0.0.1",
+                    lan_txt,
+                    "off-LAN pilots use their DCS/SRS address + TCP 8766 forwarded here",
                 ]
                 if fw:
                     bits.append(fw)
@@ -1298,7 +1301,7 @@ class MissionPlanner(tk.Tk):
             server = self._atc_server
             if server is None:
                 return
-            for sess in list(server.sessions.values()):
+            for sess in server.unique_flow_sessions():
                 try:
                     self._position_work(
                         engine=sess.engine,
@@ -1959,6 +1962,7 @@ class MissionPlanner(tk.Tk):
         cached state — no network.
         """
         context: dict[str, Any] = {}
+        self._sync_client_flow_cursor()
         try:
             airport = self.engine.airport()
             context["airport"] = airport
@@ -2011,6 +2015,9 @@ class MissionPlanner(tk.Tk):
             tuned_channel=tuned,
         )
         context["callsign"] = atc_phrase.cached_radio_callsign(self.config_data)
+        seat = atc_phrase.configured_opus_seat(self.config_data)
+        if seat is not None:
+            context["seat"] = int(seat)
         try:
             # Steps carry their own voice_phrases, so the grammar is per-mission.
             context["steps"] = list(self.engine.steps)
@@ -2071,6 +2078,25 @@ class MissionPlanner(tk.Tk):
                 context["channel"] = last_ch or context.get("channel") or ""
                 # Keep the mission phase from the cursor; only the agency changes.
         return context
+
+    def _sync_client_flow_cursor(self) -> None:
+        """Copy the Host's shared flight cursor onto this Client's local engine."""
+        if self._atc_role() != "client":
+            return
+        client = getattr(self, "_atc_client", None)
+        if client is None:
+            return
+        st = client.last_status or {}
+        fs = st.get("flow_state")
+        if not isinstance(fs, dict):
+            if st.get("index") is None:
+                return
+            fs = {"index": st.get("index")}
+        state = getattr(self.engine, "state", None)
+        if not isinstance(state, dict):
+            return
+        for key, value in fs.items():
+            state[key] = value
 
     def _snap_voice_confidence(self, value: float | None = None) -> float:
         """Clamp to the slider range and snap to 5% steps (0.40, 0.45, … 0.95)."""
@@ -5441,7 +5467,7 @@ class MissionPlanner(tk.Tk):
                 rwy = atc_phrase.normalize_runway(step.get("runway")) or ""
                 if not rwy:
                     try:
-                        rwy = atc_phrase.active_runway(list(ap.get("runways") or ["21R"]), wx.wind_dir)
+                        rwy = atc_phrase.pick_recovery_runway(ap, wx)
                     except Exception:
                         rwy = "21R"
                 text = atc_phrase.generate_situation_phrase(
@@ -8272,6 +8298,7 @@ class MissionPlanner(tk.Tk):
             self.fly_channel.set(str(st.get("channel") or "").upper())
         if st.get("last_tx_text") and hasattr(self, "fly_say"):
             self.fly_say.set(str(st["last_tx_text"]))
+        self._sync_client_flow_cursor()
 
     def _build_traffic(self) -> None:
         f = self.tab_traffic
@@ -8320,9 +8347,21 @@ class MissionPlanner(tk.Tk):
                 )
             return
         data = self._atc_server.traffic()
+        rows = atc_net.lan_ipv4_interfaces()
+        ip_lines = [
+            f"  {row.get('ip')}:{data.get('port')}  {row.get('name')}"
+            for row in rows
+        ] or ["  (no LAN IPv4 — check the Host NIC)"]
+        advertised = str(self.config_data.get("atc_host") or "").strip()
+        if advertised in {"", "127.0.0.1", "localhost"}:
+            advertised = "(set Setup → Squadron → Address pilots type to your DCS/SRS host)"
         lines = [
-            f"Host listen {', '.join(atc_net.lan_ipv4_addresses()) or '?'}:{data.get('port')}",
-            "Clients use that LAN IP + this port (not 127.0.0.1, not SRS).",
+            "This box listens on:",
+            *ip_lines,
+            "",
+            f"Pilots type:  {advertised}  port {data.get('port')}",
+            "Off-LAN: same IP/hostname as DCS/SRS. Forward TCP 8766 to this PC",
+            "(like SRS 5002). 127.0.0.1 only works sitting at this server.",
             f"{len(data.get('sessions') or [])} pilots",
             "",
         ]
@@ -8340,6 +8379,7 @@ class MissionPlanner(tk.Tk):
         for sess in data.get("sessions") or []:
             lines.append(
                 f"  {sess.get('callsign') or sess.get('session_id')}  "
+                f"seat {sess.get('opus_seat') or '?'}  "
                 f"step {sess.get('step_number')}/{sess.get('total')}  "
                 f"{sess.get('channel') or '—'}  "
                 f"{sess.get('label') or ''}  "
@@ -8729,7 +8769,7 @@ class MissionPlanner(tk.Tk):
             value=str(self.config_data.get("atc_token") or "")
         )
         self.var_atc_net_status = tk.StringVar(value="")
-        self._setup_field(lf, 0, "Host address (clients)", self.var_atc_host, width=28)
+        self._setup_field(lf, 0, "Address pilots type", self.var_atc_host, width=28)
         self._setup_field(lf, 1, "ATC port", self.var_atc_port, width=8)
         token_row = tk.Frame(lf, bg=C_PANEL)
         token_row.grid(row=2, column=1, sticky="we", pady=3, padx=(8, 0))
@@ -8746,10 +8786,11 @@ class MissionPlanner(tk.Tk):
         tk.Label(
             lf,
             text=(
-                "Clients: Host address = the server's LAN IP from the green line after Host Save "
-                f"(ATC port {atc_net.DEFAULT_ATC_PORT}, not SRS 5002). "
-                "127.0.0.1 is only for fake-pilot tests on the Host PC itself. "
-                "Same token on every machine. Never share the Google JSON."
+                "Pilots: type the same hostname you already use for SRS "
+                f"(for example showtime.455aew.com), ATC port {atc_net.DEFAULT_ATC_PORT} "
+                "(not SRS 5002). Off-LAN is fine — the Showtime router must forward "
+                "TCP 8766 to the DCS server, same as 5002. "
+                "127.0.0.1 is only for tests on the Host PC. Same token on every machine."
             ),
             bg=C_PANEL,
             fg=C_MUTED,
@@ -8804,14 +8845,31 @@ class MissionPlanner(tk.Tk):
         try:
             health_url = client.probe_health()
         except Exception as exc:  # noqa: BLE001
+            extra = ""
+            target = str(cfg.get("atc_host") or "")
+            local_ips = atc_net.lan_ipv4_addresses()
+            if (
+                target
+                and target not in {"127.0.0.1", "localhost"}
+                and local_ips
+                and not atc_net.ipv4_same_lan(target, local_ips)
+            ):
+                extra = (
+                    f"\n\nThis PC is {', '.join(local_ips)}; Host is {target}. "
+                    "Different subnets are OK.\n"
+                    "On this PC use the same address you already use for DCS/SRS, "
+                    "and on the DCS server's router forward TCP 8766 to that server "
+                    "(same idea as SRS 5002). Direct 192.168.50.20 only works if "
+                    "this PC can already reach that IP."
+                )
             messagebox.showerror(
                 "ATC Host",
-                f"Cannot reach the Host.\n\n{exc}\n\n"
+                f"Cannot reach the Host.\n\n{exc}{extra}\n\n"
                 "Check:\n"
-                "• Host PC: Setup → Squadron → Host → Save, green line shows a LAN IP\n"
-                f"• This PC: that LAN IP in Host address, port {atc_net.DEFAULT_ATC_PORT} "
-                "(not SRS 5002, not 127.0.0.1)\n"
-                "• Host Windows Firewall: allow inbound TCP on that port / python.exe",
+                "• DCS server: Host role saved, firewall allows inbound TCP 8766\n"
+                f"• This PC: DCS/SRS address, port {atc_net.DEFAULT_ATC_PORT} "
+                "(not SRS 5002)\n"
+                "• Router: TCP 8766 forwarded/routed to the DCS server",
             )
             self._set_net_status(str(exc))
             return
@@ -9476,8 +9534,9 @@ class MissionPlanner(tk.Tk):
             text=(
                 "After you request rejoin, Texaco starts boom chat — you do not ask "
                 "first. Auto-fires after 30–60 seconds at 0.1–0.5 NM from the tanker "
-                "with a jet in that envelope (you count). Mix of A/B polls, open "
-                "questions, and random small-talk riffs — answer in a word, say "
+                "with a jet in that envelope (you count). First call is a hello "
+                "(Good morning / afternoon / evening, sir); later bits mix A/B polls, "
+                "open questions, and random small-talk riffs — answer in a word, say "
                 "anything, or just listen; Texaco keeps going with short breaks until "
                 "you Stop chat / say “talk later”, or leave the tanker. With Ollama / "
                 "Gemini / OpenAI on, you can freestyle past the A/B buttons and Texaco "

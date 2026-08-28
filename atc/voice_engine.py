@@ -55,6 +55,17 @@ MIN_UTTERANCE_S = 0.4
 MAX_UTTERANCE_S = 20.0
 DEFAULT_MIN_CONFIDENCE = 0.6
 
+
+def _context_seat(context: dict[str, Any] | None) -> int | None:
+    raw = (context or {}).get("seat")
+    if raw is None or raw == "":
+        return None
+    try:
+        seat = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return seat if seat > 0 else None
+
 # Steers Whisper towards callsigns and phraseology instead of plain English.
 _BASE_PROMPT = (
     "Radio call to air traffic control. Nellis ground, tower, approach, departure, "
@@ -387,6 +398,7 @@ class VoiceController:
             tanker_chat_freeform=bool(context.get("tanker_chat_freeform")),
             tanker_chat_last_spoke=str(context.get("tanker_chat_last_spoke") or ""),
             tanker_chat_guard_until=float(context.get("tanker_chat_guard_until") or 0),
+            seat=_context_seat(context),
         )
         if evaluation.match is None:
             try:

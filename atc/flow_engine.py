@@ -150,6 +150,7 @@ class FlowEngine:
         if dry_run:
             self.config["dry_run"] = True
         srs_radio.apply_config(self.config)
+        self.mutex = threading.RLock()
         self.persist_state = bool(persist_state)
         self.airports = dict(airports) if airports is not None else load_json(AIRPORTS_PATH)
         if mission is not None:

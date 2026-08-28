@@ -664,7 +664,8 @@ def extras() -> int:
     else:
         print("approach pattern+FP — TORYE from route, not position STRYK")
 
-    # 03 only with >= 11 kt headwind on 03.
+    # NAFBI 11-250 §1.12: RWY 21 is calm-wind. Flip only when the along-runway
+    # headwind/tailwind *component* exceeds 10 kt — not merely closest heading.
     light_north = atc_phrase.Weather(30, 8, 29.92, "", visibility_sm=10)
     plan_light = atc_phrase.assign_approach_plan(
         nellis, light_north, state={}, force=True
@@ -675,7 +676,52 @@ def extras() -> int:
     else:
         print(f"approach wind gate light 030/08 — RWY {plan_light.get('runway')}")
 
-    # 081/07 favors 03 by heading but fails the 11 kt gate — stay on 21.
+    # 090/15 favors 03 by heading (60° vs 120°) but the component is only 7.5 kt.
+    east_xwind = atc_phrase.Weather(90, 15, 29.92, "KLSV 09015KT 10SM", visibility_sm=10)
+    plan_090 = atc_phrase.assign_approach_plan(nellis, east_xwind, state={}, force=True)
+    if not str(plan_090.get("runway") or "").startswith("21"):
+        print(f"  FAIL 090/15 must stay on 21 (component 7.5 kt): {plan_090}")
+        bad += 1
+    else:
+        print(f"approach wind gate 090/15 closest-03 but component 7.5 — RWY {plan_090.get('runway')}")
+    rwy_090 = atc_phrase.pick_departure_runway(nellis, east_xwind, None)
+    if not str(rwy_090).startswith("21"):
+        print(f"  FAIL pick_departure_runway 090/15 should be 21: {rwy_090}")
+        bad += 1
+    rwy_090_active = atc_phrase.active_runway(
+        list(nellis.get("runways") or ["21R", "03L"]), 90, 15
+    )
+    if not str(rwy_090_active).startswith("21"):
+        print(f"  FAIL active_runway 090/15 should be 21: {rwy_090_active}")
+        bad += 1
+    # 090/22: same heading as 090/15, but component 11 kt exceeds 10 → 03.
+    east_strong = atc_phrase.Weather(90, 22, 29.92, "", visibility_sm=10)
+    rwy_090_22 = atc_phrase.pick_recovery_runway(nellis, east_strong)
+    if not str(rwy_090_22).startswith("03"):
+        print(f"  FAIL 090/22 component 11 kt should open 03: {rwy_090_22}")
+        bad += 1
+    else:
+        print(f"approach wind gate 090/22 component 11 — RWY {rwy_090_22}")
+
+    # 030/10 is exactly 10 kt — does not *exceed* 10, stay on 21.
+    at_limit = atc_phrase.pick_recovery_runway(
+        nellis, atc_phrase.Weather(30, 10, 29.92, "")
+    )
+    if not str(at_limit).startswith("21"):
+        print(f"  FAIL 030/10 must stay on 21 (does not exceed 10): {at_limit}")
+        bad += 1
+    else:
+        print(f"approach wind gate 030/10 at-limit — RWY {at_limit}")
+    just_over = atc_phrase.pick_recovery_runway(
+        nellis, atc_phrase.Weather(30, 11, 29.92, "")
+    )
+    if not str(just_over).startswith("03"):
+        print(f"  FAIL 030/11 should open 03: {just_over}")
+        bad += 1
+    else:
+        print(f"approach wind gate 030/11 exceeds 10 — RWY {just_over}")
+
+    # 081/07 favors 03 by heading but fails the 10 kt component gate — stay on 21.
     east_light = atc_phrase.Weather(81, 7, 29.92, "KLSV 08107KT 10SM", visibility_sm=10)
     st_stale = {
         "approach_assigned": True,
@@ -717,6 +763,67 @@ def extras() -> int:
         bad += 1
     else:
         print(f"approach wind gate 030/12 — RWY {plan_strong.get('runway')}")
+
+    # §4.1.4 2200L–0800L: dep 03 / arr 21 unless the component gate overrides.
+    light = atc_phrase.Weather(210, 8, 29.92, "", visibility_sm=10)
+    night = 23 * 60
+    day = 13 * 60
+    if atc_phrase.parse_mission_local_minutes("13:00:06 Z") != day:
+        print(
+            f"  FAIL CAOC missionTimeZulu parse: "
+            f"{atc_phrase.parse_mission_local_minutes('13:00:06 Z')}"
+        )
+        bad += 1
+    if not atc_phrase.in_night_ops_window(22 * 60) or atc_phrase.in_night_ops_window(8 * 60):
+        print("  FAIL night window should include 2200 and exclude 0800")
+        bad += 1
+    rwy_night_dep = atc_phrase.pick_departure_runway(
+        nellis, light, None, local_minutes=night
+    )
+    if not str(rwy_night_dep).startswith("03"):
+        print(f"  FAIL night light-wind departure should be 03: {rwy_night_dep}")
+        bad += 1
+    else:
+        print(f"night §4.1.4 2300L dep — RWY {rwy_night_dep}")
+    rwy_night_arr = atc_phrase.pick_recovery_runway(
+        nellis, light, local_minutes=night, for_departure=False
+    )
+    if not str(rwy_night_arr).startswith("21"):
+        print(f"  FAIL night light-wind arrival should be 21: {rwy_night_arr}")
+        bad += 1
+    else:
+        print(f"night §4.1.4 2300L arr — RWY {rwy_night_arr}")
+    rwy_night_wind = atc_phrase.pick_departure_runway(
+        nellis,
+        atc_phrase.Weather(210, 15, 29.92, ""),
+        None,
+        local_minutes=night,
+    )
+    if not str(rwy_night_wind).startswith("21"):
+        print(f"  FAIL night 210/15 should override dep to 21: {rwy_night_wind}")
+        bad += 1
+    else:
+        print(f"night §4.1.4 210/15 overrides dep — RWY {rwy_night_wind}")
+    rwy_day_dep = atc_phrase.pick_departure_runway(
+        nellis, light, None, local_minutes=day
+    )
+    if not str(rwy_day_dep).startswith("21"):
+        print(f"  FAIL 1300L departure should stay 21: {rwy_day_dep}")
+        bad += 1
+    rwy_0800 = atc_phrase.pick_departure_runway(
+        nellis, light, None, local_minutes=8 * 60
+    )
+    if not str(rwy_0800).startswith("21"):
+        print(f"  FAIL 0800L should already be day (21): {rwy_0800}")
+        bad += 1
+    rwy_2200 = atc_phrase.pick_departure_runway(
+        nellis, light, None, local_minutes=22 * 60
+    )
+    if not str(rwy_2200).startswith("03"):
+        print(f"  FAIL 2200L departure should be 03: {rwy_2200}")
+        bad += 1
+    else:
+        print("night §4.1.4 window edges — 2200L dep 03, 0800L dep 21")
 
     # Reset runway to winds clears sticky request + refreshes Approach plan.
     st_reset: dict = {}
@@ -857,6 +964,53 @@ def extras() -> int:
         bad += 1
     else:
         print("element callsign — 1.1 is lead; 1.2 stays flight talk")
+
+    dash3_pic = voice_intent.evaluate(
+        "Blackjack, Fleece 1.3, request picture",
+        channel="blackjack",
+        phase="flight",
+        callsign=CALLSIGN,
+        seat=3,
+        runways=RUNWAYS,
+    )
+    dash3_flight = voice_intent.evaluate(
+        "Blackjack, Fleece 1, request picture",
+        channel="blackjack",
+        phase="flight",
+        callsign=CALLSIGN,
+        seat=3,
+        runways=RUNWAYS,
+    )
+    lead_hears_three = voice_intent.evaluate(
+        "Blackjack, Fleece 1.3, request picture",
+        channel="blackjack",
+        phase="flight",
+        callsign=CALLSIGN,
+        seat=1,
+        runways=RUNWAYS,
+    )
+    dash3_hears_two = voice_intent.evaluate(
+        "Blackjack, Fleece 1.2, request picture",
+        channel="blackjack",
+        phase="flight",
+        callsign=CALLSIGN,
+        seat=3,
+        runways=RUNWAYS,
+    )
+    if not dash3_pic.fired or dash3_pic.match.intent != "request_picture":
+        print(f"  FAIL seat 3 saying 1.3 picture: {dash3_pic.describe()}")
+        bad += 1
+    elif not dash3_flight.fired or dash3_flight.match.intent != "request_picture":
+        print(f"  FAIL seat 3 saying Fleece 1 picture: {dash3_flight.describe()}")
+        bad += 1
+    elif lead_hears_three.fired:
+        print(f"  FAIL seat 1 must ignore 1.3 picture: {lead_hears_three.describe()}")
+        bad += 1
+    elif dash3_hears_two.fired:
+        print(f"  FAIL seat 3 must ignore 1.2 picture: {dash3_hears_two.describe()}")
+        bad += 1
+    else:
+        print("seat 3 — Fleece 1 / 1.3 picture fires; 1.2 stays flight talk")
 
     ga_ok = True
     for text, want in (
@@ -2666,6 +2820,76 @@ def extras() -> int:
         else:
             print("tanker chat — Dunkin/Starbucks, reply without parroted copy")
 
+        hello_am = tanker_chat_mod.greeting_opener(hour=8)
+        hello_pm = tanker_chat_mod.greeting_opener(hour=14)
+        hello_eve = tanker_chat_mod.greeting_opener(hour=20)
+        if (
+            tanker_chat_mod._daypart(8) != "morning"
+            or tanker_chat_mod._daypart(0) != "morning"
+            or tanker_chat_mod._daypart(14) != "afternoon"
+            or tanker_chat_mod._daypart(20) != "evening"
+            or "morning" not in hello_am.lower()
+            or "sir" not in hello_am.lower()
+            or "?" in hello_am
+            or "afternoon" not in hello_pm.lower()
+            or "sir" not in hello_pm.lower()
+            or "evening" not in hello_eve.lower()
+            or "sir" not in hello_eve.lower()
+        ):
+            print(
+                f"  FAIL tanker hello lines: am={hello_am!r} pm={hello_pm!r} "
+                f"eve={hello_eve!r}"
+            )
+            bad += 1
+        else:
+            print(f"tanker chat hello lines — {hello_am}")
+
+        st_hi: dict = {}
+        hi = tanker_chat_mod.start_chat(
+            st_hi,
+            "Fleece 1",
+            {"callsign": "TEXACO 1"},
+            config={"tanker_chat_llm": "off"},
+        )
+        hi_l = (hi or "").lower()
+        hi_waiting = (
+            tanker_chat_mod.is_awaiting_react(st_hi)
+            and not tanker_chat_mod.current_choices(st_hi)
+        )
+        hi_ack = tanker_chat_mod.answer_chat(
+            st_hi,
+            "Fleece 1",
+            {"callsign": "TEXACO 1"},
+            transcript="hello",
+            config={"tanker_chat_llm": "off"},
+        )
+        nxt = tanker_chat_mod.start_chat(
+            st_hi,
+            "Fleece 1",
+            {"callsign": "TEXACO 1"},
+            thread_id="dunkin_starbucks",
+            config={"tanker_chat_llm": "off"},
+        )
+        if (
+            "sir" not in hi_l
+            or "?" in (hi or "")
+            or not any(p in hi_l for p in ("morning", "afternoon", "evening"))
+            or "dunkin" in hi_l
+            or not hi_waiting
+            or not st_hi.get("tanker_chat_greeted")
+            or not hi_ack
+            or tanker_chat_mod.is_awaiting_react(st_hi)
+            or "dunkin or starbucks" not in (nxt or "").lower()
+            or tanker_chat_mod._should_greet(st_hi, None)
+        ):
+            print(
+                f"  FAIL tanker first hello: hi={hi!r} ack={hi_ack!r} nxt={nxt!r} "
+                f"waiting={hi_waiting} state={st_hi.get('tanker_chat')}"
+            )
+            bad += 1
+        else:
+            print("tanker chat hello — first contact only, then questions")
+
         soft = tanker_chat_mod.naturalize_reply(
             "Navy, copy. Correct. They show up like a boat.", force=True
         )
@@ -3105,7 +3329,7 @@ def extras() -> int:
             print("tanker chat memory — history + coffee cooldown skips coffee bits")
 
         # No models → clear note, library fallback (do not pretend Ollama fired).
-        st_empty = {}
+        st_empty = {tanker_chat_mod._GREETED_KEY: True}
         tanker_chat_mod._set_llm_error("", st_empty)
         tanker_chat_mod.list_ollama_models = lambda config=None: []  # type: ignore[assignment]
         try:

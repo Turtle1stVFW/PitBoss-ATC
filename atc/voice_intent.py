@@ -461,6 +461,41 @@ def _callsign_number_role(said: str | None, ours: str) -> str:
     return "own" if said_ship == our_ship else "member"
 
 
+def _callsign_role_for_seat(
+    said_flight: str | None,
+    said_ship: str | None,
+    ours: str,
+    seat: int,
+) -> str:
+    """
+    Seat-aware own vs wingman.
+
+    Bare 'Fleece 1' is the flight callsign — every seat. Whisper writes
+    1.3 as '13'; that is ship 3, not a new flight. 'Fleece 1-3' is only
+    seat 3. Another flight number is never us.
+    """
+    our_flight, _our_ship = _flight_and_ship(ours)
+    try:
+        our_ship = str(int(seat))
+    except (TypeError, ValueError):
+        our_ship = "1"
+    if said_ship:
+        spoken_flight, _ = _flight_and_ship(said_flight or "")
+        spoken_ship = str(said_ship)
+    else:
+        digits = re.sub(r"\D", "", said_flight or "")
+        if len(digits) >= 2:
+            spoken_flight, spoken_ship = _flight_and_ship(digits)
+        else:
+            spoken_flight = said_flight or ""
+            spoken_ship = ""
+    if spoken_flight and our_flight and spoken_flight != our_flight:
+        return "member"
+    if not spoken_ship:
+        return "own"
+    return "own" if spoken_ship == our_ship else "member"
+
+
 def _callsign_word_forms(word: str) -> tuple[str, ...]:
     """Configured callsign stem plus common Whisper near-misses."""
     w = (word or "").casefold()
@@ -491,13 +526,18 @@ def _address_search_heads(normalized: str, raw: str = "") -> tuple[str, ...]:
     return tuple(heads)
 
 
-def analyze_address(text: str, callsign: str = "", raw: str = "") -> Address:
+def analyze_address(
+    text: str, callsign: str = "", raw: str = "", seat: int | None = None
+) -> Address:
     """
     Work out who a transmission was addressed to.
 
     `callsign` is our own ("FLEECE 1" or "FLEECE 1-1"). Element forms
     (1.1 / 1-1) are the lead, not a wingman. If we are Fleece 2 then
     "Fleece 2" is us and "Fleece 3" is someone else.
+
+    When `seat` is set (Client opus_seat), the bare flight callsign
+    ("Fleece 1") is us, and "Fleece 1-3" is us only on seat 3.
     """
     tokens = text.split()
     if not tokens:
@@ -524,11 +564,20 @@ def analyze_address(text: str, callsign: str = "", raw: str = "") -> Address:
                 for hit in re.finditer(pat, head):
                     said = hit.group(1)
                     ship = hit.group(2)
-                    if ship and said:
-                        said = f"{said}{ship}"
                     if not number:
                         own = True
                         continue
+                    if seat is not None:
+                        if (
+                            _callsign_role_for_seat(said, ship, number, int(seat))
+                            == "own"
+                        ):
+                            own = True
+                        else:
+                            member = True
+                        continue
+                    if ship and said:
+                        said = f"{said}{ship}"
                     if _callsign_number_role(said, number) == "own":
                         own = True
                     else:
@@ -2941,6 +2990,7 @@ def evaluate(
     tanker_chat_freeform: bool = False,
     tanker_chat_last_spoke: str = "",
     tanker_chat_guard_until: float = 0.0,
+    seat: int | None = None,
 ) -> Evaluation:
     """
     Decide whether a transmission is ATC business, and if so what it asks for.
@@ -2957,7 +3007,15 @@ def evaluate(
     if not text:
         return Evaluation(transcript=transcript, reason="nothing heard")
 
-    address = analyze_address(text, callsign, raw=transcript)
+    seat_n: int | None = None
+    if seat is not None:
+        try:
+            seat_n = int(seat)
+        except (TypeError, ValueError):
+            seat_n = None
+        if seat_n is not None and seat_n <= 0:
+            seat_n = None
+    address = analyze_address(text, callsign, raw=transcript, seat=seat_n)
     # Who the pilot called outranks where the timeline cursor happens to sit.
     channel = address.agency or channel
     phase = normalize_mission_phase(phase, channel=channel or "")

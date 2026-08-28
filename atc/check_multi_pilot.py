@@ -22,6 +22,7 @@ import atc_server
 import channel_tx
 import flow_engine
 import srs_radio
+import tanker
 
 AIRPORTS = atc_phrase.load_json(atc_phrase.AIRPORTS_PATH)
 MISSION = atc_phrase.load_json(HERE / "flows" / "nellis_default.json")
@@ -185,30 +186,211 @@ def test_session_key() -> list[str]:
     k2 = atc_net.session_key(opus_flight_id=1, opus_seat=2)
     k3 = atc_net.session_key(opus_flight_id=1, opus_seat=1)
     if k1 == k2:
-        fails.append("dash-1 and dash-2 must be different sessions")
+        fails.append("dash-1 and dash-2 must be different connection keys")
     if k1 != k3:
         fails.append("same flight/seat should resume the same session key")
+    f1 = atc_net.flow_key(opus_flight_id=1, callsign="Fleece 1")
+    f2 = atc_net.flow_key(opus_flight_id=1, callsign="Fleece 1")
+    f3 = atc_net.flow_key(opus_flight_id=2, callsign="Viper 3")
+    if f1 != f2:
+        fails.append("same Opus flight must share a flow key")
+    if f1 == f3:
+        fails.append("different Opus flights must not share a flow key")
+    if f1 == k1:
+        fails.append("flow key must not include the seat")
+    if tanker.element_seats(1) != (1, 2) or tanker.element_seats(2) != (1, 2):
+        fails.append("seats 1-2 should be the lead element")
+    if tanker.element_seats(3) != (3, 4) or tanker.element_seats(4) != (3, 4):
+        fails.append("seats 3-4 should be the second element")
+    return fails
+
+
+def test_flight_shared_cursor() -> list[str]:
+    fails: list[str] = []
+    cfg = _host_config()
+    server = atc_server.AtcServer(
+        cfg, AIRPORTS, lambda: copy.deepcopy(MISSION), transmit_fn=lambda _j: 0
+    )
+    lead = server.hello(
+        {
+            "callsign_override": "Fleece 1",
+            "opus_flight_id": 101,
+            "opus_seat": 1,
+            "radio_fresh": False,
+        }
+    )
+    three = server.hello(
+        {
+            "callsign_override": "Fleece 1",
+            "opus_flight_id": 101,
+            "opus_seat": 3,
+            "radio_fresh": False,
+        }
+    )
+    other = server.hello(
+        {
+            "callsign_override": "Viper 3",
+            "opus_flight_id": 202,
+            "opus_seat": 1,
+            "radio_fresh": False,
+        }
+    )
+    sl = server.get_session(lead["session_id"])
+    s3 = server.get_session(three["session_id"])
+    so = server.get_session(other["session_id"])
+    if sl is None or s3 is None or so is None:
+        return ["hello did not create all sessions"]
+    if lead["session_id"] == three["session_id"]:
+        fails.append("dash-1 and dash-3 should keep separate connection ids")
+    if sl.engine is not s3.engine:
+        fails.append("same Opus flight should share one FlowEngine")
+    if sl.engine is so.engine:
+        fails.append("Viper 3 must not share Fleece 1's engine")
+    idx_other = int(so.engine.state.get("index") or 0)
+    server.handle_command(sl, "next", {"radio_fresh": False})
+    if int(s3.engine.state.get("index") or 0) != int(sl.engine.state.get("index") or 0):
+        fails.append("dash-3 cursor did not follow dash-1 next()")
+    if int(so.engine.state.get("index") or 0) != idx_other:
+        fails.append("Viper 3 cursor moved when Fleece 1 advanced")
+    reps = server.unique_flow_sessions()
+    if len(reps) != 2:
+        fails.append(f"expected 2 unique flows, got {len(reps)}")
+    return fails
+
+
+def test_element_tanker_peel() -> list[str]:
+    fails: list[str] = []
+    cfg = _host_config()
+    server = atc_server.AtcServer(
+        cfg, AIRPORTS, lambda: copy.deepcopy(MISSION), transmit_fn=lambda _j: 0
+    )
+    lead = server.hello(
+        {
+            "callsign_override": "Fleece 1",
+            "opus_flight_id": 77,
+            "opus_seat": 1,
+            "radio_fresh": False,
+        }
+    )
+    two = server.hello(
+        {
+            "callsign_override": "Fleece 1",
+            "opus_flight_id": 77,
+            "opus_seat": 2,
+            "radio_fresh": False,
+        }
+    )
+    three = server.hello(
+        {
+            "callsign_override": "Fleece 1",
+            "opus_flight_id": 77,
+            "opus_seat": 3,
+            "radio_fresh": False,
+        }
+    )
+    four = server.hello(
+        {
+            "callsign_override": "Fleece 1",
+            "opus_flight_id": 77,
+            "opus_seat": 4,
+            "radio_fresh": False,
+        }
+    )
+    sl = server.get_session(lead["session_id"])
+    s2 = server.get_session(two["session_id"])
+    s3 = server.get_session(three["session_id"])
+    s4 = server.get_session(four["session_id"])
+    if sl is None or s2 is None or s3 is None or s4 is None:
+        return ["hello did not create element sessions"]
+    idx0 = int(sl.engine.state.get("index") or 0)
+
+    def peel(engine: flow_engine.FlowEngine) -> dict:
+        tanker.enter_tanker_overlay(engine)
+        return {"action": "ok"}
+
+    server.run_action(s3, peel, {"radio_fresh": False})
+    if not tanker.tanker_overlay_active(s3.local_state):
+        fails.append("dash-3 should be on tanker overlay")
+    if not tanker.tanker_overlay_active(s4.local_state):
+        fails.append("dash-4 should peel with dash-3")
+    if tanker.tanker_overlay_active(sl.local_state) or tanker.tanker_overlay_active(
+        s2.local_state
+    ):
+        fails.append("lead element should stay on C2")
+    if int(sl.engine.state.get("index") or 0) != idx0:
+        fails.append("shared C2 cursor moved when the element went tanker")
+    st3 = s3.public_status()
+    st1 = sl.public_status()
+    if str(st3.get("channel") or "").lower() != "tanker":
+        fails.append(f"dash-3 status should show tanker, got {st3.get('channel')}")
+    if str(st1.get("channel") or "").lower() == "tanker":
+        fails.append("lead status should stay on C2")
+    if not st3.get("on_tanker") or st1.get("on_tanker"):
+        fails.append("on_tanker flag should be per element")
+
+    server.handle_command(sl, "seek", {"index": idx0 + 1, "radio_fresh": False})
+    idx1 = int(sl.engine.state.get("index") or 0)
+    if idx1 == idx0:
+        fails.append("lead should still be able to move the shared C2 cursor")
+    if str(s3.public_status().get("channel") or "").lower() != "tanker":
+        fails.append("dash-3 should stay on tanker while lead advances C2")
+
+    def back(engine: flow_engine.FlowEngine) -> dict:
+        tanker.leave_tanker_overlay(engine, "bandsaw", checkin=True)
+        return {"action": "ok"}
+
+    server.run_action(s3, back, {"radio_fresh": False})
+    if tanker.tanker_overlay_active(s3.local_state) or tanker.tanker_overlay_active(
+        s4.local_state
+    ):
+        fails.append("element return should clear overlay on 3 and 4")
+    if int(sl.engine.state.get("index") or 0) != idx1:
+        fails.append("element return must not rewind the flight's C2 cursor")
+    if str(s3.public_status().get("channel") or "").lower() == "tanker":
+        fails.append("dash-3 should rejoin the shared C2 step after tanker")
     return fails
 
 
 def test_connect_error_hints() -> list[str]:
     fails: list[str] = []
     timed = atc_net.describe_connect_failure(
-        TimeoutError("timed out"), "http://192.168.1.9:8766/v1/intent"
+        TimeoutError("timed out"),
+        "http://192.168.1.9:8766/v1/intent",
+        local_ips=["192.168.1.50"],
     )
     if "timed out" not in timed or "Firewall" not in timed:
         fails.append(f"timeout hint: {timed}")
     loop = atc_net.describe_connect_failure(
-        TimeoutError("timed out"), "http://127.0.0.1:8766/v1/health"
+        TimeoutError("timed out"),
+        "http://127.0.0.1:8766/v1/health",
+        local_ips=["10.1.10.131"],
     )
     if "this pc" not in loop.casefold():
         fails.append(f"loopback hint: {loop}")
     refused = atc_net.describe_connect_failure(
         OSError("[WinError 10061] connection refused"),
         "http://10.0.0.5:8766/v1/hello",
+        local_ips=["10.0.0.8"],
     )
     if "refused" not in refused.casefold():
         fails.append(f"refused hint: {refused}")
+    mismatch = atc_net.describe_connect_failure(
+        TimeoutError("timed out"),
+        "http://192.168.50.20:8766/v1/health",
+        local_ips=["10.1.10.131"],
+    )
+    if "10.1.10.131" not in mismatch or "8766" not in mismatch:
+        fails.append(f"subnet hint: {mismatch}")
+    sample = (
+        "Wireless LAN adapter Wi-Fi:\n"
+        "   IPv4 Address. . . . . . . . . . . : 10.1.10.131\n"
+        "Ethernet adapter vEthernet (Default Switch):\n"
+        "   IPv4 Address. . . . . . . . . . . : 192.168.50.20\n"
+    )
+    parsed = atc_net._parse_ipconfig(sample)
+    ips = [r["ip"] for r in parsed]
+    if ips != ["10.1.10.131", "192.168.50.20"]:
+        fails.append(f"ipconfig parse: {parsed}")
     return fails
 
 
@@ -304,6 +486,8 @@ def main() -> int:
         test_injected_radio_gate,
         test_channel_parallel_and_fifo,
         test_session_isolation,
+        test_flight_shared_cursor,
+        test_element_tanker_peel,
         test_client_freq_gate,
         test_secret_redaction_and_session_tts_cap,
     )

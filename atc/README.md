@@ -25,9 +25,13 @@ Default role is still **Solo** — one PC, same as today. To run ATC for several
 
 1. Pick **one** machine as Host (the Windows DCS dedicated server is fine). It needs **Python 3.10+ with tcl/tk** — the `.cmd` files find `python.exe` without the `py` launcher. Setup → **Squadron** → Host. Save. Allow Windows inbound on the ATC port (default `8766`). That box needs ExternalAudio + TTS and network to the squadron SRS server.
 2. Put the same **shared token** on every PC.
-3. Each pilot: Setup → Squadron → **Client**, **Host address = the server LAN IP** shown in green on the Host after Save (not `127.0.0.1`), ATC port **8766** (not SRS 5002), same token. Click **Test connection**, then Save. Voice/PTT stay on their PC; the host speaks on SRS.
-4. Timed out = Windows Firewall on the Host dropped the packets. Allow inbound TCP 8766, or allow python.exe when Windows asks. Connection refused = Host is not listening on that port.
-4. Host **Traffic** tab shows who is connected, which frequency is talking, and the per-channel queue.
+3. Each pilot: Setup → Squadron → **Client**, **Address pilots type** = the same IP/hostname they already use for DCS/SRS, ATC port **8766** (not SRS 5002), same token. Click **Test connection**, then Save.
+4. Off-LAN (flying PC on `10.x`, DCS server on `192.168.50.x`) is expected. Do not join the server LAN. On the **DCS server’s router**, forward/route **TCP 8766** to `192.168.50.20`, the same way SRS 5002 already is. Then point the client at that reachable address (often the SRS host, not the server’s private 192.168.50.20).
+5. Host **Traffic** tab shows who is connected, which frequency is talking, and the per-channel queue.
+
+**Same Opus flight = one timeline.** Every Client that picks the same Opus flight shares the Host C2 cursor. Dash-1 checking in with Ground (or Play Next) moves dash-3’s Fly tab too. Picture / declare from number 3 work on that shared C2 step — say *Fleece 1* or *Fleece 1-3*. A different Opus flight stays on its own cursor.
+
+**Tanker is a side trip per element.** Seats 1–2 are the lead element, 3–4 the second. Whoever requests tanker (voice or Fly) parks **their element** on Texaco; the other element stays with Blackjack / Bandsaw. Dash-3/4 peeling off does not walk the flight off the CAP. When they check back in or retune C2, they rejoin the flight’s current step. Both elements can tank if both request. Each talking jet still needs the Client app on their PC.
 
 Ground talks to one jet at a time. Tower / Blackjack can talk at the same time as Ground. Pilots never transmit ATC from their own ExternalAudio.
 
@@ -316,7 +320,7 @@ Calls it understands:
 | "Blackjack / Bandsaw, request tanker" | Track (e.g. *track A R two tree one Victor*) + braw with altitude to the Opus **KC-135 boom** — never KC-130 or KC-135MPRS. Ends with *Frequency change approved.* AAR is a **side trip**: the cursor jumps to Tanker, then when you retune **Blackjack or Bandsaw** (or check back in) it returns to that agency — not the next timeline step. |
 | "Say TACAN" / "say tanker frequency" / "say tanker bullseye" | On-request C2: TACAN, UHF, live bullseye |
 | "Texaco, request rejoin" / "request reform" | Cleared rejoin left, sometimes left observation (tanker does not say *identified*) |
-| Boom / reform small talk | After rejoin, Texaco starts boom chat once you have been **0.1–0.5 NM** from the tanker for **30–60 seconds** with a receiver in that envelope. Fly **Texaco starts chat** makes Texaco talk first. Mix of A/B polls, open questions, and random riffs — answer in a word, say anything, or just listen. With Ollama/Gemini/OpenAI on, freeform replies get a **live riff** (not locked to the two buttons). Texaco keeps chatting with short breaks until you **stop chat** / say *talk later* / *standing by*, or leave the tanker. LLM falls back to the library if slow. |
+| Boom / reform small talk | After rejoin, Texaco starts boom chat once you have been **0.1–0.5 NM** from the tanker for **30–60 seconds** with a receiver in that envelope. Fly **Texaco starts chat** makes Texaco talk first. The **first** line is a time-of-day hello (*Good morning, sir*) — later bits are A/B polls, open questions, and riffs. Answer in a word, say anything, or just listen. With Ollama/Gemini/OpenAI on, freeform replies get a **live riff** (not locked to the two buttons). Texaco keeps chatting with short breaks until you **stop chat** / say *talk later* / *standing by*, or leave the tanker. LLM falls back to the library if slow. |
 | DCS tanker radio | **Ready pre-contact** → DCS *cleared contact* (boom). **Abort refueling** to disconnect. Do not use SRS for those. |
 | "Blackjack / Bandsaw, back from the tanker" / "checking in" after AAR | Radar contact, continue — returns to **whichever C2 freq you tuned** (Blackjack or Bandsaw) |
 | "Blackjack, off station / range complete" | Range checkout → Approach (required after Blackjack check-in) |
@@ -366,9 +370,13 @@ TAC Overhead runway two one right, cleared direct Arcoe, …”* (or Torye / Str
 Mintt for that recovery; landing north when the 03s are active; instrument uses
 the plate name + IAF). Descend altitude comes from the VFR recovery or the
 **plate IAF altitude** in `approaches/nellis.json`. Speed is **not** cleared
-unless traffic (or similar) sets a restriction. Recoveries prefer the **21s**;
-the **03s** are used only when headwind on 03 is **11 kt or greater**. You can
-request a different recovery, hold, or vectors. “Airport in sight / request tower”
+unless traffic (or similar) sets a restriction. Recoveries prefer the **21s** and use the **03s** only when the prevailing
+headwind/tailwind **component** exceeds **10 kt** (NAFBI 11-250 §1.12 — RWY 21 is
+the calm-wind runway; closest wind direction alone is not enough, so 090/15 stays
+on 21). From **2200L–0800L** on the OPUS CAOC mission clock (§4.1.4) departures
+default to the **03s** and arrivals stay on the **21s**, still overridden when
+that component exceeds 10 kt (or by a spoken / Setup runway). You can request a
+different recovery, hold, or vectors. “Airport in sight / request tower”
 clears you to Tower.
 
 After an **instrument missed**, Approach sends you back to the IAF (e.g. Arcoe).

@@ -42,6 +42,7 @@ def session_key(
     callsign: str = "",
     opus_user_name: str = "",
 ) -> str:
+    """Per-seat connection id (radios, TTS cap, Traffic row)."""
     fid = str(opus_flight_id or "").strip()
     seat = str(opus_seat if opus_seat is not None else "").strip()
     if fid:
@@ -52,25 +53,91 @@ def session_key(
     return "anon"
 
 
+def flow_key(
+    *,
+    opus_flight_id: Any = None,
+    callsign: str = "",
+    opus_user_name: str = "",
+) -> str:
+    """Shared timeline id — one cursor for every seat on the same Opus flight."""
+    fid = str(opus_flight_id or "").strip()
+    if fid:
+        return f"flight:{fid}"
+    return session_key(
+        opus_flight_id=None,
+        opus_seat=None,
+        callsign=callsign,
+        opus_user_name=opus_user_name,
+    )
+
+
 def _slug(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", (value or "").strip().lower()).strip("-")
 
 
-def lan_ipv4_addresses() -> list[str]:
-    """Non-loopback IPv4 addresses this PC can be reached at on the LAN."""
-    found: list[str] = []
+_IPCONFIG_ADAPTER = re.compile(
+    r"^(?P<kind>.+?) adapter (?P<name>.+):\s*$", re.IGNORECASE
+)
+_IPCONFIG_IPV4 = re.compile(
+    r"^\s*(?:Autoconfiguration )?IPv4 Address[.\s]*:\s*(?P<ip>\d+\.\d+\.\d+\.\d+)",
+    re.IGNORECASE,
+)
 
-    def _add(ip: str) -> None:
+
+def _parse_ipconfig(text: str) -> list[dict[str, str]]:
+    """Parse `ipconfig` into [{name, ip}, ...] (no loopback / APIPA)."""
+    rows: list[dict[str, str]] = []
+    adapter = ""
+    for line in (text or "").splitlines():
+        m_ad = _IPCONFIG_ADAPTER.match(line.rstrip())
+        if m_ad:
+            adapter = (m_ad.group("name") or "").strip()
+            continue
+        m_ip = _IPCONFIG_IPV4.match(line)
+        if not m_ip:
+            continue
+        ip = m_ip.group("ip")
+        if not ip or ip.startswith("127.") or ip.startswith("169.254."):
+            continue
+        rows.append({"name": adapter or "LAN", "ip": ip})
+    return rows
+
+
+def _windows_ipv4_interfaces() -> list[dict[str, str]]:
+    try:
+        raw = subprocess.check_output(
+            ["ipconfig"],
+            text=True,
+            errors="replace",
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return []
+    return _parse_ipconfig(raw)
+
+
+def lan_ipv4_interfaces() -> list[dict[str, str]]:
+    """Named IPv4 interfaces this PC owns (Windows ipconfig; else hostname)."""
+    if os.name == "nt":
+        rows = _windows_ipv4_interfaces()
+        if rows:
+            return rows
+    found: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    def _add(ip: str, name: str = "LAN") -> None:
         ip = (ip or "").strip()
         if not ip or ip.startswith("127.") or ip.startswith("169.254."):
             return
-        if ip not in found:
-            found.append(ip)
+        if ip in seen:
+            return
+        seen.add(ip)
+        found.append({"name": name, "ip": ip})
 
     try:
         probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         probe.connect(("8.8.8.8", 80))
-        _add(probe.getsockname()[0])
+        _add(probe.getsockname()[0], "default")
         probe.close()
     except OSError:
         pass
@@ -82,27 +149,85 @@ def lan_ipv4_addresses() -> list[str]:
     return found
 
 
+def lan_ipv4_addresses() -> list[str]:
+    """Non-loopback IPv4 addresses this PC can be reached at on the LAN."""
+    return [row["ip"] for row in lan_ipv4_interfaces()]
+
+
+def ipv4_same_lan(host_ip: str, local_ips: list[str] | None = None) -> bool:
+    """True if host_ip shares a /24 with any local address (common home LAN)."""
+    local_ips = list(local_ips if local_ips is not None else lan_ipv4_addresses())
+    try:
+        h = tuple(int(p) for p in str(host_ip).split("."))
+        if len(h) != 4:
+            return False
+    except ValueError:
+        return False
+    for raw in local_ips:
+        try:
+            loc = tuple(int(p) for p in str(raw).split("."))
+        except ValueError:
+            continue
+        if len(loc) != 4:
+            continue
+        if loc[:3] == h[:3]:
+            return True
+    return False
+
+
+def host_from_url(url: str) -> str:
+    m = re.match(r"^https?://([^/:]+)", (url or "").strip(), re.IGNORECASE)
+    return (m.group(1) if m else "").strip()
+
+
 def listen_urls(port: int) -> list[str]:
     port = int(port)
-    urls = [f"http://{ip}:{port}" for ip in lan_ipv4_addresses()]
+    urls = [f"http://{row['ip']}:{port}" for row in lan_ipv4_interfaces()]
     urls.append(f"http://127.0.0.1:{port}")
     return urls
 
 
-def describe_connect_failure(reason: object, url: str) -> str:
+def format_listen_summary(port: int) -> str:
+    """Host UI line listing every NIC IP pilots might use."""
+    port = int(port)
+    rows = lan_ipv4_interfaces()
+    if not rows:
+        return f"HOST  listen ?:{port}  ·  no LAN IPv4 found"
+    parts = [f"{row['ip']}:{port} ({row['name']})" for row in rows]
+    return "HOST  listen " + "  |  ".join(parts)
+
+
+def describe_connect_failure(
+    reason: object,
+    url: str,
+    *,
+    local_ips: list[str] | None = None,
+) -> str:
     """Human hint for urllib URLError.reason (timeout vs refused vs other)."""
     text = str(reason or "").strip() or "unknown"
     low = text.casefold()
     url = (url or "").strip()
-    loopback = "127.0.0.1" in url or "localhost" in url.casefold()
+    host = host_from_url(url)
+    loopback = host in {"127.0.0.1", "localhost"}
+    locals_ = list(local_ips if local_ips is not None else lan_ipv4_addresses())
+    mismatch = bool(host) and not loopback and locals_ and not ipv4_same_lan(host, locals_)
+    route_hint = ""
+    if mismatch:
+        here = ", ".join(locals_) or "?"
+        route_hint = (
+            f" This PC is {here}; Host is {host}. Different subnets are fine if "
+            f"TCP {DEFAULT_ATC_PORT} is routed or port-forwarded to the DCS server "
+            f"the same way SRS is (do not use 192.168.50.x unless this PC can already "
+            f"reach it). "
+        )
     if "timed out" in low or "timeout" in low:
         hint = (
             "timed out — packets never reached the Host. "
-            "On the Host PC: Windows Firewall inbound TCP "
-            f"{DEFAULT_ATC_PORT} (or allow python.exe). "
-            "On this PC: Host address must be the server LAN IP "
-            f"(not 127.0.0.1) and ATC port {DEFAULT_ATC_PORT} "
-            "(not SRS 5002)."
+            f"{route_hint}"
+            "On the Host PC: allow Windows Firewall inbound TCP "
+            f"{DEFAULT_ATC_PORT} (or python.exe). "
+            "On this PC: Host address = the IP/hostname you already use for DCS/SRS, "
+            f"ATC port {DEFAULT_ATC_PORT} (not SRS 5002)."
         )
         if loopback:
             hint = (

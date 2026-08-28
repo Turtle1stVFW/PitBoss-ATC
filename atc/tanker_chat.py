@@ -6,9 +6,10 @@ on the boom — no callsign addressing. The boom operator is enlisted USAF talki
 to an F-16 officer on a military tanker: dry and funny, not buddy-buddy, not
 airline. Bits are mixed:
 
-  • ab   — short A/B (or A/B/C) poll; one-word answers
-  • riff — observation / banter; optional freeform react, then auto-continues
-  • open — open question; freeform reply, then continues
+  • hello — first contact only: time-of-day pleasantry (Good morning, sir)
+  • ab    — short A/B (or A/B/C) poll; one-word answers
+  • riff  — observation / banter; optional freeform react, then auto-continues
+  • open  — open question; freeform reply, then continues
 
 Not every turn is Ask → Answer → Respond. Replies can run a couple sentences,
 and a choice can chain into another bit. After a turn Texaco pauses, then comes
@@ -36,6 +37,8 @@ _STATE_KEY = "tanker_chat"
 _LAST_KEY = "tanker_chat_last_id"
 _RECENT_KEY = "tanker_chat_recent"
 _HISTORY_KEY = "tanker_chat_history"
+_GREETED_KEY = "tanker_chat_greeted"
+_GREET_ID = "hello_sir"
 _HISTORY_MAX = 8
 _RECENT_MAX = 28
 _LLM_TIMEOUT_S = 6.5
@@ -417,7 +420,8 @@ def looks_like_own_echo(transcript: str, state: dict[str, Any] | None) -> bool:
     # During the post-TX guard, be aggressive — mic often hears the boom play back.
     if in_guard and overlap >= 0.28:
         return True
-    if overlap >= 0.55:
+    # One-word acks ("morning", "hey") share a word with the hello; that is not echo.
+    if overlap >= 0.55 and (len(blob) >= 12 or len(wb) >= 4):
         return True
     # Near-substring echo of the opener / last line.
     compact_b = re.sub(r"[^a-z0-9]+", "", blob.casefold())
@@ -2213,6 +2217,90 @@ def try_llm_react(
     return text
 
 
+def _daypart(hour: int | None = None) -> str:
+    """USAF greeting window from local clock (or an explicit hour)."""
+    h = time.localtime().tm_hour if hour is None else int(hour)
+    h = h % 24
+    if h < 12:
+        return "morning"
+    if h < 17:
+        return "afternoon"
+    return "evening"
+
+
+_GREETING_LINES: dict[str, tuple[str, ...]] = {
+    "morning": (
+        "Good morning, sir.",
+        "Morning, sir.",
+        "Good morning, sir. Looking good from here.",
+    ),
+    "afternoon": (
+        "Good afternoon, sir.",
+        "Afternoon, sir.",
+        "Good afternoon, sir. We'll keep her steady.",
+    ),
+    "evening": (
+        "Good evening, sir.",
+        "Evening, sir.",
+        "Good evening, sir. Looking good from here.",
+    ),
+}
+
+
+def greeting_opener(*, hour: int | None = None) -> str:
+    """First-contact boom hello — time of day, then sir. Not a question."""
+    part = _daypart(hour)
+    pool = _GREETING_LINES.get(part) or _GREETING_LINES["morning"]
+    return random.choice(pool)
+
+
+def _should_greet(state: dict[str, Any] | None, thread_id: str | None) -> bool:
+    """True only for the first boom chat of the sortie (not pinned bits)."""
+    if str(thread_id or "").strip():
+        return False
+    if not isinstance(state, dict):
+        return True
+    if state.get(_GREETED_KEY):
+        return False
+    for row in state.get(_HISTORY_KEY) or []:
+        if isinstance(row, dict) and str(row.get("text") or "").strip():
+            return False
+    return True
+
+
+def _greeting_bit(*, hour: int | None = None) -> dict[str, Any]:
+    """Riff hello so a quiet jet still gets the first real question after a pause."""
+    return chat_lib.Riff(
+        _GREET_ID,
+        greeting_opener(hour=hour),
+        chat_lib.R(
+            "Morning",
+            "Morning. We'll keep her steady, sir.",
+            "morning",
+            "good morning",
+        ),
+        chat_lib.R(
+            "Afternoon",
+            "Afternoon. Hang in there, sir.",
+            "afternoon",
+            "good afternoon",
+        ),
+        chat_lib.R(
+            "Evening",
+            "Evening. Stay boring, sir.",
+            "evening",
+            "good evening",
+        ),
+        chat_lib.R(
+            "Hey",
+            "Hey. Looking stable from here, sir.",
+            "hey",
+            "hello",
+            "howdy",
+        ),
+    )
+
+
 def _pick_library(avoid: list[str], thread_id: str | None) -> dict[str, Any]:
     if thread_id:
         found = chat_lib.thread_by_id(thread_id)
@@ -2311,7 +2399,10 @@ def start_chat(
         state = {}
     recent = _recent_ids(state)
     node: dict[str, Any] | None = None
-    if not thread_id:
+    if _should_greet(state, thread_id):
+        node = _greeting_bit()
+        state[_GREETED_KEY] = True
+    if node is None and not thread_id:
         node = try_llm_thread(config, recent, state=state)
     if node is None:
         node = _pick_library_for_state(state, recent, thread_id)
@@ -2481,6 +2572,12 @@ def answer_chat(
         _apply_open_bit(state, follow, schedule_auto=True, opener=follow_open)
         append_history(state, "boom", follow_open)
         return f"{reply} {follow_open}".strip()
+
+    # First-contact hello is done — next bit is a real question, not more small talk.
+    if str(row.get("id") or "") == _GREET_ID:
+        wait = schedule_next_question(state, llm=used_live or live_on)
+        state[_STATE_KEY]["break_s"] = wait
+        return reply
 
     # Keep the same bit open for a few freeform / live exchanges.
     if freeform and (used_live or live_on or awaiting or chatty):

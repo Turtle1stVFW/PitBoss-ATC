@@ -1118,44 +1118,187 @@ def _headwind_kt(wind_dir: float | None, wind_spd: float | None, rwy_hdg: float)
     return float(wind_spd) * math.cos(math.radians(delta))
 
 
+def _runway_magnetic_hdg(rwy: str) -> float | None:
+    """Magnetic heading implied by the runway number (21R → 210)."""
+    digits = re.sub(r"[^0-9]", "", str(rwy or ""))
+    if not digits:
+        return None
+    return float((int(digits) % 100) * 10 % 360)
+
+
+def _component_limit_kt(defs: dict[str, Any] | None) -> float:
+    """Threshold the along-runway component must *exceed* (11-250 §1.12: 10 kt)."""
+    raw = (defs or {}).get("wind_flip_min_kt", 10)
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return 10.0
+
+
+_MISSION_CLOCK_RE = re.compile(r"\b(\d{1,2}):(\d{2})(?::(\d{2}))?")
+
+
+def parse_mission_local_minutes(raw: str | None) -> int | None:
+    """'13:00:06 Z' / '13:00:06 L' / '2200' → minutes past midnight, or None."""
+    s = str(raw or "").strip()
+    if not s:
+        return None
+    m = _MISSION_CLOCK_RE.search(s)
+    if m:
+        return (int(m.group(1)) % 24) * 60 + (int(m.group(2)) % 60)
+    digits = re.sub(r"\D", "", s)
+    if len(digits) >= 3:
+        hhmm = int(digits[:4] if len(digits) >= 4 else digits)
+        return ((hhmm // 100) % 24) * 60 + (hhmm % 100) % 60
+    return None
+
+
+def caoc_mission_local_minutes(
+    config: dict[str, Any] | None = None,
+    *,
+    radar: dict[str, Any] | None = None,
+) -> int | None:
+    """
+    DCS mission clock from OPUS CAOC radar (`missionTimeZulu`).
+
+    The CAOC page publishes that string as local by rewriting the trailing Z
+    to L — 11-250 §4.1.4 2200L/0800L uses this clock, not wall-clock Pacific.
+    """
+    data = radar
+    if data is None and config:
+        data = fetch_caoc_radar(config)
+    if not isinstance(data, dict):
+        return None
+    return parse_mission_local_minutes(
+        data.get("missionTimeZulu") or data.get("missionTimeLocal")
+    )
+
+
+def _hhmm_to_minutes(raw: Any, default: int) -> int:
+    parsed = parse_mission_local_minutes(str(raw) if raw is not None else None)
+    return default if parsed is None else parsed
+
+
+def in_night_ops_window(
+    local_minutes: int | None,
+    defs: dict[str, Any] | None = None,
+) -> bool:
+    """True for 2200L–0800L (start inclusive, end exclusive) on the mission clock."""
+    if local_minutes is None:
+        return False
+    start = _hhmm_to_minutes((defs or {}).get("night_ops_start_hhmm"), 22 * 60)
+    end = _hhmm_to_minutes((defs or {}).get("night_ops_end_hhmm"), 8 * 60)
+    minutes = int(local_minutes) % (24 * 60)
+    if start == end:
+        return False
+    if start < end:
+        return start <= minutes < end
+    return minutes >= start or minutes < end
+
+
+def _calm_wind_side_for_ops(
+    defs: dict[str, Any] | None,
+    *,
+    for_departure: bool,
+    local_minutes: int | None,
+) -> str:
+    """
+    Day: prefer_runway_side (21). Night §4.1.4: departures 03, arrivals 21,
+    unless this catalog has no night window configured.
+    """
+    prefer = str((defs or {}).get("prefer_runway_side") or "21")
+    has_night = (defs or {}).get("night_ops_start_hhmm") not in (None, "") or (
+        defs or {}
+    ).get("night_departure_side") not in (None, "")
+    if not has_night or not in_night_ops_window(local_minutes, defs):
+        return prefer
+    if for_departure:
+        return str((defs or {}).get("night_departure_side") or "03")
+    return str((defs or {}).get("night_arrival_side") or prefer)
+
+
+def pick_active_runway(
+    runways: list[str],
+    wind_dir: float | None,
+    wind_speed_kt: float | None,
+    *,
+    calm_wind_side: str = "21",
+    component_limit_kt: float = 10.0,
+) -> str:
+    """
+    NellisAFBI 11-250 §1.12 active-runway selection.
+
+    RWY 21 is the calm-wind runway. Closest wind *direction* is not enough:
+    only when the prevailing headwind/tailwind *component* exceeds
+    ``component_limit_kt`` (10 kt) is the runway most nearly aligned with
+    the wind (greatest headwind) designated active.
+    """
+    if not runways:
+        return "21R" if str(calm_wind_side) == "21" else "03L"
+    prefer = str(calm_wind_side or "21")
+    calm = [r for r in runways if _runway_side(r) == prefer]
+    default = calm[0] if calm else runways[0]
+    if wind_dir is None or wind_speed_kt is None:
+        return default
+
+    scored: list[tuple[float, str]] = []
+    for rwy in runways:
+        hdg = _runway_magnetic_hdg(rwy)
+        if hdg is None:
+            continue
+        scored.append((_headwind_kt(wind_dir, wind_speed_kt, hdg), rwy))
+    if not scored:
+        return default
+
+    strongest = max(abs(hw) for hw, _ in scored)
+    if strongest > float(component_limit_kt):
+        return max(scored, key=lambda item: item[0])[1]
+    return default
+
+
 def pick_recovery_runway(
     airport: dict[str, Any],
     weather: Weather,
     *,
     instrument: bool = False,
     catalog: dict[str, Any] | None = None,
+    for_departure: bool = False,
+    config: dict[str, Any] | None = None,
+    local_minutes: int | None = None,
 ) -> str:
     """
-    Prefer the 21s. Use the 03s only when headwind on 03 is >= wind_flip_min_kt
-    (default 11) and stronger than the 21 headwind.
+    Active runway per 11-250 §1.12 / §4.1.4, snapped to ops or instrument ends.
 
+    RWY 21 is calm-wind by day. Flip to the other end only when the along-runway
+    headwind/tailwind component exceeds wind_flip_min_kt (default 10).
+    2200L–0800L (CAOC mission clock): departures default 03, arrivals 21,
+    still overridden when the component exceeds 10 kt.
     Visual ops → 21R / 03L; instrument → 21L / 03R.
     """
     cat = catalog if catalog is not None else load_approach_catalog(airport)
     defs = approach_defaults(cat)
-    prefer = str(defs.get("prefer_runway_side") or "21")
-    try:
-        min_kt = float(defs.get("wind_flip_min_kt") or 11)
-    except (TypeError, ValueError):
-        min_kt = 11.0
-
-    side = prefer
-    hw21 = _headwind_kt(weather.wind_dir, weather.wind_speed_kt, 210.0)
-    hw03 = _headwind_kt(weather.wind_dir, weather.wind_speed_kt, 30.0)
-    if prefer == "21":
-        if hw03 >= min_kt and hw03 > hw21:
-            side = "03"
-        else:
-            side = "21"
-    elif hw21 >= min_kt and hw21 > hw03:
-        side = "21"
-    else:
-        side = prefer
-
-    raw = "21R" if side == "21" else "03L"
-    if instrument:
-        raw = "21L" if side == "21" else "03R"
-    return align_runway_to_airport(airport, raw, instrument=instrument)
+    minutes = local_minutes
+    if minutes is None:
+        minutes = caoc_mission_local_minutes(config)
+    prefer = _calm_wind_side_for_ops(
+        defs, for_departure=for_departure, local_minutes=minutes
+    )
+    min_kt = _component_limit_kt(defs)
+    pool = (
+        airport_instrument_runways(airport)
+        if instrument
+        else airport_ops_runways(airport)
+    )
+    if not pool:
+        pool = ["21L", "03R"] if instrument else ["21R", "03L"]
+    picked = pick_active_runway(
+        pool,
+        weather.wind_dir,
+        weather.wind_speed_kt,
+        calm_wind_side=prefer,
+        component_limit_kt=min_kt,
+    )
+    return align_runway_to_airport(airport, picked, instrument=instrument)
 
 
 def is_vfr_recovery_weather(
@@ -3544,7 +3687,13 @@ def reset_runway_to_winds(
         return str(plan.get("runway") or "")
 
     instrument = uses_instrument_runway(mission=mission, state=state)
-    picked = pick_recovery_runway(airport, weather, instrument=instrument)
+    picked = pick_recovery_runway(
+        airport,
+        weather,
+        instrument=instrument,
+        for_departure=True,
+        config=config,
+    )
     if weather.wind_dir is not None and weather.wind_speed_kt is not None:
         print(
             f"Runway reset to winds: {int(weather.wind_dir):03d}/"
@@ -7198,6 +7347,7 @@ def pick_departure_runway(
     mission: dict[str, Any] | None = None,
     state: dict[str, Any] | None = None,
     template: str | None = None,
+    local_minutes: int | None = None,
 ) -> str:
     """
     Runway selection order:
@@ -7205,8 +7355,8 @@ def pick_departure_runway(
     2. Pilot-requested runway (Fly) — honored as-is
     3. Manual runway_override from Setup — honored as-is
     4. Runway coded on the filed Opus route (snapped)
-    5. Wind-preferred recovery runway (prefer 21; 03 only with >= 11 kt
-       headwind on 03) — not nearest-heading alone
+    5. 11-250: wind component > 10 kt → most aligned; else day calm-wind 21,
+       or 2200L–0800L split (dep 03 / arr 21) from the CAOC mission clock
 
     FP/wind results snap to ops runways (21R / 03L), or to instrument
     runways (21L / 03R) only for instrument-approach phrases. Explicit
@@ -7258,14 +7408,29 @@ def pick_departure_runway(
             return align_runway_to_airport(
                 airport, plan_rwy, instrument=plan_instrument or instrument
             )
-        picked = pick_recovery_runway(airport, weather, instrument=instrument)
+        picked = pick_recovery_runway(
+            airport,
+            weather,
+            instrument=instrument,
+            for_departure=False,
+            config=config,
+            local_minutes=local_minutes,
+        )
         print(f"Runway (recovery bias): {picked}")
         return picked
 
     raw: str | None = runway_from_route(opus.fp_route_string if opus else None)
     if raw is None:
-        # Prefer-21 wind gate — do not use nearest-heading (081/07 → 03).
-        raw = pick_recovery_runway(airport, weather, instrument=instrument)
+        # 11-250 §1.12 component + §4.1.4 night dep 03 / arr 21.
+        raw = pick_recovery_runway(
+            airport,
+            weather,
+            instrument=instrument,
+            for_departure=True,
+            config=config,
+            local_minutes=local_minutes,
+        )
+        print(f"Runway (wind/night): {raw}")
     aligned = align_runway_to_airport(airport, raw, instrument=instrument)
     if aligned != raw:
         kind = "instrument" if instrument else "ops"
@@ -7850,23 +8015,22 @@ def heading_delta(a: float, b: float) -> float:
     return min(d, 360 - d)
 
 
-def active_runway(runways: list[str], wind_dir: int | None) -> str:
-    if not runways:
-        return "21"
-    if wind_dir is None:
-        return runways[0]
-    best = runways[0]
-    best_delta = 999.0
-    for rwy in runways:
-        digits = re.sub(r"[^0-9]", "", rwy)
-        if not digits:
-            continue
-        hdg = (int(digits) * 10) % 360
-        delta = heading_delta(float(wind_dir), float(hdg))
-        if delta < best_delta:
-            best_delta = delta
-            best = rwy
-    return best
+def active_runway(
+    runways: list[str],
+    wind_dir: int | None,
+    wind_speed_kt: float | None = None,
+    *,
+    calm_wind_side: str = "21",
+    component_limit_kt: float = 10.0,
+) -> str:
+    """11-250 §1.12: calm-wind 21 until the HW/TW component exceeds 10 kt."""
+    return pick_active_runway(
+        runways,
+        wind_dir,
+        wind_speed_kt,
+        calm_wind_side=calm_wind_side,
+        component_limit_kt=component_limit_kt,
+    )
 
 
 def channel_radio(airport: dict[str, Any], channel: str) -> tuple[float, str, str]:

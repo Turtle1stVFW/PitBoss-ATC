@@ -1,8 +1,12 @@
 {
-  "_comment": "Nellis (KLSV) recoveries per NellisAFBI 11-250 §4.13.5 + FAA IAP plates (d-TPP). Four VFR recoveries: STRYK, TORYE, ARCOE, MINTT — TORYE and ARCOE are separate initial fixes (Figure 4.7). Prefer RWY 21; use 03 only when headwind on 03 is >= 11 kt. Instrument descend altitudes are IAF crossing altitudes from the plate. Speed is not cleared unless traffic requires it (speed_restrict).",
+  "_comment": "Nellis (KLSV) recoveries per NellisAFBI 11-250 §4.13.5 + FAA IAP plates (d-TPP). Four VFR recoveries: STRYK, TORYE, ARCOE, MINTT — TORYE and ARCOE are separate initial fixes (Figure 4.7). §1.12: RWY 21 is the calm-wind runway; flip to 03 only when the prevailing headwind/tailwind *component* exceeds 10 kt (not merely the closest wind direction). §4.1.4: 2200L–0800L on the CAOC mission clock, departures default 03 and arrivals 21 unless that component gate (or a pilot/Setup override) says otherwise. Instrument descend altitudes are IAF crossing altitudes from the plate. Speed is not cleared unless traffic requires it (speed_restrict).",
   "defaults": {
     "prefer_runway_side": "21",
-    "wind_flip_min_kt": 11,
+    "wind_flip_min_kt": 10,
+    "night_ops_start_hhmm": "2200",
+    "night_ops_end_hhmm": "0800",
+    "night_departure_side": "03",
+    "night_arrival_side": "21",
     "ifr_ceiling_ft": 3000,
     "ifr_visibility_sm": 3.0,
     "default_pattern_vmc": "visual_overhead",

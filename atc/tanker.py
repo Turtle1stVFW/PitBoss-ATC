@@ -52,6 +52,37 @@ _TANKER_STATE_KEYS = (
     "tanker_needs_c2_checkin",
 )
 
+# Boom chat lives with the jet on AAR, not on the shared C2 cursor.
+_CHAT_STATE_KEYS = (
+    "tanker_chat",
+    "tanker_chat_last_id",
+    "tanker_chat_recent",
+    "tanker_chat_history",
+    "tanker_chat_greeted",
+    "tanker_chat_llm_note",
+    "tanker_chat_guard_until",
+    "tanker_chat_last_spoke",
+)
+
+SEAT_STATE_KEYS = _TANKER_STATE_KEYS + _CHAT_STATE_KEYS
+
+# Copied to the other ship in the element (1-2 or 3-4). Not boom chat.
+_OVERLAY_COPY_KEYS = (
+    "tanker_overlay",
+    "tanker_resume_index",
+    "tanker_resume_step_id",
+    "tanker_resume_channel",
+    "tanker_needs_c2_checkin",
+    "tanker_seen_tune",
+    "tanker_id",
+    "tanker_callsign",
+    "tanker_freq_mhz",
+    "tanker_phase",
+    "tanker_aircraft",
+    "tanker_track",
+    "tanker_tcn",
+)
+
 # Receiver position in the boom pattern.
 PHASE_NONE = ""
 PHASE_JOIN = "join"
@@ -737,6 +768,71 @@ def tanker_needs_c2_checkin(state: dict[str, Any] | None) -> bool:
 def tanker_overlay_active(state: dict[str, Any] | None) -> bool:
     """True while the tanker is a side trip parked off the C2 timeline."""
     return bool(isinstance(state, dict) and state.get("tanker_overlay"))
+
+
+def element_seats(seat: Any) -> tuple[int, int]:
+    """Lead element is 1-2; second element is 3-4; then 5-6, …"""
+    try:
+        n = int(seat)
+    except (TypeError, ValueError):
+        n = 1
+    if n <= 0:
+        n = 1
+    start = n - 1 if n % 2 == 0 else n
+    return (start, start + 1)
+
+
+def snapshot_seat_state(state: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(state, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for key in SEAT_STATE_KEYS:
+        if key in state:
+            out[key] = state[key]
+    return out
+
+
+def apply_seat_state(
+    state: dict[str, Any] | None, local: dict[str, Any] | None
+) -> None:
+    if not isinstance(state, dict):
+        return
+    local = local if isinstance(local, dict) else {}
+    for key in SEAT_STATE_KEYS:
+        if key in local:
+            state[key] = local[key]
+        else:
+            state.pop(key, None)
+
+
+def strip_seat_state(state: dict[str, Any] | None) -> None:
+    if not isinstance(state, dict):
+        return
+    for key in SEAT_STATE_KEYS:
+        state.pop(key, None)
+
+
+def copy_overlay(dst: dict[str, Any], src: dict[str, Any] | None) -> None:
+    """Share AAR parking with the other jet in the element; keep boom chat local."""
+    src = src if isinstance(src, dict) else {}
+    for key in _OVERLAY_COPY_KEYS:
+        if key in src:
+            dst[key] = src[key]
+        else:
+            dst.pop(key, None)
+
+
+def park_tanker_index(engine: Any) -> None:
+    """Point the cursor at the tanker step without rewriting resume."""
+    if engine is None:
+        return
+    state = engine.state if isinstance(getattr(engine, "state", None), dict) else None
+    if state is None:
+        return
+    for i, step in enumerate(list(getattr(engine, "steps", None) or [])):
+        if is_tanker_step(step):
+            state["index"] = i
+            return
 
 
 def is_tanker_step(step: dict[str, Any] | None) -> bool:
