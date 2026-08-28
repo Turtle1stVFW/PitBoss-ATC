@@ -93,6 +93,32 @@ def check_page_wiring() -> int:
     return bad
 
 
+def check_tester_wiring() -> int:
+    """Every element the tester script reaches for has to exist in the page."""
+    import re
+
+    bad = 0
+    html = (HERE / "tester_map.html").read_text(encoding="utf-8")
+    js = (HERE / "tester_map.js").read_text(encoding="utf-8")
+    ids = set(re.findall(r'id="([^"]+)"', html))
+    wanted = set(re.findall(r'el\("([^"]+)"\)', js))
+    missing = sorted(wanted - ids)
+    if missing:
+        print(f"FAIL tester script looks up ids the page does not have: {missing}")
+        bad += 1
+    else:
+        print(f"ok   tester {len(wanted)} element lookups all resolve")
+
+    for src, name in ((html, "tester_map.html"), (js, "tester_map.js")):
+        for asset in re.findall(r'(?:src|href)="(/[^"]+)"', src):
+            if asset == "/":
+                continue
+            if not (HERE / asset.lstrip("/")).is_file():
+                print(f"FAIL {name} references a missing file: {asset}")
+                bad += 1
+    return bad
+
+
 def main() -> int:
     bad = 0
     scratch = Path(tempfile.mkdtemp(prefix="zones-")) / "airports.json"
@@ -116,6 +142,9 @@ def main() -> int:
         for path in (
             "/zone_map.js",
             "/zone_map.css",
+            "/tester",
+            "/tester_map.js",
+            "/tester_map.css",
             "/vendor/leaflet.js",
             "/vendor/leaflet-draw.js",
             "/vendor/leaflet.css",
@@ -132,6 +161,95 @@ def main() -> int:
 
         print("\n--- page wiring ---")
         bad += check_page_wiring()
+        bad += check_tester_wiring()
+
+        print("\n--- route tester ---")
+        status, body = get("/tester")
+        ok = status == 200 and b"Map jet" in body
+        bad += 0 if ok else 1
+        print(f"{'ok  ' if ok else 'FAIL'} GET /tester  ({len(body)} bytes)")
+
+        status, body = get("/api/tester/state?airport=nellis")
+        tstate = json.loads(body)
+        ok = status == 200 and tstate.get("ok") and tstate.get("geojson")
+        bad += 0 if ok else 1
+        print(
+            f"{'ok  ' if ok else 'FAIL'} /api/tester/state hop={tstate.get('hop')!r} "
+            f"fixes={len(tstate.get('fixes') or [])}"
+        )
+
+        status, body = get("/api/tester/route?airport=nellis&q=KLSV+DREAM+SARAH+KLSV")
+        plotted = json.loads(body)
+        wps = plotted.get("waypoints") or []
+        ok = status == 200 and plotted.get("ok") and len(wps) >= 2
+        bad += 0 if ok else 1
+        print(f"{'ok  ' if ok else 'FAIL'} /api/tester/route {len(wps)} waypoint(s) hop={plotted.get('hop')!r}")
+
+        payload = json.dumps(
+            {
+                "airport": "nellis",
+                "lat": 36.235,
+                "lon": -115.038,
+                "alt_ft_agl": 1000,
+                "heading_deg": 210,
+                "speed_kt": 200,
+                "route": "KLSV FLEX DREAM SARAH KLSV",
+                "reset": True,
+            }
+        ).encode()
+        status, body = get("/api/tester/tick", payload)
+        tick = json.loads(body)
+        trigs = [z.get("trigger") for z in (tick.get("inside") or [])]
+        ok = status == 200 and tick.get("ok") and "tower" in trigs
+        bad += 0 if ok else 1
+        print(f"{'ok  ' if ok else 'FAIL'} POST /api/tester/tick tower in {trigs}")
+
+        status, body = get("/api/tester/opus-flights?detail=0")
+        opus = json.loads(body)
+        ok = status == 200 and isinstance(opus.get("flights"), list)
+        bad += 0 if ok else 1
+        print(
+            f"{'ok  ' if ok else 'FAIL'} GET /api/tester/opus-flights "
+            f"ok={opus.get('ok')} n={len(opus.get('flights') or [])}"
+        )
+
+        status, body = get("/api/tester/metar?airport=nellis")
+        metar = json.loads(body)
+        ok = status == 200 and "ok" in metar
+        bad += 0 if ok else 1
+        print(
+            f"{'ok  ' if ok else 'FAIL'} GET /api/tester/metar "
+            f"ok={metar.get('ok')} icao={metar.get('icao')!r}"
+        )
+
+        say_payload = json.dumps(
+            {
+                "airport": "nellis",
+                "lat": 36.235,
+                "lon": -115.038,
+                "alt_ft_agl": 0,
+                "heading_deg": 210,
+                "speed_kt": 0,
+                "route": "KLSV FLEX DREAM SARAH KLSV",
+                "tune": "ground",
+                "transcript": "Nellis Ground, Fleece 1, ready to taxi",
+                "hear": False,
+                "reset": True,
+            }
+        ).encode()
+        status, body = get("/api/tester/say", say_payload)
+        said = json.loads(body)
+        ok = (
+            status == 200
+            and said.get("ok")
+            and said.get("fired")
+            and said.get("intent") == "ready_taxi"
+        )
+        bad += 0 if ok else 1
+        print(
+            f"{'ok  ' if ok else 'FAIL'} POST /api/tester/say "
+            f"intent={said.get('intent')!r} fired={said.get('fired')}"
+        )
 
         print("\n--- state ---")
         status, body = get("/api/state")

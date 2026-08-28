@@ -157,7 +157,10 @@ def match_from_choice(
         "approach_continue",
     ):
         vfr = voice_intent.extract_vfr_recovery(transcript)
-        if vfr:
+        feeder = voice_intent.extract_stryk_feeder(transcript)
+        if feeder:
+            slots["vfr_recovery"] = feeder
+        elif vfr:
             slots["vfr_recovery"] = vfr
         iaf = voice_intent.extract_iaf(transcript)
         if iaf:

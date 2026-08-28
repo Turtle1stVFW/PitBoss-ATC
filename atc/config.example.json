@@ -14,6 +14,7 @@
   "unrestricted_climb_enabled": true,
   "unrestricted_climb_approve_chance": 0.80,
   "auto_clearance_enabled": false,
+  "ownship_from_map": false,
   "auto_takeoff_clearance": true,
   "auto_monitor_tower": true,
   "auto_clearance_require_full_flight": true,

@@ -51,7 +51,8 @@ AIRPORTS_PATH = HERE / "airports.json"
 
 # The zone drawing tool is a separate program: a small web server that puts a map
 # in the browser. Setup and the step editor both launch it, and Open-Zone-Editor.cmd
-# starts the same thing without the app.
+# starts the same thing without the app. Map is my jet… / Open-Route-Tester.cmd open
+# /tester on that same server; Fly treats the red jet as you.
 ZONE_TOOL = HERE.parent / "tools" / "zone_server.py"
 ZONE_EDITOR_PORT = 8777
 ZONE_EDITOR_LOG = Path(tempfile.gettempdir()) / "atc-zone-editor.log"
@@ -72,6 +73,11 @@ ZONE_TAGS = (
     "tower",
     "departure",
     "approach",
+    "joshua",
+    "control_east",
+    "control_west",
+    "blackjack",
+    "center",
 )
 
 # One press reaches us by several routes at once; ignore the echoes.
@@ -97,7 +103,13 @@ CHANNEL_COLORS = {
     "departure": "#bb9af7",
     "approach": "#7dcfff",
     "blackjack": "#f7768e",
+    "bandsaw": "#bb9af7",
+    "joshua": "#9ece6a",
+    "control_east": "#89dceb",
+    "control_west": "#74c7ec",
+    "center": "#cba6f7",
     "ops": "#ff9e64",
+    "tanker": "#f5c2e7",
     "other": "#c0caf5",
 }
 
@@ -956,16 +968,31 @@ class MissionPlanner(tk.Tk):
             tmpl = str(step.get("template") or "")
             handoff = ""
             if tmpl == "bj_range_exit":
-                handoff = "  →  Approach (≤40 NM)"
+                handoff = "  →  Nellis Control (≤40 NM)"
+            elif tmpl == "control_handoff":
+                handoff = "  →  Approach"
             elif tmpl == "bandsaw_check_out":
                 handoff = "  →  Blackjack"
             elif tmpl == "climb_cruise":
-                handoff = "  →  cruise (≥10 NM)"
+                handoff = "  →  cruise (≥10 NM, if radar stayed at the initial)"
             elif tmpl == "departure_handoff":
                 handoff = "  →  Blackjack (≥18 NM)"
             next_line = (
                 f"NEXT STEP  ·  {phase_lbl}  ·  {label}  ({ch.upper()} {need}){handoff}"
             )
+            try:
+                import agencies as agencies_mod
+
+                if agencies_mod.is_default_sandbox(self.config_data):
+                    live = srs_radio.channel_for_tuned_freq(
+                        airport, self.config_data
+                    ) or ch
+                    spoken = agencies_mod.spoken_name(
+                        live, str((airport or {}).get("name") or "")
+                    )
+                    next_line = f"YOU CAN SAY  ·  follows {spoken}"
+            except Exception:
+                pass
             try:
                 import tanker as tanker_mod
 
@@ -1364,7 +1391,7 @@ class MissionPlanner(tk.Tk):
             tracker = self._position_tracker()
         try:
             if engine is None:
-                engine = flow_engine.FlowEngine()
+                engine = self._live_engine() if bind_live else flow_engine.FlowEngine()
             step = engine.current_step() or {}
             template = str(step.get("template") or "")
             airport = engine.airport()
@@ -1603,6 +1630,21 @@ class MissionPlanner(tk.Tk):
         latch = f"fire:{key}"
         if not tracker.armed(latch):
             return "", waiting
+        last_id = str((state or {}).get("last_step_id") or "")
+        more_land = False
+        if tmpl == "clear_land":
+            more_land = atc_phrase.should_hold_for_landing_clearances(
+                state, step=step, mission=mission
+            )
+        if runway_position.skip_auto_tx_already_played(
+            fire_id=step_id,
+            current_step_id=step_id,
+            last_step_id=last_id,
+            template=tmpl,
+            hold_for_landing=more_land,
+            playing_id=str(getattr(tracker, "playing_step_id", "") or ""),
+        ):
+            return "", waiting or "already played"
         tracker.pending_latch = latch
         return step_id, waiting
 
@@ -1627,7 +1669,18 @@ class MissionPlanner(tk.Tk):
         if waiting and label:
             prefix = f"{prefix} · {label}"
         if bind_live:
-            self.fly_position.set(f"{prefix}: {summary}")
+            tag = ""
+            try:
+                bits: list[str] = []
+                if atc_phrase.ownship_from_map_enabled(self.config_data):
+                    bits.append("MAP")
+                if atc_phrase.read_weather_inject():
+                    bits.append("WX")
+                if bits:
+                    tag = " · ".join(bits) + " · "
+            except Exception:
+                tag = ""
+            self.fly_position.set(f"{tag}{prefix}: {summary}")
             if hasattr(self, "_fly_position_lbl"):
                 if fire:
                     color = C_GREEN
@@ -1647,7 +1700,43 @@ class MissionPlanner(tk.Tk):
         if tracker is None:
             tracker = self._position_tracker()
         latch = tracker.pending_latch or f"fire:{fire}:{status.runway or 'field'}"
+        live_engine = engine
+        if bind_live:
+            try:
+                live_engine = self._live_engine()
+            except Exception:
+                live_engine = engine
+        live_step = {}
         try:
+            live_step = live_engine.current_step() or {}
+        except Exception:
+            live_step = step if isinstance(step, dict) else {}
+        live_id = str(live_step.get("id") or live_step.get("template") or "")
+        want_id = str(step.get("id") or fire or "")
+        last_id = str((getattr(live_engine, "state", None) or {}).get("last_step_id") or "")
+        more_land = False
+        if str(live_step.get("template") or tmpl) == "clear_land":
+            try:
+                more_land = atc_phrase.should_hold_for_landing_clearances(
+                    live_engine.state,
+                    step=live_step or step,
+                    mission=getattr(live_engine, "mission", None),
+                )
+            except Exception:
+                more_land = False
+        if not tracker.armed(latch) or runway_position.skip_auto_tx_already_played(
+            fire_id=want_id,
+            current_step_id=live_id,
+            last_step_id=last_id,
+            template=str(live_step.get("template") or tmpl),
+            hold_for_landing=more_land,
+            playing_id=str(getattr(tracker, "playing_step_id", "") or ""),
+        ):
+            tracker.fire_once(latch)
+            tracker.pending_latch = ""
+            return
+        try:
+            play_engine = live_engine
             if session is not None and self._atc_server is not None:
                 result = self._atc_server.run_action(
                     session,
@@ -1656,7 +1745,11 @@ class MissionPlanner(tk.Tk):
                     else e.play_template(fire),
                 )
             else:
-                result = engine.play_id(fire) if step.get("id") else engine.play_template(fire)
+                result = (
+                    play_engine.play_id(fire)
+                    if step.get("id")
+                    else play_engine.play_template(fire)
+                )
         except Exception as exc:  # noqa: BLE001
             tracker.clear_fired(latch)
             tracker.pending_latch = ""
@@ -1671,7 +1764,7 @@ class MissionPlanner(tk.Tk):
         self._voice_log(f"AUTO  {who}{spoken} — {summary}")
         self._on_trigger_received(f"AUTO {spoken} (position)")
         if bind_live:
-            self.engine = engine
+            self.engine = live_engine
             self._refresh_fly_status()
 
     def _sync_eam_strip_from_srs(self) -> None:
@@ -2063,7 +2156,7 @@ class MissionPlanner(tk.Tk):
         except Exception:  # noqa: BLE001
             pass
         # Tips / voice scoring follow the live radio when it is an agency in
-        # this mission phase (Blackjack vs Bandsaw during Flight, etc.).
+        # this mission phase (Blackjack vs Control vs Joshua during Flight).
         tuned = None
         try:
             tuned = srs_radio.channel_for_tuned_freq(
@@ -2072,14 +2165,29 @@ class MissionPlanner(tk.Tk):
             )
         except Exception:  # noqa: BLE001
             tuned = None
+        try:
+            import agencies as agencies_mod
+
+            mission_phase = agencies_mod.sandbox_mission_phase(
+                cursor_phase=mission_phase,
+                cursor_channel=cursor_channel,
+                tuned_channel=tuned,
+                state=getattr(self.engine, "state", None),
+            )
+            context["channel"] = agencies_mod.resolve(
+                tuned_channel=tuned,
+                cursor_channel=cursor_channel,
+                mission_phase=mission_phase,
+            )
+        except Exception:  # noqa: BLE001
+            context["channel"] = voice_intent.resolve_context_channel(
+                mission_phase=mission_phase,
+                cursor_channel=cursor_channel,
+                tuned_channel=tuned,
+            )
         context["tuned_channel"] = tuned or ""
         context["cursor_channel"] = cursor_channel
         context["phase"] = mission_phase
-        context["channel"] = voice_intent.resolve_context_channel(
-            mission_phase=mission_phase,
-            cursor_channel=cursor_channel,
-            tuned_channel=tuned,
-        )
         context["callsign"] = atc_phrase.cached_radio_callsign(self.config_data)
         seat = atc_phrase.configured_opus_seat(self.config_data)
         if seat is not None:
@@ -3658,17 +3766,64 @@ class MissionPlanner(tk.Tk):
         except Exception:  # noqa: BLE001 — urllib raises URLError/HTTPError variants
             return False
 
+    def _map_tool_url(self, page: str = "/") -> str:
+        port = self._zone_editor_port()
+        return f"http://127.0.0.1:{port}{page}?airport={self._airport_key()}"
+
     def _open_zone_editor(self) -> None:
         """Open the map drawing tool in a browser, reusing a server already up."""
+        self._open_map_page(
+            "/",
+            title="Zone editor",
+            ready=(
+                "The zone editor is open in your browser.\n\n"
+                "Pick the field, trace the area on the map, name what it fires, "
+                "then press Save. This app picks the new area up on its own — "
+                "it will be in the zone list a few seconds later."
+            ),
+        )
+
+    def _on_ownship_from_map_changed(self) -> None:
+        """Fly checkbox: map tester vs Opus CAOC for ownship position."""
+        self.config_data["ownship_from_map"] = bool(self.var_ownship_from_map.get())
+        save_json(CONFIG_PATH, self.config_data)
+        self._position_tracker().reset()
+        atc_phrase.invalidate_opus_cache()
+        self._update_opus_flight_label()
+        self._refresh_opus_identity_bar()
+        if hasattr(self, "_persist_identity"):
+            self._persist_identity(refresh_opus=True)
+
+    def _open_route_tester(self) -> None:
+        """Open the map that drives Fly ownship (same local map server as the zone editor)."""
+        self.config_data["auto_clearance_enabled"] = True
+        self.config_data["ownship_from_map"] = True
+        if hasattr(self, "var_auto_clearance"):
+            self.var_auto_clearance.set(True)
+        if hasattr(self, "var_ownship_from_map"):
+            self.var_ownship_from_map.set(True)
+        save_json(CONFIG_PATH, self.config_data)
+        self._open_map_page(
+            "/tester",
+            title="Map jet",
+            ready=(
+                "The map is open in your browser.\n\n"
+                "That red jet is what Fly treats as you. Drag or Play on the map; "
+                "talk and hear ATC on this Fly tab. Tankers and other traffic still "
+                "come from CAOC. Watch live position is on so zone steps can fire."
+            ),
+        )
+
+    def _open_map_page(self, page: str, *, title: str, ready: str) -> None:
         port = self._zone_editor_port()
-        url = f"http://127.0.0.1:{port}/?airport={self._airport_key()}"
+        url = self._map_tool_url(page)
         if self._serving(port) and self._zone_editor_supports_overlays(port):
             webbrowser.open(url)
             return
         if not ZONE_TOOL.exists():
             messagebox.showerror(
-                "Zone editor",
-                "The zone editor is missing. It lives next to this app in:\n\n"
+                title,
+                "The map server is missing. It lives next to this app in:\n\n"
                 f"{ZONE_TOOL}",
             )
             return
@@ -3691,14 +3846,21 @@ class MissionPlanner(tk.Tk):
             )
         except OSError as exc:
             messagebox.showerror(
-                "Zone editor",
-                f"Could not start the zone editor:\n{exc}\n\n"
+                title,
+                f"Could not start the map server:\n{exc}\n\n"
                 "It needs Python, the same as this app.",
             )
             return
-        self._wait_for_zone_editor(url)
+        self._wait_for_zone_editor(url, title=title, ready=ready)
 
-    def _wait_for_zone_editor(self, url: str, tries: int = 24) -> None:
+    def _wait_for_zone_editor(
+        self,
+        url: str,
+        tries: int = 24,
+        *,
+        title: str = "Zone editor",
+        ready: str = "",
+    ) -> None:
         """Give the server a moment to bind before pointing a browser at it."""
         proc = self._zone_proc
         if proc is None:
@@ -3706,11 +3868,14 @@ class MissionPlanner(tk.Tk):
         if self._serving(self._zone_editor_port()):
             webbrowser.open(url)
             messagebox.showinfo(
-                "Zone editor",
-                "The zone editor is open in your browser.\n\n"
-                "Pick the field, trace the area on the map, name what it fires, "
-                "then press Save. This app picks the new area up on its own — "
-                "it will be in the zone list a few seconds later.",
+                title,
+                ready
+                or (
+                    "The zone editor is open in your browser.\n\n"
+                    "Pick the field, trace the area on the map, name what it fires, "
+                    "then press Save. This app picks the new area up on its own — "
+                    "it will be in the zone list a few seconds later."
+                ),
             )
             return
         if proc.poll() is not None or tries <= 0:
@@ -3721,12 +3886,17 @@ class MissionPlanner(tk.Tk):
             except OSError:
                 pass
             messagebox.showerror(
-                "Zone editor",
-                "The zone editor did not come up."
+                title,
+                "The map server did not come up."
                 + (f"\n\n{detail[-600:]}" if detail else f"\n\nLog: {ZONE_EDITOR_LOG}"),
             )
             return
-        self.after(250, lambda: self._wait_for_zone_editor(url, tries - 1))
+        self.after(
+            250,
+            lambda: self._wait_for_zone_editor(
+                url, tries - 1, title=title, ready=ready
+            ),
+        )
 
     def _trigger_from_form(self) -> dict[str, Any] | None:
         """The step's `trigger` block, or None when no zone is chosen."""
@@ -7073,6 +7243,15 @@ class MissionPlanner(tk.Tk):
             variable=self.always_on_top,
             command=lambda: self.attributes("-topmost", self.always_on_top.get()),
         ).pack(side=tk.LEFT)
+        self.var_ownship_from_map = tk.BooleanVar(
+            value=bool(self.config_data.get("ownship_from_map"))
+        )
+        ttk.Checkbutton(
+            foot,
+            text="Test: map is my jet + route",
+            variable=self.var_ownship_from_map,
+            command=self._on_ownship_from_map_changed,
+        ).pack(side=tk.LEFT, padx=(14, 0))
         self.fly_hotkey_hint = tk.StringVar(value="")
         tk.Label(
             foot,
@@ -8101,12 +8280,55 @@ class MissionPlanner(tk.Tk):
             total = st.get("total") or 0
             step = st.get("step") or {}
             label = str(step.get("label") or step.get("id") or "—").strip() or "—"
-            self.fly_step_num.set(f"STEP {num} / {total}")
-            self.fly_step_name.set(label)
+            sandbox = False
+            try:
+                import agencies as agencies_mod
+
+                sandbox = agencies_mod.is_default_sandbox(self.config_data)
+            except Exception:
+                sandbox = False
+            live_ch = ""
+            if sandbox:
+                try:
+                    live_ch = srs_radio.channel_for_tuned_freq(
+                        self.engine.airport(), self.config_data
+                    ) or ""
+                except Exception:
+                    live_ch = ""
+                if not live_ch:
+                    live_ch = str(
+                        (getattr(self.engine, "state", None) or {}).get("last_agency")
+                        or step.get("channel")
+                        or ""
+                    ).strip().lower()
+                ap_name = str((self.engine.airport() or {}).get("name") or "")
+                try:
+                    import agencies as agencies_mod
+
+                    with_name = agencies_mod.spoken_name(live_ch, ap_name) or label
+                except Exception:
+                    with_name = label
+                self.fly_step_num.set("YOU ARE WITH")
+                self.fly_step_name.set(with_name)
+            else:
+                self.fly_step_num.set(f"STEP {num} / {total}")
+                self.fly_step_name.set(label)
             ch, freq, mod, tx = self._fly_upcoming_radio(step)
+            display_ch = ch
+            if sandbox and live_ch:
+                try:
+                    live_freq, live_mod, live_tx = atc_phrase.channel_radio(
+                        self.engine.airport(), live_ch
+                    )
+                    freq = srs_radio.format_mhz(live_freq)
+                    mod = live_mod
+                    tx = live_tx
+                    display_ch = live_ch.upper().replace("_", " ")
+                except Exception:
+                    display_ch = live_ch.upper().replace("_", " ")
             self.fly_freq.set(freq)
             self.fly_mod.set(mod)
-            self.fly_channel.set(ch)
+            self.fly_channel.set(display_ch)
             self.fly_tx_name.set(f"SRS name: {tx}" if tx else "")
             mode = step.get("mode") or "tts"
             tmpl = step.get("template") or step.get("file") or ""
@@ -8144,8 +8366,29 @@ class MissionPlanner(tk.Tk):
                     hint += "  ·  rolling offer pending"
             if atc_phrase.awaiting_option_on_the_go(self.engine.state):
                 hint += "  ·  option — On the go or Full stop / Next"
+            if sandbox:
+                try:
+                    import agencies as agencies_mod
+
+                    icao = str((self.engine.airport() or {}).get("icao") or "KLSV")
+                    opus, _wx = atc_phrase.resolve_opus_and_metar(
+                        self.config_data, icao
+                    )
+                    hop = agencies_mod.format_hop(
+                        agencies_mod.infer_from_context(
+                            airport=self.engine.airport(),
+                            opus=opus,
+                            config=self.config_data,
+                        )
+                    )
+                    if hop:
+                        hint += f"  ·  hop {hop}"
+                except Exception:
+                    pass
             self.fly_hint.set(hint)
-            color = CHANNEL_COLORS.get(ch.lower(), C_ACCENT)
+            color = CHANNEL_COLORS.get(
+                (live_ch or ch).lower() if sandbox else ch.lower(), C_ACCENT
+            )
             if hasattr(self, "_fly_channel_lbl"):
                 self._fly_channel_lbl.configure(fg=color)
             if hasattr(self, "_fly_step_name_lbl"):
@@ -8200,6 +8443,35 @@ class MissionPlanner(tk.Tk):
         idx = self._jump_index_by_label[label]
         self._fly("seek", seek_index=idx)
 
+    def _arm_watch_against_manual_play(self, action: str) -> str:
+        """Latch Watch so Play and the timing trigger cannot TX the same step."""
+        if action not in ("next", "back"):
+            return ""
+        try:
+            eng = self._live_engine()
+            st = getattr(eng, "state", None) or {}
+            step: dict[str, Any] = {}
+            if action == "next":
+                if st.get("awaiting_readback") and st.get("readback_items"):
+                    return ""
+                try:
+                    if atc_phrase.rolling_offer_awaiting_reply(st):
+                        return ""
+                except Exception:
+                    pass
+                step = eng.current_step() or {}
+            else:
+                steps = list(getattr(eng, "steps", None) or [])
+                idx = int(st.get("index") or 0) - 1
+                if 0 <= idx < len(steps):
+                    step = steps[idx] or {}
+            sid = str(step.get("id") or "")
+            if sid:
+                self._position_tracker().mark_step_played(sid)
+            return sid
+        except Exception:
+            return ""
+
     def _fly(
         self,
         action: str,
@@ -8220,10 +8492,12 @@ class MissionPlanner(tk.Tk):
             self._fly_via_host(action, seek_index=seek_index)
             return
 
+        marked_sid = self._arm_watch_against_manual_play(action)
+
         def work() -> None:
             eng = None
             try:
-                eng = flow_engine.FlowEngine()
+                eng = self._live_engine()
                 if action == "next":
                     r = eng.next(bypass_freq_gate=bypass_freq_gate)
                 elif action == "back":
@@ -8272,6 +8546,10 @@ class MissionPlanner(tk.Tk):
                     self.fly_log.see(tk.END)
                     if action in ("next", "back"):
                         self._append_fly_voice_feed(line)
+                        sid = marked_sid or str(r.get("step_id") or "")
+                        if not sid:
+                            sid = str((eng.state or {}).get("last_step_id") or "")
+                        self._position_tracker().finish_manual_tx(sid)
                     self.engine = eng
                     self._refresh_fly_status()
 
@@ -8285,6 +8563,8 @@ class MissionPlanner(tk.Tk):
                     step = None
 
                 def show_err() -> None:
+                    if marked_sid:
+                        self._position_tracker().unmark_step_played(marked_sid)
                     if action in ("next", "back") or err.startswith("Blocked:"):
                         self._note_no_tx(err, action=action, step=step)
                         if err.startswith("Blocked:"):
@@ -8585,6 +8865,8 @@ class MissionPlanner(tk.Tk):
                     ("bullet", "   Optional: Manual runway overrides flight-plan / wind selection."),
                     ("bullet", "4. Plan Flight — New… (base flow + optional Opus), or Load / Save mission."),
                     ("bullet", "5. Fly — use Play and Advance through the sortie (or Stream Deck later)."),
+                    ("heading", "Rehearse without DCS"),
+                    ("body", "Fly tab checkbox “Test: map is my jet” (or Setup → Map is my jet…) uses the local map as your aircraft instead of Opus. Drag or Play on the map; talk on the Fly tab. Tankers still come from CAOC. Uncheck the box to go back to Opus position."),
                     ("heading", "Voice quality"),
                     ("body", "Windows voices work with zero setup (robotic)."),
                     ("body", "Google Cloud TTS is optional and sounds much more natural — see the Google topic."),
@@ -9750,6 +10032,9 @@ class MissionPlanner(tk.Tk):
         ttk.Button(
             zone_row, text="Draw zones on a map…", command=self._open_zone_editor
         ).pack(side=tk.LEFT)
+        ttk.Button(
+            zone_row, text="Map is my jet…", command=self._open_route_tester
+        ).pack(side=tk.LEFT, padx=(8, 0))
         self.var_zone_count = tk.StringVar(value="")
         tk.Label(
             zone_row,
@@ -9764,7 +10049,11 @@ class MissionPlanner(tk.Tk):
                 "Opens a satellite map in your browser: trace the runway, the EOR and "
                 "any area of your own, say what each one fires, press Save. Saved areas "
                 "appear here and in Fires when on Plan Flight within a few seconds. "
-                "Open-Zone-Editor.cmd next to this app does the same thing on its own."
+                "Open-Zone-Editor.cmd next to this app does the same thing on its own. "
+                "Map is my jet… (or Open-Route-Tester.cmd) opens a map that Fly treats "
+                "as your aircraft when the Fly tab checkbox “Test: map is my jet” is on — "
+                "drag or Play there, talk on the Fly tab. Uncheck that box to use Opus "
+                "position again. Other CAOC traffic (tankers, etc.) stays live."
             ),
             bg=C_PANEL,
             fg=C_MUTED,
@@ -10778,6 +11067,8 @@ class MissionPlanner(tk.Tk):
             self.var_auto_full_flight.set(
                 bool(c.get("auto_clearance_require_full_flight", True))
             )
+        if hasattr(self, "var_ownship_from_map"):
+            self.var_ownship_from_map.set(bool(c.get("ownship_from_map")))
         for which, var in (
             ("next", "var_joy_next"),
             ("back", "var_joy_back"),
@@ -11148,6 +11439,8 @@ class MissionPlanner(tk.Tk):
             self.var_identity_match.set("choose a flight")
         else:
             self.var_identity_match.set("")
+        if atc_phrase.ownship_from_map_enabled(self.config_data):
+            self.var_identity_match.set("map tester is the flight")
 
     def _opus_flight_summary_bits(self, row: dict[str, Any]) -> list[str]:
         """Callsign · filed route · seat — crew/date stay on the picker."""
@@ -11164,6 +11457,23 @@ class MissionPlanner(tk.Tk):
 
     def _update_opus_flight_label(self, row: dict[str, Any] | None = None) -> None:
         """Refresh the header flight chip from config and optional picker row."""
+        if atc_phrase.ownship_from_map_enabled(self.config_data):
+            inj = atc_phrase.read_ownship_inject(config=self.config_data)
+            if inj:
+                bits = ["MAP"]
+                cs = str(inj.get("callsign") or "").strip()
+                if cs:
+                    bits.append(cs)
+                route = str(inj.get("fp_route_string") or "").strip()
+                if route:
+                    bits.append(route)
+                alt = str(inj.get("fp_altitude") or "").strip()
+                if alt:
+                    bits.append(alt)
+                self.var_opus_flight.set(" · ".join(bits))
+                return
+            self.var_opus_flight.set("MAP · wait for tester tick")
+            return
         fid = atc_phrase.configured_opus_flight_id(self.config_data)
         if fid is None:
             self.var_opus_flight.set("choose Opus flight…")
@@ -11227,10 +11537,12 @@ class MissionPlanner(tk.Tk):
         hdr.pack(fill=tk.X, padx=12, pady=(12, 6))
         tk.Label(
             hdr,
-            text="Flights from Opus — select a flight, then pick a seat / pilot from the crew list",
+            text="Flights from Opus — list loads fast; route and crew load when you click a row. With “map is my jet” on, Fly uses the tester route instead.",
             bg=C_PANEL,
             fg=C_TEXT,
-            font=("Segoe UI Semibold", 11),
+            font=("Segoe UI Semibold", 10),
+            wraplength=720,
+            justify="left",
         ).pack(side=tk.LEFT, padx=10, pady=8)
         status = tk.StringVar(value="Loading…")
         tk.Label(hdr, textvariable=status, bg=C_PANEL, fg=C_MUTED, font=("Segoe UI", 9)).pack(
@@ -11346,7 +11658,48 @@ class MissionPlanner(tk.Tk):
             sel = tree.selection()
             if not sel:
                 return
-            fill_crew(rows_by_iid.get(sel[0]))
+            row = rows_by_iid.get(sel[0])
+            fill_crew(row)
+            if not row or row.get("_detailed"):
+                return
+            fid = int(row.get("id") or 0)
+            if not fid:
+                return
+            status.set("Loading route / crew…")
+
+            def work() -> None:
+                try:
+                    detail = atc_phrase.fetch_opus_flight_detail(self.config_data, fid)
+                except Exception as exc:  # noqa: BLE001
+                    err = str(exc)
+                    self._ui_call(lambda e=err: status.set(f"Detail failed: {e}"))
+                    return
+
+                def apply() -> None:
+                    if not dlg.winfo_exists():
+                        return
+                    rows_by_iid[str(fid)] = detail
+                    self._opus_flight_rows = [
+                        detail if int(r.get("id") or 0) == fid else r
+                        for r in (self._opus_flight_rows or [])
+                    ]
+                    fp = str(
+                        detail.get("fp_route_string")
+                        or ("(no FP)" if not detail.get("has_filed_plan") else "")
+                    )
+                    if tree.exists(str(fid)):
+                        vals = list(tree.item(str(fid), "values") or ())
+                        if len(vals) >= 7:
+                            vals[6] = fp
+                            tree.item(str(fid), values=tuple(vals))
+                    still = tree.selection()
+                    if still and still[0] == str(fid):
+                        fill_crew(detail)
+                    status.set(f"{len(rows_by_iid)} flight(s)")
+
+                self._ui_call(apply)
+
+            threading.Thread(target=work, daemon=True).start()
 
         tree.bind("<<TreeviewSelect>>", on_select)
 
@@ -11394,13 +11747,14 @@ class MissionPlanner(tk.Tk):
                 tree.selection_set(first)
                 tree.focus(first)
                 fill_crew(rows_by_iid.get(first))
+            on_select()
 
         def load() -> None:
             status.set("Loading…")
 
             def work() -> None:
                 try:
-                    rows = atc_phrase.list_opus_flights(self.config_data, include_detail=True)
+                    rows = atc_phrase.list_opus_flights(self.config_data, include_detail=False)
                     self._ui_call(lambda: apply_rows(rows))
                 except Exception as exc:  # noqa: BLE001
                     err = str(exc)
@@ -11419,6 +11773,15 @@ class MissionPlanner(tk.Tk):
             row = rows_by_iid.get(sel[0])
             if not row:
                 return
+            if not row.get("_detailed"):
+                try:
+                    row = atc_phrase.fetch_opus_flight_detail(
+                        self.config_data, int(row["id"])
+                    )
+                    rows_by_iid[sel[0]] = row
+                except Exception as exc:  # noqa: BLE001
+                    messagebox.showerror("Opus flights", str(exc), parent=dlg)
+                    return
             crew_sel = crew_list.curselection()
             seat_n = 1
             if crew_sel and crew_slots_by_index:
@@ -11432,6 +11795,14 @@ class MissionPlanner(tk.Tk):
             self.config_data["opus_flight_label"] = " · ".join(
                 self._opus_flight_summary_bits(row)
             )
+            if atc_phrase.ownship_from_map_enabled(self.config_data):
+                self.config_data["ownship_from_map"] = False
+                if hasattr(self, "var_ownship_from_map"):
+                    self.var_ownship_from_map.set(False)
+                try:
+                    save_json(CONFIG_PATH, self.config_data)
+                except OSError:
+                    pass
             self._update_opus_flight_label(row)
             dlg.destroy()
             self._persist_identity(refresh_opus=True)

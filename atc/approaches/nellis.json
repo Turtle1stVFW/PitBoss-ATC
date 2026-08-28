@@ -43,10 +43,54 @@
       "day_vmc_only": true,
       "default_pattern": "visual_overhead",
       "descend_ft": 10000,
-      "priority_note": "§4.13.5.1 Western ranges — Day/VMC; procedure speed 300 KIAS (not ATC-restricted unless traffic)",
+      "priority_note": "§4.13.5.1 Western ranges — Day/VMC; procedure speed 300 KIAS (not ATC-restricted unless traffic). Blackjack clears direct the entry (Stryk / Nixon / Sarah). Approach still names Stryk recovery.",
       "lat": 36.427056,
       "lon": -115.511736,
-      "radial_ref": "LSV 283°/26 NM"
+      "radial_ref": "LSV 283°/26 NM",
+      "entries": [
+        {
+          "id": "SARAH",
+          "aliases": [
+            "SARAH",
+            "SARA"
+          ],
+          "say": "Sarah",
+          "entry": true,
+          "direct_fix": "SARAH",
+          "direct_say": "Sarah",
+          "lat": 36.6075,
+          "lon": -115.30055,
+          "radial_ref": "LSV 317°/24 NM"
+        },
+        {
+          "id": "NIXON",
+          "aliases": [
+            "NIXON"
+          ],
+          "say": "Nixon",
+          "entry": true,
+          "direct_fix": "NIXON",
+          "direct_say": "Nixon",
+          "lat": 36.533617,
+          "lon": -115.5375,
+          "radial_ref": "LSV 293°/30 NM"
+        },
+        {
+          "id": "GASS",
+          "aliases": [
+            "GASS",
+            "GASSPEAK",
+            "GASPEAK"
+          ],
+          "say": "Gass Peak",
+          "entry": false,
+          "direct_fix": "GASS",
+          "direct_say": "Gass Peak",
+          "lat": 36.402217,
+          "lon": -115.177783,
+          "radial_ref": "LSV 310°/12 NM"
+        }
+      ]
     },
     {
       "id": "TORYE",

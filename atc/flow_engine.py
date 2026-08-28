@@ -192,6 +192,8 @@ class FlowEngine:
             "active_takeoff_mode": None,
             "pending_takeoff_offer": None,
             "takeoff_offer_rolled": False,
+            "contact_phase": "field",
+            "last_agency": "delivery",
         }
 
     def _load_state(self) -> dict[str, Any]:
@@ -553,6 +555,8 @@ class FlowEngine:
             file_path = step.get("file")
             if not file_path:
                 raise RuntimeError(f"Step {step.get('id')} is mode=file but no file set")
+            # Stamp before emit so Watch cannot TX the same step during Play.
+            self.state["last_step_id"] = step.get("id")
             code = self.emit_radio(
                 file_path=str(file_path),
                 tx_name=tx_name,
@@ -581,6 +585,8 @@ class FlowEngine:
                 state=self.state,
                 config=self.config,
             )
+            # Stamp before emit so Watch cannot TX the same step during Play.
+            self.state["last_step_id"] = step.get("id")
             # Prefer per-step freq/mod (e.g. unique "other" freqs) over airport defaults
             code = self.emit_radio(
                 text=text,
@@ -630,8 +636,12 @@ class FlowEngine:
         template = atc_phrase.readback_template_for_step(
             step, mission=self.mission, state=self.state
         )
-        climb_ft = atc_phrase.resolve_shared_climb_ft(
-            step=step, mission=self.mission, state=self.state
+        climb_ft = atc_phrase.climb_ft_for_readback(
+            template,
+            opus=opus,
+            mission=self.mission,
+            state=self.state,
+            step=step,
         )
         items = atc_phrase.build_readback_checklist(
             template,
@@ -646,6 +656,16 @@ class FlowEngine:
         self.state["last_tx_template"] = template
         self.state["last_tx_channel"] = str(detail.get("channel") or "")
         self.state["last_tx_at"] = time.time()
+        try:
+            import agencies as agencies_mod
+
+            agencies_mod.note_tx(
+                self.state,
+                str(detail.get("channel") or ""),
+                template,
+            )
+        except Exception:
+            pass
         detail["climb_ft"] = climb_ft
         detail["readback_items"] = items
 
@@ -726,8 +746,12 @@ class FlowEngine:
             state=self.state,
             template=template,
         )
-        climb_ft = atc_phrase.resolve_shared_climb_ft(
-            step=prev, mission=self.mission, state=self.state
+        climb_ft = atc_phrase.climb_ft_for_readback(
+            template,
+            opus=opus,
+            mission=self.mission,
+            state=self.state,
+            step=prev,
         )
         items = atc_phrase.build_readback_checklist(
             template,
@@ -1379,6 +1403,13 @@ class FlowEngine:
             )
         self.state["index"] = 0
         self.state["last_step_id"] = None
+        try:
+            import agencies as agencies_mod
+
+            agencies_mod.reset_contact(self.state)
+        except Exception:
+            self.state["contact_phase"] = "field"
+            self.state["last_agency"] = "delivery"
         self._clear_readback_state()
         try:
             import tanker as tanker_mod
@@ -1416,6 +1447,13 @@ class FlowEngine:
         )
         self.state["index"] = 0
         self.state["last_step_id"] = None
+        try:
+            import agencies as agencies_mod
+
+            agencies_mod.reset_contact(self.state)
+        except Exception:
+            self.state["contact_phase"] = "field"
+            self.state["last_agency"] = "delivery"
         self._clear_readback_state()
         try:
             import tanker as tanker_mod

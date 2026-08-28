@@ -1277,6 +1277,8 @@ def llm_json(
     provider, key = resolved
     try:
         if provider == "ollama":
+            if not resolve_ollama_model(config):
+                return None
             text = _ollama_chat(
                 config,
                 [
@@ -1773,7 +1775,7 @@ def list_ollama_models(config: dict[str, Any] | None = None) -> list[str]:
         return []
     base = _ollama_base_url(cfg)
     try:
-        with urllib.request.urlopen(f"{base}/api/tags", timeout=3.0) as resp:
+        with urllib.request.urlopen(f"{base}/api/tags", timeout=0.8) as resp:
             raw = resp.read().decode("utf-8", errors="replace")
         data = json.loads(raw) if raw else {}
     except Exception:
@@ -1919,6 +1921,9 @@ def try_llm_thread(
     history = format_history_for_llm(state)
     ban_coffee = coffee_on_cooldown(state)
     if provider == "ollama":
+        if not resolve_ollama_model(config):
+            _set_llm_error("Ollama unavailable — using library", state)
+            return None
         _set_llm_error("Ollama · generating…", state)
     try:
         if provider == "gemini":
@@ -1971,8 +1976,8 @@ def llm_live_enabled(config: dict[str, Any] | None) -> bool:
     if not isinstance(config, dict):
         return False
     if _llm_mode(config) in {"ollama", "local"}:
-        # Don't advertise freeform if nothing is pulled — avoids silent no-ops.
-        return bool(list_ollama_models(config))
+        # Don't advertise freeform if the daemon is down or nothing is pulled.
+        return resolve_ollama_model(config) is not None
     return True
 
 
@@ -2127,6 +2132,9 @@ def try_llm_react(
         boom_line, pilot, history=history, ban_coffee=ban_coffee
     )
     if provider == "ollama":
+        if not resolve_ollama_model(config):
+            _set_llm_error("Ollama unavailable — using library", state)
+            return None
         _set_llm_error("Ollama · generating…", state)
 
     def _call(active_prompt: str, *, ban: bool) -> str | None:
@@ -2544,19 +2552,16 @@ def answer_chat(
         )
         follow = choice.get("follow") if isinstance(choice.get("follow"), dict) else None
     if not reply and freeform:
-        # Prefer a soft on-topic hedge over a random coffee canned line.
-        if chatty:
-            soft = "Ha — fair question. Hang on, boom's thinking."
-        else:
-            reacted = match_react(transcript or "roger", current_reacts(state))
-            soft = str(
-                reacted.get("reply") or random.choice(_DEFAULT_REACT_REPLIES)
-            )
-            follow = (
-                reacted.get("follow")
-                if isinstance(reacted.get("follow"), dict)
-                else None
-            )
+        # LLM miss / Ollama down → canned boom chat, never a "hold on" stall.
+        reacted = match_react(transcript or "roger", current_reacts(state))
+        soft = str(
+            reacted.get("reply") or random.choice(_DEFAULT_REACT_REPLIES)
+        )
+        follow = (
+            reacted.get("follow")
+            if isinstance(reacted.get("follow"), dict)
+            else None
+        )
         reply = naturalize_reply(_fill(soft, cs, tcs), force=True)
     if not reply and choice is not None:
         reply = naturalize_reply(

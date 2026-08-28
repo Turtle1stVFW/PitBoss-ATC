@@ -547,6 +547,35 @@ def execute_intent(
         )
     callsign = opus.radio_callsign
 
+    try:
+        import agencies as agencies_mod
+
+        addressed = str((match.slots or {}).get("channel") or "").strip().lower()
+        current_field = agencies_mod.field_agency(engine)
+        if (
+            addressed
+            and agencies_mod.too_early_field(current_field, addressed)
+            and intent
+            not in (
+                "acknowledge_readback",
+                "say_again",
+                "request_winds",
+                "request_altimeter",
+            )
+        ):
+            text = agencies_mod.build_field_redirect(
+                airport, callsign, addressed, current_field
+            )
+            for ch in (addressed, current_field):
+                result = _transmit(engine, airport, text, ch)
+                if result.get("action") != "blocked":
+                    result["field_redirect"] = True
+                    result["stay_with"] = current_field
+                    return result
+            return result
+    except Exception:
+        pass
+
     if intent in (
         "request_winds",
         "request_altimeter",
@@ -558,6 +587,23 @@ def execute_intent(
 
     if intent == "request_bandsaw":
         text = atc_phrase.build_contact_bandsaw(airport, callsign)
+        return _transmit(engine, airport, text, "blackjack")
+
+    if intent == "request_joshua":
+        text = atc_phrase.build_contact_joshua(airport, callsign)
+        return _transmit(engine, airport, text, "blackjack")
+
+    if intent == "request_control":
+        ctrl = atc_phrase.control_channel_for_ownship(
+            airport,
+            config=getattr(engine, "config", None),
+            callsign=callsign,
+            opus=opus,
+            state=getattr(engine, "state", None),
+        )
+        text = atc_phrase.build_contact_control(
+            airport, callsign, handoff_channel=ctrl
+        )
         return _transmit(engine, airport, text, "blackjack")
 
     if intent in (
@@ -656,7 +702,7 @@ def execute_intent(
     if intent == "request_alpha_check":
         fix = atc_phrase.resolve_alpha_bullseye(config, callsign=callsign, opus=opus)
         channel = _resolve_tx_channel(engine, airport, match)
-        if channel not in ("blackjack", "bandsaw", "ops", "other"):
+        if channel not in ("blackjack", "bandsaw", "joshua", "ops", "other"):
             channel = "blackjack"
         text = atc_phrase.build_standalone_alpha_check(
             callsign, (fix or {}).get("spoken"), agency=channel
@@ -800,14 +846,82 @@ def execute_intent(
         if intent == "bandsaw_check_out" or match.template == "bandsaw_check_out":
             played = _play_step(engine, match)
             if played.get("action") != "none":
+                _advance_past_bandsaw(engine)
                 return played
             # No bandsaw_check_out step in this mission — reply and skip ahead
-            # past any remaining Bandsaw cursor (check-in holds until checkout).
+            # past any remaining Bandsaw / Joshua cursor.
             text = atc_phrase.build_bandsaw_check_out(airport, callsign)
             result = _transmit(engine, airport, text, "bandsaw")
             if result.get("action") == "transmit":
                 _advance_past_bandsaw(engine)
             return result
+        if intent == "joshua_check_in" or match.template == "joshua_check_in":
+            import tanker as tanker_mod
+            import tanker_chat as tanker_chat_mod
+
+            cur = engine.current_step() or {}
+            if voice_intent.step_is_authored(cur):
+                return _play_step(engine, match)
+            if hasattr(engine, "_seek_template"):
+                engine._seek_template("joshua_check_in")
+            if tanker_mod.tanker_needs_c2_checkin(
+                engine.state
+            ) or tanker_mod.tanker_overlay_active(engine.state):
+                tanker_mod.leave_tanker_overlay(
+                    engine, "joshua", checkin=True
+                )
+                tanker_chat_mod.end_chat(engine.state)
+                if hasattr(engine, "save_state"):
+                    engine.save_state()
+            text = atc_phrase.build_joshua_check_in(callsign)
+            return _transmit(engine, airport, text, "joshua")
+        if intent == "joshua_check_out" or match.template == "joshua_check_out":
+            played = _play_step(engine, match)
+            if played.get("action") != "none":
+                _advance_past_bandsaw(engine)
+                return played
+            text = atc_phrase.build_joshua_check_out(airport, callsign)
+            result = _transmit(engine, airport, text, "joshua")
+            if result.get("action") == "transmit":
+                _advance_past_bandsaw(engine)
+            return result
+        if intent == "control_check_in" or match.template == "control_check_in":
+            cur = engine.current_step() or {}
+            if voice_intent.step_is_authored(cur):
+                return _play_step(engine, match)
+            if hasattr(engine, "_seek_template"):
+                engine._seek_template("control_check_in")
+            ch = _resolve_tx_channel(engine, airport, match) or "control_east"
+            if ch not in ("control_east", "control_west"):
+                ch = "control_east"
+            text = atc_phrase.build_control_check_in(callsign, channel=ch)
+            return _transmit(engine, airport, text, ch)
+        if intent == "control_handoff" or match.template == "control_handoff":
+            played = _play_step(engine, match)
+            if played.get("action") != "none":
+                return played
+            ch = _resolve_tx_channel(engine, airport, match) or "control_east"
+            if ch not in ("control_east", "control_west"):
+                ch = "control_east"
+            text = atc_phrase.build_control_handoff(
+                airport, callsign, from_channel=ch
+            )
+            return _transmit(engine, airport, text, ch)
+        if intent == "center_check_in" or match.template in (
+            "center_check_in",
+            "center_radar",
+        ):
+            cur = engine.current_step() or {}
+            if voice_intent.step_is_authored(cur):
+                return _play_step(engine, match)
+            if hasattr(engine, "_seek_template"):
+                if not engine._seek_template("center_check_in"):
+                    engine._seek_template("center_radar")
+            text = atc_phrase.build_center_check_in(callsign)
+            ch = _resolve_tx_channel(engine, airport, match) or "center"
+            if ch not in ("center", "other"):
+                ch = "center"
+            return _transmit(engine, airport, text, ch)
         # Back on Blackjack after Bandsaw, the tanker, or still on the range:
         # check-in is "continue", not a second range-entry / Approach handoff.
         if intent == "range_entry" or match.template == "bj_check_in":
@@ -838,7 +952,13 @@ def execute_intent(
                         "detail": detail,
                         "blackjack_continue": True,
                     }
-        # Range complete: ARCOE anytime; Approach only inside ~40 NM.
+            played = _play_step(engine, match)
+            if played.get("action") != "none":
+                return played
+            if hasattr(engine, "_seek_template"):
+                engine._seek_template("bj_check_in")
+            text = atc_phrase.build_blackjack_continue(callsign)
+            return _transmit(engine, airport, text, "blackjack")
         if intent == "range_exit" or match.template == "bj_range_exit":
             ready, waiting = (False, "")
             if hasattr(engine, "range_exit_ready"):
@@ -868,7 +988,11 @@ def execute_intent(
                         "range_exit_released": True,
                         "range_exit_waiting": waiting,
                     }
-            return _play_step(engine, match)
+            played = _play_step(engine, match)
+            if played.get("action") != "none":
+                return played
+            text = atc_phrase.build_blackjack_range_exit(airport, callsign)
+            return _transmit(engine, airport, text, "blackjack")
         # Approach check-in: METAR / route auto-assign recovery / IAF; hold cursor.
         if intent == "inbound_recovery" or match.template == "approach_check_in":
             return _approach_check_in(
@@ -1253,7 +1377,7 @@ def _speak_reply(
     elif intent == "request_altimeter":
         text = voice_actions.build_altimeter_reply(airport, callsign, weather)
     else:
-        if channel not in ("blackjack", "bandsaw", "ops", "other"):
+        if channel not in ("blackjack", "bandsaw", "joshua", "ops", "other"):
             channel = "blackjack"
         agency = atc_phrase.speak_agency_name(channel)
         cs = atc_phrase.speak_callsign(callsign)
@@ -1381,6 +1505,12 @@ def _transmit(
         # Boom / ad-hoc TX is not a clearance hinge — don't invent a template.
         if not st.get("awaiting_readback"):
             st["last_tx_template"] = ""
+        try:
+            import agencies as agencies_mod
+
+            agencies_mod.note_tx(st, channel, str(st.get("last_tx_template") or ""))
+        except Exception:
+            pass
     return {
         "action": "transmit",
         "text": text,
@@ -1423,7 +1553,14 @@ def execute_tanker_action(
             tuned = srs_radio.channel_for_tuned_freq(ap, engine.config)
             if tuned:
                 channel = tuned
-        if channel not in ("blackjack", "bandsaw", "ops"):
+        if channel not in (
+            "blackjack",
+            "bandsaw",
+            "joshua",
+            "ops",
+            "control_east",
+            "control_west",
+        ):
             return "blackjack"
         return channel
 
@@ -1747,15 +1884,17 @@ def resolve_tanker_chat(
 
 
 def _advance_past_bandsaw(engine: Any) -> None:
-    """Move the cursor past consecutive Bandsaw steps (check-in / check-out)."""
+    """Move the cursor past consecutive optional C2 steps (Bandsaw / Joshua)."""
     steps = list(engine.steps or [])
     idx = int(engine.state.get("index") or 0)
+    skip_ch = frozenset({"bandsaw", "joshua"})
     while idx < len(steps):
         step = steps[idx]
         ch = str(step.get("channel") or "").lower()
         tmpl = str(step.get("template") or "")
-        if ch == "bandsaw" or (
-            tmpl.startswith("bandsaw_") and not voice_intent.step_is_authored(step)
+        if ch in skip_ch or (
+            (tmpl.startswith("bandsaw_") or tmpl.startswith("joshua_"))
+            and not voice_intent.step_is_authored(step)
         ):
             idx += 1
             continue

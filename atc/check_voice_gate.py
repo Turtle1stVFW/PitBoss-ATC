@@ -59,6 +59,25 @@ CASES = [
     ("Bandsaw, Fleece 1, bogey dope", "bandsaw", "flight", True, "request_bogey_dope"),
     ("Bandsaw, Fleece 1, declare", "bandsaw", "flight", True, "request_declare"),
     ("Blackjack, Fleece 1, request Bandsaw", "blackjack", "flight", True, "request_bandsaw"),
+    ("Blackjack, Fleece 1, request Joshua", "blackjack", "flight", True, "request_joshua"),
+    ("Joshua, Fleece 1, checking in", "joshua", "flight", True, "joshua_check_in"),
+    ("Joshua Control, Fleece 1, with you", "joshua", "flight", True, "joshua_check_in"),
+    ("Joshua, Fleece 1, checking out", "joshua", "flight", True, "joshua_check_out"),
+    ("Joshua, Fleece 1, switch Blackjack", "joshua", "flight", True, "joshua_check_out"),
+    ("Joshua, Fleece 1, request picture", "joshua", "flight", False, None),
+    ("Joshua, Fleece 1, request tanker", "joshua", "flight", True, "request_tanker"),
+    # Agency sandbox: address + flight phase, even when the cursor is still Blackjack.
+    ("Joshua, Fleece 1, checking in", "blackjack", "flight", True, "joshua_check_in"),
+    ("Nellis Control, Fleece 1, checking in", "control_east", "flight", True, "control_check_in"),
+    ("Nellis Control, Fleece 1, checking in", "blackjack", "flight", True, "control_check_in"),
+    ("Control East, Fleece 1, with you", "control_east", "flight", True, "control_check_in"),
+    ("Control West, Fleece 1, checking in", "control_west", "flight", True, "control_check_in"),
+    ("Sally, Fleece 1, checking in", "control_east", "flight", True, "control_check_in"),
+    ("Lee, Fleece 1, checking in", "control_west", "flight", True, "control_check_in"),
+    ("Sally, Fleece 1, with you", "blackjack", "flight", True, "control_check_in"),
+    ("Los Angeles Center, Fleece 1, checking in", "center", "flight", True, "center_check_in"),
+    ("LA Center, Fleece 1, with you", "center", "flight", True, "center_check_in"),
+    ("Nellis Control, Fleece 1, contact Approach", "control_east", "flight", True, "control_handoff"),
     ("Blackjack, Fleece 1, request tanker", "blackjack", "flight", True, "request_tanker"),
     ("Blackjack, Fleece 1, request vectors to the tanker", "blackjack", "flight", True, "request_tanker"),
     ("Bandsaw, Fleece 1, going to the tanker", "bandsaw", "flight", True, "request_tanker"),
@@ -227,8 +246,36 @@ def extras() -> int:
     elif "descend pilot discretion" not in bj_exit.lower():
         print(f"  FAIL Blackjack range exit should start the IAF descent: {bj_exit}")
         bad += 1
+    elif "nellis control" not in bj_exit.lower():
+        print(f"  FAIL Blackjack range exit should hand to Nellis Control: {bj_exit}")
+        bad += 1
+    elif "contact approach" in bj_exit.lower():
+        print(f"  FAIL Blackjack range exit should not skip Control: {bj_exit}")
+        bad += 1
     else:
         print(f"blackjack range exit — {bj_exit}")
+    import time as _time
+
+    old_miss = atc_phrase._ownship_miss_until
+    atc_phrase._ownship_miss_until = _time.time() + 120
+    try:
+        west_txt = atc_phrase.build_template_text(
+            nellis,
+            "bj_range_exit",
+            "Fleece 1",
+            vmc,
+            str(plan_vmc.get("runway") or "21R"),
+            channel="blackjack",
+            config={"_": 1},
+            state={"ownship_ll": [37.5, -116.5]},
+        )
+    finally:
+        atc_phrase._ownship_miss_until = old_miss
+    if "nellis control" not in west_txt.lower() or "eight" not in west_txt.lower():
+        print(f"  FAIL western range exit should hand to Control West (Local 8): {west_txt}")
+        bad += 1
+    else:
+        print(f"blackjack range exit (west) — {west_txt}")
     bj_hold = atc_phrase.build_blackjack_range_exit(
         nellis, "Fleece 1", plan=plan_vmc, include_handoff=False
     )
@@ -595,6 +642,107 @@ def extras() -> int:
             )
             bad += 1
     print("approach VFR position pick — STRYK west, TORYE northeast, ARCOE north, MINTT on 03")
+
+    # STRYK recovery: Blackjack clears direct the entry (Stryk / Nixon / Sarah).
+    p_west_stryk = atc_phrase.assign_approach_plan(
+        nellis, vmc, state={}, force=True, position=(36.45, -116.00)
+    )
+    if (
+        p_west_stryk.get("vfr_recovery") != "STRYK"
+        or str(p_west_stryk.get("direct_fix") or "") != "STRYK"
+    ):
+        print(f"  FAIL western ranges should still proceed direct Stryk: {p_west_stryk}")
+        bad += 1
+    p_sarah = atc_phrase.assign_approach_plan(
+        nellis, vmc, state={}, force=True, position=(36.6075, -115.30055)
+    )
+    p_nixon = atc_phrase.assign_approach_plan(
+        nellis, vmc, state={}, force=True, position=(36.533617, -115.5375)
+    )
+    p_sarah_rt = atc_phrase.assign_approach_plan(
+        nellis,
+        vmc,
+        state={},
+        force=True,
+        opus=type("O", (), {"fp_route_string": "KLSV DREAM SARAH KLSV", "fp_altitude": None})(),
+    )
+    p_nixon_rt = atc_phrase.assign_approach_plan(
+        nellis,
+        vmc,
+        state={},
+        force=True,
+        opus=type("O", (), {"fp_route_string": "KLSV JUNNO NIXON KLSV", "fp_altitude": None})(),
+    )
+    entries_ok = True
+    for label, plan, want_fix in (
+        ("SARAH position", p_sarah, "SARAH"),
+        ("SARAH route", p_sarah_rt, "SARAH"),
+        ("NIXON position", p_nixon, "NIXON"),
+        ("NIXON route", p_nixon_rt, "NIXON"),
+    ):
+        if plan.get("vfr_recovery") != "STRYK":
+            print(f"  FAIL {label} should stay STRYK recovery: {plan}")
+            bad += 1
+            entries_ok = False
+        elif str(plan.get("direct_fix") or "") != want_fix:
+            print(f"  FAIL {label} should proceed direct {want_fix}: {plan}")
+            bad += 1
+            entries_ok = False
+    if entries_ok:
+        bj_sarah = atc_phrase.build_blackjack_range_exit(
+            nellis, "Fleece 1", plan=p_sarah
+        )
+        bj_nixon = atc_phrase.build_blackjack_range_exit(
+            nellis, "Fleece 1", plan=p_nixon
+        )
+        app_sarah = atc_phrase.build_approach_recovery(
+            nellis, "Fleece 1", vmc, str(p_sarah.get("runway") or "21R"), plan=p_sarah
+        )
+        if "direct sarah" not in bj_sarah.lower() or "gass peak" in bj_sarah.lower():
+            print(f"  FAIL Blackjack SARAH exit should be direct Sarah: {bj_sarah}")
+            bad += 1
+        elif "direct nixon" not in bj_nixon.lower() or "gass peak" in bj_nixon.lower():
+            print(f"  FAIL Blackjack NIXON exit should be direct Nixon: {bj_nixon}")
+            bad += 1
+        elif "stryk" not in app_sarah.lower() or "gass peak" in app_sarah.lower():
+            print(f"  FAIL Approach should still expect Stryk recovery: {app_sarah}")
+            bad += 1
+        else:
+            print("approach STRYK — Blackjack direct Sarah / Nixon, recovery Stryk")
+    # Sticky western STRYK plan, then ownship at SARAH, must refresh the direct-to.
+    st_sticky = {
+        "approach_assigned": True,
+        "approach_plan": dict(p_west_stryk),
+        "active_vfr_recovery": "STRYK",
+        "ownship_ll": [36.6075, -115.30055],
+        "ownship_ll_t": __import__("time").time(),
+    }
+    p_sticky = atc_phrase.assign_approach_plan(nellis, vmc, state=st_sticky, force=False)
+    if str(p_sticky.get("direct_fix") or "") != "SARAH" or p_sticky.get("vfr_recovery") != "STRYK":
+        print(f"  FAIL sticky STRYK at SARAH must refresh direct Sarah: {p_sticky}")
+        bad += 1
+    else:
+        print("approach sticky STRYK at SARAH — direct Sarah")
+    p_ask_sarah = atc_phrase.assign_approach_plan(
+        nellis, vmc, state={}, force=True, vfr_recovery="SARAH"
+    )
+    p_ask_nixon = atc_phrase.assign_approach_plan(
+        nellis, vmc, state={}, force=True, vfr_recovery="NIXON"
+    )
+    if (
+        p_ask_sarah.get("vfr_recovery") != "STRYK"
+        or str(p_ask_sarah.get("direct_fix") or "") != "SARAH"
+    ):
+        print(f"  FAIL request Sarah should be STRYK / Sarah: {p_ask_sarah}")
+        bad += 1
+    elif (
+        p_ask_nixon.get("vfr_recovery") != "STRYK"
+        or str(p_ask_nixon.get("direct_fix") or "") != "NIXON"
+    ):
+        print(f"  FAIL request Nixon should be STRYK / Nixon: {p_ask_nixon}")
+        bad += 1
+    else:
+        print("approach request Sarah / Nixon — STRYK recovery, direct the entry")
 
     # Filed route still outranks position.
     p_conflict = atc_phrase.assign_approach_plan(
@@ -3328,25 +3476,46 @@ def extras() -> int:
         else:
             print("tanker chat memory — history + coffee cooldown skips coffee bits")
 
-        # No models → clear note, library fallback (do not pretend Ollama fired).
+        # No models / daemon down → library chat, no "pull llama" stall on Fly.
         st_empty = {tanker_chat_mod._GREETED_KEY: True}
         tanker_chat_mod._set_llm_error("", st_empty)
         tanker_chat_mod.list_ollama_models = lambda config=None: []  # type: ignore[assignment]
+        tanker_chat_mod._OLLAMA_MODELS_CACHE["t"] = 0.0
+        tanker_chat_mod._OLLAMA_MODELS_CACHE["names"] = []
         try:
-            tanker_chat_mod.start_chat(
+            opener = tanker_chat_mod.start_chat(
                 st_empty,
                 "Fleece 1",
                 {"callsign": "TEXACO 1"},
                 config={"tanker_chat_llm": "ollama"},
             )
             note = tanker_chat_mod.llm_note(st_empty)
+            reply = tanker_chat_mod.answer_chat(
+                st_empty,
+                "Fleece 1",
+                {"callsign": "TEXACO 1"},
+                transcript="What do you guys actually eat for lunch?",
+                config={"tanker_chat_llm": "ollama"},
+            )
         finally:
             tanker_chat_mod.list_ollama_models = real_models  # type: ignore[assignment]
-        if "pull llama" not in note.lower() and "no ollama" not in note.lower():
-            print(f"  FAIL ollama empty models should note pull: {note!r}")
+        blob = f"{opener} {reply} {note}".lower()
+        if (
+            not opener
+            or not reply
+            or "boom's thinking" in blob
+            or "hang on, boom" in blob
+            or "no ollama models installed" in blob
+            or "pull llama" in blob
+            or "generat" in note.lower()
+        ):
+            print(
+                f"  FAIL ollama empty should use library: opener={opener!r} "
+                f"reply={reply!r} note={note!r}"
+            )
             bad += 1
         else:
-            print(f"tanker chat Ollama empty — {note}")
+            print(f"tanker chat Ollama empty — library fallback ({note or 'quiet'})")
 
         captured: dict = {}
 
@@ -3681,6 +3850,53 @@ def extras() -> int:
             bad += 1
         else:
             print("climb to cruise — auto beyond 10 NM (filed, not the 15k interim)")
+
+        radar_hi = atc_phrase.build_template_text(
+            nellis,
+            "radar_contact",
+            "Fleece 1",
+            atc_phrase.Weather(210, 5, 29.92, ""),
+            "21R",
+            opus=opus_hi,
+            initial_climb_ft=15000,
+            state={"initial_climb_ft": 15000},
+        )
+        no_fp_radar_opus = atc_phrase.synthetic_flight_context("Fleece 1")
+        radar_lo = atc_phrase.build_template_text(
+            nellis,
+            "radar_contact",
+            "Fleece 1",
+            atc_phrase.Weather(210, 5, 29.92, ""),
+            "21R",
+            opus=no_fp_radar_opus,
+            initial_climb_ft=15000,
+            state={"initial_climb_ft": 15000},
+        )
+        skip_after_radar = atc_phrase.should_skip_cruise_climb_step(
+            {"template": "climb_cruise"},
+            state={
+                "initial_climb_ft": 15000,
+                "filed_altitude_ft": 22000,
+                "departure_assigned_ft": 22000,
+            },
+            opus=opus_hi,
+        )
+        hi = radar_hi.lower()
+        lo = radar_lo.lower()
+        if (
+            "flight level two two zero" not in hi
+            or "fifteen" in hi
+            or "one five" in hi
+            or ("thousand" not in lo and "fifteen" not in lo)
+            or not skip_after_radar
+        ):
+            print(
+                f"  FAIL departure radar to filed FL: hi={radar_hi!r} lo={radar_lo!r} "
+                f"skip_after={skip_after_radar}"
+            )
+            bad += 1
+        else:
+            print("departure radar contact — climb to filed FL, not the Delivery interim")
 
         no_fp_opus = atc_phrase.synthetic_flight_context("Fleece 1")
         wx = atc_phrase.Weather(210, 5, 29.92, "")
@@ -4198,6 +4414,23 @@ def custom_agency_behavior() -> int:
         "template": "bandsaw_check_in",
         "mode": "tts",
     }
+    live_joshua = {
+        "id": "joshua_checkin",
+        "channel": "joshua",
+        "template": "joshua_check_in",
+        "mode": "tts",
+        "c2": False,
+    }
+    if not voice_intent.step_holds_after_play(live_joshua):
+        print("  FAIL live Joshua check-in must hold")
+        bad += 1
+    if voice_intent.step_offers_c2(live_joshua, channel="joshua"):
+        print("  FAIL Joshua must not offer C2 unless c2=true")
+        bad += 1
+    if voice_intent.extract_channel("joshua control fleece 1 checking in") != "joshua":
+        print("  FAIL Joshua Control must address joshua, not Center")
+        bad += 1
+
     if not voice_intent.step_holds_after_play(live_bs):
         print("  FAIL live Bandsaw check-in must still hold")
         bad += 1
@@ -4447,6 +4680,304 @@ def instruction_readback_echo() -> int:
     return bad
 
 
+def agency_sandbox() -> int:
+    """IFG core agencies answer from address + freq, not the Plan cursor."""
+    bad = 0
+    import agencies
+    import atc_phrase
+    import voice_engine
+
+    if voice_intent.extract_channel("nellis control fleece 1 checking in") != "control_east":
+        print("  FAIL Nellis Control must address control_east")
+        bad += 1
+    if voice_intent.extract_channel("sally fleece 1 checking in") != "control_east":
+        print("  FAIL Sally must address control_east")
+        bad += 1
+    if voice_intent.extract_channel("lee fleece 1 checking in") != "control_west":
+        print("  FAIL Lee must address control_west")
+        bad += 1
+    if voice_intent.extract_channel("control west fleece 1 checking in") != "control_west":
+        print("  FAIL Control West must address control_west, not East")
+        bad += 1
+    if voice_intent.extract_channel("la center fleece 1 checking in") != "center":
+        print("  FAIL LA Center must address center, not other")
+        bad += 1
+    if voice_intent.extract_channel("joshua control fleece 1 checking in") != "joshua":
+        print("  FAIL Joshua Control must still address joshua")
+        bad += 1
+
+    josh_off = voice_intent.evaluate(
+        "Joshua, Fleece 1, checking in",
+        channel="blackjack",
+        phase="flight",
+        expected="bj_check_in",
+        callsign=CALLSIGN,
+    )
+    if not josh_off.fired or josh_off.match.intent != "joshua_check_in":
+        print(f"  FAIL Joshua check-in while expected Blackjack: {josh_off.describe()}")
+        bad += 1
+
+    if agencies.resolve(tuned_channel="control_west", addressed="control_east") != "control_west":
+        print("  FAIL Control address remaps to the tuned East/West UHF")
+        bad += 1
+    if (
+        agencies.resolve(
+            tuned_channel="control_west",
+            addressed="control_east",
+            transcript="Sally Fleece 1 checking in",
+        )
+        != "control_east"
+    ):
+        print("  FAIL explicit Sally must not remap to tuned Lee")
+        bad += 1
+
+    nellis = atc_phrase.load_json(atc_phrase.AIRPORTS_PATH)["nellis"]
+    if agencies.control_for_ll(nellis, 37.0, -114.8) != "control_east":
+        print("  FAIL Desert MOA should be Control East")
+        bad += 1
+    if agencies.control_for_ll(nellis, 37.5, -116.5) != "control_west":
+        print("  FAIL R-4807A should be Control West")
+        bad += 1
+    if agencies.control_for_ll(nellis, 36.23, -115.03) != "control_east":
+        print("  FAIL field default should be Control East")
+        bad += 1
+    chk_e = atc_phrase.build_control_check_in("Fleece 1", channel="control_east")
+    if "nellis control" not in chk_e.lower():
+        print(f"  FAIL Control East check-in should speak Nellis Control: {chk_e}")
+        bad += 1
+    chk_w = atc_phrase.build_control_check_in("Fleece 1", channel="control_west")
+    if "nellis control" not in chk_w.lower():
+        print(f"  FAIL Control West check-in should speak Nellis Control: {chk_w}")
+        bad += 1
+    lee_exit = atc_phrase.build_blackjack_range_exit(
+        nellis, "Fleece 1", handoff_channel="control_west"
+    )
+    if "nellis control" not in lee_exit.lower() or "eight" not in lee_exit.lower():
+        print(f"  FAIL Blackjack → Control West (Local 8) wording: {lee_exit}")
+        bad += 1
+    if agencies.resolve(
+        tuned_channel="joshua",
+        cursor_channel="blackjack",
+        mission_phase="flight",
+    ) != "joshua":
+        print("  FAIL Fly tips follow Joshua when that UHF is tuned")
+        bad += 1
+    if agencies.resolve(
+        tuned_channel="tower",
+        cursor_channel="ground",
+        mission_phase="departure",
+    ) != "ground":
+        print("  FAIL field tips stay on the cursor, not a jumped Tower radio")
+        bad += 1
+
+    if not agencies.too_early_field("ground", "tower"):
+        print("  FAIL Tower while still with Ground is too early")
+        bad += 1
+    if agencies.too_early_field("tower", "ground"):
+        print("  FAIL calling Ground from Tower is not a skip-ahead")
+        bad += 1
+    redir = agencies.build_field_redirect(
+        {"name": "Nellis"}, "Fleece 1", "tower", "ground"
+    )
+    if "contact" not in redir.lower() or "ground" not in redir.lower():
+        print(f"  FAIL field redirect should send them to Ground: {redir}")
+        bad += 1
+    elif "tower" not in redir.lower():
+        print(f"  FAIL field redirect should speak as Tower: {redir}")
+        bad += 1
+    else:
+        print(f"field redirect — {redir}")
+
+    class _FieldEng:
+        def __init__(self) -> None:
+            self.config = {"dry_run": True, "freq_gate_enabled": False}
+            self.mission = {
+                "steps": [
+                    {
+                        "id": "gnd_taxi",
+                        "channel": "ground",
+                        "template": "taxi",
+                        "phase": "departure",
+                        "enabled": True,
+                    },
+                    {
+                        "id": "twr_lineup",
+                        "channel": "tower",
+                        "template": "lineup",
+                        "phase": "departure",
+                        "enabled": True,
+                    },
+                ]
+            }
+            self.steps = self.mission["steps"]
+            self.state = {
+                "index": 0,
+                "contact_phase": "field",
+                "last_agency": "ground",
+            }
+            self.played_id = None
+            self.airports = atc_phrase.load_json(atc_phrase.AIRPORTS_PATH)
+
+        def airport(self) -> dict:
+            return self.airports["nellis"]
+
+        def current_step(self) -> dict:
+            return self.steps[int(self.state.get("index") or 0)]
+
+        def save_state(self) -> None:
+            return None
+
+        def play_id(self, step_id: str, **_k: object) -> dict:
+            self.played_id = step_id
+            return {"text": "should not grant lineup", "channel": "tower"}
+
+    eng = _FieldEng()
+    match = voice_intent.evaluate(
+        "Nellis Tower, Fleece 1, ready for departure",
+        channel="tower",
+        phase="departure",
+        expected="taxi",
+        callsign=CALLSIGN,
+    )
+    if not match.fired or match.match.intent != "ready_departure":
+        print(f"  FAIL Tower-too-early call must still parse: {match.describe()}")
+        bad += 1
+    else:
+        orig_opus = atc_phrase.resolve_opus_and_metar
+        atc_phrase.resolve_opus_and_metar = lambda *_a, **_k: (
+            atc_phrase.synthetic_flight_context("FLEECE 1"),
+            atc_phrase.Weather(210, 8, 29.92, "KLSV 010000Z 21008KT 10SM FEW100 20/05 A2992"),
+        )
+        try:
+            played = voice_engine.execute_intent(match.match, eng)
+        finally:
+            atc_phrase.resolve_opus_and_metar = orig_opus
+        text = str(played.get("text") or "").lower()
+        if eng.played_id is not None:
+            print(f"  FAIL Tower-too-early must not play lineup: {eng.played_id}")
+            bad += 1
+        elif not played.get("field_redirect"):
+            print(f"  FAIL Tower-too-early should redirect, not clear: {played}")
+            bad += 1
+        elif "contact" not in text or "ground" not in text:
+            print(f"  FAIL Tower-too-early redirect wording: {played}")
+            bad += 1
+        else:
+            print(f"tower too early — {played.get('text')}")
+
+    if not voice_intent.step_holds_after_play(
+        {"id": "ce", "channel": "control_east", "template": "control_check_in", "mode": "tts"}
+    ):
+        print("  FAIL Control check-in must hold")
+        bad += 1
+
+    local = agencies.infer_flight(
+        route="KLSV MINTT DREAM ARCOE KLSV", dep_icao="KLSV", arr_icao="KLSV"
+    )
+    if not local.uses("blackjack") or not local.uses("control"):
+        print(f"  FAIL local NTTR hop needs Blackjack + Control: {local.areas}")
+        bad += 1
+    elif local.uses("joshua") or local.uses("center"):
+        print(f"  FAIL local NTTR hop should not add Joshua/Center: {local.areas}")
+        bad += 1
+    r2508 = agencies.infer_flight(
+        route="KLSV BTY DAG EDW", dep_icao="KLSV", arr_icao="KEDW"
+    )
+    if not r2508.uses("joshua") or not r2508.uses("control") or not r2508.uses("center"):
+        print(f"  FAIL R-2508 hop needs Control + Center + Joshua: {r2508.areas}")
+        bad += 1
+    elif r2508.uses("blackjack"):
+        print(f"  FAIL Nellis→Edwards should not invent Blackjack: {r2508.areas}")
+        bad += 1
+    enroute = agencies.infer_flight(
+        route="KLSV STRYK BTY BAM MLF DTA PUC HVE MTU FFU OGD KLSV",
+        dep_icao="KLSV",
+        arr_icao="KLSV",
+    )
+    if not enroute.uses("center") or not enroute.uses("control"):
+        print(f"  FAIL enroute hop needs Center + Control: {enroute.areas}")
+        bad += 1
+    ranges = agencies.infer_flight(
+        airspace_names=["CALA", "R63A"], airport={"icao": "KLSV"}
+    )
+    if not ranges.uses("blackjack") or not ranges.uses("control"):
+        print(f"  FAIL reserved Desert/R-61 airspace needs Blackjack + Control: {ranges.areas}")
+        bad += 1
+    owens = agencies.infer_flight(airspace_names=["OWENS"], airport={"icao": "KLSV"})
+    if not owens.uses("joshua"):
+        print(f"  FAIL Owens airspace needs Joshua: {owens.areas}")
+        bad += 1
+    if agencies.handoff_from_plan("departure", local) != "blackjack":
+        print("  FAIL local Departure should still hand to Blackjack")
+        bad += 1
+    dep_r2508 = agencies.handoff_from_plan("departure", r2508)
+    if dep_r2508 == "joshua":
+        print("  FAIL R-2508 Departure must not skip transit to Joshua")
+        bad += 1
+    elif dep_r2508 != "control_east":
+        print(f"  FAIL R-2508 Departure should hand to Nellis Control: {dep_r2508}")
+        bad += 1
+    if agencies.handoff_from_plan("blackjack", local) != "control_east":
+        print("  FAIL local Blackjack should hand to Nellis Control")
+        bad += 1
+    ctrl_gap = agencies.handoff_from_plan("control_east", r2508)
+    if ctrl_gap != "center":
+        print(f"  FAIL Control still in the NTTR should hand to Center, not Joshua: {ctrl_gap}")
+        bad += 1
+    edwards_ll = (36.0, -117.7)
+    if not agencies.approaching_joshua(nellis, edwards_ll[0], edwards_ll[1]):
+        print("  FAIL Edwards should count as approaching R-2508")
+        bad += 1
+    if agencies.approaching_joshua(nellis, 36.23, -115.03):
+        print("  FAIL Nellis field must not count as approaching R-2508")
+        bad += 1
+    josh_now = agencies.handoff_from_plan(
+        "center", r2508, airport=nellis, lat=edwards_ll[0], lon=edwards_ll[1]
+    )
+    if josh_now != "joshua":
+        print(f"  FAIL Center approaching R-2508 should hand to Joshua: {josh_now}")
+        bad += 1
+    home = agencies.infer_flight(
+        route="KEDW BTY ARCOE KLSV", dep_icao="KEDW", arr_icao="KLSV"
+    )
+    if agencies.handoff_from_plan("joshua", home) not in ("center", "control_east"):
+        print(f"  FAIL Joshua recovering to Nellis should hand to Center/Control: {agencies.handoff_from_plan('joshua', home)}")
+        bad += 1
+    sandbox_cfg = {"flow_file": "nellis_default.json"}
+    dep_2508 = atc_phrase.resolve_handoff_channel(
+        from_channel="departure",
+        default="blackjack",
+        config=sandbox_cfg,
+        opus=type(
+            "O",
+            (),
+            {
+                "fp_route_string": "KLSV BTY DAG EDW",
+                "dep_icao": "KLSV",
+                "arr_icao": "KEDW",
+                "flight_id": 0,
+            },
+        )(),
+        airport=nellis,
+    )
+    if dep_2508 == "joshua":
+        print(f"  FAIL sandbox Departure on an Edwards hop must not name Joshua: {dep_2508}")
+        bad += 1
+    elif dep_2508 != "control_east":
+        print(f"  FAIL sandbox Departure on an Edwards hop should name Control: {dep_2508}")
+        bad += 1
+    else:
+        print(f"flight-plan agencies — local {agencies.format_hop(local)}")
+        print(f"flight-plan agencies — R-2508 {agencies.format_hop(r2508)}")
+        print(f"flight-plan agencies — enroute {agencies.format_hop(enroute)}")
+
+    if bad:
+        print(f"agency sandbox — {bad} problem(s)")
+    else:
+        print("agency sandbox — Control / Joshua / Center / field redirect")
+    return bad
+
+
 def main() -> int:
     failures = 0
     for transcript, channel, mission_phase, should_fire, want in CASES:
@@ -4472,6 +5003,7 @@ def main() -> int:
     failures += expecting()
     failures += custom_agency_behavior()
     failures += instruction_readback_echo()
+    failures += agency_sandbox()
     return 1 if failures else 0
 
 

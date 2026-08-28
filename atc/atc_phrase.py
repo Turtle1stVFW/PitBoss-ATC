@@ -37,6 +37,9 @@ HERE = Path(__file__).resolve().parent
 AIRPORTS_PATH = HERE / "airports.json"
 STATE_PATH = HERE / "state.json"
 CONFIG_PATH = HERE / "config.json"
+OWNSHIP_INJECT_PATH = HERE / "ownship_inject.json"
+WEATHER_INJECT_PATH = HERE / "weather_inject.json"
+TRAFFIC_INJECT_PATH = HERE / "traffic_inject.json"
 TTS_USAGE_PATH = HERE / "tts_usage.json"
 SECRETS_DIR = HERE / "secrets"
 DEFAULT_GOOGLE_CREDS_FILE = SECRETS_DIR / "google-tts.json"
@@ -329,6 +332,24 @@ OPUS_FREQ_NAME_MAP: dict[str, tuple[str, ...]] = {
         "bansaw",
         "ban saw",
     ),
+    "joshua": (
+        "joshua",
+        "joshua control",
+        "josh",
+    ),
+    "control_east": (
+        "control east",
+        "nellis control",
+        "natcf",
+    ),
+    "control_west": (
+        "control west",
+    ),
+    "center": (
+        "la center",
+        "los angeles center",
+        "center",
+    ),
     "ops": ("squadron ops", "ops"),
 }
 
@@ -513,8 +534,8 @@ def list_opus_flights(
     """
     List flights from Opus backend (newest first).
 
-    Each row includes list fields; when include_detail=True also pulls FP route/alt
-    and signup names for the picker UI.
+    Each row includes list fields. include_detail=True also pulls FP route/alt
+    and crew for every flight (slow — prefer fetch_opus_flight_detail for one).
     """
     backend = (config.get("opus_backend_url") or "").rstrip("/")
     if not backend:
@@ -526,58 +547,134 @@ def list_opus_flights(
 
     rows: list[dict[str, Any]] = []
     for flight in sorted(flights, key=_opus_flight_sort_key, reverse=True):
-        fid = flight.get("id")
-        if fid is None:
+        row = _opus_list_row(flight)
+        if row is None:
             continue
-        row: dict[str, Any] = {
-            "id": int(fid),
-            "callsign": str(flight.get("callsign") or "").strip(),
-            "event_date": _str_or_none(flight.get("event_date")),
-            "vul_start": _str_or_none(flight.get("vul_start")),
-            "vul_end": _str_or_none(flight.get("vul_end")),
-            "aircraft": _str_or_none(flight.get("aircraft")),
-            "qty": flight.get("qty"),
-            "mission": _str_or_none(flight.get("mission")),
-            "mission_number": _str_or_none(flight.get("mission_number")),
-            "squadron_name": _str_or_none(flight.get("squadron_name")),
-            "theater_name": _str_or_none(flight.get("theater_name")),
-            "fp_route_string": None,
-            "fp_altitude": None,
-            "fp_filed_at": None,
-            "has_filed_plan": False,
-            "signups": [],
-            "signup_labels": [],
-        }
         if include_detail:
-            try:
-                detail = http_get_json(f"{backend}/opus/flights/{int(fid)}", ua)
-                if isinstance(detail, dict):
-                    row["fp_route_string"] = _str_or_none(detail.get("fp_route_string"))
-                    row["fp_altitude"] = _str_or_none(detail.get("fp_altitude"))
-                    row["fp_filed_at"] = _str_or_none(detail.get("fp_filed_at"))
-                    row["has_filed_plan"] = bool(
-                        row["fp_filed_at"] or row["fp_route_string"] or row["fp_altitude"]
-                    )
-                    # Prefer list event/vul; fill from detail if missing
-                    row["event_date"] = row["event_date"] or _str_or_none(detail.get("event_date"))
-                    row["vul_start"] = row["vul_start"] or _str_or_none(detail.get("vul_start"))
-                    row["vul_end"] = row["vul_end"] or _str_or_none(detail.get("vul_end"))
-            except urllib.error.URLError as exc:
-                print(f"WARNING: Opus flight {fid} detail failed ({exc})", file=sys.stderr)
-            try:
-                signups = http_get_json(f"{backend}/opus/flights/{int(fid)}/signups", ua)
-                if isinstance(signups, dict):
-                    signups = [signups]
-                if isinstance(signups, list):
-                    row["signups"] = signups
-                    row["crew_slots"] = opus_crew_slots(signups, qty=row.get("qty"))
-                    row["signup_labels"] = [
-                        f"{c['seat']}:{c['user_name']}" for c in row["crew_slots"] if c.get("user_name")
-                    ]
-            except urllib.error.URLError as exc:
-                print(f"WARNING: Opus flight {fid} signups failed ({exc})", file=sys.stderr)
+            _enrich_opus_flight_row(row, backend=backend, ua=ua)
         rows.append(row)
     return rows
+
+
+def fetch_opus_flight_detail(config: dict[str, Any], flight_id: int) -> dict[str, Any]:
+    """One Opus flight with route, altitude, and crew. Raises if backend is unset."""
+    backend = (config.get("opus_backend_url") or "").rstrip("/")
+    if not backend:
+        raise RuntimeError("opus_backend_url is not set")
+    ua = config.get("user_agent", "DCS-ATC-Phrase/1.0")
+    fid = int(flight_id)
+    row: dict[str, Any] = {
+        "id": fid,
+        "callsign": "",
+        "event_date": None,
+        "vul_start": None,
+        "vul_end": None,
+        "aircraft": None,
+        "qty": None,
+        "mission": None,
+        "mission_number": None,
+        "squadron_name": None,
+        "theater_name": None,
+        "fp_route_string": None,
+        "fp_altitude": None,
+        "fp_filed_at": None,
+        "has_filed_plan": False,
+        "signups": [],
+        "signup_labels": [],
+    }
+    try:
+        listing = http_get_json(f"{backend}/opus/flights", ua)
+        if isinstance(listing, list):
+            for flight in listing:
+                if int(flight.get("id") or 0) == fid:
+                    listed = _opus_list_row(flight)
+                    if listed:
+                        row.update(listed)
+                    break
+    except urllib.error.URLError as exc:
+        print(f"WARNING: Opus flights list failed ({exc})", file=sys.stderr)
+    _enrich_opus_flight_row(row, backend=backend, ua=ua)
+    if not row.get("callsign"):
+        row["callsign"] = f"#{fid}"
+    return row
+
+
+def _opus_list_row(flight: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(flight, dict) or flight.get("id") is None:
+        return None
+    return {
+        "id": int(flight.get("id")),
+        "callsign": str(flight.get("callsign") or "").strip(),
+        "event_date": _str_or_none(flight.get("event_date")),
+        "vul_start": _str_or_none(flight.get("vul_start")),
+        "vul_end": _str_or_none(flight.get("vul_end")),
+        "aircraft": _str_or_none(flight.get("aircraft")),
+        "qty": flight.get("qty"),
+        "mission": _str_or_none(flight.get("mission")),
+        "mission_number": _str_or_none(flight.get("mission_number")),
+        "squadron_name": _str_or_none(flight.get("squadron_name")),
+        "theater_name": _str_or_none(flight.get("theater_name")),
+        "fp_route_string": _str_or_none(flight.get("fp_route_string")),
+        "fp_altitude": _str_or_none(flight.get("fp_altitude")),
+        "fp_filed_at": _str_or_none(flight.get("fp_filed_at")),
+        "has_filed_plan": bool(
+            flight.get("fp_filed_at")
+            or flight.get("fp_route_string")
+            or flight.get("fp_altitude")
+        ),
+        "signups": [],
+        "signup_labels": [],
+        "_detailed": False,
+    }
+
+
+def _enrich_opus_flight_row(
+    row: dict[str, Any],
+    *,
+    backend: str,
+    ua: str,
+) -> dict[str, Any]:
+    fid = int(row.get("id") or 0)
+    if not fid:
+        return row
+    try:
+        detail = http_get_json(f"{backend}/opus/flights/{fid}", ua)
+        if isinstance(detail, dict):
+            row["fp_route_string"] = _str_or_none(detail.get("fp_route_string")) or row.get(
+                "fp_route_string"
+            )
+            row["fp_altitude"] = _str_or_none(detail.get("fp_altitude")) or row.get(
+                "fp_altitude"
+            )
+            row["fp_filed_at"] = _str_or_none(detail.get("fp_filed_at")) or row.get(
+                "fp_filed_at"
+            )
+            row["has_filed_plan"] = bool(
+                row["fp_filed_at"] or row["fp_route_string"] or row["fp_altitude"]
+            )
+            row["event_date"] = row.get("event_date") or _str_or_none(detail.get("event_date"))
+            row["vul_start"] = row.get("vul_start") or _str_or_none(detail.get("vul_start"))
+            row["vul_end"] = row.get("vul_end") or _str_or_none(detail.get("vul_end"))
+            if detail.get("callsign") and not row.get("callsign"):
+                row["callsign"] = str(detail.get("callsign") or "").strip()
+            if detail.get("qty") is not None and row.get("qty") is None:
+                row["qty"] = detail.get("qty")
+    except urllib.error.URLError as exc:
+        print(f"WARNING: Opus flight {fid} detail failed ({exc})", file=sys.stderr)
+    try:
+        signups = http_get_json(f"{backend}/opus/flights/{fid}/signups", ua)
+        if isinstance(signups, dict):
+            signups = [signups]
+        if isinstance(signups, list):
+            row["signups"] = signups
+            row["crew_slots"] = opus_crew_slots(signups, qty=row.get("qty"))
+            row["signup_labels"] = [
+                f"{c['seat']}:{c['user_name']}" for c in row["crew_slots"] if c.get("user_name")
+            ]
+    except urllib.error.URLError as exc:
+        print(f"WARNING: Opus flight {fid} signups failed ({exc})", file=sys.stderr)
+    row["_detailed"] = True
+    return row
 
 
 def opus_crew_slots(
@@ -795,6 +892,19 @@ def resolve_active_opus_flight(config: dict[str, Any]) -> OpusFlightContext | No
     Seat: opus_seat if set, else matching signup for opus_user_name, else seat 1.
     callsign_override replaces the spoken callsign (FP still from Opus when available).
     """
+    if ownship_from_map_enabled(config):
+        mapped = map_flight_context(config)
+        if mapped is not None:
+            print(
+                f"Using map tester flight: {mapped.radio_callsign} "
+                f"route={mapped.fp_route_string} alt={mapped.fp_altitude}"
+            )
+            return apply_callsign_override(config, mapped)
+        override = callsign_override(config)
+        label = override or "MAP"
+        print(f"Using map tester callsign (no inject yet): {label}")
+        return apply_callsign_override(config, synthetic_flight_context(label))
+
     override = callsign_override(config)
     user = (config.get("opus_user_name") or "").strip()
     backend = (config.get("opus_backend_url") or "").rstrip("/")
@@ -1163,7 +1273,13 @@ def caoc_mission_local_minutes(
 
     The CAOC page publishes that string as local by rewriting the trailing Z
     to L — 11-250 §4.1.4 2200L/0800L uses this clock, not wall-clock Pacific.
+    Tester weather override, when enabled, wins over CAOC.
     """
+    inj = read_weather_inject()
+    if inj:
+        parsed = parse_mission_local_minutes(str(inj.get("mission_hhmm") or ""))
+        if parsed is not None:
+            return parsed
     data = radar
     if data is None and config:
         data = fetch_caoc_radar(config)
@@ -1346,7 +1462,149 @@ def find_vfr_recovery(
         for a in aliases:
             if re.sub(r"[^A-Z0-9]", "", a.upper()) == want:
                 return entry
+        for feeder in entry.get("entries") or []:
+            if not isinstance(feeder, dict):
+                continue
+            feeder_aliases = [str(feeder.get("id") or "")] + [
+                str(a) for a in (feeder.get("aliases") or [])
+            ]
+            for a in feeder_aliases:
+                if re.sub(r"[^A-Z0-9]", "", a.upper()) == want:
+                    return entry
     return None
+
+
+def _fix_token(token: str | None) -> str:
+    return re.sub(r"[^A-Z0-9]", "", str(token or "").upper())
+
+
+def _vfr_feeder_entries(vfr: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(vfr, dict):
+        return []
+    return [e for e in (vfr.get("entries") or []) if isinstance(e, dict)]
+
+
+def _feeder_aliases(feeder: dict[str, Any]) -> set[str]:
+    names = [str(feeder.get("id") or "")] + [
+        str(a) for a in (feeder.get("aliases") or [])
+    ]
+    return {tok for tok in (_fix_token(n) for n in names) if tok}
+
+
+def _feeder_is_entry(feeder: dict[str, Any]) -> bool:
+    """SARAH / NIXON are range-exit entries; Gass Peak is not."""
+    flag = feeder.get("entry")
+    if flag is False:
+        return False
+    if flag is True:
+        return True
+    aliases = _feeder_aliases(feeder)
+    return bool(aliases & {"SARAH", "SARA", "NIXON"}) and not bool(
+        aliases & {"GASS", "GASSPEAK", "GASPEAK"}
+    )
+
+
+def _stryk_feeder_for_token(
+    vfr: dict[str, Any], token: str | None
+) -> dict[str, Any] | None:
+    want = _fix_token(token)
+    if not want or want in {"STRYK", "STRIKE", "STRYKER"}:
+        return None
+    for feeder in _vfr_feeder_entries(vfr):
+        if want in _feeder_aliases(feeder):
+            return feeder
+    return None
+
+
+def _stryk_feeder_from_route(
+    vfr: dict[str, Any], route: str | None
+) -> dict[str, Any] | None:
+    hit = None
+    if not route:
+        return None
+    for tok in _enroute_tokens(route):
+        feeder = _stryk_feeder_for_token(vfr, tok)
+        if feeder is not None:
+            hit = feeder
+    return hit
+
+
+def _feeder_direct(
+    feeder: dict[str, Any],
+) -> tuple[str, str, tuple[float, float] | None]:
+    fix = str(feeder.get("direct_fix") or feeder.get("id") or "")
+    say = str(feeder.get("direct_say") or feeder.get("say") or fix)
+    return fix, say, _entry_latlon(feeder)
+
+
+def resolve_vfr_direct(
+    vfr: dict[str, Any],
+    *,
+    position: Any = None,
+    route: str | None = None,
+    named: str | None = None,
+) -> tuple[str, str, tuple[float, float] | None]:
+    """
+    Direct-to for a VFR recovery.
+
+    STRYK recovery is still STRYK. Blackjack clears direct the entry in use
+    (Stryk, Nixon, or Sarah) — not Gass Peak. Approach still names Stryk recovery.
+    """
+    default_fix = str(vfr.get("direct_fix") or vfr.get("id") or "")
+    default_say = str(vfr.get("direct_say") or vfr.get("say") or default_fix)
+    default_ll = _entry_latlon(vfr)
+    if str(vfr.get("id") or "").upper() != "STRYK":
+        return default_fix, default_say, default_ll
+
+    feeder = _stryk_feeder_for_token(vfr, named)
+    if feeder is None:
+        feeder = _stryk_feeder_from_route(vfr, route)
+    if feeder is None:
+        pos = coerce_latlon(position)
+        if pos is not None and default_ll is not None:
+            plat, plon = pos
+            slat, slon = default_ll
+            d_stryk = _haversine_nm(plat, plon, slat, slon)
+            best: tuple[float, dict[str, Any]] | None = None
+            for entry in _vfr_feeder_entries(vfr):
+                if not _feeder_is_entry(entry):
+                    continue
+                fll = _entry_latlon(entry)
+                if fll is None:
+                    continue
+                d_feeder = _haversine_nm(plat, plon, fll[0], fll[1])
+                if d_feeder > 22.0 or d_feeder + 0.5 >= d_stryk:
+                    continue
+                if best is None or d_feeder < best[0]:
+                    best = (d_feeder, entry)
+            if best is not None:
+                feeder = best[1]
+    if feeder is not None:
+        return _feeder_direct(feeder)
+    return default_fix, default_say, default_ll
+
+
+def _set_vfr_direct(
+    plan: dict[str, Any],
+    vfr: dict[str, Any],
+    *,
+    position: Any = None,
+    route: str | None = None,
+    named: str | None = None,
+) -> None:
+    fix, say, ll = resolve_vfr_direct(
+        vfr,
+        position=position,
+        route=route,
+        named=named,
+    )
+    plan["direct_fix"] = fix or None
+    plan["direct_say"] = say or None
+    if ll:
+        plan["fix_lat"], plan["fix_lon"] = ll[0], ll[1]
+    else:
+        plan.pop("fix_lat", None)
+        plan.pop("fix_lon", None)
 
 
 def find_instrument_approach(
@@ -1780,6 +2038,7 @@ def assign_approach_plan(
     defs = approach_defaults(catalog)
     st = state if isinstance(state, dict) else {}
     # Pattern-only kwargs still allow the filed route to pick the fix.
+    named_fix = vfr_recovery
     explicit_fix = bool(vfr_recovery or instrument_id or iaf)
     route = (opus.fp_route_string if opus else None) or None
     route_hit = (
@@ -1860,6 +2119,21 @@ def assign_approach_plan(
                     recovery="instrument",
                     position=position,
                 )
+        # Keep STRYK recovery, but refresh Nixon / Sarah vs Stryk as the direct-to.
+        if str(plan.get("vfr_recovery") or "").upper() == "STRYK":
+            pos = coerce_latlon(position)
+            if pos is None and _ownship_fix_is_fresh(st):
+                pos = coerce_latlon(st.get("ownship_ll"))
+            vfr_sticky = find_vfr_recovery(catalog, "STRYK")
+            if vfr_sticky:
+                _set_vfr_direct(
+                    plan,
+                    vfr_sticky,
+                    position=pos,
+                    route=route,
+                    named=named_fix,
+                )
+                st["approach_plan"] = plan
         return plan
 
     if position is None and _ownship_fix_is_fresh(st):
@@ -2056,18 +2330,13 @@ def assign_approach_plan(
             plan["descend_ft"] = _int_or(
                 plan["descend_ft"], vfr.get("descend_ft"), defs.get("descend_ft")
             )
-            plan["direct_fix"] = str(
-                vfr.get("direct_fix") or vfr.get("id") or ""
-            ) or None
-            plan["direct_say"] = str(
-                vfr.get("direct_say") or vfr.get("say") or plan["direct_fix"] or ""
-            ) or None
-            try:
-                plan["fix_lat"] = float(vfr["lat"])
-                plan["fix_lon"] = float(vfr["lon"])
-            except (KeyError, TypeError, ValueError):
-                plan.pop("fix_lat", None)
-                plan.pop("fix_lon", None)
+            _set_vfr_direct(
+                plan,
+                vfr,
+                position=position,
+                route=route,
+                named=named_fix,
+            )
             # Route-named recovery on 03-only (MINTT): keep wind gate — may stay 21.
             sides = [str(s) for s in (vfr.get("runway_sides") or [])]
             side = _runway_side(plan["runway"])
@@ -2154,6 +2423,12 @@ def approach_exit_fix_latlon(
     if vfr_id:
         vfr = find_vfr_recovery(catalog, vfr_id)
         if vfr:
+            direct_id = str(p.get("direct_fix") or "").strip()
+            for feeder in _vfr_feeder_entries(vfr):
+                if direct_id and _fix_token(direct_id) in _feeder_aliases(feeder):
+                    ll = _entry_latlon(feeder)
+                    if ll:
+                        return ll
             try:
                 return float(vfr["lat"]), float(vfr["lon"])
             except (KeyError, TypeError, ValueError):
@@ -2645,15 +2920,66 @@ def cruise_climb_target_ft(
     return filed
 
 
+def departure_radar_climb_ft(
+    opus: OpusFlightContext | None = None,
+    *,
+    mission: dict[str, Any] | None = None,
+    state: dict[str, Any] | None = None,
+    step: dict[str, Any] | None = None,
+    initial_climb_ft: int | None = None,
+) -> int | None:
+    """
+    Altitude Departure assigns on radar contact.
+
+    Filed cruise when it is above the Delivery interim; otherwise the interim.
+    None → caller rolls a random initial.
+    """
+    cruise = cruise_climb_target_ft(opus, mission=mission, state=state)
+    if cruise is not None:
+        return cruise
+    interim = resolve_shared_climb_ft(step=step, mission=mission, state=state)
+    if interim is not None:
+        return interim
+    return _parse_climb_ft(initial_climb_ft)
+
+
+def climb_ft_for_readback(
+    template: str,
+    *,
+    opus: OpusFlightContext | None = None,
+    mission: dict[str, Any] | None = None,
+    state: dict[str, Any] | None = None,
+    step: dict[str, Any] | None = None,
+) -> int | None:
+    """Altitude the READ BACK card should hinge on after this template."""
+    tmpl = str(template or "").strip().lower()
+    if tmpl == "radar_contact":
+        assigned = _parse_climb_ft((state or {}).get("departure_assigned_ft"))
+        if assigned is not None:
+            return assigned
+        return departure_radar_climb_ft(
+            opus, mission=mission, state=state, step=step
+        )
+    if tmpl == "climb_cruise":
+        return cruise_climb_target_ft(opus, mission=mission, state=state)
+    return resolve_shared_climb_ft(step=step, mission=mission, state=state)
+
+
 def should_skip_cruise_climb_step(
     step: dict[str, Any] | None,
     mission: dict[str, Any] | None = None,
     state: dict[str, Any] | None = None,
     opus: OpusFlightContext | None = None,
 ) -> bool:
-    """True when there is no higher filed altitude to clear."""
+    """True when there is no higher filed altitude left to clear."""
     if str((step or {}).get("template") or "") != "climb_cruise":
         return False
+    assigned = _parse_climb_ft((state or {}).get("departure_assigned_ft"))
+    filed = filed_altitude_feet(opus.fp_altitude if opus else None)
+    if filed is None:
+        filed = _parse_climb_ft((state or {}).get("filed_altitude_ft"))
+    if assigned is not None and filed is not None and assigned >= filed:
+        return True
     return cruise_climb_target_ft(opus, mission=mission, state=state) is None
 
 
@@ -2682,7 +3008,7 @@ def speak_unrestricted_ceiling(
 
 # Templates that share one interim climb (Delivery clearance ↔ Departure/Center)
 CLIMB_SHARED_TEMPLATES = frozenset({"clearance", "radar_contact", "center_radar"})
-# After radar contact, Departure amends to filed cruise before the 18 NM handoff.
+# Backup: if radar contact had no filed altitude, amend to cruise beyond this NM.
 CRUISE_CLIMB_BEYOND_NM = 10.0
 
 DEFAULT_UNRESTRICTED_CLIMB_APPROVE_CHANCE = 0.80
@@ -2834,6 +3160,7 @@ _SORTIE_STATE_CACHE_KEYS = (
     "unrestricted_climb_ft",
     "pending_unrestricted_climb",
     "initial_climb_ft",
+    "departure_assigned_ft",
     "filed_altitude_ft",
     "approach_assigned",
     "approach_plan",
@@ -2969,14 +3296,17 @@ HANDOFF_AGENCY_NAMES: dict[str, str] = {
     "approach": "Approach",
     "blackjack": "Blackjack",
     "bandsaw": "Bandsaw",
+    "joshua": "Joshua",
+    "control_east": "Nellis Control",
+    "control_west": "Nellis Control",
     "ops": "Ops",
     "other": "Center",
-    "center": "Center",
+    "center": "Los Angeles Center",
     "tanker": "Tanker",
 }
 
 # Skip these when auto-picking the next handoff agency from the timeline
-_HANDOFF_SKIP_CHANNELS = frozenset({"ops", "bandsaw"})
+_HANDOFF_SKIP_CHANNELS = frozenset({"ops", "bandsaw", "joshua", "tanker", "center"})
 
 
 def speak_agency_name(channel: str) -> str:
@@ -3010,18 +3340,43 @@ def resolve_handoff_channel(
     *,
     from_channel: str | None = None,
     default: str = "blackjack",
+    config: dict[str, Any] | None = None,
+    opus: OpusFlightContext | None = None,
+    airport: dict[str, Any] | None = None,
+    state: dict[str, Any] | None = None,
 ) -> str:
     """
-    Next agency for a Departure/Center handoff.
-    Prefer step.handoff_channel, else the next timeline agency (skip Ops), else default.
+    Next agency for a Departure / Blackjack / Center / Joshua handoff.
+
+    On Nellis Default, the filed route + reserved airspace pick the control
+    area. Custom Plans still use step.handoff_channel, then the timeline.
     """
+    from_ch = (from_channel or (step.get("channel") if step else None) or "departure")
+    from_ch = str(from_ch).strip().lower()
+
+    try:
+        import agencies as agencies_mod
+
+        if agencies_mod.is_default_sandbox(config):
+            plan = agencies_mod.infer_from_context(
+                airport=airport, opus=opus, config=config
+            )
+            lat = lon = None
+            ll = _ownship_ll_from_state(state)
+            if ll:
+                lat, lon = ll
+            picked = agencies_mod.handoff_from_plan(
+                from_ch, plan, airport=airport, lat=lat, lon=lon
+            )
+            if picked:
+                return picked
+    except Exception:
+        pass
+
     if step is not None:
         raw = step.get("handoff_channel") or step.get("handoff_to")
         if raw is not None and str(raw).strip():
             return str(raw).strip().lower()
-
-    from_ch = (from_channel or (step.get("channel") if step else None) or "departure")
-    from_ch = str(from_ch).strip().lower()
 
     if mission is not None and step is not None and isinstance(mission.get("steps"), list):
         steps = mission["steps"]
@@ -3065,11 +3420,15 @@ def build_departure_handoff(
     name = airport["name"]
     cs = speak_callsign(callsign)
     from_ch = (from_channel or "departure").strip().lower()
-    agency = (
-        f"{name} Departure"
-        if from_ch == "departure"
-        else (f"{name} Center" if from_ch in ("other", "center") else f"{name} {speak_agency_name(from_ch)}")
-    )
+    spoken = speak_agency_name(from_ch)
+    if from_ch == "departure":
+        agency = f"{name} Departure"
+    elif from_ch in ("other", "center", "control_east", "control_west"):
+        agency = spoken
+    elif from_ch in ("blackjack", "bandsaw", "joshua", "tanker"):
+        agency = spoken
+    else:
+        agency = f"{name} {spoken}"
     target = speak_agency_contact_target(airport, handoff_channel)
     return with_freq_handoff_closer(f"{cs}, {agency}, contact {target}")
 
@@ -3417,7 +3776,17 @@ def resolve_pilot_request_phase(
         return "approach"
     if ch in ("delivery", "ground", "departure"):
         return "departure"
-    if ch in ("blackjack", "bandsaw"):
+    if ch in (
+        "blackjack",
+        "bandsaw",
+        "joshua",
+        "ops",
+        "tanker",
+        "other",
+        "control_east",
+        "control_west",
+        "center",
+    ):
         return "flight"
     return ""
 
@@ -5024,7 +5393,7 @@ def build_blackjack_range_exit(
     airport: dict[str, Any],
     callsign: str,
     *,
-    handoff_channel: str = "approach",
+    handoff_channel: str = "control_east",
     plan: dict[str, Any] | None = None,
     include_handoff: bool = True,
 ) -> str:
@@ -5054,7 +5423,7 @@ def build_blackjack_range_exit(
             f"{cs}, Blackjack, range exit approved{direct}{descend}, "
             f"remain this frequency."
         )
-    target = speak_agency_contact_target(airport, handoff_channel or "approach")
+    target = speak_agency_contact_target(airport, handoff_channel or "control_east")
     return with_freq_handoff_closer(
         f"{cs}, Blackjack, range exit approved{direct}{descend}, contact {target}"
     )
@@ -5127,6 +5496,89 @@ def build_contact_bandsaw(airport: dict[str, Any], callsign: str) -> str:
     return with_freq_handoff_closer(f"{cs}, Blackjack, contact {target}")
 
 
+def build_joshua_check_in(callsign: str) -> str:
+    """Joshua Control check-in: radar contact, remain this frequency."""
+    cs = speak_callsign(callsign)
+    return _pick(
+        f"{cs}, Joshua, radar contact. Remain this frequency.",
+        f"{cs}, Joshua, radar contact, remain this frequency.",
+    )
+
+
+def build_joshua_check_out(
+    airport: dict[str, Any],
+    callsign: str,
+    *,
+    handoff_channel: str = "blackjack",
+) -> str:
+    """Joshua checkout — acknowledge and push back to Blackjack."""
+    cs = speak_callsign(callsign)
+    target = speak_agency_contact_target(airport, handoff_channel or "blackjack")
+    return with_freq_handoff_closer(
+        _pick(
+            f"{cs}, Joshua, copy, contact {target}",
+            f"{cs}, Joshua, roger, contact {target}",
+        )
+    )
+
+
+def build_contact_joshua(airport: dict[str, Any], callsign: str) -> str:
+    """Stub Blackjack push to Joshua."""
+    cs = speak_callsign(callsign)
+    target = speak_agency_contact_target(airport, "joshua")
+    return with_freq_handoff_closer(f"{cs}, Blackjack, contact {target}")
+
+
+def build_control_check_in(callsign: str, *, channel: str = "control_east") -> str:
+    """Nellis Control check-in — radar contact, remain this frequency."""
+    cs = speak_callsign(callsign)
+    del channel  # East / West share the spoken agency name; Local 7 vs 8 differentiates.
+    return _pick(
+        f"{cs}, Nellis Control, radar contact. Remain this frequency.",
+        f"{cs}, Nellis Control, radar contact, remain this frequency.",
+    )
+
+
+def build_control_handoff(
+    airport: dict[str, Any],
+    callsign: str,
+    *,
+    handoff_channel: str = "approach",
+    from_channel: str = "control_east",
+) -> str:
+    """Nellis Control hands the recovery to Approach."""
+    cs = speak_callsign(callsign)
+    del from_channel  # Spoken as Nellis Control on both sectors.
+    target = speak_agency_contact_target(airport, handoff_channel or "approach")
+    return with_freq_handoff_closer(
+        _pick(
+            f"{cs}, Nellis Control, contact {target}",
+            f"{cs}, Nellis Control, roger, contact {target}",
+        )
+    )
+
+
+def build_contact_control(
+    airport: dict[str, Any],
+    callsign: str,
+    *,
+    handoff_channel: str = "control_east",
+) -> str:
+    """Blackjack (or Departure) push to Nellis Control (East or West by freq)."""
+    cs = speak_callsign(callsign)
+    target = speak_agency_contact_target(airport, handoff_channel or "control_east")
+    return with_freq_handoff_closer(f"{cs}, Blackjack, contact {target}")
+
+
+def build_center_check_in(callsign: str) -> str:
+    """Los Angeles Center radar contact."""
+    cs = speak_callsign(callsign)
+    return _pick(
+        f"{cs}, Los Angeles Center, radar contact. Remain this frequency.",
+        f"{cs}, Los Angeles Center, radar contact, remain this frequency.",
+    )
+
+
 # --- CAOC radar / bullseye alpha check ---------------------------------
 # Match Opus CAOC aircraft popup math (/opus/caoc): click unit → tooltip
 #   "ELVIS 305 25"  (name + mag bearing 000-359 + range NM, zero-padded to 2)
@@ -5142,6 +5594,442 @@ _CAOC_DEFAULT_BULLSEYE = {"name": "ELVIS", "lat": 37.25, "lon": -115.75}
 
 _caoc_radar_cache: dict[str, Any] = {"t": 0.0, "data": None}
 _theater_nav_cache: dict[int, list[dict[str, Any]]] = {}
+MAP_OWNSHIP_ID = "map-ownship"
+MAP_TRAFFIC_PREFIX = "map-traffic-"
+OWNSHIP_INJECT_MAX_AGE_S = 8.0
+
+
+def ownship_from_map_enabled(config: dict[str, Any] | None) -> bool:
+    """Fly checkbox: use the map tester as ownship instead of CAOC."""
+    return bool((config or {}).get("ownship_from_map"))
+
+
+def map_flight_context(config: dict[str, Any] | None) -> OpusFlightContext | None:
+    """
+    Filed plan + callsign from the map tester.
+
+    Used when Fly's 'Test: map is my jet' is on so ATC does not wait on Opus.
+    """
+    if not ownship_from_map_enabled(config):
+        return None
+    inj = read_ownship_inject(config=config)
+    if not inj:
+        return None
+    override = callsign_override(config or {})
+    cs = override or str(inj.get("callsign") or "").strip() or "MAP"
+    ctx = synthetic_flight_context(cs)
+    route = str(inj.get("fp_route_string") or "").strip()
+    if route:
+        ctx.fp_route_string = route
+        tokens = [t for t in re.split(r"\s+", route) if t]
+        ctx.dep_icao = tokens[0] if tokens else None
+        ctx.arr_icao = tokens[-1] if len(tokens) >= 2 else ctx.dep_icao
+    alt = str(inj.get("fp_altitude") or "").strip()
+    if alt:
+        ctx.fp_altitude = alt
+    return ctx
+
+
+def read_ownship_inject(
+    *,
+    config: dict[str, Any] | None = None,
+    max_age_s: float = OWNSHIP_INJECT_MAX_AGE_S,
+) -> dict[str, Any] | None:
+    """Map-jet sample. Fly only uses this when ownship_from_map is on."""
+    if config is not None and not ownship_from_map_enabled(config):
+        return None
+    path = OWNSHIP_INJECT_PATH
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("enabled") is False:
+        return None
+    persist = ownship_from_map_enabled(config)
+    if not persist:
+        try:
+            age = time.time() - float(data.get("t") or 0)
+        except (TypeError, ValueError):
+            return None
+        if age < 0 or age > max_age_s:
+            return None
+    try:
+        lat, lon = float(data["lat"]), float(data["lon"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    data["lat"] = lat
+    data["lon"] = lon
+    return data
+
+
+def clear_ownship_inject() -> None:
+    try:
+        OWNSHIP_INJECT_PATH.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def write_ownship_inject(
+    *,
+    lat: float,
+    lon: float,
+    alt_ft_agl: float | None = None,
+    heading_deg: float | None = None,
+    speed_kt: float | None = None,
+    callsign: str = "",
+    airport: dict[str, Any] | None = None,
+    fp_route_string: str | None = None,
+    fp_altitude: str | None = None,
+) -> None:
+    """Map tester publishes this; Fly / CAOC consumers treat it as ownship."""
+    import runway_position as rp
+
+    height_m = None if alt_ft_agl is None else float(alt_ft_agl) / rp.FT_PER_M
+    elev = rp.field_elev_m(airport)
+    alt_m = None if height_m is None else (0.0 if elev is None else elev) + height_m
+    payload = {
+        "enabled": True,
+        "t": time.time(),
+        "lat": float(lat),
+        "lon": float(lon),
+        "alt_ft_agl": None if alt_ft_agl is None else float(alt_ft_agl),
+        "alt_m": alt_m,
+        "heading_deg": None if heading_deg is None else float(heading_deg),
+        "speed_kt": None if speed_kt is None else float(speed_kt),
+        "callsign": str(callsign or "").strip(),
+        "fp_route_string": str(fp_route_string or "").strip() or None,
+        "fp_altitude": str(fp_altitude or "").strip() or None,
+    }
+    tmp = OWNSHIP_INJECT_PATH.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload), encoding="utf-8")
+    tmp.replace(OWNSHIP_INJECT_PATH)
+
+
+def ownship_inject_unit(
+    inj: dict[str, Any],
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    cfg = config or {}
+    cs = str(inj.get("callsign") or "").strip() or "MAP"
+    x_m, z_m = caoc_ll_to_xz(float(inj["lat"]), float(inj["lon"]))
+    alt_m = inj.get("alt_m")
+    try:
+        alt_m = float(alt_m) if alt_m is not None else None
+    except (TypeError, ValueError):
+        alt_m = None
+    hdg = inj.get("heading_deg")
+    try:
+        hdg = float(hdg) if hdg is not None else 0.0
+    except (TypeError, ValueError):
+        hdg = 0.0
+    spd_mps = None
+    try:
+        raw_kt = inj.get("speed_kt")
+        if raw_kt not in (None, ""):
+            spd_mps = max(0.0, float(raw_kt) * (1852.0 / 3600.0))
+    except (TypeError, ValueError):
+        spd_mps = None
+    unit = {
+        "id": MAP_OWNSHIP_ID,
+        "type": "air",
+        "name": cs,
+        "pilotName": str(cfg.get("opus_user_name") or cs).strip() or cs,
+        "objectName": "F-16C_50",
+        "xMeters": x_m,
+        "zMeters": z_m,
+        "altMeters": 0.0 if alt_m is None else alt_m,
+        "headingDeg": hdg,
+        "coalition": "blue",
+    }
+    if spd_mps is not None:
+        unit["groundSpeedMps"] = spd_mps
+    return unit
+
+
+def merge_ownship_inject(
+    radar: dict[str, Any] | None,
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Replace CAOC ownship with the map jet; leave tankers and everyone else."""
+    if config is not None and not ownship_from_map_enabled(config):
+        return radar
+    inj = read_ownship_inject(config=config)
+    if not inj:
+        return radar
+    unit = ownship_inject_unit(inj, config)
+    units = [
+        u
+        for u in list((radar or {}).get("units") or [])
+        if isinstance(u, dict) and str(u.get("id") or "") != MAP_OWNSHIP_ID
+    ]
+    cs = str(inj.get("callsign") or "").strip() or callsign_override(config or {}) or ""
+    real = match_caoc_unit_for_flight(units, callsign=cs, config=config or {})
+    if real is not None:
+        rid = real.get("id")
+        units = [u for u in units if u.get("id") != rid]
+    units.insert(0, unit)
+    out = dict(radar or {})
+    out["units"] = units
+    out["ownshipInject"] = True
+    return out
+
+
+def read_traffic_inject() -> list[dict[str, Any]]:
+    path = TRAFFIC_INJECT_PATH
+    if not path.is_file():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(data, dict) or data.get("enabled") is False:
+        return []
+    rows = data.get("contacts")
+    return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
+
+
+def clear_traffic_inject() -> None:
+    try:
+        TRAFFIC_INJECT_PATH.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def write_traffic_inject(
+    contacts: list[dict[str, Any]] | None,
+    *,
+    airport: dict[str, Any] | None = None,
+) -> None:
+    """Map tester bandits / friendlies for picture and declare."""
+    import runway_position as rp
+
+    rows: list[dict[str, Any]] = []
+    elev = rp.field_elev_m(airport)
+    for i, raw in enumerate(contacts or []):
+        if not isinstance(raw, dict):
+            continue
+        try:
+            lat, lon = float(raw["lat"]), float(raw["lon"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        coal = str(raw.get("coalition") or "").strip().lower()
+        coal = "red" if coal.startswith("r") else "blue"
+        alt_ft = raw.get("alt_ft_agl")
+        try:
+            alt_ft = None if alt_ft in (None, "") else float(alt_ft)
+        except (TypeError, ValueError):
+            alt_ft = None
+        height_m = None if alt_ft is None else alt_ft / rp.FT_PER_M
+        alt_m = None if height_m is None else (0.0 if elev is None else elev) + height_m
+        hdg = raw.get("heading_deg")
+        try:
+            hdg = 180.0 if hdg in (None, "") else float(hdg)
+        except (TypeError, ValueError):
+            hdg = 180.0
+        spd = raw.get("speed_kt")
+        try:
+            spd = None if spd in (None, "") else float(spd)
+        except (TypeError, ValueError):
+            spd = None
+        ident = str(raw.get("id") or "").strip() or f"{MAP_TRAFFIC_PREFIX}{i + 1}"
+        if not ident.startswith(MAP_TRAFFIC_PREFIX):
+            ident = f"{MAP_TRAFFIC_PREFIX}{ident}"
+        default_cs = f"BANDIT {i + 1}" if coal == "red" else f"FRIENDLY {i + 1}"
+        cs = str(raw.get("callsign") or "").strip() or default_cs
+        rows.append(
+            {
+                "id": ident,
+                "lat": lat,
+                "lon": lon,
+                "alt_ft_agl": alt_ft,
+                "alt_m": alt_m,
+                "heading_deg": hdg,
+                "speed_kt": spd,
+                "coalition": coal,
+                "callsign": cs,
+            }
+        )
+    if not rows:
+        clear_traffic_inject()
+        return
+    payload = {"enabled": True, "t": time.time(), "contacts": rows}
+    tmp = TRAFFIC_INJECT_PATH.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload), encoding="utf-8")
+    tmp.replace(TRAFFIC_INJECT_PATH)
+
+
+def traffic_inject_unit(row: dict[str, Any]) -> dict[str, Any] | None:
+    try:
+        lat, lon = float(row["lat"]), float(row["lon"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    x_m, z_m = caoc_ll_to_xz(lat, lon)
+    coal = "red" if str(row.get("coalition") or "").lower().startswith("r") else "blue"
+    cs = str(row.get("callsign") or "").strip() or (
+        "BANDIT" if coal == "red" else "FRIENDLY"
+    )
+    alt_m = row.get("alt_m")
+    try:
+        alt_m = 0.0 if alt_m is None else float(alt_m)
+    except (TypeError, ValueError):
+        alt_m = 0.0
+    hdg = row.get("heading_deg")
+    try:
+        hdg = 180.0 if hdg is None else float(hdg)
+    except (TypeError, ValueError):
+        hdg = 180.0
+    spd_mps = None
+    try:
+        raw_kt = row.get("speed_kt")
+        if raw_kt not in (None, ""):
+            spd_mps = max(0.0, float(raw_kt) * (1852.0 / 3600.0))
+    except (TypeError, ValueError):
+        spd_mps = None
+    ident = str(row.get("id") or "").strip() or f"{MAP_TRAFFIC_PREFIX}{cs}"
+    unit = {
+        "id": ident,
+        "type": "air",
+        "name": cs,
+        "pilotName": cs,
+        "objectName": "Su-27" if coal == "red" else "F-16C_50",
+        "coalition": coal,
+        "xMeters": x_m,
+        "zMeters": z_m,
+        "altMeters": alt_m,
+        "headingDeg": hdg,
+    }
+    if spd_mps is not None:
+        unit["groundSpeedMps"] = spd_mps
+    return unit
+
+
+def merge_traffic_inject(
+    radar: dict[str, Any] | None,
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Splice tester red/blue contacts into the CAOC picture; leave tankers."""
+    if config is not None and not ownship_from_map_enabled(config):
+        return radar
+    rows = read_traffic_inject()
+    extra = [u for u in (traffic_inject_unit(r) for r in rows) if u]
+    units = [
+        u
+        for u in list((radar or {}).get("units") or [])
+        if isinstance(u, dict)
+        and not str(u.get("id") or "").startswith(MAP_TRAFFIC_PREFIX)
+    ]
+    if not extra:
+        if radar is None:
+            return None
+        out = dict(radar)
+        out["units"] = units
+        return out
+    units.extend(extra)
+    out = dict(radar or {})
+    out["units"] = units
+    out["trafficInject"] = True
+    return out
+
+
+def read_weather_inject() -> dict[str, Any] | None:
+    """Tester weather / mission-clock sample. None means use Opus METAR and CAOC time."""
+    path = WEATHER_INJECT_PATH
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("enabled") is False:
+        return None
+    return data
+
+
+def clear_weather_inject() -> None:
+    try:
+        WEATHER_INJECT_PATH.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def write_weather_inject(
+    *,
+    wind_dir: int | None = None,
+    wind_speed_kt: int | None = None,
+    altimeter_inhg: float | None = None,
+    visibility_sm: float | None = None,
+    ceiling_ft: int | None = None,
+    metar: str = "",
+    mission_hhmm: str = "",
+) -> None:
+    """Map tester publishes this; Fly uses it instead of Opus METAR / CAOC clock."""
+    payload = {
+        "enabled": True,
+        "t": time.time(),
+        "wind_dir": wind_dir,
+        "wind_speed_kt": wind_speed_kt,
+        "altimeter_inhg": altimeter_inhg,
+        "visibility_sm": visibility_sm,
+        "ceiling_ft": ceiling_ft,
+        "metar": str(metar or "").strip(),
+        "mission_hhmm": str(mission_hhmm or "").strip(),
+    }
+    tmp = WEATHER_INJECT_PATH.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload), encoding="utf-8")
+    tmp.replace(WEATHER_INJECT_PATH)
+
+
+def weather_from_inject(data: dict[str, Any]) -> Weather:
+    raw = str(data.get("metar") or "").strip()
+    if raw:
+        wx = parse_metar(raw)
+        if (
+            wx.wind_dir is not None
+            or wx.wind_speed_kt is not None
+            or wx.altimeter_inhg is not None
+        ):
+            return wx
+
+    def _int(key: str) -> int | None:
+        try:
+            val = data.get(key)
+            return None if val in (None, "") else int(float(val))
+        except (TypeError, ValueError):
+            return None
+
+    def _float(key: str) -> float | None:
+        try:
+            val = data.get(key)
+            return None if val in (None, "") else float(val)
+        except (TypeError, ValueError):
+            return None
+
+    return Weather(
+        _int("wind_dir"),
+        _int("wind_speed_kt"),
+        _float("altimeter_inhg"),
+        raw,
+        ceiling_ft=_int("ceiling_ft"),
+        visibility_sm=_float("visibility_sm"),
+    )
+
+
+def apply_mission_clock_inject(radar: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Stamp CAOC missionTime* from the tester clock so night-ops runway logic sees it."""
+    inj = read_weather_inject()
+    if not inj or radar is None:
+        return radar
+    minutes = parse_mission_local_minutes(str(inj.get("mission_hhmm") or ""))
+    if minutes is None:
+        return radar
+    hour, minute = divmod(int(minutes) % (24 * 60), 60)
+    clock = f"{hour:02d}:{minute:02d}:00"
+    out = dict(radar)
+    out["missionTimeZulu"] = f"{clock} Z"
+    out["missionTimeLocal"] = f"{clock} L"
+    return out
 
 
 def speak_natural_number(n: int) -> str:
@@ -5355,21 +6243,27 @@ def fetch_caoc_radar(config: dict[str, Any], *, max_age_s: float = 5.0) -> dict[
     """Latest CAOC radar snapshot from Opus (`GET /opus/caoc/radar`)."""
     now = time.time()
     cached = _caoc_radar_cache.get("data")
+    data: Any = None
     if cached is not None and (now - float(_caoc_radar_cache.get("t") or 0)) < max_age_s:
-        return cached
-    backend = (config.get("opus_backend_url") or "").rstrip("/")
-    if not backend:
-        return None
-    ua = str(config.get("user_agent") or "DCS-ATC-Phrase/1.0")
-    try:
-        data = http_get_json(f"{backend}/opus/caoc/radar", ua)
-    except Exception:
-        return cached if isinstance(cached, dict) else None
-    if not isinstance(data, dict):
-        return None
-    _caoc_radar_cache["t"] = now
-    _caoc_radar_cache["data"] = data
-    return data
+        data = cached
+    else:
+        backend = (config.get("opus_backend_url") or "").rstrip("/")
+        if backend:
+            ua = str(config.get("user_agent") or "DCS-ATC-Phrase/1.0")
+            try:
+                data = http_get_json(f"{backend}/opus/caoc/radar", ua)
+            except Exception:
+                data = cached if isinstance(cached, dict) else None
+            if isinstance(data, dict) and data is not cached:
+                _caoc_radar_cache["t"] = now
+                _caoc_radar_cache["data"] = data
+            elif not isinstance(data, dict):
+                data = None
+        else:
+            data = None
+    merged = merge_ownship_inject(data if isinstance(data, dict) else None, config)
+    merged = merge_traffic_inject(merged, config)
+    return apply_mission_clock_inject(merged)
 
 
 def fetch_theater_navpoints(config: dict[str, Any], theater_id: int) -> list[dict[str, Any]]:
@@ -5705,6 +6599,9 @@ def match_caoc_unit_for_flight(
     air = caoc_air_units(units)
     if not air:
         return None
+    for u in air:
+        if str(u.get("id") or "") == MAP_OWNSHIP_ID:
+            return u
 
     fid = opus.flight_id if opus else configured_opus_flight_id(config)
     mode3 = (opus.mode3 if opus else None) or None
@@ -5820,7 +6717,7 @@ def ownship_latlon(
     max_age_s: float = 10.0,
 ) -> tuple[float, float] | None:
     """
-    Own aircraft position from the CAOC feed, cached into state.
+    Own aircraft position: map inject if the tester is driving, else CAOC.
 
     Approach uses this to hand out the recovery/plate nearest the jet. The feed
     is often unavailable (no mission, no backend), so callers must treat None as
@@ -5828,8 +6725,7 @@ def ownship_latlon(
     OWNSHIP_MISS_BACKOFF_S so a dead backend never stalls phrase building.
     """
     global _ownship_miss_until
-    if not config:
-        return None
+
     def _cached_ll() -> tuple[float, float] | None:
         if not isinstance(state, dict):
             return None
@@ -5839,6 +6735,19 @@ def ownship_latlon(
                 return (float(raw[0]), float(raw[1]))
         except (TypeError, ValueError):
             return None
+        return None
+
+    inj = read_ownship_inject(config=config)
+    if inj:
+        ll = (inj["lat"], inj["lon"])
+        if isinstance(state, dict):
+            state["ownship_ll"] = [ll[0], ll[1]]
+            state["ownship_ll_t"] = time.time()
+        return ll
+    if ownship_from_map_enabled(config):
+        return _cached_ll()
+
+    if not config:
         return None
 
     now = time.time()
@@ -5869,6 +6778,29 @@ def ownship_latlon(
         state["ownship_ll"] = [ll[0], ll[1]]
         state["ownship_ll_t"] = time.time()
     return ll
+
+
+def control_channel_for_ownship(
+    airport: dict[str, Any] | None,
+    *,
+    config: dict[str, Any] | None = None,
+    callsign: str | None = None,
+    opus: OpusFlightContext | None = None,
+    state: dict[str, Any] | None = None,
+    default: str = "control_east",
+) -> str:
+    """Control East vs West from live lat/lon. Falls back to `default` with no position."""
+    try:
+        import agencies as agencies_mod
+
+        ll = ownship_latlon(config, callsign=callsign, opus=opus, state=state)
+        if ll:
+            return agencies_mod.control_for_ll(
+                airport, ll[0], ll[1], default=default
+            )
+    except Exception:
+        pass
+    return default
 
 
 _airspace_schedule_cache: dict[str, Any] = {"t": 0.0, "key": "", "rows": None}
@@ -6020,6 +6952,8 @@ _AIRSPACE_ZONE_SPOKEN: dict[str, str] = {
     "REVSOUTH": "Reveille South",
     "SALLY": "Sally Corridor",
     "SALLYCORRIDOR": "Sally Corridor",
+    "LEE": "Lee Corridor",
+    "LEECORRIDOR": "Lee Corridor",
     # Alamo / R-4806
     "ALAMO": "Alamo",
     "ALAMOA": "Alamo Alpha",
@@ -6446,7 +7380,12 @@ def speak_zulu_clock(raw: str | None) -> str | None:
 
 
 def speak_zulu_now() -> str:
-    """Current UTC clock as spoken HHMM zulu."""
+    """Current UTC clock as spoken HHMM zulu, or the tester mission clock if set."""
+    inj = read_weather_inject()
+    if inj:
+        spoken = speak_zulu_clock(str(inj.get("mission_hhmm") or ""))
+        if spoken:
+            return spoken
     now = datetime.now(timezone.utc)
     return speak_zulu_clock(f"{now.hour:02d}:{now.minute:02d}") or "time unavailable"
 
@@ -6523,7 +7462,8 @@ def situation_fields(situation: str) -> list[dict[str, Any]]:
     """Field specs for the Plan → Phrase helper modal."""
     agencies = [(c, HANDOFF_AGENCY_NAMES.get(c, c.title())) for c in (
         "delivery", "ground", "tower", "departure", "approach",
-        "blackjack", "bandsaw", "ops", "other",
+        "blackjack", "bandsaw", "joshua", "control_east", "control_west",
+        "center", "ops", "other", "tanker",
     )]
     recovery_opts = list(RECOVERY_CHOICES) + [("__custom__", "Custom…")]
     pattern_opts = list(APPROACH_PATTERN_CHOICES) + [("__custom__", "Custom…")]
@@ -6541,7 +7481,7 @@ def situation_fields(situation: str) -> list[dict[str, Any]]:
         ]
     if situation == "bj_range_exit":
         return [
-            {"key": "handoff_channel", "label": "Contact", "kind": "choice", "choices": agencies, "default": "approach"},
+            {"key": "handoff_channel", "label": "Contact", "kind": "choice", "choices": agencies, "default": "control_east"},
         ]
     if situation == "bj_alpha_check":
         return [
@@ -6665,7 +7605,7 @@ def generate_situation_phrase(
         return build_approach_tower_handoff(airport, callsign)
 
     if situation == "bj_range_exit":
-        handoff = str(params.get("handoff_channel") or "approach").strip().lower() or "approach"
+        handoff = str(params.get("handoff_channel") or "control_east").strip().lower() or "control_east"
         return build_blackjack_range_exit(airport, callsign, handoff_channel=handoff)
 
     if situation == "bj_alpha_check":
@@ -6687,7 +7627,10 @@ def generate_situation_phrase(
         agency = speak_agency_name(ch)
         spoken = (
             f"{name} {agency}"
-            if ch not in ("blackjack", "bandsaw", "ops", "other")
+            if ch not in (
+                "blackjack", "bandsaw", "joshua", "ops", "other",
+                "control_east", "control_west", "center", "tanker",
+            )
             else agency
         )
         if ch == "other":
@@ -7960,7 +8903,16 @@ def parse_metar(raw: str) -> Weather:
     )
 
 
-def fetch_metar(config: dict[str, Any], icao: str) -> Weather:
+def fetch_metar(
+    config: dict[str, Any],
+    icao: str,
+    *,
+    skip_inject: bool = False,
+) -> Weather:
+    if not skip_inject:
+        inj = read_weather_inject()
+        if inj:
+            return weather_from_inject(inj)
     url = config["opus_metar_url"].format(icao=icao)
     cache_key = f"{url}|{icao.strip().upper()}"
     now = time.time()
@@ -8859,6 +9811,16 @@ def build_template_text(
     departure = airport.get("departure") or {"freq_mhz": 350.0}
     twr_local = speak_local_preset(airport, "tower")
     climb_ft = random_initial_climb_feet(initial_climb_ft)
+    if template == "radar_contact":
+        radar_ft = departure_radar_climb_ft(
+            opus,
+            mission=mission,
+            state=state,
+            step=step,
+            initial_climb_ft=initial_climb_ft if initial_climb_ft is not None else climb_ft,
+        )
+        if radar_ft is not None:
+            climb_ft = radar_ft
     climb = speak_altitude_value(str(climb_ft), prefer_fl_below=1000)
     if climb_ft_out is not None and template in ("radar_contact", "center_radar"):
         climb_ft_out.append(climb_ft)
@@ -9057,6 +10019,10 @@ def build_template_text(
             mission=mission,
             from_channel=channel or "departure",
             default="blackjack",
+            config=config,
+            opus=opus,
+            airport=airport,
+            state=state,
         )
         if step is not None:
             step["handoff_channel"] = next_ch
@@ -9188,8 +10154,21 @@ def build_template_text(
             step=step,
             mission=mission,
             from_channel=channel or "blackjack",
-            default="approach",
+            default="control_east",
+            config=config,
+            opus=opus,
+            airport=airport,
+            state=state,
         )
+        if next_ch in ("control_east", "control_west"):
+            next_ch = control_channel_for_ownship(
+                airport,
+                config=config,
+                callsign=callsign,
+                opus=opus,
+                state=state,
+                default=next_ch,
+            )
         if step is not None:
             step["handoff_channel"] = next_ch
         # Pre-assign so Blackjack can clear to the exit / recovery fix;
@@ -9237,12 +10216,51 @@ def build_template_text(
         return build_bandsaw_check_out(
             airport, callsign, handoff_channel=handoff
         )
+    if template == "contact_joshua":
+        return build_contact_joshua(airport, callsign)
+    if template == "joshua_check_in":
+        return build_joshua_check_in(callsign)
+    if template == "joshua_check_out":
+        handoff = resolve_handoff_channel(
+            step=step,
+            mission=mission,
+            from_channel="joshua",
+            default="blackjack",
+            config=config,
+            opus=opus,
+            airport=airport,
+            state=state,
+        )
+        if step is not None:
+            step["handoff_channel"] = handoff
+        return build_joshua_check_out(
+            airport, callsign, handoff_channel=handoff
+        )
+    if template == "control_check_in":
+        return build_control_check_in(callsign, channel=channel or "control_east")
+    if template == "control_handoff":
+        next_ch = resolve_handoff_channel(
+            step=step,
+            mission=mission,
+            from_channel=channel or "control_east",
+            default="approach",
+            config=config,
+            opus=opus,
+            airport=airport,
+            state=state,
+        )
+        if step is not None:
+            step["handoff_channel"] = next_ch
+        return build_control_handoff(
+            airport,
+            callsign,
+            handoff_channel=next_ch,
+            from_channel=channel or "control_east",
+        )
     if template == "ops_check_in":
         return f"{cs}, Ops, go ahead."
-    if template == "center_radar":
-        return (
-            f"{cs}, radar contact, climb and maintain {climb}."
-        )
+    if template in ("center_radar", "center_check_in"):
+        return build_center_check_in(callsign)
     if template == "center_handoff":
         # Center/Other → next agency (same auto target as departure_handoff)
         next_ch = resolve_handoff_channel(
@@ -9250,6 +10268,10 @@ def build_template_text(
             mission=mission,
             from_channel=channel or "other",
             default="blackjack",
+            config=config,
+            opus=opus,
+            airport=airport,
+            state=state,
         )
         return build_departure_handoff(
             airport,
@@ -9306,13 +10328,19 @@ TEMPLATE_CHOICES = [
     ("bj_check_in", "Blackjack — Check-in / alpha"),
     ("bj_alpha_check", "Blackjack — Alpha check (standalone)"),
     ("bj_range_entry", "Blackjack — Alpha approved (optional)"),
-    ("bj_range_exit", "Blackjack — Range exit → Approach"),
+    ("bj_range_exit", "Blackjack — Range exit → Nellis Control"),
     ("contact_bandsaw", "Blackjack — Contact Bandsaw"),
     ("bandsaw_check_in", "Bandsaw — Check-in + alpha"),
     ("bandsaw_check_out", "Bandsaw — Check-out → Blackjack"),
+    ("contact_joshua", "Blackjack — Contact Joshua"),
+    ("joshua_check_in", "Joshua — Check-in (R-2508)"),
+    ("joshua_check_out", "Joshua — Check-out → Blackjack"),
+    ("control_check_in", "Nellis Control — Check-in (NATCF)"),
+    ("control_handoff", "Nellis Control — Handoff → Approach"),
     ("ops_check_in", "Ops — Check-in"),
-    ("center_radar", "Other — Center radar contact"),
-    ("center_handoff", "Other — Center / handoff"),
+    ("center_check_in", "LA Center — Radar contact"),
+    ("center_radar", "LA Center — Radar contact"),
+    ("center_handoff", "LA Center — Handoff"),
     ("radio_check", "Other — Radio check"),
 ]
 
@@ -9324,6 +10352,10 @@ CHANNELS = [
     "approach",
     "blackjack",
     "bandsaw",
+    "joshua",
+    "control_east",
+    "control_west",
+    "center",
     "ops",
     "tanker",
     "other",
@@ -9383,6 +10415,16 @@ def build_flow_step_phrase(
             climb_fixed = resolve_shared_climb_ft(
                 step=step, mission=mission, state=state
             )
+        if tmpl == "radar_contact":
+            radar_ft = departure_radar_climb_ft(
+                opus,
+                mission=mission,
+                state=state,
+                step=step,
+                initial_climb_ft=climb_fixed,
+            )
+            if radar_ft is not None:
+                climb_fixed = radar_ft
         climb_out: list[int] = []
         text = build_template_text(
             airport,
@@ -9399,9 +10441,14 @@ def build_flow_step_phrase(
             config=config,
             state=state,
         )
-        # Sticky shared climb: Delivery clearance ↔ Departure / Center radar
+        # Sticky shared climb: Delivery clearance ↔ Center radar.
+        # Radar contact may amend to filed cruise — do not rewrite Delivery's interim.
         if climb_out:
-            stick_shared_climb_ft(climb_out[0], step=step, mission=mission)
+            if tmpl == "radar_contact":
+                if isinstance(state, dict):
+                    state["departure_assigned_ft"] = int(climb_out[0])
+            else:
+                stick_shared_climb_ft(climb_out[0], step=step, mission=mission)
     freq, mod, tx_name = channel_radio(airport, channel)
     return text, tx_name, freq, mod
 

@@ -527,6 +527,36 @@ def zone_admits(
     return True
 
 
+def zone_wait_reason(
+    zone: dict[str, Any] | None,
+    fix: UnitFix,
+    *,
+    settled: bool = True,
+    hdg_tol: float = DEFAULTS["position_heading_tolerance_deg"],
+    settled_speed: float = DEFAULTS["position_settled_speed_mps"],
+    alt_tol: float = DEFAULTS["position_alt_tolerance_m"],
+) -> str:
+    """Why a jet that is over this area still does not count, or ''."""
+    if not point_in_zone(fix.x_m, fix.z_m, zone):
+        return ""
+    bits: list[str] = []
+    lo, hi = zone_alt_band_m(zone)
+    if fix.height_m is not None:
+        agl_ft = fix.height_m * FT_PER_M
+        if lo is not None and fix.height_m < lo:
+            bits.append(f"{agl_ft:.0f} ft AGL, zone min {lo * FT_PER_M:.0f} ft")
+        elif hi is not None and fix.height_m > hi:
+            bits.append(f"{agl_ft:.0f} ft AGL, zone max {hi * FT_PER_M:.0f} ft")
+        elif settled and abs(fix.height_m) > alt_tol:
+            bits.append(f"{agl_ft:.0f} ft AGL, need on deck")
+    if settled:
+        if fix.speed_mps is not None and fix.speed_mps > settled_speed:
+            bits.append(f"{fix.speed_mps * 1.94384:.0f} kt, still moving")
+        if fix.heading_err_deg is not None and fix.heading_err_deg > hdg_tol:
+            bits.append(f"heading {fix.heading_err_deg:.0f}° off")
+    return ", ".join(bits)
+
+
 @dataclass(frozen=True)
 class ZoneCount:
     """How much of the flight is in one zone."""
@@ -539,6 +569,7 @@ class ZoneCount:
     own_seen: bool = False
     own_inside: bool = False
     own_qualified: bool = False
+    detail: str = ""
 
     def ok(self, *, need_full: bool = True) -> bool:
         if not self.total:
@@ -562,9 +593,9 @@ class ZoneCount:
         have = self.qualified if need_full else int(self.ok(need_full=False))
         word = "settled in" if self.settled else "in"
         out = f"{have}/{need} {word} {self.label}"
-        # Inside but not settled is the interesting case: the flight is where it
-        # should be and the call is waiting on the jets, not on the geometry.
-        if self.settled and self.inside > self.qualified:
+        if self.detail:
+            out += f" ({self.detail})"
+        elif self.settled and self.inside > self.qualified:
             out += f" ({self.inside} inside, still moving)"
         return out
 
@@ -624,6 +655,7 @@ class FlightStatus:
         inside = qualified = 0
         own_seen = own_inside = own_qualified = False
         hit_name = ""
+        own_why = ""
         for fix in self.fixes:
             own_seen = own_seen or fix.own
             in_any = False
@@ -637,6 +669,14 @@ class FlightStatus:
                 if not settled or zone_admits(zone, fix, settled=True, **tol):
                     ok_any = True
                     break
+            if fix.own and not ok_any:
+                for zone in zones_l:
+                    why = zone_wait_reason(zone, fix, settled=settled, **tol)
+                    if why:
+                        own_why = why
+                        if not hit_name:
+                            hit_name = zone_label(zone)
+                        break
             if not in_any:
                 continue
             inside += 1
@@ -660,6 +700,7 @@ class FlightStatus:
             own_seen=own_seen,
             own_inside=own_inside,
             own_qualified=own_qualified,
+            detail=own_why,
         )
 
     def summary(self, *, need_full: bool = True) -> str:
@@ -769,6 +810,40 @@ def gap_remaining(
         return 0.0
     elapsed = (time.time() if now is None else now) - last
     return max(0.0, trigger.gap_s - elapsed)
+
+
+def skip_auto_tx_already_played(
+    *,
+    fire_id: str,
+    current_step_id: str,
+    last_step_id: str,
+    template: str = "",
+    hold_for_landing: bool = False,
+    playing_id: str = "",
+) -> bool:
+    """
+    True when Watch must not transmit.
+
+    Manual Play (or voice) already sent this step, or the cursor has moved on.
+    play_id() would otherwise seek back and TX it a second time. Multi-ship
+    landings are the exception: the same clear_land step fires once per seat
+    after Play has finished talking.
+    """
+    want = str(fire_id or "").strip()
+    if not want:
+        return False
+    current = str(current_step_id or "").strip()
+    last = str(last_step_id or "").strip()
+    playing = str(playing_id or "").strip()
+    if playing == want:
+        return True
+    if current and current != want:
+        return True
+    if last == want and not (
+        str(template or "").strip().lower() == "clear_land" and hold_for_landing
+    ):
+        return True
+    return False
 
 
 def _trigger_float(val: Any) -> float | None:
@@ -1316,6 +1391,8 @@ class PositionTracker:
         self._fired: set[str] = set()
         self._entered: set[str] = set()
         self.pending_latch: str = ""
+        self.playing_step_id: str = ""
+        self._manual_consumed: dict[str, str] = {}
 
     # -- motion ----------------------------------------------------------
     def _speed_mps(self, unit: dict[str, Any], now: float) -> float | None:
@@ -1323,6 +1400,17 @@ class PositionTracker:
         pos = unit_xz(unit)
         if not uid or pos is None:
             return None
+        # Map tester publishes the slider speed. CAOC groundSpeedMps is not
+        # trusted — it reads 0 even when the jet is moving.
+        if uid == atc_phrase.MAP_OWNSHIP_ID:
+            for key in ("groundSpeedMps", "speedMps"):
+                raw = unit.get(key)
+                if raw is None:
+                    continue
+                try:
+                    return max(0.0, float(raw))
+                except (TypeError, ValueError):
+                    continue
         prev = self._last.get(uid)
         self._last[uid] = (now, pos[0], pos[1])
         if not prev:
@@ -1368,9 +1456,46 @@ class PositionTracker:
         self._fired.add(key)
         return True
 
+    def mark_step_played(self, step_id: str) -> None:
+        """Manual Play started — Watch must not TX this step until it finishes."""
+        sid = str(step_id or "").strip()
+        if not sid:
+            return
+        self.playing_step_id = sid
+        pending = str(self.pending_latch or "")
+        if pending and sid in pending.split(":"):
+            self._fired.add(pending)
+            self._manual_consumed[sid] = pending
+            self.pending_latch = ""
+
+    def unmark_step_played(self, step_id: str) -> None:
+        """Play failed — let Watch fire this step again."""
+        sid = str(step_id or "").strip()
+        if self.playing_step_id == sid:
+            self.playing_step_id = ""
+        consumed = self._manual_consumed.pop(sid, "")
+        if consumed:
+            self._fired.discard(consumed)
+            if not self.pending_latch:
+                self.pending_latch = consumed
+
+    def finish_manual_tx(self, step_id: str = "") -> None:
+        """Play finished talking — Watch may arm the next seat / step."""
+        sid = str(step_id or self.playing_step_id or "").strip()
+        if self.playing_step_id == sid or not sid:
+            self.playing_step_id = ""
+        self._manual_consumed.pop(sid, None)
+
     def armed(self, key: str) -> bool:
         """Whether `fire_once` would still fire for this key."""
-        return key not in self._fired
+        token = str(key or "")
+        if token in self._fired:
+            return False
+        parts = token.split(":")
+        if len(parts) >= 2 and parts[0] == "fire":
+            if self.playing_step_id and parts[1] == self.playing_step_id:
+                return False
+        return True
 
     def clear_fired(self, predicate: Any = None) -> int:
         """
@@ -1397,6 +1522,8 @@ class PositionTracker:
         self._fired.clear()
         self._entered.clear()
         self.pending_latch = ""
+        self.playing_step_id = ""
+        self._manual_consumed.clear()
 
     # -- main evaluation -------------------------------------------------
     def evaluate(
@@ -1440,19 +1567,32 @@ class PositionTracker:
         status.has_eor_area = bool(eor_zones) or point_xz((geo or {}).get("eor")) is not None
 
         radar = atc_phrase.fetch_caoc_radar(config, max_age_s=max_age_s)
+        map_own = atc_phrase.ownship_from_map_enabled(config)
         if not radar:
-            status.reason = "CAOC radar feed unavailable"
+            status.reason = (
+                "map jet not published — move the aircraft on the map"
+                if map_own
+                else "CAOC radar feed unavailable"
+            )
             return status
         units = atc_phrase.caoc_air_units(list(radar.get("units") or []))
         if not units:
-            status.reason = "no air tracks in the feed"
+            status.reason = (
+                "map jet not published — move the aircraft on the map"
+                if map_own
+                else "no air tracks in the feed"
+            )
             return status
 
         own = atc_phrase.match_caoc_unit_for_flight(
             units, callsign=callsign, opus=opus, config=config
         )
-        if not own:
-            status.reason = "own aircraft not found in the feed"
+        if not own or (map_own and str(own.get("id") or "") != atc_phrase.MAP_OWNSHIP_ID):
+            status.reason = (
+                "map jet not published — move the aircraft on the map"
+                if map_own
+                else "own aircraft not found in the feed"
+            )
             return status
 
         status.own_label = atc_phrase.radio_callsign_from_caoc_unit(own)

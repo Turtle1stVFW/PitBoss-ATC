@@ -11,6 +11,8 @@ installed, the window tells you to install it from python.org with tcl/tk.
 
 Both open the same polished UI. `Open-Zone-Editor.cmd` is the separate map for
 drawing the areas that fire steps automatically — the app has a button for it too.
+`Open-Route-Tester.cmd` is the same server’s `/tester` page: a map Fly treats
+as your jet (talk on the Fly tab; tankers still come from CAOC).
 
 ## Tabs
 1. **Plan Flight** — build the full sortie timeline (TTS template, custom text, or MP3/OGG). No JSON editing.
@@ -168,6 +170,24 @@ drawn on the same map, which is how you check that a jet parked on the runway in
 DCS also sits inside the area you traced. Details of the drawing tools, imports
 from Google Earth KML and the `calibrated` flag are in `tools/README.md`.
 
+### Map jet (Fly test mode)
+
+**Fly tab → Test: map is my jet** (checked) reads ownship from the local map
+instead of Opus. Uncheck it to go back to CAOC position. **Setup → Map is my
+jet…** (or `Open-Route-Tester.cmd`) opens `http://127.0.0.1:8777/tester` and
+turns that checkbox on. The red jet is what Fly treats as you — drag it or
+**Play** along a plotted route. Talk and hear ATC on the **Fly** tab (PTT,
+Whisper, TTS, SRS). Tankers and other traffic still come from CAOC; only your
+position is taken from the map. Click **Add red** / **Add blue** on the tester to
+drop hostile or friendly planes for picture and declare (Fly must be in map-jet
+test mode). Check **Override Opus weather and time of day**
+on the tester to set winds, altimeter, ceiling, and the mission clock Fly uses
+instead of Opus METAR / CAOC time (Night 2300L calm-wind departures are 03s).
+Leave **Drive Fly ownship** on and **Watch live position** on so zone steps fire.
+Named NTTR points come from `NTTR.kml`.
+
+`py -3 check_route_tester.py` exercises the evaluation with synthetic positions.
+
 ### Any step can fire off a zone
 
 The two above are the built-in cases. On **Plan Flight**, any step — including a
@@ -317,13 +337,16 @@ Calls it understands:
 | "Bandsaw, checking in" / picture / bogey dope / declare | Optional C2 on Bandsaw |
 | "Bandsaw, checking out / switch Blackjack" | Leave Bandsaw → contact Blackjack (not check-in) |
 | "Blackjack, request Bandsaw" | Push to Bandsaw (optional; you can also self-tune) |
+| "Joshua, checking in" | Optional R-2508 agency (built into Nellis Default). No picture/declare unless you check **C2 services** on that step |
+| "Joshua, checking out / switch Blackjack" | Leave Joshua → contact Blackjack |
+| "Blackjack, request Joshua" | Push to Joshua (optional; you can also self-tune) |
 | "Blackjack / Bandsaw, request tanker" | Track (e.g. *track A R two tree one Victor*) + braw with altitude to the Opus **KC-135 boom** — never KC-130 or KC-135MPRS. Ends with *Frequency change approved.* AAR is a **side trip**: the cursor jumps to Tanker, then when you retune **Blackjack or Bandsaw** (or check back in) it returns to that agency — not the next timeline step. |
 | "Say TACAN" / "say tanker frequency" / "say tanker bullseye" | On-request C2: TACAN, UHF, live bullseye |
 | "Texaco, request rejoin" / "request reform" | Cleared rejoin left, sometimes left observation (tanker does not say *identified*) |
 | Boom / reform small talk | After rejoin, Texaco starts boom chat once you have been **0.1–0.5 NM** from the tanker for **30–60 seconds** with a receiver in that envelope. Fly **Texaco starts chat** makes Texaco talk first. The **first** line is a time-of-day hello (*Good morning, sir*) — later bits are A/B polls, open questions, and riffs. Answer in a word, say anything, or just listen. With Ollama/Gemini/OpenAI on, freeform replies get a **live riff** (not locked to the two buttons). Texaco keeps chatting with short breaks until you **stop chat** / say *talk later* / *standing by*, or leave the tanker. LLM falls back to the library if slow. |
 | DCS tanker radio | **Ready pre-contact** → DCS *cleared contact* (boom). **Abort refueling** to disconnect. Do not use SRS for those. |
 | "Blackjack / Bandsaw, back from the tanker" / "checking in" after AAR | Radar contact, continue — returns to **whichever C2 freq you tuned** (Blackjack or Bandsaw) |
-| "Blackjack, off station / range complete" | Range checkout → Approach (required after Blackjack check-in) |
+| "Blackjack, off station / range complete" | Range checkout → **Nellis Control** East (ch 7) or West (ch 8) from position — then Approach |
 | "Approach, checking in" / "inbound" | Approach assigns recovery from METAR (VMC → VFR recovery + TAC overhead; IFR → instrument + IAF). Prefers RWY 21 |
 | "Request ARCOE / TORYE / STRYK / MINTT / overhead / instrument" | Change the assigned recovery / approach |
 | "Request hold" / "cancel hold" | Spoken hold / continue (simple state) |
@@ -341,16 +364,19 @@ The mission timeline uses three **mission phases** (separate from the radio agen
 | Phase | Agencies |
 |-------|----------|
 | **Departure** | Delivery, Ground, Tower, Departure |
-| **Flight / airwork** | Blackjack, Bandsaw, Ops, Other (en-route / C2) |
+| **Flight / airwork** | Blackjack, Bandsaw, Joshua, Nellis Control (East/West), Ops, Other (en-route / C2) |
 | **Approach** | Approach, Tower, Ground |
 
-After Blackjack check-in you are in Flight: stay on Blackjack, push or self-tune to
-**Bandsaw** for picture/C2 work, or do other range tasks. **You can say** tips follow
-the frequency you are actually tuned to within that phase (Blackjack tips on 377.8,
-Bandsaw tips on 378.225). When finished with Bandsaw, **check out** on that net
-(“checking out” / “switch Blackjack”) — that call advances past Bandsaw;
-check-in alone does not. Then return to Blackjack for range exit before Approach.
-Bandsaw is optional and does not block that handoff.
+After Blackjack check-in you are in Flight. **Nellis Default** reads the Opus
+flight plan and reserved airspace to decide which **control areas** this hop
+needs (Fly shows `hop Blackjack, Nellis Control, Approach`). A local NTTR strip
+is Departure → Blackjack → Nellis Control → Approach. An R-2508 route is
+Departure → Nellis Control → **LA Center** (the ~100 NM transit) → **Joshua**
+only inside **15 NM of R-2508** — never a Departure-to-Joshua jump.
+Enroute VORs also add Center. **Bandsaw** and **tanker** are never inferred —
+tune those when tasked. **You can say** tips follow the frequency you are
+actually tuned to. Mixed packages on one Host share this same default plan —
+each Opus flight has its own cursor.
 
 **Approach / recovery (NAFBI 11-250):** Blackjack range exit says **proceed direct**
 to the exit / recovery fix (e.g. Arcoe / Torye / Dudbe) and hands you to Approach.

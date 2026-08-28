@@ -138,6 +138,73 @@ def main() -> int:
     if not tracker.held_for("k2", True, 0.0, now=t0):
         print("  FAIL zero dwell should pass immediately")
         bad += 1
+    if not rp.skip_auto_tx_already_played(
+        fire_id="dep_cruise",
+        current_step_id="dep_handoff",
+        last_step_id="dep_cruise",
+    ):
+        print("  FAIL auto must not replay a step after Play advanced the cursor")
+        bad += 1
+    if not rp.skip_auto_tx_already_played(
+        fire_id="dep_cruise",
+        current_step_id="dep_cruise",
+        last_step_id="dep_cruise",
+    ):
+        print("  FAIL auto must not replay a step still under the cursor")
+        bad += 1
+    if rp.skip_auto_tx_already_played(
+        fire_id="dep_cruise",
+        current_step_id="dep_cruise",
+        last_step_id="dep_radar",
+    ):
+        print("  FAIL first auto of the cursor step should still fire")
+        bad += 1
+    if rp.skip_auto_tx_already_played(
+        fire_id="twr_land",
+        current_step_id="twr_land",
+        last_step_id="twr_land",
+        template="clear_land",
+        hold_for_landing=True,
+    ):
+        print("  FAIL next-seat land must still auto")
+        bad += 1
+    if not rp.skip_auto_tx_already_played(
+        fire_id="dep_cruise",
+        current_step_id="dep_cruise",
+        last_step_id="dep_radar",
+        playing_id="dep_cruise",
+    ):
+        print("  FAIL auto must not overlap Play while it is still talking")
+        bad += 1
+    if not rp.skip_auto_tx_already_played(
+        fire_id="twr_land",
+        current_step_id="twr_land",
+        last_step_id="twr_land",
+        template="clear_land",
+        hold_for_landing=True,
+        playing_id="twr_land",
+    ):
+        print("  FAIL land must wait until Play finishes before the next seat")
+        bad += 1
+    play_tracker = rp.PositionTracker()
+    play_tracker.pending_latch = "fire:dep_cruise:21R"
+    play_tracker.mark_step_played("dep_cruise")
+    if play_tracker.armed("fire:dep_cruise:21R"):
+        print("  FAIL Play must disarm Watch for the step it is transmitting")
+        bad += 1
+    play_tracker.finish_manual_tx("dep_cruise")
+    if play_tracker.armed("fire:dep_cruise:21R"):
+        print("  FAIL the consumed Watch latch must stay spent after Play")
+        bad += 1
+    fail_tracker = rp.PositionTracker()
+    fail_tracker.pending_latch = "fire:dep_cruise:21R"
+    fail_tracker.mark_step_played("dep_cruise")
+    fail_tracker.unmark_step_played("dep_cruise")
+    if not fail_tracker.armed("fire:dep_cruise:21R"):
+        print("  FAIL a failed Play must re-arm Watch")
+        bad += 1
+    else:
+        print("auto vs Play — no double TX; landing seats still auto")
 
     bad += check_zones()
     bad += check_zone_admission()
@@ -406,6 +473,17 @@ def check_zone_admission() -> int:
         print("  FAIL 'just me' fired on a wingman's position")
         bad += 1
     print("ok   'just me' means me, not whoever is parked in the right place")
+
+    eor_cap = dict(pad, name="NW EOR", trigger="eor", max_alt_ft=100.0)
+    status = rp.FlightStatus(runway="21R", ok=True, total=1)
+    status.fixes = [fix(unit_id="1", own=True, height_m=305.0)]
+    high = status.in_zone(eor_cap, settled=True)
+    desc = high.describe(need_full=False)
+    if high.inside or high.ok(need_full=False) or "AGL" not in desc or "100" not in desc:
+        print(f"  FAIL airborne over EOR should name altitude, got {desc!r}")
+        bad += 1
+    else:
+        print(f"ok   airborne over EOR: {desc}")
 
     # Leaving: nobody inside is what a "clear of the runway" step waits for.
     status.fixes = [fix(unit_id="1", own=True, x_m=5000.0), fix(unit_id="2", x_m=5000.0)]

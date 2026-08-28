@@ -158,7 +158,7 @@
     {
       "id": "bs_checkin",
       "phase": "flight",
-      "label": "Bandsaw check-in (optional)",
+      "label": "Bandsaw check-in (optional sandbox)",
       "channel": "bandsaw",
       "mode": "tts",
       "template": "bandsaw_check_in",
@@ -169,7 +169,7 @@
     {
       "id": "new_step_3b0a8c",
       "phase": "flight",
-      "label": "Tanker",
+      "label": "Tanker (optional sandbox)",
       "channel": "tanker",
       "mode": "tts",
       "template": "radio_check",
@@ -192,16 +192,56 @@
       "text": null
     },
     {
+      "id": "joshua_checkin",
+      "phase": "flight",
+      "label": "Joshua check-in (R-2508)",
+      "channel": "joshua",
+      "mode": "tts",
+      "template": "joshua_check_in",
+      "file": null,
+      "enabled": true,
+      "text": null,
+      "c2": false,
+      "hold": true
+    },
+    {
+      "id": "joshua_checkout",
+      "phase": "flight",
+      "label": "Joshua check-out \u2192 Nellis Control",
+      "channel": "joshua",
+      "mode": "tts",
+      "template": "joshua_check_out",
+      "file": null,
+      "enabled": true,
+      "text": null,
+      "handoff_channel": "blackjack",
+      "c2": false,
+      "hold": false
+    },
+    {
+      "id": "center_checkin",
+      "phase": "flight",
+      "label": "LA Center check-in (optional sandbox)",
+      "channel": "center",
+      "mode": "tts",
+      "template": "center_check_in",
+      "file": null,
+      "enabled": true,
+      "text": null,
+      "c2": false,
+      "hold": true
+    },
+    {
       "id": "bj_range_exit",
       "phase": "flight",
-      "label": "Blackjack range exit",
+      "label": "Blackjack range exit \u2192 Control",
       "channel": "blackjack",
       "mode": "tts",
       "template": "bj_range_exit",
       "file": null,
       "enabled": true,
       "text": null,
-      "handoff_channel": "approach",
+      "handoff_channel": "control_east",
       "trigger": {
         "zone": "approach",
         "within_nm": 40,
@@ -210,6 +250,42 @@
         "dwell_s": 0,
         "gap_s": 5
       }
+    },
+    {
+      "id": "control_east_checkin",
+      "phase": "flight",
+      "label": "Nellis Control East check-in (NATCF)",
+      "channel": "control_east",
+      "mode": "tts",
+      "template": "control_check_in",
+      "file": null,
+      "enabled": true,
+      "text": null,
+      "hold": true
+    },
+    {
+      "id": "control_west_checkin",
+      "phase": "flight",
+      "label": "Nellis Control West check-in (optional)",
+      "channel": "control_west",
+      "mode": "tts",
+      "template": "control_check_in",
+      "file": null,
+      "enabled": true,
+      "text": null,
+      "hold": true
+    },
+    {
+      "id": "control_to_approach",
+      "phase": "flight",
+      "label": "Nellis Control \u2192 Approach",
+      "channel": "control_east",
+      "mode": "tts",
+      "template": "control_handoff",
+      "file": null,
+      "enabled": true,
+      "text": null,
+      "handoff_channel": "approach"
     },
     {
       "id": "app_checkin",

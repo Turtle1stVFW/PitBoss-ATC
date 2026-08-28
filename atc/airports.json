@@ -96,6 +96,28 @@
       "mod": "AM",
       "source": "local"
     },
+    "joshua": {
+      "freq_mhz": 348.7,
+      "mod": "AM",
+      "source": "local"
+    },
+    "control_east": {
+      "freq_mhz": 317.525,
+      "mod": "AM",
+      "source": "opus",
+      "local_preset": 7
+    },
+    "control_west": {
+      "freq_mhz": 254.4,
+      "mod": "AM",
+      "source": "opus",
+      "local_preset": 8
+    },
+    "center": {
+      "freq_mhz": 353.6,
+      "mod": "AM",
+      "source": "local"
+    },
     "ops": {
       "freq_mhz": 255.0,
       "mod": "AM",
@@ -108,7 +130,7 @@
     },
     "geometry": {
       "calibrated": true,
-      "note": "Drawn on a map with tools/zone_server.py, 2026-08-10. Coordinates are lat/lon.",
+      "note": "Field boxes drawn in zone_server.py. NTTR agency polygons from FAA AIS Special Use Airspace (generalized NASR). Control East/Sally = Desert MOA + R-4806E + Reveille. Control West/Lee = R-4807A/B + R-4808S + R-4809 + an inferred Lee Corridor (11-250; not a published SUA). Blackjack = working restricted areas. Joshua = R-2508 sketch. Not a substitute for the IFG chart.",
       "field_elev_ft": 1870,
       "zones": [
         {
@@ -281,8 +303,638 @@
           "locked": true
         },
         {
-          "id": "other",
-          "trigger": "other",
+          "id": "sally-desert-moa",
+          "trigger": "control_east",
+          "kind": "polygon",
+          "name": "Sally \u2014 Desert MOA",
+          "max_alt_ft": 60000,
+          "source": "faa_sua",
+          "points": [
+            {
+              "lat": 37.8236,
+              "lon": -113.7003
+            },
+            {
+              "lat": 36.7167,
+              "lon": -114.6008
+            },
+            {
+              "lat": 36.7167,
+              "lon": -115.0508
+            },
+            {
+              "lat": 36.4333,
+              "lon": -115.3008
+            },
+            {
+              "lat": 37.2833,
+              "lon": -115.3008
+            },
+            {
+              "lat": 37.2833,
+              "lon": -115.5842
+            },
+            {
+              "lat": 37.4667,
+              "lon": -115.5842
+            },
+            {
+              "lat": 37.4667,
+              "lon": -115.8008
+            },
+            {
+              "lat": 37.55,
+              "lon": -115.8008
+            },
+            {
+              "lat": 37.55,
+              "lon": -115.8842
+            },
+            {
+              "lat": 37.7,
+              "lon": -115.8842
+            },
+            {
+              "lat": 37.7,
+              "lon": -116.1842
+            },
+            {
+              "lat": 37.8833,
+              "lon": -116.1842
+            },
+            {
+              "lat": 38.0167,
+              "lon": -114.5008
+            },
+            {
+              "lat": 38.0167,
+              "lon": -114.2
+            },
+            {
+              "lat": 37.8956,
+              "lon": -113.7008
+            }
+          ],
+          "locked": true
+        },
+        {
+          "id": "sally-r4806e",
+          "trigger": "control_east",
+          "kind": "polygon",
+          "name": "Sally \u2014 R-4806E",
+          "max_alt_ft": 60000,
+          "source": "faa_sua",
+          "points": [
+            {
+              "lat": 36.8,
+              "lon": -115.1178
+            },
+            {
+              "lat": 36.6333,
+              "lon": -115.3008
+            },
+            {
+              "lat": 37.2833,
+              "lon": -115.3008
+            },
+            {
+              "lat": 37.2833,
+              "lon": -115.1845
+            },
+            {
+              "lat": 37.2,
+              "lon": -115.1175
+            }
+          ],
+          "locked": true
+        },
+        {
+          "id": "sally-reveille-n",
+          "trigger": "control_east",
+          "kind": "polygon",
+          "name": "Sally \u2014 Reveille North MOA",
+          "max_alt_ft": 60000,
+          "source": "faa_sua",
+          "points": [
+            {
+              "lat": 37.9997,
+              "lon": -114.7017
+            },
+            {
+              "lat": 37.9992,
+              "lon": -116.667
+            },
+            {
+              "lat": 38.2333,
+              "lon": -116.3145
+            },
+            {
+              "lat": 38.2333,
+              "lon": -115.0
+            },
+            {
+              "lat": 38.0167,
+              "lon": -114.2008
+            }
+          ],
+          "locked": true
+        },
+        {
+          "id": "sally-reveille-s",
+          "trigger": "control_east",
+          "kind": "polygon",
+          "name": "Sally \u2014 Reveille South MOA",
+          "max_alt_ft": 60000,
+          "source": "faa_sua",
+          "points": [
+            {
+              "lat": 37.8833,
+              "lon": -116.8222
+            },
+            {
+              "lat": 37.9992,
+              "lon": -116.667
+            },
+            {
+              "lat": 37.9997,
+              "lon": -114.7017
+            },
+            {
+              "lat": 37.8833,
+              "lon": -116.1842
+            }
+          ],
+          "locked": true
+        },
+        {
+          "id": "lee-r4807a",
+          "trigger": "control_west",
+          "kind": "polygon",
+          "name": "Lee \u2014 R-4807A",
+          "max_alt_ft": 60000,
+          "source": "faa_sua",
+          "points": [
+            {
+              "lat": 37.8833,
+              "lon": -116.1842
+            },
+            {
+              "lat": 37.7,
+              "lon": -116.1842
+            },
+            {
+              "lat": 37.7,
+              "lon": -115.8842
+            },
+            {
+              "lat": 37.55,
+              "lon": -115.8842
+            },
+            {
+              "lat": 37.55,
+              "lon": -115.8008
+            },
+            {
+              "lat": 37.4667,
+              "lon": -115.8008
+            },
+            {
+              "lat": 37.4667,
+              "lon": -116.0008
+            },
+            {
+              "lat": 37.2667,
+              "lon": -116.0008
+            },
+            {
+              "lat": 37.2667,
+              "lon": -116.1842
+            },
+            {
+              "lat": 37.3333,
+              "lon": -116.1842
+            },
+            {
+              "lat": 37.3833,
+              "lon": -116.2842
+            },
+            {
+              "lat": 37.35,
+              "lon": -116.5675
+            },
+            {
+              "lat": 37.1333,
+              "lon": -116.4508
+            },
+            {
+              "lat": 36.9167,
+              "lon": -116.4508
+            },
+            {
+              "lat": 36.9167,
+              "lon": -116.5592
+            },
+            {
+              "lat": 36.85,
+              "lon": -116.5592
+            },
+            {
+              "lat": 37.4417,
+              "lon": -117.0758
+            },
+            {
+              "lat": 37.8833,
+              "lon": -117.0947
+            },
+            {
+              "lat": 37.8833,
+              "lon": -116.9175
+            },
+            {
+              "lat": 37.7833,
+              "lon": -116.9175
+            },
+            {
+              "lat": 37.55,
+              "lon": -116.7175
+            },
+            {
+              "lat": 37.55,
+              "lon": -116.4342
+            },
+            {
+              "lat": 37.8833,
+              "lon": -116.4342
+            }
+          ],
+          "locked": true
+        },
+        {
+          "id": "lee-r4807b",
+          "trigger": "control_west",
+          "kind": "polygon",
+          "name": "Lee \u2014 R-4807B",
+          "max_alt_ft": 60000,
+          "source": "faa_sua",
+          "points": [
+            {
+              "lat": 37.2667,
+              "lon": -116.1842
+            },
+            {
+              "lat": 37.2667,
+              "lon": -116.5175
+            },
+            {
+              "lat": 37.35,
+              "lon": -116.5675
+            },
+            {
+              "lat": 37.3833,
+              "lon": -116.2842
+            },
+            {
+              "lat": 37.3333,
+              "lon": -116.1842
+            }
+          ],
+          "locked": true
+        },
+        {
+          "id": "lee-r4808s",
+          "trigger": "control_west",
+          "kind": "polygon",
+          "name": "Lee \u2014 R-4808S",
+          "max_alt_ft": 60000,
+          "source": "faa_sua",
+          "points": [
+            {
+              "lat": 36.6833,
+              "lon": -116.2467
+            },
+            {
+              "lat": 36.6833,
+              "lon": -116.4425
+            },
+            {
+              "lat": 36.7667,
+              "lon": -116.4425
+            }
+          ],
+          "locked": true
+        },
+        {
+          "id": "lee-r4809",
+          "trigger": "control_west",
+          "kind": "polygon",
+          "name": "Lee \u2014 R-4809",
+          "max_alt_ft": 60000,
+          "source": "faa_sua",
+          "points": [
+            {
+              "lat": 37.55,
+              "lon": -116.4342
+            },
+            {
+              "lat": 37.55,
+              "lon": -116.7175
+            },
+            {
+              "lat": 37.7833,
+              "lon": -116.9175
+            },
+            {
+              "lat": 37.8833,
+              "lon": -116.9175
+            },
+            {
+              "lat": 37.8833,
+              "lon": -116.4342
+            }
+          ],
+          "locked": true
+        },
+        {
+          "id": "bj-r4806w",
+          "trigger": "blackjack",
+          "kind": "polygon",
+          "name": "Blackjack \u2014 R-4806W",
+          "max_alt_ft": 60000,
+          "source": "faa_sua",
+          "points": [
+            {
+              "lat": 37.2833,
+              "lon": -115.3008
+            },
+            {
+              "lat": 36.4333,
+              "lon": -115.3008
+            },
+            {
+              "lat": 36.4333,
+              "lon": -115.3842
+            },
+            {
+              "lat": 36.5833,
+              "lon": -115.6175
+            },
+            {
+              "lat": 36.6,
+              "lon": -115.9342
+            },
+            {
+              "lat": 37.1,
+              "lon": -115.9342
+            },
+            {
+              "lat": 37.1,
+              "lon": -115.5842
+            },
+            {
+              "lat": 37.2833,
+              "lon": -115.5842
+            }
+          ],
+          "locked": true
+        },
+        {
+          "id": "bj-r4806e",
+          "trigger": "blackjack",
+          "kind": "polygon",
+          "name": "Blackjack \u2014 R-4806E",
+          "max_alt_ft": 60000,
+          "source": "faa_sua",
+          "points": [
+            {
+              "lat": 36.8,
+              "lon": -115.1178
+            },
+            {
+              "lat": 36.6333,
+              "lon": -115.3008
+            },
+            {
+              "lat": 37.2833,
+              "lon": -115.3008
+            },
+            {
+              "lat": 37.2833,
+              "lon": -115.1845
+            },
+            {
+              "lat": 37.2,
+              "lon": -115.1175
+            }
+          ],
+          "locked": true
+        },
+        {
+          "id": "bj-r4807a",
+          "trigger": "blackjack",
+          "kind": "polygon",
+          "name": "Blackjack \u2014 R-4807A",
+          "max_alt_ft": 60000,
+          "source": "faa_sua",
+          "points": [
+            {
+              "lat": 37.8833,
+              "lon": -116.1842
+            },
+            {
+              "lat": 37.7,
+              "lon": -116.1842
+            },
+            {
+              "lat": 37.7,
+              "lon": -115.8842
+            },
+            {
+              "lat": 37.55,
+              "lon": -115.8842
+            },
+            {
+              "lat": 37.55,
+              "lon": -115.8008
+            },
+            {
+              "lat": 37.4667,
+              "lon": -115.8008
+            },
+            {
+              "lat": 37.4667,
+              "lon": -116.0008
+            },
+            {
+              "lat": 37.2667,
+              "lon": -116.0008
+            },
+            {
+              "lat": 37.2667,
+              "lon": -116.1842
+            },
+            {
+              "lat": 37.3333,
+              "lon": -116.1842
+            },
+            {
+              "lat": 37.3833,
+              "lon": -116.2842
+            },
+            {
+              "lat": 37.35,
+              "lon": -116.5675
+            },
+            {
+              "lat": 37.1333,
+              "lon": -116.4508
+            },
+            {
+              "lat": 36.9167,
+              "lon": -116.4508
+            },
+            {
+              "lat": 36.9167,
+              "lon": -116.5592
+            },
+            {
+              "lat": 36.85,
+              "lon": -116.5592
+            },
+            {
+              "lat": 37.4417,
+              "lon": -117.0758
+            },
+            {
+              "lat": 37.8833,
+              "lon": -117.0947
+            },
+            {
+              "lat": 37.8833,
+              "lon": -116.9175
+            },
+            {
+              "lat": 37.7833,
+              "lon": -116.9175
+            },
+            {
+              "lat": 37.55,
+              "lon": -116.7175
+            },
+            {
+              "lat": 37.55,
+              "lon": -116.4342
+            },
+            {
+              "lat": 37.8833,
+              "lon": -116.4342
+            }
+          ],
+          "locked": true
+        },
+        {
+          "id": "bj-r4807b",
+          "trigger": "blackjack",
+          "kind": "polygon",
+          "name": "Blackjack \u2014 R-4807B",
+          "max_alt_ft": 60000,
+          "source": "faa_sua",
+          "points": [
+            {
+              "lat": 37.2667,
+              "lon": -116.1842
+            },
+            {
+              "lat": 37.2667,
+              "lon": -116.5175
+            },
+            {
+              "lat": 37.35,
+              "lon": -116.5675
+            },
+            {
+              "lat": 37.3833,
+              "lon": -116.2842
+            },
+            {
+              "lat": 37.3333,
+              "lon": -116.1842
+            }
+          ],
+          "locked": true
+        },
+        {
+          "id": "bj-r4809",
+          "trigger": "blackjack",
+          "kind": "polygon",
+          "name": "Blackjack \u2014 R-4809",
+          "max_alt_ft": 60000,
+          "source": "faa_sua",
+          "points": [
+            {
+              "lat": 37.55,
+              "lon": -116.4342
+            },
+            {
+              "lat": 37.55,
+              "lon": -116.7175
+            },
+            {
+              "lat": 37.7833,
+              "lon": -116.9175
+            },
+            {
+              "lat": 37.8833,
+              "lon": -116.9175
+            },
+            {
+              "lat": 37.8833,
+              "lon": -116.4342
+            }
+          ],
+          "locked": true
+        },
+        {
+          "id": "lee-corridor",
+          "trigger": "control_west",
+          "kind": "polygon",
+          "name": "Lee Corridor (inferred 11-250)",
+          "max_alt_ft": 27000.0,
+          "source": "inferred_11_250",
+          "points": [
+            {
+              "lat": 36.32,
+              "lon": -115.18
+            },
+            {
+              "lat": 36.48,
+              "lon": -115.52
+            },
+            {
+              "lat": 36.59,
+              "lon": -115.67
+            },
+            {
+              "lat": 36.68,
+              "lon": -116.25
+            },
+            {
+              "lat": 36.78,
+              "lon": -116.5
+            },
+            {
+              "lat": 36.55,
+              "lon": -115.95
+            },
+            {
+              "lat": 36.38,
+              "lon": -115.45
+            }
+          ],
+          "locked": true
+        },
+        {
+          "id": "joshua",
+          "trigger": "joshua",
           "kind": "polygon",
           "name": "R-2508 Joshua Control",
           "max_alt_ft": 18000.0,

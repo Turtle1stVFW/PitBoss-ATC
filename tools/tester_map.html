@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Map jet — Fly test</title>
+<link rel="stylesheet" href="/vendor/leaflet.css">
+<link rel="stylesheet" href="/zone_map.css">
+<link rel="stylesheet" href="/tester_map.css">
+</head>
+<body>
+<aside id="side">
+  <header>
+    <h1>Map jet</h1>
+    <p class="sub">This is your aircraft for Fly. Drag or Play here; talk and hear ATC on the Fly tab. Drop red (hostile) or blue (friendly) planes for picture and declare. Tankers still come from CAOC.</p>
+  </header>
+
+  <section>
+    <label class="check"><input type="checkbox" id="driveFly" checked> Drive Fly ownship</label>
+    <label class="check"><input type="checkbox" id="showTracks" checked> Show CAOC traffic</label>
+    <label class="check"><input type="checkbox" id="showFixes" checked> Show NTTR points</label>
+    <p id="driveStatus" class="hint">Fly is using this jet.</p>
+  </section>
+
+  <section>
+    <label for="airport">Airport</label>
+    <select id="airport"></select>
+    <p id="hop" class="pill">&nbsp;</p>
+  </section>
+
+  <section>
+    <label for="route">Filed route</label>
+    <textarea id="route" rows="2" spellcheck="false" placeholder="KLSV FLEX DREAM SARAH KLSV"></textarea>
+    <div class="row rotate-row">
+      <button type="button" id="plotRoute" class="nudge go-nudge">Plot route</button>
+      <button type="button" id="resetJet" class="nudge">Reset</button>
+    </div>
+    <p id="routeUnknown" class="hint"></p>
+    <label for="opusFlight">Opus flight</label>
+    <select id="opusFlight">
+      <option value="">Load flights…</option>
+    </select>
+    <div class="row rotate-row">
+      <button type="button" id="opusLoad" class="nudge">Load Opus flights</button>
+      <button type="button" id="opusApply" class="nudge go-nudge">Use this route</button>
+    </div>
+    <p id="opusStatus" class="hint">Load a list (fast). Use this route fills the box — Fly uses it when “Test: map is my jet” is on.</p>
+  </section>
+
+  <section>
+    <h2>Aircraft</h2>
+    <label for="callsign">Callsign</label>
+    <input id="callsign" type="text" spellcheck="false" value="FLEECE 1">
+    <label for="alt">Altitude <span class="opt" id="altVal">0 ft AGL</span></label>
+    <input id="alt" type="range" min="0" max="40000" step="100" value="0">
+    <label for="spd">Speed <span class="opt" id="spdVal">0 kt</span></label>
+    <input id="spd" type="range" min="0" max="600" step="10" value="0">
+    <label for="hdg">Heading <span class="opt" id="hdgVal">210°</span></label>
+    <input id="hdg" type="range" min="0" max="359" step="1" value="210">
+    <div class="row rotate-row">
+      <button type="button" id="hdgLeft" class="nudge">−15°</button>
+      <button type="button" id="hdgRight" class="nudge">+15°</button>
+      <button type="button" id="faceRwy" class="nudge">Face runway</button>
+    </div>
+    <div class="row rotate-row">
+      <button type="button" id="play" class="nudge go-nudge">Play</button>
+      <button type="button" id="pause" class="nudge">Pause</button>
+    </div>
+    <p class="hint">Drag the red jet, or click the map to teleport. Heading slider (or Shift+wheel) turns the nose — EOR / lineup need you pointed down the runway (Face runway). Leave altitude and speed at 0 to park. Raise them to Play the route — NW EOR only counts below 100 ft AGL, settled below ~4 kt.</p>
+  </section>
+
+  <section>
+    <h2>Traffic</h2>
+    <label for="clickMode">Click map to</label>
+    <select id="clickMode">
+      <option value="own">Move my jet</option>
+      <option value="red">Add red (hostile)</option>
+      <option value="blue">Add blue (friendly)</option>
+    </select>
+    <label for="trafficAlt">Traffic altitude <span class="opt" id="trafficAltVal">20000 ft AGL</span></label>
+    <input id="trafficAlt" type="range" min="0" max="40000" step="500" value="20000">
+    <div class="row rotate-row">
+      <button type="button" id="clearTraffic" class="nudge">Clear placed</button>
+    </div>
+    <div id="trafficList" class="traffic-list"></div>
+    <p class="hint">Red is hostile (picture). Blue is friendly (declare). Drag a plane to move it. Click a row or a plane, then Delete to remove it.</p>
+  </section>
+
+  <section>
+    <h2>Weather / time</h2>
+    <label class="check"><input type="checkbox" id="overrideWx"> Override Opus weather and time of day</label>
+    <label for="metar">METAR</label>
+    <input id="metar" type="text" spellcheck="false" placeholder="KLSV 21005KT 10SM SKC A2992">
+    <div class="row wx-row">
+      <label>Wind
+        <input id="windDir" type="number" min="0" max="360" step="10" value="210">
+      </label>
+      <label>kt
+        <input id="windKt" type="number" min="0" max="99" step="1" value="5">
+      </label>
+      <label>Altimeter
+        <input id="altimeter" type="number" min="28" max="32" step="0.01" value="29.92">
+      </label>
+    </div>
+    <div class="row wx-row">
+      <label>Vis SM
+        <input id="visSm" type="number" min="0" max="10" step="0.25" value="10">
+      </label>
+      <label>Ceiling ft
+        <input id="ceilingFt" type="number" min="0" max="20000" step="100" placeholder="unl">
+      </label>
+    </div>
+    <label for="missionClock">Mission clock (HHMM)</label>
+    <input id="missionClock" type="text" spellcheck="false" value="1300" maxlength="8">
+    <div class="row rotate-row">
+      <button type="button" id="todDay" class="nudge">Day 1300</button>
+      <button type="button" id="todNight" class="nudge">Night 2300</button>
+      <button type="button" id="pullMetar" class="nudge">Pull live METAR</button>
+    </div>
+    <p id="wxHint" class="hint">Checked: Fly uses these winds, altimeter, ceiling, and clock instead of Opus. Night 2200–0800L calm-wind departures are 03s. Uncheck to go back to Opus.</p>
+  </section>
+
+  <section>
+    <h2>Now</h2>
+    <p id="hudOwner" class="hud-line">Owner —</p>
+    <p id="hudSector" class="hud-line">NATCF —</p>
+    <p id="hudHandoff" class="hud-line">Next —</p>
+    <p id="hudZones" class="hud-line">Inside —</p>
+    <p id="hudArmed" class="hud-line">Armed —</p>
+  </section>
+
+  <section>
+    <h2>Reference overlay</h2>
+    <select id="overlayPick">
+      <option value="">None</option>
+    </select>
+    <button type="button" id="overlayLoad" class="nudge">Show on map</button>
+    <p id="overlayStatus" class="hint">&nbsp;</p>
+    <p class="hint"><a href="/" id="editorLink">Zone editor</a> — same server, drawing tools.</p>
+  </section>
+</aside>
+
+<div id="map"></div>
+
+<script src="/vendor/leaflet.js"></script>
+<script src="/tester_map.js"></script>
+</body>
+</html>

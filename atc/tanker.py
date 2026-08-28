@@ -845,7 +845,18 @@ def is_tanker_step(step: dict[str, Any] | None) -> bool:
     return tmpl == "tanker" or tmpl.startswith("tanker_")
 
 
-_AAR_CHANNELS = frozenset({"tanker", "blackjack", "bandsaw", "ops"})
+_AAR_CHANNELS = frozenset(
+    {
+        "tanker",
+        "blackjack",
+        "bandsaw",
+        "joshua",
+        "ops",
+        "control_east",
+        "control_west",
+        "center",
+    }
+)
 
 
 def step_allows_aar(step: dict[str, Any] | None) -> bool:
@@ -939,7 +950,7 @@ def leave_tanker_overlay(
     checkin: bool = False,
 ) -> str:
     """
-    End the tanker side trip and land on Blackjack or Bandsaw.
+    End the tanker side trip and land on Blackjack, Bandsaw, or Joshua.
 
     `agency` is the live radio (tune or addressed). Checking in clears the
     AAR flag; a tune-only return keeps it so C2 still gets a continue call.
@@ -954,8 +965,10 @@ def leave_tanker_overlay(
     state["tanker_overlay"] = False
     state.pop("tanker_seen_tune", None)
     ch = str(agency or "").strip().lower()
-    if ch not in ("blackjack", "bandsaw"):
-        ch = resume_ch if resume_ch in ("blackjack", "bandsaw") else "blackjack"
+    if ch not in ("blackjack", "bandsaw", "joshua", "control_east", "control_west"):
+        ch = resume_ch if resume_ch in (
+            "blackjack", "bandsaw", "joshua", "control_east", "control_west"
+        ) else "blackjack"
     if checkin:
         state["tanker_needs_c2_checkin"] = False
         apply_tanker_phase(state, PHASE_DEPARTED)
@@ -989,6 +1002,12 @@ def leave_tanker_overlay(
     if ch == "bandsaw":
         if not _seek_template("bandsaw_check_in"):
             _seek_channel("bandsaw")
+    elif ch == "joshua":
+        if not _seek_template("joshua_check_in"):
+            _seek_channel("joshua")
+    elif ch in ("control_east", "control_west"):
+        if not _seek_template("control_check_in"):
+            _seek_channel(ch)
     else:
         restored = False
         try:
@@ -1018,7 +1037,7 @@ def note_tanker_tune(state: dict[str, Any] | None, tuned: str | None) -> bool:
     """
     Follow the radio during an AAR side trip.
 
-    Returns True when the cursor should leave tanker for Blackjack / Bandsaw
+    Returns True when the cursor should leave tanker for Blackjack / Bandsaw / Joshua
     (they have been on tanker UHF, then retuned to C2).
     """
     if not tanker_overlay_active(state):
@@ -1027,7 +1046,7 @@ def note_tanker_tune(state: dict[str, Any] | None, tuned: str | None) -> bool:
     if ch == "tanker":
         state["tanker_seen_tune"] = True
         return False
-    if ch not in ("blackjack", "bandsaw"):
+    if ch not in ("blackjack", "bandsaw", "joshua", "control_east", "control_west"):
         return False
     return bool(state.get("tanker_seen_tune"))
 
