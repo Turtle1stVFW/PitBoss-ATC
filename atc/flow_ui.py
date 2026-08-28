@@ -10,6 +10,7 @@ import copy
 import ctypes
 import json
 import os
+import queue
 import random
 import re
 import socket
@@ -177,6 +178,11 @@ class MissionPlanner(tk.Tk):
         self._atc_server: atc_server.AtcServer | None = None
         self._atc_client: atc_client.AtcClient | None = None
         self._pos_trackers: dict[str, runway_position.PositionTracker] = {}
+        # Worker threads must not call Tk.after() — Python 3.14 raises
+        # "main thread is not in main loop" (especially before mainloop()).
+        self._ui_jobs: queue.Queue[Callable[[], None]] = queue.Queue()
+        self._ui_pumping = True
+        self.after(20, self._drain_ui_jobs)
 
         srs_radio.apply_config(self.config_data)
         srs_radio.ensure_srs_udp_listener()
@@ -417,6 +423,12 @@ class MissionPlanner(tk.Tk):
         )
 
     def _on_close(self) -> None:
+        self._ui_pumping = False
+        try:
+            while True:
+                self._ui_jobs.get_nowait()
+        except queue.Empty:
+            pass
         try:
             self._clear_tk_hotkeys()
             self._hotkey_listener.stop()
@@ -1897,7 +1909,7 @@ class MissionPlanner(tk.Tk):
                 var.set(joystick.describe_binding(self._joy_bindings[which]))
                 self._apply_hotkeys()
 
-            self.after(0, apply)
+            self._ui_call(apply)
 
         def cancel() -> None:
             if var.get().startswith("Press a HOTAS or mouse"):
@@ -1966,17 +1978,47 @@ class MissionPlanner(tk.Tk):
 
     # ---------- voice control ----------
 
+    def _drain_ui_jobs(self) -> None:
+        """Run queued UI callbacks on the Tk thread. Reschedules itself."""
+        if not getattr(self, "_ui_pumping", False):
+            return
+        budget = 64
+        try:
+            while budget > 0:
+                fn = self._ui_jobs.get_nowait()
+                budget -= 1
+                try:
+                    fn()
+                except (RuntimeError, tk.TclError):
+                    pass
+                except Exception as exc:  # noqa: BLE001
+                    print(f"UI callback failed: {exc}", file=sys.stderr)
+        except queue.Empty:
+            pass
+        if not getattr(self, "_ui_pumping", False):
+            return
+        try:
+            self.after(20, self._drain_ui_jobs)
+        except (RuntimeError, tk.TclError):
+            self._ui_pumping = False
+
     def _ui_call(self, fn: Callable[[], None]) -> None:
         """
-        Schedule work on the Tk thread from an audio/model thread.
+        Marshal work onto the Tk thread from an audio/model/worker thread.
 
-        Silently drops the callback once the window is gone, which happens
-        routinely when the app closes mid-transcription.
+        Tk.after() from a non-main thread raises RuntimeError on Python 3.14
+        (and also if the window is gone or mainloop has not started yet).
+        Silently drops the callback once the window is closing.
         """
-        try:
-            self.after(0, fn)
-        except (RuntimeError, tk.TclError):
-            pass
+        if not getattr(self, "_ui_pumping", False):
+            return
+        if threading.current_thread() is threading.main_thread():
+            try:
+                fn()
+            except (RuntimeError, tk.TclError):
+                pass
+            return
+        self._ui_jobs.put(fn)
 
     def _voice_context(self) -> dict[str, Any]:
         """
@@ -6314,7 +6356,7 @@ class MissionPlanner(tk.Tk):
                     self._last_preview_file = str(file_path) if file_path else None
                     self._set_preview_display(text, base_phrase=phrase or None)
 
-                self.after(0, done)
+                self._ui_call(done)
             except Exception as exc:  # noqa: BLE001
                 err = str(exc)
 
@@ -6328,7 +6370,7 @@ class MissionPlanner(tk.Tk):
                             f"(preview unavailable)\n{err}", base_phrase=""
                         )
 
-                self.after(0, fail)
+                self._ui_call(fail)
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -6415,10 +6457,10 @@ class MissionPlanner(tk.Tk):
                     google_credentials=google_creds if use_google else None,
                 )
                 if use_google:
-                    self.after(0, self._refresh_tts_usage)
+                    self._ui_call(self._refresh_tts_usage)
             except Exception as exc:  # noqa: BLE001
                 err = str(exc)
-                self.after(0, lambda e=err: messagebox.showerror("Hear locally", e))
+                self._ui_call(lambda e=err: messagebox.showerror("Hear locally", e))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -6486,10 +6528,10 @@ class MissionPlanner(tk.Tk):
                     self._set_preview_display(body, base_phrase=base)
                     self._last_preview_channel = step.get("channel") or "other"
 
-                self.after(0, done)
+                self._ui_call(done)
             except Exception as exc:  # noqa: BLE001
                 err = str(exc)
-                self.after(0, lambda e=err: messagebox.showerror("TX preview", e))
+                self._ui_call(lambda e=err: messagebox.showerror("TX preview", e))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -7138,7 +7180,7 @@ class MissionPlanner(tk.Tk):
                     return
                 self.fly_say.set(text)
 
-            self.after(0, done)
+            self._ui_call(done)
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -7466,13 +7508,10 @@ class MissionPlanner(tk.Tk):
             def ga_work() -> None:
                 try:
                     played = self.engine.execute_go_around(bypass_freq_gate=True)
-                    self.after(0, lambda: self._on_go_around_done(played))
+                    self._ui_call(lambda: self._on_go_around_done(played))
                 except Exception as exc:  # noqa: BLE001
                     err = str(exc)
-                    self.after(
-                        0,
-                        lambda m=err: messagebox.showerror("Go around", m),
-                    )
+                    self._ui_call(lambda m=err: messagebox.showerror("Go around", m))
 
             threading.Thread(target=ga_work, daemon=True).start()
             return
@@ -7488,13 +7527,10 @@ class MissionPlanner(tk.Tk):
                         played = self.engine.play_template(
                             "departure_handoff", bypass_freq_gate=True
                         )
-                    self.after(0, lambda p=played: self._on_handoff_request_done(p))
+                    self._ui_call(lambda p=played: self._on_handoff_request_done(p))
                 except Exception as exc:  # noqa: BLE001
                     err = str(exc)
-                    self.after(
-                        0,
-                        lambda m=err: messagebox.showerror("Handoff", m),
-                    )
+                    self._ui_call(lambda m=err: messagebox.showerror("Handoff", m))
 
             threading.Thread(target=ho_work, daemon=True).start()
             return
@@ -7506,13 +7542,10 @@ class MissionPlanner(tk.Tk):
                     played = voice_engine.execute_tanker_action(
                         self.engine, action
                     )
-                    self.after(0, lambda p=played: self._on_tanker_request_done(p))
+                    self._ui_call(lambda p=played: self._on_tanker_request_done(p))
                 except Exception as exc:  # noqa: BLE001
                     err = str(exc)
-                    self.after(
-                        0,
-                        lambda m=err: messagebox.showerror("Tanker", m),
-                    )
+                    self._ui_call(lambda m=err: messagebox.showerror("Tanker", m))
 
             threading.Thread(target=tk_work, daemon=True).start()
             return
@@ -7522,13 +7555,10 @@ class MissionPlanner(tk.Tk):
                     played = self.engine.accept_option_full_stop(
                         bypass_freq_gate=True
                     )
-                    self.after(0, lambda: self._on_option_full_stop_done(played))
+                    self._ui_call(lambda: self._on_option_full_stop_done(played))
                 except Exception as exc:  # noqa: BLE001
                     err = str(exc)
-                    self.after(
-                        0,
-                        lambda m=err: messagebox.showerror("Full stop", m),
-                    )
+                    self._ui_call(lambda m=err: messagebox.showerror("Full stop", m))
 
             threading.Thread(target=fs_work, daemon=True).start()
             return
@@ -7545,13 +7575,10 @@ class MissionPlanner(tk.Tk):
                     )
                     if isinstance(played, dict) and played.get("action") == "none":
                         raise RuntimeError(played.get("detail") or "no takeoff step")
-                    self.after(0, lambda p=played: self._on_rolling_offer_done(p))
+                    self._ui_call(lambda p=played: self._on_rolling_offer_done(p))
                 except Exception as exc:  # noqa: BLE001
                     err = str(exc)
-                    self.after(
-                        0,
-                        lambda m=err: messagebox.showerror("Pilot request", m),
-                    )
+                    self._ui_call(lambda m=err: messagebox.showerror("Pilot request", m))
 
             threading.Thread(target=offer_work, daemon=True).start()
             return
@@ -7603,10 +7630,10 @@ class MissionPlanner(tk.Tk):
                     self.fly_log.see(tk.END)
                     self._refresh_fly_status()
 
-                self.after(0, done)
+                self._ui_call(done)
             except Exception as exc:  # noqa: BLE001
                 err = str(exc)
-                self.after(0, lambda e=err: messagebox.showerror("Pilot request", e))
+                self._ui_call(lambda e=err: messagebox.showerror("Pilot request", e))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -8248,7 +8275,7 @@ class MissionPlanner(tk.Tk):
                     self.engine = eng
                     self._refresh_fly_status()
 
-                self.after(0, done)
+                self._ui_call(done)
             except Exception as exc:  # noqa: BLE001
                 err = str(exc)
                 step = None
@@ -8264,7 +8291,7 @@ class MissionPlanner(tk.Tk):
                             return
                     messagebox.showerror("Fly", err)
 
-                self.after(0, show_err)
+                self._ui_call(show_err)
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -8302,7 +8329,7 @@ class MissionPlanner(tk.Tk):
                     self.fly_log.see(tk.END)
                     self._refresh_client_fly()
 
-                self.after(0, done)
+                self._ui_call(done)
             except Exception as exc:  # noqa: BLE001
                 err = str(exc)
 
@@ -8310,7 +8337,7 @@ class MissionPlanner(tk.Tk):
                     self._set_net_status(f"CLIENT  {err}")
                     messagebox.showerror("Fly", err)
 
-                self.after(0, show_err)
+                self._ui_call(show_err)
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -9947,7 +9974,7 @@ class MissionPlanner(tk.Tk):
                 self.var_voice_ptt.set(joystick.describe_binding(normalized))
                 self._apply_voice()
 
-            self.after(0, apply)
+            self._ui_call(apply)
 
         def cancel() -> None:
             if self.var_voice_ptt.get().startswith("Press your PTT"):
@@ -10514,10 +10541,10 @@ class MissionPlanner(tk.Tk):
                     google_credentials=google_creds if use_google else None,
                 )
                 if use_google:
-                    self.after(0, self._refresh_tts_usage)
+                    self._ui_call(self._refresh_tts_usage)
             except Exception as exc:  # noqa: BLE001
                 err = str(exc)
-                self.after(0, lambda e=err: messagebox.showerror("Preview", e))
+                self._ui_call(lambda e=err: messagebox.showerror("Preview", e))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -11374,13 +11401,12 @@ class MissionPlanner(tk.Tk):
             def work() -> None:
                 try:
                     rows = atc_phrase.list_opus_flights(self.config_data, include_detail=True)
-                    self.after(0, lambda: apply_rows(rows))
+                    self._ui_call(lambda: apply_rows(rows))
                 except Exception as exc:  # noqa: BLE001
                     err = str(exc)
-                    self.after(0, lambda e=err: status.set(f"Failed: {e}"))
-                    self.after(
-                        0,
-                        lambda e=err: messagebox.showerror("Opus flights", e, parent=dlg),
+                    self._ui_call(lambda e=err: status.set(f"Failed: {e}"))
+                    self._ui_call(
+                        lambda e=err: messagebox.showerror("Opus flights", e, parent=dlg)
                     )
 
             threading.Thread(target=work, daemon=True).start()
@@ -11463,7 +11489,7 @@ class MissionPlanner(tk.Tk):
                     )
                     self._refresh_opus_identity_bar()
 
-                self.after(0, _missing)
+                self._ui_call(_missing)
                 return
             if not backend or (not selected and not (self.config_data.get("opus_user_name") or "").strip()):
                 mode = "manual" if atc_phrase.callsign_override(self.config_data) else "offline"
@@ -11473,7 +11499,7 @@ class MissionPlanner(tk.Tk):
                     self.var_callsign.set(label)
                     self._refresh_opus_identity_bar()
 
-                self.after(0, _manual)
+                self._ui_call(_manual)
                 return
             ov = " · manual" if atc_phrase.callsign_override(self.config_data) else ""
             local_bit = f" · dep Local {dep_local}" if dep_local else ""
@@ -11491,7 +11517,7 @@ class MissionPlanner(tk.Tk):
                 self._update_opus_flight_label()
                 self._refresh_opus_identity_bar()
 
-            self.after(0, _ok)
+            self._ui_call(_ok)
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -11552,10 +11578,10 @@ class MissionPlanner(tk.Tk):
                         msg += f"\n\nDeparture will speak as Local {dep}."
                     messagebox.showinfo("Opus freqs", msg)
 
-                self.after(0, apply)
+                self._ui_call(apply)
             except Exception as exc:  # noqa: BLE001
                 err = str(exc)
-                self.after(0, lambda e=err: messagebox.showerror("Opus freqs", e))
+                self._ui_call(lambda e=err: messagebox.showerror("Opus freqs", e))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -11580,10 +11606,10 @@ class MissionPlanner(tk.Tk):
                         for r in mismatches
                     ]
                     msg = f"{len(mismatches)} mismatch(es):\n" + "\n".join(bits)
-                self.after(0, lambda: self.var_freq_status.set(msg))
+                self._ui_call(lambda: self.var_freq_status.set(msg))
             except Exception as exc:  # noqa: BLE001
                 err = str(exc)
-                self.after(0, lambda e=err: messagebox.showerror("Compare freqs", e))
+                self._ui_call(lambda e=err: messagebox.showerror("Compare freqs", e))
 
         threading.Thread(target=work, daemon=True).start()
 
