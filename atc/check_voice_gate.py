@@ -3918,6 +3918,33 @@ def extras() -> int:
                 "return follows Blackjack or Bandsaw"
             )
 
+        ground = _TankerEng()
+        ground.steps.insert(
+            0,
+            {"id": "del", "channel": "delivery", "template": "clearance"},
+        )
+        ground.state = {
+            "index": 0,
+            "tanker_overlay": True,
+            "tanker_rejoined": True,
+            "tanker_chat_last_spoke": "Standing by, sir — looking good.",
+        }
+        cleared = tanker_mod.reconcile_aar_overlay(ground)
+        c2 = _TankerEng()
+        c2.state["tanker_overlay"] = True
+        kept = not tanker_mod.reconcile_aar_overlay(c2)
+        if (
+            not cleared
+            or tanker_mod.tanker_overlay_active(ground.state)
+            or tanker_mod.has_rejoined(ground.state)
+            or not kept
+            or not tanker_mod.tanker_overlay_active(c2.state)
+        ):
+            print("  FAIL tanker overlay should clear on Delivery, stay on Blackjack")
+            bad += 1
+        else:
+            print("tanker overlay — stripped on Delivery, kept on C2")
+
     return bad
 
 

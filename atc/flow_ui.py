@@ -818,6 +818,7 @@ class MissionPlanner(tk.Tk):
             return
         self._sync_eam_freqs_to_config()
         self._sync_eam_strip_from_srs()
+        self._sync_client_flow_cursor()
         airport = self._airport()
         try:
             airport = self.engine.airport()
@@ -828,18 +829,21 @@ class MissionPlanner(tk.Tk):
         except Exception:  # noqa: BLE001
             tuned = ""
         prev = getattr(self, "_last_tip_tuned_channel", None)
-        if tuned != prev:
-            self._last_tip_tuned_channel = tuned
-            self._maybe_follow_tanker_tune(tuned)
-            if hasattr(self, "fly_say_frame"):
-                self._refresh_voice_prompts()
-            if hasattr(self, "_sync_fly_pilot_request_ui"):
-                self._sync_fly_pilot_request_ui(tuned or None)
         step = None
         try:
             step = self.engine.current_step()
         except Exception:  # noqa: BLE001
             step = None
+        sid = str((step or {}).get("id") or "")
+        prev_sid = getattr(self, "_last_tip_step_id", None)
+        if tuned != prev or sid != prev_sid:
+            self._last_tip_tuned_channel = tuned
+            self._last_tip_step_id = sid
+            self._maybe_follow_tanker_tune(tuned)
+            if hasattr(self, "fly_say_frame"):
+                self._refresh_voice_prompts()
+            if hasattr(self, "_sync_fly_pilot_request_ui"):
+                self._sync_fly_pilot_request_ui(tuned or None)
         _ok, msg, result = srs_radio.check_freq_gate(
             self.config_data,
             airport,
@@ -954,7 +958,10 @@ class MissionPlanner(tk.Tk):
                 import tanker as tanker_mod
 
                 flow_st = getattr(self.engine, "state", None)
-                if tanker_mod.tanker_overlay_active(flow_st):
+                tanker_mod.reconcile_aar_overlay(self.engine)
+                if tanker_mod.tanker_overlay_active(flow_st) and tanker_mod.step_allows_aar(
+                    step
+                ):
                     resume = str(
                         (flow_st or {}).get("tanker_resume_channel") or "C2"
                     ).strip().upper() or "C2"
@@ -1212,6 +1219,23 @@ class MissionPlanner(tk.Tk):
             import tanker_chat as tanker_chat_mod
 
             engine = self._live_engine()
+            tanker_mod.reconcile_aar_overlay(engine)
+            tuned = ""
+            try:
+                tuned = str(
+                    srs_radio.channel_for_tuned_freq(
+                        engine.airport(), engine.config
+                    )
+                    or ""
+                ).strip().lower()
+            except Exception:
+                tuned = ""
+            on_aar = tanker_mod.tanker_overlay_active(
+                engine.state
+            ) or tuned == "tanker"
+            if not on_aar:
+                self._ui_call(lambda: self._set_boom_status(""))
+                return
             if tanker_chat_mod.current_choices(engine.state):
                 msg = self._boom_caption(engine, "waiting for your answer")
                 self._ui_call(lambda m=msg: self._set_boom_status(m))
@@ -2097,6 +2121,18 @@ class MissionPlanner(tk.Tk):
             return
         for key, value in fs.items():
             state[key] = value
+        # Host omits these when idle; leave them set and cues stay on the old
+        # readback / tanker list instead of the current step.
+        if "awaiting_readback" not in fs:
+            state["awaiting_readback"] = False
+        if "readback_items" not in fs:
+            state.pop("readback_items", None)
+        try:
+            import tanker as tanker_mod
+
+            tanker_mod.reconcile_aar_overlay(self.engine)
+        except Exception:
+            pass
 
     def _snap_voice_confidence(self, value: float | None = None) -> float:
         """Clamp to the slider range and snap to 5% steps (0.40, 0.45, … 0.95)."""
@@ -8009,6 +8045,7 @@ class MissionPlanner(tk.Tk):
     def _refresh_fly_status(self) -> None:
         # Keep the live Plan mission (Keywords / voice_phrases included). reload()
         # re-reads the flow file and would drop unsaved step edits.
+        self._sync_client_flow_cursor()
         self.engine.config = self.config_data
         self.engine.airports = self.airports
         self.engine.mission = self.mission
@@ -8095,7 +8132,12 @@ class MissionPlanner(tk.Tk):
         self._sync_fly_eam_ui()
         self._update_fly_freq_gate_status()
         try:
-            cap = self._boom_caption(self.engine)
+            import tanker as tanker_mod
+
+            tanker_mod.reconcile_aar_overlay(self.engine)
+            cap = ""
+            if tanker_mod.tanker_overlay_active(self.engine.state):
+                cap = self._boom_caption(self.engine)
             self._set_boom_status(cap)
         except Exception:
             pass
@@ -8299,6 +8341,20 @@ class MissionPlanner(tk.Tk):
         if st.get("last_tx_text") and hasattr(self, "fly_say"):
             self.fly_say.set(str(st["last_tx_text"]))
         self._sync_client_flow_cursor()
+        cue_key = (
+            st.get("index"),
+            st.get("step_number"),
+            (st.get("step") or {}).get("id")
+            if isinstance(st.get("step"), dict)
+            else None,
+            bool(st.get("awaiting_readback")),
+        )
+        if cue_key != getattr(self, "_client_fly_cue_key", None):
+            self._client_fly_cue_key = cue_key
+            if hasattr(self, "fly_say_frame"):
+                self._refresh_fly_status()
+            if st.get("last_tx_text") and hasattr(self, "fly_say"):
+                self.fly_say.set(str(st["last_tx_text"]))
 
     def _build_traffic(self) -> None:
         f = self.tab_traffic

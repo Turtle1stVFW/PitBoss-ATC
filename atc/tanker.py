@@ -845,6 +845,48 @@ def is_tanker_step(step: dict[str, Any] | None) -> bool:
     return tmpl == "tanker" or tmpl.startswith("tanker_")
 
 
+_AAR_CHANNELS = frozenset({"tanker", "blackjack", "bandsaw", "ops"})
+
+
+def step_allows_aar(step: dict[str, Any] | None) -> bool:
+    """True when this cursor can honestly be on an AAR side trip."""
+    if is_tanker_step(step):
+        return True
+    ch = str((step or {}).get("channel") or "").strip().lower()
+    return ch in _AAR_CHANNELS
+
+
+def clear_aar_state(state: dict[str, Any] | None) -> None:
+    """Drop overlay, boom chat, and rejoin — the ramp is not Texaco."""
+    strip_seat_state(state)
+
+
+def reconcile_aar_overlay(engine: Any) -> bool:
+    """
+    flow_state.json / a leftover request can keep tanker_overlay and
+    tanker_rejoined while the timeline is back on Delivery. Strip that.
+    """
+    if engine is None:
+        return False
+    state = engine.state if isinstance(getattr(engine, "state", None), dict) else None
+    if state is None:
+        return False
+    dirty = tanker_overlay_active(state) or has_rejoined(state) or bool(
+        state.get("tanker_chat") or state.get("tanker_chat_last_spoke")
+    )
+    if not dirty:
+        return False
+    steps = list(getattr(engine, "steps", None) or [])
+    idx = int(state.get("index") or 0)
+    cur = steps[idx] if 0 <= idx < len(steps) else None
+    if step_allows_aar(cur):
+        return False
+    clear_aar_state(state)
+    if hasattr(engine, "save_state"):
+        engine.save_state()
+    return True
+
+
 def should_skip_tanker_step(
     step: dict[str, Any] | None,
     state: dict[str, Any] | None = None,

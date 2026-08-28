@@ -172,6 +172,12 @@ class FlowEngine:
         self.defer_tx = False
         self.pending_tx: dict[str, Any] | None = None
         self.sync_requested_runway_from_mission()
+        try:
+            import tanker as tanker_mod
+
+            tanker_mod.reconcile_aar_overlay(self)
+        except Exception:
+            pass
         # Persist cleared/restored runway so a stale flow_state.json does not linger.
         try:
             self.save_state()
@@ -1374,6 +1380,12 @@ class FlowEngine:
         self.state["index"] = 0
         self.state["last_step_id"] = None
         self._clear_readback_state()
+        try:
+            import tanker as tanker_mod
+
+            tanker_mod.clear_aar_state(self.state)
+        except Exception:
+            pass
         if "active_takeoff_mode" in self.mission:
             self.mission["active_takeoff_mode"] = atc_phrase.DEFAULT_TAKEOFF_MODE
         self.save_state()
@@ -1405,6 +1417,12 @@ class FlowEngine:
         self.state["index"] = 0
         self.state["last_step_id"] = None
         self._clear_readback_state()
+        try:
+            import tanker as tanker_mod
+
+            tanker_mod.clear_aar_state(self.state)
+        except Exception:
+            pass
         if "active_takeoff_mode" in self.mission:
             self.mission["active_takeoff_mode"] = atc_phrase.DEFAULT_TAKEOFF_MODE
         self.save_state()

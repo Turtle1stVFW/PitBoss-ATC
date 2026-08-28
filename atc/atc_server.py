@@ -444,8 +444,11 @@ class AtcServer:
 
 def _shared_flow_state(state: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(state, dict):
-        return {}
-    return {key: state[key] for key in _SHARED_FLOW_KEYS if key in state}
+        return {"index": 0, "awaiting_readback": False}
+    out = {key: state[key] for key in _SHARED_FLOW_KEYS if key in state}
+    out.setdefault("index", int(state.get("index") or 0))
+    out.setdefault("awaiting_readback", False)
+    return out
 
 
 def _status_view(sess: PilotSession) -> tuple[dict[str, Any], dict[str, Any]]:
