@@ -2,13 +2,15 @@
 Boom / reform small talk on tanker freq (ATP-56 join is separate).
 
 Texaco keeps an informal side-channel going while the receiver is in reform or
-on the boom — no callsign addressing. The boom operator is enlisted USAF talking
-to an F-16 officer on a military tanker: dry and funny, not buddy-buddy, not
+on the boom — no callsign addressing. The boom operator is a female enlisted
+USAF talking to an F-16 officer on a military tanker: dry and funny, not
+buddy-buddy, not
 airline. Bits are mixed:
 
-  • ab   — short A/B (or A/B/C) poll; one-word answers
-  • riff — observation / banter; optional freeform react, then auto-continues
-  • open — open question; freeform reply, then continues
+  • hello — first contact only: time-of-day pleasantry (Good morning, sir)
+  • ab    — short A/B (or A/B/C) poll; one-word answers
+  • riff  — observation / banter; optional freeform react, then auto-continues
+  • open  — open question; freeform reply, then continues
 
 Not every turn is Ask → Answer → Respond. Replies can run a couple sentences,
 and a choice can chain into another bit. After a turn Texaco pauses, then comes
@@ -36,6 +38,8 @@ _STATE_KEY = "tanker_chat"
 _LAST_KEY = "tanker_chat_last_id"
 _RECENT_KEY = "tanker_chat_recent"
 _HISTORY_KEY = "tanker_chat_history"
+_GREETED_KEY = "tanker_chat_greeted"
+_GREET_ID = "hello_sir"
 _HISTORY_MAX = 8
 _RECENT_MAX = 28
 _LLM_TIMEOUT_S = 6.5
@@ -113,6 +117,16 @@ _STOP_HITS = (
     "checking out",
     "stop chatting",
     "stop the chat",
+    "stop talking",
+    "stop speaking",
+    "quit talking",
+    "quit chatting",
+    "be quiet",
+    "quiet down",
+    "that's enough",
+    "thats enough",
+    "that is enough",
+    "that s enough",
     "end chat",
     "enough chat",
     "enough talking",
@@ -123,6 +137,7 @@ _STOP_HITS = (
     "that will be all",
     "later texaco",
     "see you later",
+    "stop",
 )
 
 _STOP_REPLY = "Standing by, sir — looking good."
@@ -283,7 +298,7 @@ def fly_request_rows(state: dict[str, Any] | None) -> list[tuple[str, str]]:
 
 
 def fly_controls_visible(state: dict[str, Any] | None) -> bool:
-    """Show boom-chat buttons after rejoin, even if the cursor is not on tanker."""
+    """Stop/answer boom-chat buttons after rejoin; start-chat stays tanker-freq only."""
     if is_session_active(state):
         return True
     try:
@@ -417,7 +432,8 @@ def looks_like_own_echo(transcript: str, state: dict[str, Any] | None) -> bool:
     # During the post-TX guard, be aggressive — mic often hears the boom play back.
     if in_guard and overlap >= 0.28:
         return True
-    if overlap >= 0.55:
+    # One-word acks ("morning", "hey") share a word with the hello; that is not echo.
+    if overlap >= 0.55 and (len(blob) >= 12 or len(wb) >= 4):
         return True
     # Near-substring echo of the opener / last line.
     compact_b = re.sub(r"[^a-z0-9]+", "", blob.casefold())
@@ -1273,6 +1289,8 @@ def llm_json(
     provider, key = resolved
     try:
         if provider == "ollama":
+            if not resolve_ollama_model(config):
+                return None
             text = _ollama_chat(
                 config,
                 [
@@ -1355,6 +1373,14 @@ def llm_json(
     return parsed if isinstance(parsed, dict) else None
 
 
+_BOOM_GENDER = (
+    "You are a woman — a female USAF KC-135 boom operator. "
+    "Never describe yourself as a man, guy, dude, male, or 'one of the guys'. "
+    "Do not joke that you are a man or switch gender. "
+    "Talking about other men on the crew is fine. "
+)
+
+
 _BOOM_RANK_TONE = (
     "You are an enlisted USAF KC-135 boom operator talking to an F-16 officer "
     "while you gas the fighter on a military tanker track. "
@@ -1366,8 +1392,8 @@ _BOOM_RANK_TONE = (
 
 
 _BOOM_IDENTITY = (
-    "You ARE the KC-135 boom operator. First person, on the radio, talking to "
-    "a real F-16 officer on your boom. You are not a narrator and you are not "
+    "You ARE the female KC-135 boom operator. First person, on the radio, talking "
+    "to a real F-16 officer on your boom. You are not a narrator and you are not "
     "writing a screenplay. Never invent the fighter's next line. Never output "
     "labels like Pilot:, Boom:, Texaco:, You:, MIC:, or F-16:. Speak only YOUR "
     "radio words, then STOP and wait — the human answers. This is dialogue: "
@@ -1389,8 +1415,9 @@ _BOOM_SETTING = (
 _BOOM_STYLE = (
     "While the boom is in, talk like real tanker/fighter gas-up chatter: "
     "morale-boosting, a little goofy, two-way. Short riddles, food they miss "
-    "from home, who has the worse seat (boom pad vs Viper), TDY boredom. "
+    "from home, TDY boredom, squadron life, pets, sports, cars, movies. "
     "You lead, they answer, you riff back. Not a briefing. Not scenery narration. "
+    "Do not ask boom pad vs Viper seat — that joke is worn out. "
     "Riddles must be short and answerable on the radio. "
 )
 
@@ -1399,15 +1426,17 @@ def _boom_llm_system(*, json_out: bool) -> str:
     if json_out:
         return (
             f"{_BOOM_IDENTITY}"
+            f"{_BOOM_GENDER}"
             "Return exactly one JSON object only. opener is only YOUR next "
             "radio sentence — never a fake pilot answer. "
             "Never concatenate multiple objects. No markdown."
         )
     return (
         f"{_BOOM_IDENTITY}"
+        f"{_BOOM_GENDER}"
         "Answer the F-16 directly and stay on their topic. "
         "Plain radio text only. No JSON. No markdown. "
-        'Good: "Ha — that\'s the view I live with. Boom pad or Viper seat, who got robbed?" '
+        'Good: "Ha — In-N-Out or Whataburger, which one are you missing?" '
         'Bad: "The pad\'s wider. Pilot: really?"'
     )
 
@@ -1439,6 +1468,7 @@ def _llm_prompt(
     return (
         "You write one short boom-operator radio bit for a KC-135 refueling an F-16. "
         f"{_BOOM_IDENTITY}"
+        f"{_BOOM_GENDER}"
         f"{_BOOM_RANK_TONE}"
         f"{_BOOM_SETTING}"
         f"{_BOOM_STYLE}"
@@ -1457,9 +1487,10 @@ def _llm_prompt(
         "said instead of starting a brand-new random topic. "
         f"{coffee_rule}"
         "Good topic pool (rotate): short riddles, food they miss from home "
-        "(Chick-fil-A / Whataburger / In-N-Out — not only coffee), boom pad vs "
-        "Viper seat, Viper / Eagle / Mudhen / Navy jokes, boom-pod life, range days, "
+        "(Chick-fil-A / Whataburger / In-N-Out — not only coffee), "
+        "Viper / Eagle / Mudhen / Navy jokes, boom-pod life, range days, "
         "TDY, chow, dorms, squadron, pets, sports, cars, weekends, movies. "
+        "Do not ask boom pad vs Viper seat. "
         "Not airline, not passenger flying. "
         "Avoid these recent ids: "
         f"{avoid}.\n\nRecent chat:\n{hist}\n\n"
@@ -1492,6 +1523,7 @@ def _llm_riff_prompt(
     return (
         "Write one short KC-135 boom-operator QUESTION an F-16 officer can answer. "
         f"{_BOOM_IDENTITY}"
+        f"{_BOOM_GENDER}"
         f"{_BOOM_RANK_TONE}"
         f"{_BOOM_SETTING}"
         f"{_BOOM_STYLE}"
@@ -1500,9 +1532,9 @@ def _llm_riff_prompt(
         "(rejoin, contact, disconnect, abort, observation, altitude, airspeed). "
         "Continue the recent chat when there is history. "
         f"{coffee_rule}"
-        "Topics: riddles, food from home, worse seat, Viper/Eagle/Mudhen/Navy "
+        "Topics: riddles, food from home, Viper/Eagle/Mudhen/Navy "
         "jokes, chow, TDY, snacks, boom boredom, pets, sports — military crew, "
-        "not airline. "
+        "not airline. Do not ask boom pad vs Viper seat. "
         f"Avoid sounding like these recent ids: {avoid}.\n\n"
         f"Recent chat:\n{hist}\n\n"
         "Return JSON only: {\"id\":\"...\",\"kind\":\"open\",\"opener\":\"...\"}. "
@@ -1526,6 +1558,7 @@ def _llm_react_prompt(
     return (
         "You ARE the KC-135 boom operator answering on the radio. "
         f"{_BOOM_IDENTITY}"
+        f"{_BOOM_GENDER}"
         f"{_BOOM_RANK_TONE}"
         f"{_BOOM_SETTING}"
         f"{_BOOM_STYLE}"
@@ -1568,6 +1601,7 @@ def _llm_answer_prompt(
     return (
         "You ARE the KC-135 boom operator. Short informal radio reply. "
         f"{_BOOM_IDENTITY}"
+        f"{_BOOM_GENDER}"
         f"{_BOOM_RANK_TONE}"
         f"{_BOOM_SETTING}"
         f"{_BOOM_STYLE}"
@@ -1596,6 +1630,7 @@ def _llm_dialogue_nudge_prompt(
     hist = (history or "").strip() or "(none)"
     return (
         f"{_BOOM_IDENTITY}"
+        f"{_BOOM_GENDER}"
         f"{coffee_rule}"
         "One or two short radio sentences as the boom operator. Answer what they "
         "said, then end with a real question mark so they can talk back. No labels. "
@@ -1769,7 +1804,7 @@ def list_ollama_models(config: dict[str, Any] | None = None) -> list[str]:
         return []
     base = _ollama_base_url(cfg)
     try:
-        with urllib.request.urlopen(f"{base}/api/tags", timeout=3.0) as resp:
+        with urllib.request.urlopen(f"{base}/api/tags", timeout=0.8) as resp:
             raw = resp.read().decode("utf-8", errors="replace")
         data = json.loads(raw) if raw else {}
     except Exception:
@@ -1915,6 +1950,9 @@ def try_llm_thread(
     history = format_history_for_llm(state)
     ban_coffee = coffee_on_cooldown(state)
     if provider == "ollama":
+        if not resolve_ollama_model(config):
+            _set_llm_error("Ollama unavailable — using library", state)
+            return None
         _set_llm_error("Ollama · generating…", state)
     try:
         if provider == "gemini":
@@ -1967,8 +2005,8 @@ def llm_live_enabled(config: dict[str, Any] | None) -> bool:
     if not isinstance(config, dict):
         return False
     if _llm_mode(config) in {"ollama", "local"}:
-        # Don't advertise freeform if nothing is pulled — avoids silent no-ops.
-        return bool(list_ollama_models(config))
+        # Don't advertise freeform if the daemon is down or nothing is pulled.
+        return resolve_ollama_model(config) is not None
     return True
 
 
@@ -2123,6 +2161,9 @@ def try_llm_react(
         boom_line, pilot, history=history, ban_coffee=ban_coffee
     )
     if provider == "ollama":
+        if not resolve_ollama_model(config):
+            _set_llm_error("Ollama unavailable — using library", state)
+            return None
         _set_llm_error("Ollama · generating…", state)
 
     def _call(active_prompt: str, *, ban: bool) -> str | None:
@@ -2211,6 +2252,90 @@ def try_llm_react(
             text = "Ha — fair point. Hang tight."
     _set_llm_error("", state)
     return text
+
+
+def _daypart(hour: int | None = None) -> str:
+    """USAF greeting window from local clock (or an explicit hour)."""
+    h = time.localtime().tm_hour if hour is None else int(hour)
+    h = h % 24
+    if h < 12:
+        return "morning"
+    if h < 17:
+        return "afternoon"
+    return "evening"
+
+
+_GREETING_LINES: dict[str, tuple[str, ...]] = {
+    "morning": (
+        "Good morning, sir.",
+        "Morning, sir.",
+        "Good morning, sir. Looking good from here.",
+    ),
+    "afternoon": (
+        "Good afternoon, sir.",
+        "Afternoon, sir.",
+        "Good afternoon, sir. We'll keep her steady.",
+    ),
+    "evening": (
+        "Good evening, sir.",
+        "Evening, sir.",
+        "Good evening, sir. Looking good from here.",
+    ),
+}
+
+
+def greeting_opener(*, hour: int | None = None) -> str:
+    """First-contact boom hello — time of day, then sir. Not a question."""
+    part = _daypart(hour)
+    pool = _GREETING_LINES.get(part) or _GREETING_LINES["morning"]
+    return random.choice(pool)
+
+
+def _should_greet(state: dict[str, Any] | None, thread_id: str | None) -> bool:
+    """True only for the first boom chat of the sortie (not pinned bits)."""
+    if str(thread_id or "").strip():
+        return False
+    if not isinstance(state, dict):
+        return True
+    if state.get(_GREETED_KEY):
+        return False
+    for row in state.get(_HISTORY_KEY) or []:
+        if isinstance(row, dict) and str(row.get("text") or "").strip():
+            return False
+    return True
+
+
+def _greeting_bit(*, hour: int | None = None) -> dict[str, Any]:
+    """Riff hello so a quiet jet still gets the first real question after a pause."""
+    return chat_lib.Riff(
+        _GREET_ID,
+        greeting_opener(hour=hour),
+        chat_lib.R(
+            "Morning",
+            "Morning. We'll keep her steady, sir.",
+            "morning",
+            "good morning",
+        ),
+        chat_lib.R(
+            "Afternoon",
+            "Afternoon. Hang in there, sir.",
+            "afternoon",
+            "good afternoon",
+        ),
+        chat_lib.R(
+            "Evening",
+            "Evening. Stay boring, sir.",
+            "evening",
+            "good evening",
+        ),
+        chat_lib.R(
+            "Hey",
+            "Hey. Looking stable from here, sir.",
+            "hey",
+            "hello",
+            "howdy",
+        ),
+    )
 
 
 def _pick_library(avoid: list[str], thread_id: str | None) -> dict[str, Any]:
@@ -2311,7 +2436,10 @@ def start_chat(
         state = {}
     recent = _recent_ids(state)
     node: dict[str, Any] | None = None
-    if not thread_id:
+    if _should_greet(state, thread_id):
+        node = _greeting_bit()
+        state[_GREETED_KEY] = True
+    if node is None and not thread_id:
         node = try_llm_thread(config, recent, state=state)
     if node is None:
         node = _pick_library_for_state(state, recent, thread_id)
@@ -2453,19 +2581,16 @@ def answer_chat(
         )
         follow = choice.get("follow") if isinstance(choice.get("follow"), dict) else None
     if not reply and freeform:
-        # Prefer a soft on-topic hedge over a random coffee canned line.
-        if chatty:
-            soft = "Ha — fair question. Hang on, boom's thinking."
-        else:
-            reacted = match_react(transcript or "roger", current_reacts(state))
-            soft = str(
-                reacted.get("reply") or random.choice(_DEFAULT_REACT_REPLIES)
-            )
-            follow = (
-                reacted.get("follow")
-                if isinstance(reacted.get("follow"), dict)
-                else None
-            )
+        # LLM miss / Ollama down → canned boom chat, never a "hold on" stall.
+        reacted = match_react(transcript or "roger", current_reacts(state))
+        soft = str(
+            reacted.get("reply") or random.choice(_DEFAULT_REACT_REPLIES)
+        )
+        follow = (
+            reacted.get("follow")
+            if isinstance(reacted.get("follow"), dict)
+            else None
+        )
         reply = naturalize_reply(_fill(soft, cs, tcs), force=True)
     if not reply and choice is not None:
         reply = naturalize_reply(
@@ -2481,6 +2606,12 @@ def answer_chat(
         _apply_open_bit(state, follow, schedule_auto=True, opener=follow_open)
         append_history(state, "boom", follow_open)
         return f"{reply} {follow_open}".strip()
+
+    # First-contact hello is done — next bit is a real question, not more small talk.
+    if str(row.get("id") or "") == _GREET_ID:
+        wait = schedule_next_question(state, llm=used_live or live_on)
+        state[_STATE_KEY]["break_s"] = wait
+        return reply
 
     # Keep the same bit open for a few freeform / live exchanges.
     if freeform and (used_live or live_on or awaiting or chatty):

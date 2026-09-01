@@ -1,0 +1,305 @@
+"""
+Shared multi-pilot ATC constants: roles, token header, session keys.
+"""
+
+from __future__ import annotations
+
+import hmac
+import os
+import re
+import socket
+import subprocess
+from typing import Any
+
+TOKEN_HEADER = "X-ATC-Token"
+DEFAULT_ATC_PORT = 8766
+SESSION_TTL_S = 15 * 60
+ROLES = ("solo", "host", "client")
+FIREWALL_RULE_PREFIX = "DCS ATC Host"
+
+
+def role_of(config: dict[str, Any] | None) -> str:
+    raw = str((config or {}).get("atc_role") or "solo").strip().lower()
+    return raw if raw in ROLES else "solo"
+
+
+def token_of(config: dict[str, Any] | None) -> str:
+    return str((config or {}).get("atc_token") or "").strip()
+
+
+def tokens_match(expected: str, got: str) -> bool:
+    want = (expected or "").strip()
+    have = (got or "").strip()
+    if not want:
+        return False
+    return hmac.compare_digest(want.encode("utf-8"), have.encode("utf-8"))
+
+
+def session_key(
+    *,
+    opus_flight_id: Any = None,
+    opus_seat: Any = None,
+    callsign: str = "",
+    opus_user_name: str = "",
+) -> str:
+    """Per-seat connection id (radios, TTS cap, Traffic row)."""
+    fid = str(opus_flight_id or "").strip()
+    seat = str(opus_seat if opus_seat is not None else "").strip()
+    if fid:
+        return f"flight:{fid}:{seat or '1'}"
+    cs = _slug(callsign) or _slug(opus_user_name)
+    if cs:
+        return f"callsign:{cs}"
+    return "anon"
+
+
+def flow_key(
+    *,
+    opus_flight_id: Any = None,
+    callsign: str = "",
+    opus_user_name: str = "",
+) -> str:
+    """Shared timeline id — one cursor for every seat on the same Opus flight."""
+    fid = str(opus_flight_id or "").strip()
+    if fid:
+        return f"flight:{fid}"
+    return session_key(
+        opus_flight_id=None,
+        opus_seat=None,
+        callsign=callsign,
+        opus_user_name=opus_user_name,
+    )
+
+
+def _slug(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", (value or "").strip().lower()).strip("-")
+
+
+_IPCONFIG_ADAPTER = re.compile(
+    r"^(?P<kind>.+?) adapter (?P<name>.+):\s*$", re.IGNORECASE
+)
+_IPCONFIG_IPV4 = re.compile(
+    r"^\s*(?:Autoconfiguration )?IPv4 Address[.\s]*:\s*(?P<ip>\d+\.\d+\.\d+\.\d+)",
+    re.IGNORECASE,
+)
+
+
+def _parse_ipconfig(text: str) -> list[dict[str, str]]:
+    """Parse `ipconfig` into [{name, ip}, ...] (no loopback / APIPA)."""
+    rows: list[dict[str, str]] = []
+    adapter = ""
+    for line in (text or "").splitlines():
+        m_ad = _IPCONFIG_ADAPTER.match(line.rstrip())
+        if m_ad:
+            adapter = (m_ad.group("name") or "").strip()
+            continue
+        m_ip = _IPCONFIG_IPV4.match(line)
+        if not m_ip:
+            continue
+        ip = m_ip.group("ip")
+        if not ip or ip.startswith("127.") or ip.startswith("169.254."):
+            continue
+        rows.append({"name": adapter or "LAN", "ip": ip})
+    return rows
+
+
+def _windows_ipv4_interfaces() -> list[dict[str, str]]:
+    try:
+        raw = subprocess.check_output(
+            ["ipconfig"],
+            text=True,
+            errors="replace",
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return []
+    return _parse_ipconfig(raw)
+
+
+def lan_ipv4_interfaces() -> list[dict[str, str]]:
+    """Named IPv4 interfaces this PC owns (Windows ipconfig; else hostname)."""
+    if os.name == "nt":
+        rows = _windows_ipv4_interfaces()
+        if rows:
+            return rows
+    found: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    def _add(ip: str, name: str = "LAN") -> None:
+        ip = (ip or "").strip()
+        if not ip or ip.startswith("127.") or ip.startswith("169.254."):
+            return
+        if ip in seen:
+            return
+        seen.add(ip)
+        found.append({"name": name, "ip": ip})
+
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        probe.connect(("8.8.8.8", 80))
+        _add(probe.getsockname()[0], "default")
+        probe.close()
+    except OSError:
+        pass
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            _add(info[4][0])
+    except OSError:
+        pass
+    return found
+
+
+def lan_ipv4_addresses() -> list[str]:
+    """Non-loopback IPv4 addresses this PC can be reached at on the LAN."""
+    return [row["ip"] for row in lan_ipv4_interfaces()]
+
+
+def ipv4_same_lan(host_ip: str, local_ips: list[str] | None = None) -> bool:
+    """True if host_ip shares a /24 with any local address (common home LAN)."""
+    local_ips = list(local_ips if local_ips is not None else lan_ipv4_addresses())
+    try:
+        h = tuple(int(p) for p in str(host_ip).split("."))
+        if len(h) != 4:
+            return False
+    except ValueError:
+        return False
+    for raw in local_ips:
+        try:
+            loc = tuple(int(p) for p in str(raw).split("."))
+        except ValueError:
+            continue
+        if len(loc) != 4:
+            continue
+        if loc[:3] == h[:3]:
+            return True
+    return False
+
+
+def host_from_url(url: str) -> str:
+    m = re.match(r"^https?://([^/:]+)", (url or "").strip(), re.IGNORECASE)
+    return (m.group(1) if m else "").strip()
+
+
+def listen_urls(port: int) -> list[str]:
+    port = int(port)
+    urls = [f"http://{row['ip']}:{port}" for row in lan_ipv4_interfaces()]
+    urls.append(f"http://127.0.0.1:{port}")
+    return urls
+
+
+def format_listen_summary(port: int) -> str:
+    """Host UI line listing every NIC IP pilots might use."""
+    port = int(port)
+    rows = lan_ipv4_interfaces()
+    if not rows:
+        return f"HOST  listen ?:{port}  ·  no LAN IPv4 found"
+    parts = [f"{row['ip']}:{port} ({row['name']})" for row in rows]
+    return "HOST  listen " + "  |  ".join(parts)
+
+
+def describe_connect_failure(
+    reason: object,
+    url: str,
+    *,
+    local_ips: list[str] | None = None,
+) -> str:
+    """Human hint for urllib URLError.reason (timeout vs refused vs other)."""
+    text = str(reason or "").strip() or "unknown"
+    low = text.casefold()
+    url = (url or "").strip()
+    host = host_from_url(url)
+    loopback = host in {"127.0.0.1", "localhost"}
+    locals_ = list(local_ips if local_ips is not None else lan_ipv4_addresses())
+    mismatch = bool(host) and not loopback and locals_ and not ipv4_same_lan(host, locals_)
+    route_hint = ""
+    if mismatch:
+        here = ", ".join(locals_) or "?"
+        route_hint = (
+            f" This PC is {here}; Host is {host}. Different subnets are fine if "
+            f"TCP {DEFAULT_ATC_PORT} is routed or port-forwarded to the DCS server "
+            f"the same way SRS is (do not use 192.168.50.x unless this PC can already "
+            f"reach it). "
+        )
+    if "timed out" in low or "timeout" in low:
+        hint = (
+            "timed out — packets never reached the Host. "
+            f"{route_hint}"
+            "On the Host PC: allow Windows Firewall inbound TCP "
+            f"{DEFAULT_ATC_PORT} (or python.exe). "
+            "On this PC: Host address = the IP/hostname you already use for DCS/SRS, "
+            f"ATC port {DEFAULT_ATC_PORT} (not SRS 5002)."
+        )
+        if loopback:
+            hint = (
+                "timed out talking to 127.0.0.1 — that is THIS PC. "
+                "Set Host address to the server's LAN IP shown on the Host Squadron tab."
+            )
+        return f"host unreachable ({hint}) [{url}]"
+    if "refused" in low or "10061" in low:
+        hint = (
+            "connection refused — nothing is listening on that IP:port. "
+            "Host role must be saved on the server, same ATC port, "
+            "and not the SRS port."
+        )
+        if loopback:
+            hint = (
+                "connection refused on 127.0.0.1 — this PC has no Host. "
+                "Use the dedicated server's LAN IP."
+            )
+        return f"host unreachable ({hint}) [{url}]"
+    return f"host unreachable ({text}) [{url}]"
+
+
+def ensure_inbound_tcp_firewall(port: int) -> str:
+    """
+    Add a Windows inbound TCP allow rule for the ATC Host port.
+
+    Returns a short status for the UI. No-op on non-Windows. Failure is
+    non-fatal (the Host still listens; the operator can allow Python once).
+    """
+    if os.name != "nt":
+        return ""
+    port = int(port)
+    name = f"{FIREWALL_RULE_PREFIX} {port}"
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        show = subprocess.run(
+            ["netsh", "advfirewall", "firewall", "show", "rule", f"name={name}"],
+            capture_output=True,
+            text=True,
+            creationflags=creationflags,
+        )
+    except OSError as exc:
+        return f"firewall skipped ({exc})"
+    combined = f"{show.stdout or ''}{show.stderr or ''}"
+    if show.returncode == 0 and "No rules match" not in combined:
+        return f"firewall OK ({name})"
+    try:
+        added = subprocess.run(
+            [
+                "netsh",
+                "advfirewall",
+                "firewall",
+                "add",
+                "rule",
+                f"name={name}",
+                "dir=in",
+                "action=allow",
+                "protocol=TCP",
+                f"localport={port}",
+                "enable=yes",
+                "profile=any",
+            ],
+            capture_output=True,
+            text=True,
+            creationflags=creationflags,
+        )
+    except OSError as exc:
+        return f"firewall skipped ({exc})"
+    if added.returncode == 0:
+        return f"firewall allowed TCP {port}"
+    return (
+        f"firewall rule needs Administrator — allow python.exe when Windows asks, "
+        f"or run: netsh advfirewall firewall add rule name=\"{name}\" dir=in "
+        f"action=allow protocol=TCP localport={port}"
+    )

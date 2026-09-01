@@ -105,6 +105,15 @@ def main() -> int:
         ("bandsaw fleece 1 declare group 05667 21000", 56, 67, 21000),
         ("bandsaw fleece 1 declare ellis 056 67", 56, 67, None),
         ("bandsaw fleece 1 declare alvis 05667", 56, 67, None),
+        ("blackjack fleece 1 declare 056 67 28k", 56, 67, 28000),
+        ("blackjack fleece 1 declare 056 67 28 k", 56, 67, 28000),
+        ("blackjack fleece 1 declare 056 67 angels 28", 56, 67, 28000),
+        ("blackjack fleece 1 declare 056 67 twenty eight thousand", 56, 67, 28000),
+        ("Declare group Bullseye 020 15 Twenty eight thousand", 20, 15, 28000),
+        ("Declare group Elvis 020 15 Twenty eight thousand", 20, 15, 28000),
+        ("Declare group Bullseye 020 15 Angels 28", 20, 15, 28000),
+        ("Declare group Elvis 020 15 angels twenty eight", 20, 15, 28000),
+        ("Declare group Bullseye 020 15 twenty eight", 20, 15, 28000),
     ]
     for raw, brg, rng, alt in cases:
         cue = voice_actions.parse_declare_cue(raw)
@@ -128,6 +137,40 @@ def main() -> int:
         bad += 1
     else:
         print(f"OK cue error lateral: {err2:.1f} nm")
+
+    cue_28k = {"bearing": 56, "range_nm": 67, "altitude_ft": 28000}
+    hit = voice_actions.declare_cue_score(56, 67, 27500, cue_28k)
+    miss_alt = voice_actions.declare_cue_score(56, 67, 12000, cue_28k)
+    miss_pos = voice_actions.declare_cue_score(40, 20, 28000, cue_28k)
+    if hit is None or hit > 3.0 or miss_alt is not None or miss_pos is not None:
+        print(
+            f"FAIL declare gates: hit={hit} miss_alt={miss_alt} miss_pos={miss_pos}"
+        )
+        bad += 1
+    else:
+        print(f"OK declare altitude + bullseye gates (hit {hit:.1f} nm)")
+
+    friendly = _g(12.0, 250, heading=90, feet=15000, bearing=40, range_nm=20)
+    friendly.declaration = "friendly"
+    hostile = _g(6.0, 270, heading=90, feet=28000, bearing=56, range_nm=67)
+    hostile.declaration = "hostile"
+    picked = voice_actions.prefer_declare_group(
+        [friendly, hostile], cue=cue_28k
+    )
+    if picked is None or picked.declaration != "hostile":
+        print(f"FAIL prefer hostile over loose friendly: {picked}")
+        bad += 1
+    else:
+        print("OK declare prefers hostile over a loose friendly")
+
+    weak_friendly = _g(14.0, 250, heading=90, feet=15000, bearing=40, range_nm=20)
+    weak_friendly.declaration = "friendly"
+    none = voice_actions.prefer_declare_group([weak_friendly], cue=cue_28k)
+    if none is not None:
+        print(f"FAIL weak friendly-only cue should be unable: {none}")
+        bad += 1
+    else:
+        print("OK declare says unable instead of guessing friendly")
 
     # Sticky declarations: same group keeps its label; only Hostile upgrades.
     mem = pl.DeclarationMemory()
@@ -181,6 +224,64 @@ def main() -> int:
         bad += 1
     else:
         print("OK declaration memory survives state round-trip")
+
+    import atc_phrase
+
+    # Spoken BRAA is magnetic (true − 12°E on NTTR).
+    if abs(atc_phrase.true_to_magnetic_deg(221.0) - 209.0) > 0.01:
+        print(f"FAIL true 221 -> mag 209, got {atc_phrase.true_to_magnetic_deg(221.0)}")
+        bad += 1
+    else:
+        print("OK true-to-magnetic 221 -> 209")
+    own_lat, own_lon = 36.0, -115.0
+    tgt_lat, tgt_lon = 36.0, -114.0
+    true_brg = atc_phrase._true_bearing_deg(own_lat, own_lon, tgt_lat, tgt_lon)
+    mag_brg = atc_phrase.magnetic_bearing_deg(own_lat, own_lon, tgt_lat, tgt_lon)
+    braa_brg, _rng = pl.braa_from_own(own_lat, own_lon, tgt_lat, tgt_lon)
+    expect_mag = (true_brg - 12.0) % 360.0
+    if abs(mag_brg - expect_mag) > 0.01 or braa_brg != int(round(expect_mag)) % 360:
+        print(
+            f"FAIL BRAA magnetic: true={true_brg:.1f} mag={mag_brg:.1f} "
+            f"spoken={braa_brg} expect={expect_mag:.1f}"
+        )
+        bad += 1
+    else:
+        print(f"OK spoken BRAA is magnetic ({braa_brg:03d}, true was {true_brg:.0f})")
+
+    wreck = {
+        "type": "air",
+        "name": "Pilot",
+        "coalition": "red",
+        "objectName": "Parachutist",
+    }
+    live = {
+        "type": "air",
+        "name": "MiG-29",
+        "coalition": "red",
+        "flightLabel": "IVAN 11",
+        "objectName": "MiG-29S",
+    }
+    flagged = {
+        "type": "air",
+        "name": "Bandit 2",
+        "coalition": "red",
+        "objectName": "Su-27",
+        "alive": False,
+    }
+    if (
+        not atc_phrase.caoc_unit_is_dead_or_wreck(wreck)
+        or atc_phrase.caoc_unit_is_picture_eligible(wreck)
+        or not atc_phrase.caoc_unit_is_picture_eligible(live)
+        or atc_phrase.caoc_unit_is_picture_eligible(flagged)
+    ):
+        print(
+            f"FAIL dead/wreck picture filter: wreck={atc_phrase.caoc_unit_is_dead_or_wreck(wreck)} "
+            f"live={atc_phrase.caoc_unit_is_picture_eligible(live)} "
+            f"flagged={atc_phrase.caoc_unit_is_picture_eligible(flagged)}"
+        )
+        bad += 1
+    else:
+        print("OK shot-down Pilot / wreck tracks are excluded from picture")
 
     print(f"\n{bad} failure(s)" if bad else "\nall picture label checks passed")
     return 1 if bad else 0

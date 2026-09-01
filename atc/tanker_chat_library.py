@@ -7,7 +7,7 @@ Mix of:
   • open questions — answer in your own words
 
 Keep hits away from official tanker words (rejoin, contact, disconnect,
-observation). Boom operator is enlisted talking to an F-16 officer —
+observation). Boom operator is a female enlisted talking to an F-16 officer —
 respectful, not peer-to-peer.
 """
 

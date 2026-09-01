@@ -6,6 +6,7 @@ Mission flight flow engine: next/back/reset/flip/play + localhost HTTP control.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import random
 import sys
@@ -37,6 +38,35 @@ def save_json(path: Path, data: Any) -> None:
     with path.open("w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
         f.write("\n")
+
+
+def load_app_config(path: Path | None = None) -> dict[str, Any]:
+    """
+    Load config.json, creating it from config.example.json on first run.
+
+    Dedicated-server copies often have no config.json yet; the example is enough
+    to open Setup and switch the role to Host.
+    """
+    cfg_path = path or CONFIG_PATH
+    if cfg_path.is_file():
+        data = load_json(cfg_path)
+        if isinstance(data, dict):
+            return data
+        raise ValueError(f"{cfg_path.name} is not a JSON object")
+    example = cfg_path.parent / "config.example.json"
+    if example.is_file():
+        data = load_json(example)
+        if not isinstance(data, dict):
+            raise ValueError("config.example.json is not a JSON object")
+        try:
+            save_json(cfg_path, data)
+            print(f"Created {cfg_path.name} from config.example.json", file=sys.stderr)
+        except OSError as exc:
+            print(f"WARNING: could not write {cfg_path.name}: {exc}", file=sys.stderr)
+        return data
+    raise FileNotFoundError(
+        f"Missing {cfg_path.name}. Copy config.example.json to config.json."
+    )
 
 
 _DEFAULT_FLOW_REL = "flows/nellis_default.json"
@@ -106,23 +136,65 @@ def normalize_mission_to_steps(mission: dict[str, Any]) -> dict[str, Any]:
 
 
 class FlowEngine:
-    def __init__(self, config: dict[str, Any] | None = None, dry_run: bool = False) -> None:
-        self.config = dict(config or load_json(CONFIG_PATH))
+    def __init__(
+        self,
+        config: dict[str, Any] | None = None,
+        dry_run: bool = False,
+        *,
+        persist_state: bool = True,
+        initial_state: dict[str, Any] | None = None,
+        mission: dict[str, Any] | None = None,
+        airports: dict[str, Any] | None = None,
+    ) -> None:
+        self.config = dict(config or load_app_config())
         if dry_run:
             self.config["dry_run"] = True
         srs_radio.apply_config(self.config)
-        self.airports = load_json(AIRPORTS_PATH)
-        self.mission = load_json(resolve_flow_path(self.config))
+        self.mutex = threading.RLock()
+        self.persist_state = bool(persist_state)
+        self.airports = dict(airports) if airports is not None else load_json(AIRPORTS_PATH)
+        if mission is not None:
+            self.mission = copy.deepcopy(mission)
+        else:
+            self.mission = load_json(resolve_flow_path(self.config))
         # In-memory unify; disk migrates on next UI save
         if "steps" not in self.mission and ("outbound" in self.mission or "inbound" in self.mission):
             self.mission["steps"] = mission_steps(self.mission)
-        self.state = self._load_state()
+        if initial_state is not None:
+            self.state = dict(initial_state)
+        elif self.persist_state:
+            self.state = self._load_state()
+        else:
+            self.state = self._blank_state()
+        # Client-injected radios for a host with no local DCS/SRS.
+        self.remote_radios: srs_radio.RadioState | None = None
+        # Host queues TX per channel; mutation still runs immediately.
+        self.defer_tx = False
+        self.pending_tx: dict[str, Any] | None = None
         self.sync_requested_runway_from_mission()
+        try:
+            import tanker as tanker_mod
+
+            tanker_mod.reconcile_aar_overlay(self)
+        except Exception:
+            pass
         # Persist cleared/restored runway so a stale flow_state.json does not linger.
         try:
             self.save_state()
         except Exception:
             pass
+
+    @staticmethod
+    def _blank_state() -> dict[str, Any]:
+        return {
+            "index": 0,
+            "last_step_id": None,
+            "active_takeoff_mode": None,
+            "pending_takeoff_offer": None,
+            "takeoff_offer_rolled": False,
+            "contact_phase": "field",
+            "last_agency": "delivery",
+        }
 
     def _load_state(self) -> dict[str, Any]:
         if STATE_PATH.is_file():
@@ -130,13 +202,76 @@ class FlowEngine:
                 return load_json(STATE_PATH)
             except json.JSONDecodeError:
                 pass
-        return {
-            "index": 0,
-            "last_step_id": None,
-            "active_takeoff_mode": None,
-            "pending_takeoff_offer": None,
-            "takeoff_offer_rolled": False,
+        return self._blank_state()
+
+    def set_remote_radios(
+        self,
+        freqs_mhz: list[float] | None,
+        *,
+        fresh: bool = True,
+        selected_mhz: float | None = None,
+    ) -> None:
+        """Use a client's tuned radios instead of the host's local SRS/DCS."""
+        if freqs_mhz is None:
+            self.remote_radios = None
+            return
+        self.remote_radios = srs_radio.RadioState(
+            source="client",
+            freqs_mhz=[float(f) for f in freqs_mhz],
+            selected_mhz=selected_mhz,
+            unit="client",
+            age_s=0.0,
+            fresh=bool(fresh),
+        )
+
+    def emit_radio(
+        self,
+        *,
+        text: str = "",
+        file_path: str = "",
+        tx_name: str,
+        freq: float,
+        mod: str,
+        channel: str | None = None,
+        voice_override: str | None = None,
+        step: dict[str, Any] | None = None,
+    ) -> int:
+        """TX on SRS, or stash the payload when the host is queueing the channel."""
+        payload: dict[str, Any] = {
+            "text": text,
+            "file_path": file_path,
+            "tx_name": tx_name,
+            "freq": freq,
+            "mod": mod,
+            "channel": str(channel or "other"),
+            "voice": voice_override,
+            "step": step,
+            "config": self.config,
+            "airport": self.airport(),
         }
+        if self.defer_tx:
+            self.pending_tx = payload
+            return 0
+        if file_path:
+            return atc_phrase.transmit_file(
+                self.config, self.airport(), file_path, tx_name, freq, mod
+            )
+        return atc_phrase.transmit(
+            self.config,
+            self.airport(),
+            text,
+            tx_name,
+            freq,
+            mod,
+            channel=channel,
+            voice_override=voice_override,
+            step=step,
+        )
+
+    def take_pending_tx(self) -> dict[str, Any] | None:
+        job = self.pending_tx
+        self.pending_tx = None
+        return job
 
     def sync_requested_runway_from_mission(self) -> None:
         """
@@ -157,6 +292,8 @@ class FlowEngine:
     def save_state(self) -> None:
         # Drop legacy direction from state if present
         self.state.pop("direction", None)
+        if not self.persist_state:
+            return
         save_json(STATE_PATH, self.state)
 
     def _advance_past_skippable(self) -> None:
@@ -170,6 +307,7 @@ class FlowEngine:
         while idx < len(steps) and self._step_is_skippable(steps[idx]):
             idx += 1
         self.state["index"] = idx
+        self._park_pending_departure_handoff()
 
     def _step_is_skippable(self, step: dict[str, Any] | None) -> bool:
         if not step:
@@ -185,6 +323,7 @@ class FlowEngine:
             tanker_skip
             or atc_phrase.should_skip_takeoff_step(step, self.mission, self.state)
             or atc_phrase.should_skip_approach_step(step, self.mission, self.state)
+            or atc_phrase.should_skip_control_step(step, self.state)
             or atc_phrase.should_skip_cruise_climb_step(step, self.mission, self.state)
         )
 
@@ -249,6 +388,37 @@ class FlowEngine:
             self.state["pending_takeoff_offer"] = "rolling"
         self.save_state()
 
+    def _park_pending_departure_handoff(self) -> None:
+        """
+        After Departure radar / climb, stay on the Blackjack handoff.
+
+        Skipping the unused climb-to-cruise step must not walk the cursor onto
+        Control → Approach. A leftover recovery cursor plus a filed TORYE
+        (outbound local hop) made Watch hand to Approach instead of Blackjack.
+        """
+        last_id = str(self.state.get("last_step_id") or "").strip()
+        last_tmpl = str(self.state.get("last_tx_template") or "").strip().lower()
+        played_tmpl = last_tmpl
+        for step in self.steps:
+            if str(step.get("id") or "").strip() == last_id:
+                played_tmpl = str(step.get("template") or last_tmpl).strip().lower()
+                break
+        if played_tmpl not in ("radar_contact", "climb_cruise"):
+            return
+        handoff_i = next(
+            (
+                i
+                for i, step in enumerate(self.steps)
+                if str(step.get("template") or "") == "departure_handoff"
+            ),
+            None,
+        )
+        if handoff_i is None:
+            return
+        idx = int(self.state.get("index") or 0)
+        if idx > handoff_i:
+            self.state["index"] = handoff_i
+
     def prepare_takeoff_cursor(self) -> None:
         """Skip LUAW if needed + maybe arm a rolling offer for the current step."""
         self._advance_past_skippable()
@@ -258,7 +428,10 @@ class FlowEngine:
         self._maybe_roll_takeoff_offer(step)
 
     def reload(self) -> None:
-        self.config = load_json(CONFIG_PATH)
+        if not self.persist_state:
+            # Multi-pilot sessions own their config/mission; do not clobber from disk.
+            return
+        self.config = load_app_config()
         if self.config.get("dry_run"):
             pass
         self.airports = load_json(AIRPORTS_PATH)
@@ -381,6 +554,11 @@ class FlowEngine:
         if filed is not None:
             self.state["filed_altitude_ft"] = filed
         channel = step.get("channel") or step.get("phase") or "other"
+        tmpl = str(step.get("template") or "")
+        if tmpl in ("control_check_in", "control_handoff"):
+            live = str(self.state.get("control_channel") or "").strip().lower()
+            if live in ("control_east", "control_west"):
+                channel = live
         runway = atc_phrase.pick_departure_runway(
             airport,
             weather,
@@ -415,7 +593,15 @@ class FlowEngine:
             file_path = step.get("file")
             if not file_path:
                 raise RuntimeError(f"Step {step.get('id')} is mode=file but no file set")
-            code = atc_phrase.transmit_file(self.config, airport, file_path, tx_name, freq, mod)
+            # Stamp before emit so Watch cannot TX the same step during Play.
+            self.state["last_step_id"] = step.get("id")
+            code = self.emit_radio(
+                file_path=str(file_path),
+                tx_name=tx_name,
+                freq=freq,
+                mod=mod,
+                channel=channel,
+            )
             detail["file"] = file_path
             # File audio has no TTS string — keep the label so a spoken
             # readback of the instruction can be recognized as an echo.
@@ -437,14 +623,14 @@ class FlowEngine:
                 state=self.state,
                 config=self.config,
             )
+            # Stamp before emit so Watch cannot TX the same step during Play.
+            self.state["last_step_id"] = step.get("id")
             # Prefer per-step freq/mod (e.g. unique "other" freqs) over airport defaults
-            code = atc_phrase.transmit(
-                self.config,
-                airport,
-                text,
-                tx_name,
-                freq,
-                mod,
+            code = self.emit_radio(
+                text=text,
+                tx_name=tx_name,
+                freq=freq,
+                mod=mod,
                 channel=channel,
                 voice_override=voice_name,
                 step=step,
@@ -488,8 +674,12 @@ class FlowEngine:
         template = atc_phrase.readback_template_for_step(
             step, mission=self.mission, state=self.state
         )
-        climb_ft = atc_phrase.resolve_shared_climb_ft(
-            step=step, mission=self.mission, state=self.state
+        climb_ft = atc_phrase.climb_ft_for_readback(
+            template,
+            opus=opus,
+            mission=self.mission,
+            state=self.state,
+            step=step,
         )
         items = atc_phrase.build_readback_checklist(
             template,
@@ -504,6 +694,16 @@ class FlowEngine:
         self.state["last_tx_template"] = template
         self.state["last_tx_channel"] = str(detail.get("channel") or "")
         self.state["last_tx_at"] = time.time()
+        try:
+            import agencies as agencies_mod
+
+            agencies_mod.note_tx(
+                self.state,
+                str(detail.get("channel") or ""),
+                template,
+            )
+        except Exception:
+            pass
         detail["climb_ft"] = climb_ft
         detail["readback_items"] = items
 
@@ -549,7 +749,10 @@ class FlowEngine:
             return
         steps = self.steps
         idx = int(self.state.get("index") or 0)
-        prev = steps[idx - 1] if steps and 1 <= idx <= len(steps) else None
+        prev_i = idx - 1
+        while prev_i > 0 and self._step_is_skippable(steps[prev_i]):
+            prev_i -= 1
+        prev = steps[prev_i] if steps and 0 <= prev_i < len(steps) else None
         if not prev:
             self._clear_readback_state()
             return
@@ -584,8 +787,12 @@ class FlowEngine:
             state=self.state,
             template=template,
         )
-        climb_ft = atc_phrase.resolve_shared_climb_ft(
-            step=prev, mission=self.mission, state=self.state
+        climb_ft = atc_phrase.climb_ft_for_readback(
+            template,
+            opus=opus,
+            mission=self.mission,
+            state=self.state,
+            step=prev,
         )
         items = atc_phrase.build_readback_checklist(
             template,
@@ -615,7 +822,11 @@ class FlowEngine:
             return
         srs_radio.apply_config(self.config)
         allowed, msg, _result = srs_radio.check_freq_gate(
-            self.config, self.airport(), step, state=self.state
+            self.config,
+            self.airport(),
+            step,
+            state=self.state,
+            radio=self.remote_radios,
         )
         if not allowed:
             raise RuntimeError(msg)
@@ -766,13 +977,11 @@ class FlowEngine:
         }
         self._freq_gate_or_raise(step, bypass=bypass_freq_gate)
         voice_name, _ = atc_phrase.voice_for_step(self.config, channel, step)
-        code = atc_phrase.transmit(
-            self.config,
-            airport,
-            text,
-            tx_name,
-            freq,
-            mod,
+        code = self.emit_radio(
+            text=text,
+            tx_name=tx_name,
+            freq=freq,
+            mod=mod,
             channel=channel,
             voice_override=voice_name,
             step=step,
@@ -792,12 +1001,16 @@ class FlowEngine:
                 "app_tower",
                 "twr_clear",
                 "twr_right",
+                "exit_runway",
+                "twr_exit",
             ]
         else:
             # VFR closed / Flex / Duck: already with Tower — new land on final.
             self.state["clear_position_fire_substrings"] = [
                 "clear_land",
                 "twr_clear",
+                "exit_runway",
+                "twr_exit",
             ]
         if kind == "instrument_missed":
             if not self._seek_template("approach_check_in"):
@@ -829,67 +1042,13 @@ class FlowEngine:
 
     def range_exit_ready(self) -> tuple[bool, str]:
         """
-        True when Blackjack may hand to Approach (near APP / field boundary).
+        True when Blackjack may hand to Nellis Control.
 
-        Range-complete far from the field only releases to the exit fix;
-        Approach waits for the approach zone or ≤40 NM from the field.
+        Range exit is an early NATCF push — voice / Play always hand off.
+        Watch still uses the leaving-blackjack trigger separately.
         """
-        try:
-            import runway_position as rp
-        except Exception:
-            return True, ""
-        step = self.current_step() or {}
-        if str(step.get("template") or "") != "bj_range_exit":
-            step = {
-                "template": "bj_range_exit",
-                "trigger": {"zone": "approach", "within_nm": 40},
-            }
-        trigger = rp.resolve_step_trigger(
-            step, mission=self.mission, state=self.state
-        )
-        if trigger is None:
-            return True, ""
-        airport = self.airport()
-        opus, _wx = atc_phrase.resolve_opus_and_metar(self.config, airport["icao"])
-        if not opus:
-            opus = atc_phrase.synthetic_flight_context(
-                atc_phrase.callsign_override(self.config) or "CALLSIGN"
-            )
-        callsign = opus.radio_callsign
-        dist = rp.ownship_distance_nm(
-            airport,
-            config=self.config,
-            callsign=callsign,
-            opus=opus,
-            state=self.state,
-        )
-        waiting_bits: list[str] = []
-        if trigger.within_nm is not None:
-            held, waiting = rp.within_nm_held(trigger, dist)
-            if held:
-                return True, ""
-            if waiting:
-                waiting_bits.append(waiting)
-        if trigger.zone:
-            zones = rp.zones_by_ref(airport, trigger.zone, None)
-            if zones:
-                status = rp.PositionTracker().evaluate(
-                    self.config,
-                    airport,
-                    None,
-                    callsign=callsign,
-                    opus=opus,
-                    watch=zones,
-                )
-                count = status.in_zones(zones, settled=False)
-                if count.ok(need_full=False):
-                    return True, ""
-                desc = count.describe(need_full=False)
-                if desc:
-                    waiting_bits.append(desc)
-        if not waiting_bits and trigger.within_nm is None and not trigger.zone:
-            return True, ""
-        return False, " · ".join(waiting_bits) or "need closer to range exit"
+        return True, ""
+
     def acknowledge_blackjack_continue(
         self, *, bypass_freq_gate: bool = False, seek_range_exit: bool = True
     ) -> dict[str, Any]:
@@ -925,13 +1084,11 @@ class FlowEngine:
         self._freq_gate_or_raise(step, bypass=bypass_freq_gate)
         freq, mod, tx_name = atc_phrase.step_radio(airport, channel, None)
         voice_name, _ = atc_phrase.voice_for_step(self.config, channel, step)
-        code = atc_phrase.transmit(
-            self.config,
-            airport,
-            text,
-            tx_name,
-            freq,
-            mod,
+        code = self.emit_radio(
+            text=text,
+            tx_name=tx_name,
+            freq=freq,
+            mod=mod,
             channel=channel,
             voice_override=voice_name,
             step=step,
@@ -957,7 +1114,7 @@ class FlowEngine:
         }
 
     def release_range_exit(self, *, bypass_freq_gate: bool = False) -> dict[str, Any]:
-        """Range complete far out: proceed direct the fix, remain this frequency."""
+        """Range complete: hand to Nellis Control immediately."""
         airport = self.airport()
         opus, weather = atc_phrase.resolve_opus_and_metar(self.config, airport["icao"])
         if not opus:
@@ -974,7 +1131,7 @@ class FlowEngine:
             force=False,
         )
         text = atc_phrase.build_blackjack_range_exit(
-            airport, callsign, plan=plan, include_handoff=False
+            airport, callsign, plan=plan, include_handoff=True
         )
         channel = "blackjack"
         cur = self.current_step() or {}
@@ -989,13 +1146,11 @@ class FlowEngine:
         self._freq_gate_or_raise(step, bypass=bypass_freq_gate)
         freq, mod, tx_name = atc_phrase.step_radio(airport, channel, None)
         voice_name, _ = atc_phrase.voice_for_step(self.config, channel, step)
-        code = atc_phrase.transmit(
-            self.config,
-            airport,
-            text,
-            tx_name,
-            freq,
-            mod,
+        code = self.emit_radio(
+            text=text,
+            tx_name=tx_name,
+            freq=freq,
+            mod=mod,
             channel=channel,
             voice_override=voice_name,
             step=step,
@@ -1025,20 +1180,9 @@ class FlowEngine:
         *,
         bypass_freq_gate: bool = False,
     ) -> dict[str, Any] | None:
-        """Outside the Approach gate: release to the fix, or remain if already released."""
-        if str((step or {}).get("template") or "") != "bj_range_exit":
-            return None
-        ready, waiting = self.range_exit_ready()
-        if ready:
-            return None
-        if self.state.get("range_exit_approved"):
-            result = self.acknowledge_blackjack_continue(
-                bypass_freq_gate=bypass_freq_gate
-            )
-        else:
-            result = self.release_range_exit(bypass_freq_gate=bypass_freq_gate)
-        result["range_exit_waiting"] = waiting or "need closer to range exit"
-        return result
+        """Play/voice always hands to NATCF — Watch uses the leaving-range trigger."""
+        del step, bypass_freq_gate
+        return None
 
     def replay_last_tx(self, *, bypass_freq_gate: bool = False) -> dict[str, Any]:
         """
@@ -1070,13 +1214,11 @@ class FlowEngine:
         self._freq_gate_or_raise(step, bypass=bypass_freq_gate)
         freq, mod, tx_name = atc_phrase.step_radio(airport, channel, None)
         voice_name, _ = atc_phrase.voice_for_step(self.config, channel, step)
-        code = atc_phrase.transmit(
-            self.config,
-            airport,
-            text,
-            tx_name,
-            freq,
-            mod,
+        code = self.emit_radio(
+            text=text,
+            tx_name=tx_name,
+            freq=freq,
+            mod=mod,
             channel=channel,
             voice_override=voice_name,
             step=step,
@@ -1241,7 +1383,20 @@ class FlowEngine:
             )
         self.state["index"] = 0
         self.state["last_step_id"] = None
+        try:
+            import agencies as agencies_mod
+
+            agencies_mod.reset_contact(self.state)
+        except Exception:
+            self.state["contact_phase"] = "field"
+            self.state["last_agency"] = "delivery"
         self._clear_readback_state()
+        try:
+            import tanker as tanker_mod
+
+            tanker_mod.clear_aar_state(self.state)
+        except Exception:
+            pass
         if "active_takeoff_mode" in self.mission:
             self.mission["active_takeoff_mode"] = atc_phrase.DEFAULT_TAKEOFF_MODE
         self.save_state()
@@ -1272,7 +1427,20 @@ class FlowEngine:
         )
         self.state["index"] = 0
         self.state["last_step_id"] = None
+        try:
+            import agencies as agencies_mod
+
+            agencies_mod.reset_contact(self.state)
+        except Exception:
+            self.state["contact_phase"] = "field"
+            self.state["last_agency"] = "delivery"
         self._clear_readback_state()
+        try:
+            import tanker as tanker_mod
+
+            tanker_mod.clear_aar_state(self.state)
+        except Exception:
+            pass
         if "active_takeoff_mode" in self.mission:
             self.mission["active_takeoff_mode"] = atc_phrase.DEFAULT_TAKEOFF_MODE
         self.save_state()

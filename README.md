@@ -4,8 +4,10 @@ Patched `DCS-SR-ExternalAudio` that can transmit to a **remote** SRS host (`--ip
 
 ## Requirements
 
-- Windows 10/11 x64
-- [Python 3](https://www.python.org/) on `PATH` (`py -3`)
+- Windows 10/11 x64 (dedicated-server Host is the same)
+- [Python 3.10+](https://www.python.org/downloads/windows/) **on the machine that runs the Host UI**
+  - `py` is optional. The `.cmd` launchers look for `python.exe` on PATH and in the usual install folders.
+  - Enable **Add python.exe to PATH** and **tcl/tk and IDLE** in the installer. The Microsoft Store stub is not enough.
 - .NET desktop runtime only if you **rebuild** ExternalAudio (prebuilt exe is included)
 
 ## Quick start
@@ -19,9 +21,11 @@ Patched `DCS-SR-ExternalAudio` that can transmit to a **remote** SRS host (`--ip
 
 3. Edit `atc\config.json` (Opus URLs/user, airport defaults).  
    `external_audio_exe` defaults to `../DCS-SR-ExternalAudio.exe` (relative to `atc\`).
+   First launch copies `config.example.json` if `config.json` is missing.
 4. Launch:
 
    - `atc\Open-ATC-Setup.cmd` or `atc\Open-Flight-Flow.cmd`
+   - Dedicated-server Host: `atc\Start-ATC-Host.cmd` (same app). Setup → Squadron → **Host** → Save.
 
 5. Optional Google Neural2 voices: see [atc/README.md](atc/README.md). Put your service-account JSON in `atc\secrets\` (gitignored).
 

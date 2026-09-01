@@ -1,2 +1,4 @@
 @echo off
-py -3 "%~dp0..\flow_engine.py" reset
+call "%~dp0..\_find_python.cmd"
+if errorlevel 1 exit /b 1
+"%ATC_PYTHON%" "%~dp0..\flow_engine.py" reset

@@ -1,8 +1,7 @@
 # Tools
 
-Nothing in `atc/` imports anything here — these only write `atc/airports.json`,
-which the app then reads. The zone editor is reachable from the app, so it ships
-with it; the rest are maintainer scripts.
+The zone editor (and its `/tester` page) live here. They write `atc/airports.json`
+and read the ATC phrase / zone modules; the rest are maintainer scripts.
 
 ## Runway zone editor
 
@@ -11,7 +10,7 @@ Pilots reach it from **Setup → Draw zones on a map…**, from **Draw one…** 
 By hand it is:
 
 ```
-py -3 tools/zone_server.py [--port 8777] [--airport nellis] [--no-browser]
+py -3 tools/zone_server.py [--port 8777] [--airport nellis] [--page editor|tester]
 ```
 
 The app launches it on `zone_editor_port` (8777 by default), reuses a copy already
@@ -49,6 +48,7 @@ Triggers and what the flow does with them:
 | `eor` | Whole flight inside → monitor tower |
 | `hold_short`, `parking` | Available to any step, nothing built in watches them |
 | `delivery`, `ground`, `tower`, `departure`, `approach` | Agency areas: entering one is the cue to talk to that agency |
+| `control_east`, `control_west`, `blackjack`, `joshua`, `center` | NTTR pass-on areas (Sally / Lee / range / R-2508). Entering one is the cue to talk to that agency |
 | Custom name… | Anything you type. A step matches the name as a plain string, so a custom agency needs no code change |
 
 Any of these can arm a step: on **Plan Flight** the step names the tag or one
@@ -153,6 +153,25 @@ The first load builds a `.kmz.geojson` cache next to the source so the next open
 is faster. Packs and caches under `tools/overlays/` are gitignored — keep your
 own copy locally.
 
+## NTTR agency airspace (Sally / Lee)
+
+Shipped Nellis zones include NATCF / range polygons so Blackjack can pass a
+recovery to **Sally** (Control East, IFG ch 7) or **Lee** (Control West, ch 8)
+from position. FAA AIS publishes Desert MOA, Reveille, and the R-4806/07/08/09
+restricted areas — not the corridor names. Lee Corridor is sketched from
+NELLISAFBI 11-250 (south of the NAFR between Nellis and R-4808S / R-4807).
+
+`tools/agency_airspace.kml` is the pass-on overlay (Google Earth, or copy into
+`tools/overlays/` for the zone editor). Rebuild it, or refresh the polygons, with:
+
+```
+py -3 tools/export_agency_airspace.py
+py -3 tools/import_nttr_agencies.py           # cached GeoJSON if present, else fetch
+py -3 tools/import_nttr_agencies.py --fetch   # re-query FAA AIS
+```
+
+Not a substitute for the IFG chart.
+
 ## Google Earth instead
 
 Draw polygons and paths over the field in Google Earth Pro, save the folder as
@@ -197,6 +216,7 @@ ExtendedData too, and win over anything inferred from the name:
 ```
 py -3 tools/check_zone_geo.py      # parsing, tag inference, reciprocals, writing
 py -3 tools/check_zone_server.py   # HTTP surface, on a spare port and a scratch file
+py -3 atc/check_route_tester.py    # offline tester evaluation (no HTTP)
 ```
 
 `check_zone_server.py` starts the server itself, so nothing needs to be running.
@@ -205,6 +225,27 @@ Both write only to temporary files; the last thing they assert is that the real
 up, which is not a failure.
 
 Saving from the editor keeps a one-shot `airports.json.bak` next to the file.
+
+## Map jet (Fly test mode)
+
+Same process as the zone editor; `/tester` is the map Fly uses as your aircraft.
+From the app: **Setup → Map is my jet…**. Standalone:
+
+```
+py -3 tools/zone_server.py --page tester
+```
+
+or `atc/Open-Route-Tester.cmd`. Plot a filed route, drag or Play the red jet.
+**Drive Fly ownship** (on by default) feeds that position into Fly so auto
+clearances, voice, and TTS run for real. CAOC still supplies tankers and other
+tracks. Weather and radio stay on the Fly tab.
+
+Drop `NTTR.kml` in `tools/overlays/` so DREAM / JUNNO / FYTTR label at CAOC
+coordinates. A bundled extract lives in `atc/nttr_navpoints.json`.
+
+```
+py -3 atc/check_route_tester.py   # synthetic positions, no HTTP
+```
 
 ## Vendored libraries
 

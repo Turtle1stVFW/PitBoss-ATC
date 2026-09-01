@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """
-Runway zone editor.
+Runway zone editor + offline route tester.
 
-    py -3 tools/zone_server.py [--port 8777] [--airport nellis] [--no-browser]
+    py -3 tools/zone_server.py [--port 8777] [--airport nellis] [--page editor|tester]
 
 Launched from the app by Setup -> Draw zones on a map, by Draw one beside Fires
 when on Plan Flight, or on its own by atc/Open-Zone-Editor.cmd.
+Setup -> Map is my jet… and atc/Open-Route-Tester.cmd open /tester on the same
+server: that red jet is what Fly treats as you. CAOC still supplies tankers.
 
-Opens a Leaflet map on satellite imagery at the airport, you trace the areas the
-automatic clearances watch, press Save, and it writes atc/airports.json. Because
-the map is georeferenced, every click already has a lat/lon — there is no image
-to calibrate and no reference points to enter.
+Opens a Leaflet map on satellite imagery at the airport. The editor traces the
+areas the automatic clearances watch and writes atc/airports.json. Because the
+map is georeferenced, every click already has a lat/lon — there is no image to
+calibrate and no reference points to enter.
 
 The browser talks to this process rather than the internet so it can reach
 airports.json and the Opus CAOC feed (which would otherwise be blocked by CORS).
@@ -74,13 +76,19 @@ if str(ATC_DIR) not in sys.path:
     sys.path.insert(0, str(ATC_DIR))
 
 import atc_phrase  # noqa: E402
+import agencies  # noqa: E402
 import runway_position as rp  # noqa: E402
+import route_tester  # noqa: E402
 
 STATIC = {
     "/": ("zone_map.html", "text/html; charset=utf-8"),
     "/zone_map.html": ("zone_map.html", "text/html; charset=utf-8"),
     "/zone_map.js": ("zone_map.js", "text/javascript; charset=utf-8"),
     "/zone_map.css": ("zone_map.css", "text/css; charset=utf-8"),
+    "/tester": ("tester_map.html", "text/html; charset=utf-8"),
+    "/tester_map.html": ("tester_map.html", "text/html; charset=utf-8"),
+    "/tester_map.js": ("tester_map.js", "text/javascript; charset=utf-8"),
+    "/tester_map.css": ("tester_map.css", "text/css; charset=utf-8"),
 }
 VENDOR_TYPES = {
     ".js": "text/javascript; charset=utf-8",
@@ -98,7 +106,7 @@ def _config() -> dict[str, Any]:
         return {}
 
 
-def _airport_keys(data: dict[str, Any]) -> list[dict[str, str]]:
+def _airport_keys(data: dict[str, Any]) -> list[dict[str, str | bool]]:
     return [
         {
             "key": key,
@@ -119,7 +127,8 @@ def _state(airport_key: str) -> dict[str, Any]:
     data = zone_geo.load_airports()
     cfg = _config()
     key = airport_key or str(cfg.get("default_airport") or "") or next(iter(data), "")
-    airport = data.get(key) if isinstance(data.get(key), dict) else {}
+    raw = data.get(key)
+    airport: dict[str, Any] = raw if isinstance(raw, dict) else {}
     lat, lon = zone_geo.airport_centre_ll(airport)
     return {
         "airports": _airport_keys(data),
@@ -240,11 +249,29 @@ def _tracks(airport_key: str) -> dict[str, Any]:
                 "alt_ft": None if alt_m is None else round(alt_m * rp.FT_PER_M, 1),
                 "agl_ft": None if height_m is None else round(height_m * rp.FT_PER_M, 1),
                 "own": unit.get("id") == own_id,
+                "coalition": str(unit.get("coalition") or "").strip().lower(),
                 "zone": rp.zone_label(hit) if hit else "",
                 "trigger": str((hit or {}).get("trigger") or ""),
             }
         )
     return {"ok": True, "tracks": out, "count": len(out)}
+
+
+def _tester_route(airport_key: str, route: str) -> dict[str, Any]:
+    cfg = _config()
+    data = zone_geo.load_airports()
+    key = airport_key or str(cfg.get("default_airport") or "") or next(iter(data), "")
+    airport = data.get(key) if isinstance(data.get(key), dict) else {}
+    catalog = route_tester.load_fix_catalog(airport if isinstance(airport, dict) else None, data)
+    plotted = route_tester.resolve_route(route, catalog)
+    plan = agencies.infer_flight(
+        route=route or None,
+        airport=airport if isinstance(airport, dict) else None,
+    )
+    plotted["ok"] = True
+    plotted["hop"] = agencies.format_hop(plan)
+    plotted["airport"] = key
+    return plotted
 
 
 def _num(val: Any, scale: float = 1.0) -> float | None:
@@ -304,10 +331,11 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "ZoneEditor/1.0"
     protocol_version = "HTTP/1.1"
 
-    def log_message(self, fmt: str, *args: Any) -> None:
-        if "/api/tracks" in str(args[0] if args else ""):
-            return  # polls every second; would bury anything worth reading
-        super().log_message(fmt, *args)
+    def log_message(self, format: str, *args: Any) -> None:
+        path = str(args[0] if args else "")
+        if "/api/tracks" in path or "/api/tester/tick" in path:
+            return  # polls; would bury anything worth reading
+        super().log_message(format, *args)
 
     def do_GET(self) -> None:  # noqa: N802
         url = urlparse(self.path)
@@ -356,11 +384,49 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:  # noqa: BLE001
                 return self._json({"ok": False, "error": str(exc)}, status=400)
             return self._file(cache, "application/geo+json; charset=utf-8")
+        if url.path == "/api/tester/state":
+            try:
+                return self._json(route_tester.tester_state(airport, config=_config()))
+            except Exception as exc:  # noqa: BLE001
+                return self._json({"ok": False, "error": str(exc)}, status=400)
+        if url.path == "/api/tester/route":
+            q = (query.get("q") or [""])[0]
+            try:
+                return self._json(_tester_route(airport, q))
+            except Exception as exc:  # noqa: BLE001
+                return self._json({"ok": False, "error": str(exc)}, status=400)
+        if url.path == "/api/tester/opus-flights":
+            fid_raw = (query.get("id") or [""])[0].strip()
+            detail = (query.get("detail") or ["0"])[0].lower() in ("1", "true", "yes")
+            try:
+                fid = int(fid_raw) if fid_raw else None
+            except ValueError:
+                fid = None
+            try:
+                return self._json(
+                    route_tester.opus_flight_rows(
+                        _config(), include_detail=detail, flight_id=fid
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                return self._json({"ok": False, "error": str(exc), "flights": []}, status=400)
+        if url.path == "/api/tester/metar":
+            try:
+                return self._json(route_tester.live_metar(airport, config=_config()))
+            except Exception as exc:  # noqa: BLE001
+                return self._json({"ok": False, "error": str(exc)}, status=400)
         return self._send(404, b"not found", "text/plain")
 
     def do_POST(self) -> None:  # noqa: N802
         url = urlparse(self.path)
-        if url.path not in ("/api/save", "/api/parse", "/api/overlay"):
+        if url.path not in (
+            "/api/save",
+            "/api/parse",
+            "/api/overlay",
+            "/api/tester/tick",
+            "/api/tester/say",
+            "/api/tester/hear",
+        ):
             return self._send(404, b"not found", "text/plain")
         try:
             length = int(self.headers.get("Content-Length") or 0)
@@ -372,6 +438,32 @@ class Handler(BaseHTTPRequestHandler):
                 name = (parse_qs(url.query).get("filename") or ["overlay.kmz"])[0]
                 path = zone_overlay.save_upload(name, raw)
                 return self._json(zone_overlay.load_overlay(path.name, rebuild=True))
+            if url.path == "/api/tester/tick":
+                body = json.loads(raw or b"{}")
+                if not isinstance(body, dict):
+                    raise ValueError("tick body must be a JSON object")
+                with route_tester._LOCK:
+                    return self._json(
+                        route_tester.tick(body, config=_config())
+                    )
+            if url.path == "/api/tester/say":
+                body = json.loads(raw or b"{}")
+                if not isinstance(body, dict):
+                    raise ValueError("say body must be a JSON object")
+                with route_tester._LOCK:
+                    return self._json(
+                        route_tester.handle_say(body, config=_config())
+                    )
+            if url.path == "/api/tester/hear":
+                body = json.loads(raw or b"{}")
+                if not isinstance(body, dict):
+                    raise ValueError("hear body must be a JSON object")
+                text = str(body.get("text") or "").strip()
+                channel = str(body.get("channel") or "").strip()
+                wav_b64, mime = route_tester.hear_wav_b64(
+                    _config(), text, channel=channel
+                )
+                return self._json({"ok": True, "wav_b64": wav_b64, "mime": mime, "text": text})
             return self._json(_save(json.loads(raw or b"{}")))
         except Exception as exc:  # noqa: BLE001 — report it in the page
             return self._json({"ok": False, "error": str(exc)}, status=400)
@@ -459,6 +551,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--airport", default="", help="airports.json key to open")
     ap.add_argument("--no-browser", action="store_true")
     ap.add_argument(
+        "--page",
+        choices=("editor", "tester"),
+        default="editor",
+        help="which map page to open in the browser (same server either way)",
+    )
+    ap.add_argument(
         "--replace",
         action="store_true",
         help="kill whatever is already on --port, then start this copy",
@@ -469,7 +567,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"no {zone_geo.AIRPORTS_JSON}", file=sys.stderr)
         return 2
 
-    url = f"http://127.0.0.1:{args.port}/"
+    path = "/tester" if args.page == "tester" else "/"
+    url = f"http://127.0.0.1:{args.port}{path}"
     if args.airport:
         url += f"?airport={args.airport}"
 
@@ -497,7 +596,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"could not bind port {args.port}: {exc}", file=sys.stderr)
             return 1
 
-    print(f"zone editor on {url}   (writes {zone_geo.AIRPORTS_JSON})")
+    print(f"zone editor on http://127.0.0.1:{args.port}/   (writes {zone_geo.AIRPORTS_JSON})")
+    print(f"route tester: http://127.0.0.1:{args.port}/tester")
     print(f"reference packs: {zone_overlay.OVERLAYS_DIR}")
     print("Ctrl-C to stop")
     if not args.no_browser:

@@ -1,8 +1,12 @@
 {
-  "_comment": "Nellis (KLSV) recoveries per NellisAFBI 11-250 §4.13.5 + FAA IAP plates (d-TPP). Four VFR recoveries: STRYK, TORYE, ARCOE, MINTT — TORYE and ARCOE are separate initial fixes (Figure 4.7). Prefer RWY 21; use 03 only when headwind on 03 is >= 11 kt. Instrument descend altitudes are IAF crossing altitudes from the plate. Speed is not cleared unless traffic requires it (speed_restrict).",
+  "_comment": "Nellis (KLSV) recoveries per NellisAFBI 11-250 §4.13.5 + FAA IAP plates (d-TPP). Four VFR recoveries: STRYK, TORYE, ARCOE, MINTT — TORYE and ARCOE are separate initial fixes (Figure 4.7). §1.12: RWY 21 is the calm-wind runway; flip to 03 only when the prevailing headwind/tailwind *component* exceeds 10 kt (not merely the closest wind direction). §4.1.4: 2200L–0800L on the CAOC mission clock, departures default 03 and arrivals 21 unless that component gate (or a pilot/Setup override) says otherwise. Instrument descend altitudes are IAF crossing altitudes from the plate. Speed is not cleared unless traffic requires it (speed_restrict).",
   "defaults": {
     "prefer_runway_side": "21",
-    "wind_flip_min_kt": 11,
+    "wind_flip_min_kt": 10,
+    "night_ops_start_hhmm": "2200",
+    "night_ops_end_hhmm": "0800",
+    "night_departure_side": "03",
+    "night_arrival_side": "21",
     "ifr_ceiling_ft": 3000,
     "ifr_visibility_sm": 3.0,
     "default_pattern_vmc": "visual_overhead",
@@ -39,10 +43,54 @@
       "day_vmc_only": true,
       "default_pattern": "visual_overhead",
       "descend_ft": 10000,
-      "priority_note": "§4.13.5.1 Western ranges — Day/VMC; procedure speed 300 KIAS (not ATC-restricted unless traffic)",
+      "priority_note": "§4.13.5.1 Western ranges — Day/VMC; procedure speed 300 KIAS (not ATC-restricted unless traffic). Blackjack clears direct the entry (Stryk / Nixon / Sarah). Approach still names Stryk recovery.",
       "lat": 36.427056,
       "lon": -115.511736,
-      "radial_ref": "LSV 283°/26 NM"
+      "radial_ref": "LSV 283°/26 NM",
+      "entries": [
+        {
+          "id": "SARAH",
+          "aliases": [
+            "SARAH",
+            "SARA"
+          ],
+          "say": "Sarah",
+          "entry": true,
+          "direct_fix": "SARAH",
+          "direct_say": "Sarah",
+          "lat": 36.6075,
+          "lon": -115.30055,
+          "radial_ref": "LSV 317°/24 NM"
+        },
+        {
+          "id": "NIXON",
+          "aliases": [
+            "NIXON"
+          ],
+          "say": "Nixon",
+          "entry": true,
+          "direct_fix": "NIXON",
+          "direct_say": "Nixon",
+          "lat": 36.533617,
+          "lon": -115.5375,
+          "radial_ref": "LSV 293°/30 NM"
+        },
+        {
+          "id": "GASS",
+          "aliases": [
+            "GASS",
+            "GASSPEAK",
+            "GASPEAK"
+          ],
+          "say": "Gass Peak",
+          "entry": false,
+          "direct_fix": "GASS",
+          "direct_say": "Gass Peak",
+          "lat": 36.402217,
+          "lon": -115.177783,
+          "radial_ref": "LSV 310°/12 NM"
+        }
+      ]
     },
     {
       "id": "TORYE",

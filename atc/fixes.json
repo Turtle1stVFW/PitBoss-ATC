@@ -1,0 +1,180 @@
+{
+  "_comment": "Plot-only lat/lon for filed-route tokens that airports.json, approaches/*.json, and NTTR.kml (atc/nttr_navpoints.json) do not already carry. Navaids/fields are public FAA positions (rounded). SID names in this file are fallbacks — the tester prefers NTTR.kml when present.",
+  "fixes": [
+    {
+      "id": "LSV",
+      "aliases": ["KLSV", "NELLIS"],
+      "say": "Nellis",
+      "lat": 36.23619,
+      "lon": -115.03436
+    },
+    {
+      "id": "LAS",
+      "aliases": ["KLAS", "MCCARRAN", "HARRYREID"],
+      "say": "McCarran",
+      "lat": 36.08006,
+      "lon": -115.15225
+    },
+    {
+      "id": "INS",
+      "aliases": ["KINS", "CREECH"],
+      "say": "Creech",
+      "lat": 36.58719,
+      "lon": -115.67335
+    },
+    {
+      "id": "BTY",
+      "aliases": ["BEATTY"],
+      "say": "Beatty",
+      "lat": 36.92281,
+      "lon": -116.73097
+    },
+    {
+      "id": "MMM",
+      "aliases": ["MORMONMESA", "MMM8"],
+      "say": "Mormon Mesa",
+      "lat": 36.76944,
+      "lon": -114.2775
+    },
+    {
+      "id": "DREAM",
+      "aliases": ["DREAM7"],
+      "say": "Dream",
+      "lat": 36.54667,
+      "lon": -115.21667
+    },
+    {
+      "id": "JUNNO",
+      "aliases": [],
+      "say": "Junno",
+      "lat": 36.85,
+      "lon": -115.15
+    },
+    {
+      "id": "FYTTR",
+      "aliases": ["FYTTR7", "FIGHTER"],
+      "say": "Fighter",
+      "lat": 36.236,
+      "lon": -115.68
+    },
+    {
+      "id": "DAG",
+      "aliases": [],
+      "say": "Daggett",
+      "lat": 34.78333,
+      "lon": -116.78722
+    },
+    {
+      "id": "HEC",
+      "aliases": ["HECTOR"],
+      "say": "Hector",
+      "lat": 34.79694,
+      "lon": -116.46278
+    },
+    {
+      "id": "GFS",
+      "aliases": ["GOFFS"],
+      "say": "Goffs",
+      "lat": 35.13167,
+      "lon": -115.17361
+    },
+    {
+      "id": "LHS",
+      "aliases": [],
+      "say": "Lake Hughes",
+      "lat": 34.67611,
+      "lon": -118.57667
+    },
+    {
+      "id": "EDW",
+      "aliases": ["KEDW", "EDWARDS"],
+      "say": "Edwards",
+      "lat": 34.90542,
+      "lon": -117.88383
+    },
+    {
+      "id": "NID",
+      "aliases": ["KNID", "CHINALAKE"],
+      "say": "China Lake",
+      "lat": 35.68542,
+      "lon": -117.692
+    },
+    {
+      "id": "PMD",
+      "aliases": ["KPMD", "PALMDALE"],
+      "say": "Palmdale",
+      "lat": 34.62939,
+      "lon": -118.08455
+    },
+    {
+      "id": "NXP",
+      "aliases": ["KNXP"],
+      "say": "Twentynine Palms",
+      "lat": 34.2962,
+      "lon": -116.1624
+    },
+    {
+      "id": "NJK",
+      "aliases": ["KNJK"],
+      "say": "El Centro",
+      "lat": 32.82922,
+      "lon": -115.67167
+    },
+    {
+      "id": "ILC",
+      "aliases": [],
+      "say": "Wilson Creek",
+      "lat": 38.25,
+      "lon": -114.39417
+    },
+    {
+      "id": "TPH",
+      "aliases": ["TONOPAH"],
+      "say": "Tonopah",
+      "lat": 38.04722,
+      "lon": -117.27444
+    },
+    {
+      "id": "ELY",
+      "aliases": [],
+      "say": "Ely",
+      "lat": 39.29944,
+      "lon": -114.84833
+    },
+    {
+      "id": "RNO",
+      "aliases": ["KRNO"],
+      "say": "Reno",
+      "lat": 39.49912,
+      "lon": -119.76811
+    },
+    {
+      "id": "BAM",
+      "aliases": [],
+      "say": "Battle Mountain",
+      "lat": 40.58611,
+      "lon": -116.87056
+    },
+    {
+      "id": "MLF",
+      "aliases": [],
+      "say": "Milford",
+      "lat": 38.36028,
+      "lon": -113.01306
+    },
+    {
+      "id": "ALAMO",
+      "aliases": [],
+      "say": "Alamo",
+      "lat": 37.365,
+      "lon": -115.164
+    },
+    {
+      "id": "ELGIN",
+      "aliases": [],
+      "say": "Elgin",
+      "lat": 37.754,
+      "lon": -114.53
+    }
+  ]
+}

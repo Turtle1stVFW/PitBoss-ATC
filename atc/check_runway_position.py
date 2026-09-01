@@ -34,8 +34,8 @@ def main() -> int:
     if not 2900 <= frame.length_m <= 3300:
         print("  FAIL runway length is not ~10,100 ft")
         bad += 1
-    if rp.angle_diff(frame.heading_deg, 32.6) > 1.0:
-        print("  FAIL 03L should run about 032.6° true")
+    if rp.angle_diff(frame.heading_deg, 41.2) > 1.0:
+        print("  FAIL 03L should run about 041° true (030 magnetic)")
         bad += 1
 
     # Reverse direction must be the same strip, opposite heading.
@@ -44,6 +44,100 @@ def main() -> int:
     if rp.angle_diff(rev.heading_deg, frame.heading_deg + 180.0) > 1.0:
         print("  FAIL 21R should be the reciprocal of 03L")
         bad += 1
+    if rp.angle_diff(rev.heading_deg, 221.2) > 2.0:
+        print(f"  FAIL 21R should run about 221° true (210 magnetic), got {rev.heading_deg:.1f}")
+        bad += 1
+    # Drawn backwards (threshold at the far end) must still face 21, not 03.
+    swapped = rp.RunwayFrame.build(
+        "21R",
+        {
+            "threshold": {"lat": 36.226792, "lon": -115.046639},
+            "far_end": {"lat": 36.247527, "lon": -115.024281},
+            "width_m": 45,
+        },
+    )
+    if swapped is None or rp.angle_diff(swapped.heading_deg, 221.2) > 2.0:
+        print(
+            "  FAIL backwards 21R geometry should flip to ~221° "
+            f"(got {None if swapped is None else f'{swapped.heading_deg:.1f}'})"
+        )
+        bad += 1
+    else:
+        print(f"ok   backwards 21R geometry flipped to {swapped.heading_deg:.1f}°")
+
+    ils = rp.RunwayFrame.build("21L", rp.runway_geometry(AIRPORT, "21L"))
+    if ils is None:
+        print("  FAIL 21L should be synthesized from 21R")
+        bad += 1
+    elif rp.angle_diff(ils.heading_deg, 221.2) > 2.0:
+        print(f"  FAIL 21L should parallel 21R (~221°), got {ils.heading_deg:.1f}")
+        bad += 1
+    elif ils.tx <= rev.tx:
+        print("  FAIL 21L threshold should sit east of 21R")
+        bad += 1
+    else:
+        print(f"ok   21L parallel offset east of 21R ({ils.tx - rev.tx:.0f} m)")
+
+    end_status = rp.FlightStatus(
+        runway="21L",
+        ok=True,
+        runway_length_m=3000.0,
+        fixes=[
+            rp.UnitFix(
+                unit_id="me",
+                label="Fleece 1",
+                along_m=2500.0,
+                lateral_m=2.0,
+                heading_err_deg=0.0,
+                alt_m=570.0,
+                height_m=5.0,
+                speed_mps=40.0,
+                own=True,
+                on_runway=True,
+            )
+        ],
+        tuning={"alt_tol": 60.0},
+    )
+    trig_end = rp.StepTrigger(zone="runway_end", settled=False, flight="me", explicit=True)
+    held_end, wait_end = rp.runway_end_held(trig_end, end_status, config={})
+    if not held_end:
+        print(f"  FAIL 500 m remaining should be the departure end: {wait_end}")
+        bad += 1
+    end_status.fixes[0].along_m = 1200.0
+    held_mid, wait_mid = rp.runway_end_held(trig_end, end_status, config={})
+    if held_mid:
+        print(f"  FAIL midfield rollout must wait: {wait_mid}")
+        bad += 1
+    end_status.fixes[0].along_m = 2500.0
+    end_status.fixes[0].height_m = 40.0
+    held_low, wait_low = rp.runway_end_held(trig_end, end_status, config={})
+    if held_low:
+        print(f"  FAIL a low approach / missed must not look like rollout: {wait_low}")
+        bad += 1
+    end_status.fixes[0].height_m = 5.0
+    end_status.fixes[0].speed_mps = 80.0
+    held_fast, wait_fast = rp.runway_end_held(trig_end, end_status, config={})
+    if held_fast:
+        print(f"  FAIL 150 kt over the far end must not be an exit: {wait_fast}")
+        bad += 1
+    end_status.fixes[0].speed_mps = 40.0
+    if atc_phrase.runway_exit_hold_reason({"awaiting_on_the_go": True}):
+        pass
+    else:
+        print("  FAIL option / low approach must suppress the exit call")
+        bad += 1
+    if not atc_phrase.runway_exit_hold_reason({"last_tx_template": "go_around"}):
+        print("  FAIL go-around / missed must suppress the exit call")
+        bad += 1
+    if atc_phrase.runway_exit_hold_reason({"last_tx_template": "clear_land"}):
+        print("  FAIL a full-stop land must still be allowed to exit")
+        bad += 1
+    trig_exit = rp.resolve_step_trigger({"template": "exit_runway"})
+    if trig_exit is None or trig_exit.zone != "runway_end" or trig_exit.flight != "me":
+        print(f"  FAIL exit_runway should arm on runway_end: {trig_exit}")
+        bad += 1
+    else:
+        print("ok   exit_runway arms at the departure end")
 
     show("projection")
     # A point 500 m down the centreline from the 03L threshold.
@@ -138,6 +232,73 @@ def main() -> int:
     if not tracker.held_for("k2", True, 0.0, now=t0):
         print("  FAIL zero dwell should pass immediately")
         bad += 1
+    if not rp.skip_auto_tx_already_played(
+        fire_id="dep_cruise",
+        current_step_id="dep_handoff",
+        last_step_id="dep_cruise",
+    ):
+        print("  FAIL auto must not replay a step after Play advanced the cursor")
+        bad += 1
+    if not rp.skip_auto_tx_already_played(
+        fire_id="dep_cruise",
+        current_step_id="dep_cruise",
+        last_step_id="dep_cruise",
+    ):
+        print("  FAIL auto must not replay a step still under the cursor")
+        bad += 1
+    if rp.skip_auto_tx_already_played(
+        fire_id="dep_cruise",
+        current_step_id="dep_cruise",
+        last_step_id="dep_radar",
+    ):
+        print("  FAIL first auto of the cursor step should still fire")
+        bad += 1
+    if rp.skip_auto_tx_already_played(
+        fire_id="twr_land",
+        current_step_id="twr_land",
+        last_step_id="twr_land",
+        template="clear_land",
+        hold_for_landing=True,
+    ):
+        print("  FAIL next-seat land must still auto")
+        bad += 1
+    if not rp.skip_auto_tx_already_played(
+        fire_id="dep_cruise",
+        current_step_id="dep_cruise",
+        last_step_id="dep_radar",
+        playing_id="dep_cruise",
+    ):
+        print("  FAIL auto must not overlap Play while it is still talking")
+        bad += 1
+    if not rp.skip_auto_tx_already_played(
+        fire_id="twr_land",
+        current_step_id="twr_land",
+        last_step_id="twr_land",
+        template="clear_land",
+        hold_for_landing=True,
+        playing_id="twr_land",
+    ):
+        print("  FAIL land must wait until Play finishes before the next seat")
+        bad += 1
+    play_tracker = rp.PositionTracker()
+    play_tracker.pending_latch = "fire:dep_cruise:21R"
+    play_tracker.mark_step_played("dep_cruise")
+    if play_tracker.armed("fire:dep_cruise:21R"):
+        print("  FAIL Play must disarm Watch for the step it is transmitting")
+        bad += 1
+    play_tracker.finish_manual_tx("dep_cruise")
+    if play_tracker.armed("fire:dep_cruise:21R"):
+        print("  FAIL the consumed Watch latch must stay spent after Play")
+        bad += 1
+    fail_tracker = rp.PositionTracker()
+    fail_tracker.pending_latch = "fire:dep_cruise:21R"
+    fail_tracker.mark_step_played("dep_cruise")
+    fail_tracker.unmark_step_played("dep_cruise")
+    if not fail_tracker.armed("fire:dep_cruise:21R"):
+        print("  FAIL a failed Play must re-arm Watch")
+        bad += 1
+    else:
+        print("auto vs Play — no double TX; landing seats still auto")
 
     bad += check_zones()
     bad += check_zone_admission()
@@ -406,6 +567,31 @@ def check_zone_admission() -> int:
         print("  FAIL 'just me' fired on a wingman's position")
         bad += 1
     print("ok   'just me' means me, not whoever is parked in the right place")
+
+    eor_cap = dict(pad, name="NW EOR", trigger="eor", max_alt_ft=100.0)
+    status = rp.FlightStatus(runway="21R", ok=True, total=1)
+    status.fixes = [fix(unit_id="1", own=True, height_m=305.0)]
+    high = status.in_zone(eor_cap, settled=True)
+    desc = high.describe(need_full=False)
+    if high.inside or high.ok(need_full=False) or "AGL" not in desc or "100" not in desc:
+        print(f"  FAIL airborne over EOR should name altitude, got {desc!r}")
+        bad += 1
+    else:
+        print(f"ok   airborne over EOR: {desc}")
+
+    # Recreate on-deck, 180° from takeoff heading — monitor tower must still arm.
+    status.fixes = [
+        fix(unit_id="1", own=True, heading_err_deg=180.0, height_m=0.0, speed_mps=0.0)
+    ]
+    recip = status.in_zone(eor_cap, settled=True)
+    if not recip.ok(need_full=False):
+        print(
+            f"  FAIL EOR reciprocal heading should still settle: "
+            f"{recip.describe(need_full=False)}"
+        )
+        bad += 1
+    else:
+        print("ok   EOR reciprocal heading still settles (not the lineup heading)")
 
     # Leaving: nobody inside is what a "clear of the runway" step waits for.
     status.fixes = [fix(unit_id="1", own=True, x_m=5000.0), fix(unit_id="2", x_m=5000.0)]

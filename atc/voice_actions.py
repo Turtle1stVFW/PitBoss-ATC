@@ -282,6 +282,8 @@ def collect_hostile_groups(
             continue
         if atc_phrase.caoc_unit_is_picture_fixture(unit):
             continue
+        if not atc_phrase.caoc_unit_is_picture_eligible(unit):
+            continue
         fix = atc_phrase.bullseye_for_caoc_unit(unit, config, opus=opus)
         if not fix:
             continue
@@ -312,8 +314,38 @@ def collect_hostile_groups(
 
 
 # How close a track's bullseye must be to the pilot's DECLARE cue (NM).
-DECLARE_CUE_MATCH_NM = 55.0
-DECLARE_ALT_WEIGHT_NM_PER_1K = 0.25
+# 55 NM used to snap a misheard fix onto a friendly across the area.
+DECLARE_CUE_MATCH_NM = 18.0
+# When the pilot said an altitude (28k / angels 28), reject tracks farther than this.
+DECLARE_CUE_ALT_FT = 5000
+# Ranking among tracks that already passed the hard gates.
+DECLARE_ALT_WEIGHT_NM_PER_1K = 2.0
+# If a friendly wins on score, still take a hostile within this extra NM.
+DECLARE_HOSTILE_PREFER_NM = 8.0
+# Friendly-only matches farther than this are "unable", not a guess.
+DECLARE_CUE_CONFIDENT_NM = 10.0
+
+_DECLARE_TENS = {
+    "twenty": 20,
+    "thirty": 30,
+    "forty": 40,
+    "fifty": 50,
+}
+# Whisper often writes angel / angles for angels.
+_DECLARE_ANGELS = r"(?:angels?|angles?)"
+_DECLARE_ONES = {
+    "zero": 0,
+    "oh": 0,
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+}
 
 # Spoken bullseye labels (and Whisper near-misses). Always resolve as theater ELVIS.
 _DECLARE_BE_WORDS = frozenset(
@@ -368,6 +400,9 @@ def parse_declare_cue(
 
     Bullseye name is always the theater bullseye (ELVIS). Pilots may say
     elvis, bullseye, or omit the name — Whisper mishears of the name are ignored.
+
+    Altitude accepts the book form ('twenty eight thousand') and the
+    informal one ('angels 28' / 'angels twenty eight').
     """
     raw = str(text or "").strip()
     if not raw:
@@ -428,6 +463,11 @@ def parse_declare_cue(
                 break
         if not parsed:
             range_nm = int(first[3:])
+    elif len(first) == 7:
+        # normalize() glues '056 67 28' → '0566728' (then 'k' / thousand).
+        bearing = int(first[:3]) % 360
+        range_nm = int(first[3:5])
+        rest = [first[5:]] + nums[1:]
     elif len(nums) >= 2 and len(first) <= 3:
         bearing = int(first) % 360
         range_nm = int(nums[1])
@@ -442,15 +482,8 @@ def parse_declare_cue(
     if bearing is None or range_nm is None or range_nm < 0 or range_nm > 500:
         return None
 
-    if altitude_ft is None and rest:
-        alt_n = int(rest[0])
-        thousand_near = any(t == "thousand" for t in toks[digit_i:])
-        if alt_n >= 1000:
-            altitude_ft = alt_n
-        elif thousand_near or alt_n <= 60:
-            altitude_ft = alt_n * 1000
-        else:
-            altitude_ft = alt_n
+    if altitude_ft is None:
+        altitude_ft = _declare_altitude_ft(toks, digit_i, rest)
 
     return {
         "name": theater_bullseye_name(config),
@@ -460,6 +493,81 @@ def parse_declare_cue(
     }
 
 
+def _declare_ones_value(tok: str) -> int | None:
+    if tok.isdigit() and len(tok) == 1:
+        return int(tok)
+    return _DECLARE_ONES.get(tok)
+
+
+def _declare_tens_thousands(tens: str, ones_tok: str) -> int | None:
+    ones = _declare_ones_value(ones_tok)
+    if ones is None or ones > 9:
+        return None
+    return (_DECLARE_TENS[tens] + ones) * 1000
+
+
+def _declare_altitude_ft(
+    toks: list[str], digit_i: int, rest: list[str]
+) -> int | None:
+    """
+    Altitude from the tokens after the bullseye digits.
+
+    Book: 'twenty eight thousand'. Informal: 'angels 28' / 'angels twenty eight'.
+    Also 28000, 28 thousand, 28k, and Whisper 'twenty 8 thousand'.
+    """
+    blob = " ".join(toks[digit_i:])
+    if not blob:
+        return None
+
+    # angels twenty eight / angels twenty 8 (thousand optional)
+    m = re.search(
+        rf"\b{_DECLARE_ANGELS}\s+(twenty|thirty|forty|fifty)\s+(\d{{1,2}}|[a-z]+)"
+        r"(?:\s+thousands?)?\b",
+        blob,
+    )
+    if m:
+        ft = _declare_tens_thousands(m.group(1), m.group(2))
+        if ft is not None:
+            return ft
+
+    # angels 28 / angel 28 / angles 28
+    m = re.search(rf"\b{_DECLARE_ANGELS}\s+(\d{{1,2}})\b", blob)
+    if m:
+        return int(m.group(1)) * 1000
+
+    # twenty eight thousand / twenty 8 / twenty eight
+    m = re.search(
+        r"\b(twenty|thirty|forty|fifty)\s+(\d{1,2}|[a-z]+)(?:\s+thousands?)?\b",
+        blob,
+    )
+    if m:
+        ft = _declare_tens_thousands(m.group(1), m.group(2))
+        if ft is not None:
+            return ft
+
+    m = re.search(r"\b(twenty|thirty|forty|fifty)\s+thousands?\b", blob)
+    if m:
+        return _DECLARE_TENS[m.group(1)] * 1000
+
+    m = re.search(r"(?<!\w)(\d{1,2})\s*k\b", blob)
+    if m:
+        return int(m.group(1)) * 1000
+
+    m = re.search(r"(?<!\w)(\d{1,2})\s+thousands?\b", blob)
+    if m:
+        return int(m.group(1)) * 1000
+
+    if rest:
+        alt_n = int(rest[0])
+        thousand_near = any(t.startswith("thousand") for t in toks[digit_i:])
+        if alt_n >= 1000:
+            return alt_n
+        if thousand_near or alt_n <= 60:
+            return alt_n * 1000
+        return alt_n
+    return None
+
+
 def _cue_bullseye_error_nm(fix_brg: int, fix_rng: int, cue: dict[str, Any]) -> float:
     """Approximate NM between a unit bullseye and the pilot's DECLARE cue."""
     brg_err = abs(pl.heading_delta(float(fix_brg), float(cue["bearing"])))
@@ -467,6 +575,60 @@ def _cue_bullseye_error_nm(fix_brg: int, fix_rng: int, cue: dict[str, Any]) -> f
     lateral = float(fix_rng) * math.radians(brg_err)
     range_err = abs(float(fix_rng) - float(cue["range_nm"]))
     return math.hypot(lateral, range_err)
+
+
+def declare_cue_score(
+    fix_brg: int,
+    fix_rng: int,
+    feet: int | None,
+    cue: dict[str, Any],
+    *,
+    is_own: bool = False,
+) -> float | None:
+    """
+    Match score in NM, or None when the track fails the hard gates.
+
+    Bullseye position is required. Altitude is a hard reject when the
+    pilot said one and the track height is known.
+    """
+    spatial = _cue_bullseye_error_nm(fix_brg, fix_rng, cue)
+    if spatial > DECLARE_CUE_MATCH_NM:
+        return None
+    score = spatial
+    if is_own:
+        score += 15.0
+    cue_alt = cue.get("altitude_ft")
+    if cue_alt is not None and feet is not None:
+        alt_err = abs(int(feet) - int(cue_alt))
+        if alt_err > DECLARE_CUE_ALT_FT:
+            return None
+        score += (alt_err / 1000.0) * DECLARE_ALT_WEIGHT_NM_PER_1K
+    elif cue_alt is not None:
+        score += 4.0
+    return score
+
+
+def prefer_declare_group(
+    groups: list[pl.FightGroup],
+    *,
+    cue: dict[str, Any] | None,
+) -> pl.FightGroup | None:
+    """Best DECLARE match. Do not guess friendly from a loose / misheard cue."""
+    if not groups:
+        return None
+    best = groups[0]
+    if cue is None:
+        return best
+    if pl.normalize_declaration(best.declaration) != "friendly":
+        return best
+    for g in groups[1:]:
+        if pl.normalize_declaration(g.declaration) == "friendly":
+            continue
+        if g.distance_nm <= best.distance_nm + DECLARE_HOSTILE_PREFER_NM:
+            return g
+    if best.distance_nm > DECLARE_CUE_CONFIDENT_NM:
+        return None
+    return best
 
 
 def collect_declare_groups(
@@ -482,7 +644,8 @@ def collect_declare_groups(
     Air groups for DECLARE.
 
     With a bullseye cue: match CAOC tracks by bullseye bearing/range (theater
-    ELVIS), not by nearest-to-you. Without a cue: nearest air in the bubble.
+    ELVIS) and altitude when the pilot said one. Without a cue: nearest air
+    in the bubble.
     """
     radar = atc_phrase.fetch_caoc_radar(config)
     if not radar:
@@ -501,6 +664,8 @@ def collect_declare_groups(
     tracks: list[dict[str, Any]] = []
     for unit in air:
         if atc_phrase.caoc_unit_is_picture_fixture(unit):
+            continue
+        if not atc_phrase.caoc_unit_is_picture_eligible(unit):
             continue
         # With a bullseye cue, keep friendlies even if ownship match is wrong.
         # Without a cue, skip true ownship for "nearest contact".
@@ -534,16 +699,15 @@ def collect_declare_groups(
             lat_f, lon_f = None, None
 
         if cue is not None:
-            # Cue match uses bullseye brg/rng only — lat/lon optional.
-            score = _cue_bullseye_error_nm(fix_brg, fix_rng, cue)
-            if score > DECLARE_CUE_MATCH_NM:
+            score = declare_cue_score(
+                fix_brg,
+                fix_rng,
+                _feet(unit.get("altMeters")),
+                cue,
+                is_own=is_own,
+            )
+            if score is None:
                 continue
-            if is_own:
-                score += 15.0  # prefer another contact over declaring yourself
-            cue_alt = cue.get("altitude_ft")
-            feet = _feet(unit.get("altMeters"))
-            if cue_alt is not None and feet is not None:
-                score += (abs(feet - int(cue_alt)) / 1000.0) * DECLARE_ALT_WEIGHT_NM_PER_1K
             distance = float(score)
             to_own = distance
             if own_ll is not None and lat_f is not None and lon_f is not None:
@@ -643,7 +807,7 @@ def build_bogey_dope_reply(
     opus: Any = None,
     state: dict[str, Any] | None = None,
 ) -> tuple[str, list[pl.FightGroup]]:
-    """Ch V §11 — BRAA relative to ownship on closest hostile group."""
+    """Ch V §11 — magnetic BRAA relative to ownship on closest hostile group."""
     cs = atc_phrase.speak_callsign(callsign)
     groups, _own, own_ll = collect_hostile_groups(
         config, airport, opus=opus, state=state
@@ -657,7 +821,9 @@ def build_bogey_dope_reply(
     if g.lat is None or g.lon is None:
         return f"{cs}, {agency}, unable bogey dope.", []
 
-    brg, rng = pl.braa_from_own(own_ll[0], own_ll[1], float(g.lat), float(g.lon))
+    brg, rng = pl.braa_from_own(
+        own_ll[0], own_ll[1], float(g.lat), float(g.lon), config=config
+    )
     aspect = pl.aspect_to_fighter(
         own_lat=own_ll[0],
         own_lon=own_ll[1],
@@ -691,8 +857,8 @@ def build_declare_reply(
     """
     Short DECLARE reply: callsign, agency, declaration only.
 
-    Matching still uses the pilot's bullseye cue when given; the response does
-    not read the fix back (e.g. 'Fleece 1, Bandsaw, hostile.').
+    Matching uses the pilot's bullseye and altitude when given; the response
+    does not read the fix back (e.g. 'Fleece 1, Bandsaw, hostile.').
     Bandsaw declare, or the flight lead saying hostile, upgrades that group.
     """
     cs = atc_phrase.speak_callsign(callsign)
@@ -710,10 +876,11 @@ def build_declare_reply(
     )
     if cue is None and own_ll is None:
         return f"{cs}, {agency}, unable.", []
-    if not groups:
+    g = prefer_declare_group(groups, cue=cue)
+    if g is None:
+        if cue is not None:
+            return f"{cs}, {agency}, unable, say again.", []
         return f"{cs}, {agency}, clean.", []
-
-    g = groups[0]
     if upgrade and pl.normalize_declaration(g.declaration) != "friendly":
         book = pl.DeclarationMemory.from_state(state)
         g.declaration = book.upgrade_to_hostile(

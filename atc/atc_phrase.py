@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -36,7 +37,28 @@ HERE = Path(__file__).resolve().parent
 AIRPORTS_PATH = HERE / "airports.json"
 STATE_PATH = HERE / "state.json"
 CONFIG_PATH = HERE / "config.json"
+OWNSHIP_INJECT_PATH = HERE / "ownship_inject.json"
+WEATHER_INJECT_PATH = HERE / "weather_inject.json"
+TRAFFIC_INJECT_PATH = HERE / "traffic_inject.json"
 TTS_USAGE_PATH = HERE / "tts_usage.json"
+SECRETS_DIR = HERE / "secrets"
+DEFAULT_GOOGLE_CREDS_FILE = SECRETS_DIR / "google-tts.json"
+# Tests may point the monthly counter at a temp file.
+_tts_usage_path_override: Path | None = None
+_TTS_USAGE_LOCK = threading.Lock()
+
+# Never put these on the wire (LAN /v1 responses, logs, copied client configs).
+SECRET_CONFIG_KEYS = frozenset(
+    {
+        "google_credentials",
+        "tanker_chat_llm_key",
+        "atc_token",
+        "private_key",
+        "private_key_id",
+        "client_email",
+        "client_id",
+    }
+)
 
 # Google Cloud TTS free monthly characters + overage USD per 1M (see cloud pricing)
 TTS_FREE_CHARS_PER_MONTH: dict[str, int] = {
@@ -57,9 +79,13 @@ TTS_USD_PER_MILLION: dict[str, float] = {
 }
 # Rough chars for one full Nellis default sortie (for estimator copy)
 TTS_CHARS_PER_SORTIE_EST = 1400
+# Per-pilot Google cap on the Host so one client cannot drain the shared key.
+# ~80k ≈ 57 full sorties. 0 in config disables the per-pilot cap.
+TTS_CHARS_PER_SESSION_MONTH = 80_000
 # Auto-fallback when a family's free tier is nearly exhausted (avoid paid overage)
 TTS_FREE_TIER_WARN_PCT = 0.90
 TTS_FAMILY_FALLBACK_ORDER = ("chirp", "neural2", "wavenet")
+WINDOWS_FALLBACK_VOICE = "Microsoft Zira Desktop"
 
 DIGIT_WORDS = {
     "0": "zero",
@@ -289,6 +315,8 @@ _RUNWAY_TOKEN = re.compile(r"^(\d{1,2})([LCR]?)$", re.IGNORECASE)
 _FIX_TRAIL_DIGITS = re.compile(r"^([A-Za-z]+)(\d+)$")
 # Opus visual Flex: FLEX, FLEX21R, FLEX21L, FLEX03, FLEX03L, FLEX03R, …
 _FLEX_DEP_TOKEN = re.compile(r"^FLEX(\d{1,2}[LCR]?)?$", re.IGNORECASE)
+# SID + two-digit runway glued on (PEAKS21R, FLEX03L). Not DREAM7 / MMM8.
+_DEP_GLUED_RUNWAY = re.compile(r"^[A-Z]+(\d{2}[LCR]?)$")
 
 # Map our agency channels -> substrings in Opus theater radio preset names
 OPUS_FREQ_NAME_MAP: dict[str, tuple[str, ...]] = {
@@ -305,6 +333,24 @@ OPUS_FREQ_NAME_MAP: dict[str, tuple[str, ...]] = {
         "and saw",
         "bansaw",
         "ban saw",
+    ),
+    "joshua": (
+        "joshua",
+        "joshua control",
+        "josh",
+    ),
+    "control_east": (
+        "control east",
+        "nellis control",
+        "natcf",
+    ),
+    "control_west": (
+        "control west",
+    ),
+    "center": (
+        "la center",
+        "los angeles center",
+        "center",
     ),
     "ops": ("squadron ops", "ops"),
 }
@@ -490,8 +536,8 @@ def list_opus_flights(
     """
     List flights from Opus backend (newest first).
 
-    Each row includes list fields; when include_detail=True also pulls FP route/alt
-    and signup names for the picker UI.
+    Each row includes list fields. include_detail=True also pulls FP route/alt
+    and crew for every flight (slow — prefer fetch_opus_flight_detail for one).
     """
     backend = (config.get("opus_backend_url") or "").rstrip("/")
     if not backend:
@@ -503,58 +549,134 @@ def list_opus_flights(
 
     rows: list[dict[str, Any]] = []
     for flight in sorted(flights, key=_opus_flight_sort_key, reverse=True):
-        fid = flight.get("id")
-        if fid is None:
+        row = _opus_list_row(flight)
+        if row is None:
             continue
-        row: dict[str, Any] = {
-            "id": int(fid),
-            "callsign": str(flight.get("callsign") or "").strip(),
-            "event_date": _str_or_none(flight.get("event_date")),
-            "vul_start": _str_or_none(flight.get("vul_start")),
-            "vul_end": _str_or_none(flight.get("vul_end")),
-            "aircraft": _str_or_none(flight.get("aircraft")),
-            "qty": flight.get("qty"),
-            "mission": _str_or_none(flight.get("mission")),
-            "mission_number": _str_or_none(flight.get("mission_number")),
-            "squadron_name": _str_or_none(flight.get("squadron_name")),
-            "theater_name": _str_or_none(flight.get("theater_name")),
-            "fp_route_string": None,
-            "fp_altitude": None,
-            "fp_filed_at": None,
-            "has_filed_plan": False,
-            "signups": [],
-            "signup_labels": [],
-        }
         if include_detail:
-            try:
-                detail = http_get_json(f"{backend}/opus/flights/{int(fid)}", ua)
-                if isinstance(detail, dict):
-                    row["fp_route_string"] = _str_or_none(detail.get("fp_route_string"))
-                    row["fp_altitude"] = _str_or_none(detail.get("fp_altitude"))
-                    row["fp_filed_at"] = _str_or_none(detail.get("fp_filed_at"))
-                    row["has_filed_plan"] = bool(
-                        row["fp_filed_at"] or row["fp_route_string"] or row["fp_altitude"]
-                    )
-                    # Prefer list event/vul; fill from detail if missing
-                    row["event_date"] = row["event_date"] or _str_or_none(detail.get("event_date"))
-                    row["vul_start"] = row["vul_start"] or _str_or_none(detail.get("vul_start"))
-                    row["vul_end"] = row["vul_end"] or _str_or_none(detail.get("vul_end"))
-            except urllib.error.URLError as exc:
-                print(f"WARNING: Opus flight {fid} detail failed ({exc})", file=sys.stderr)
-            try:
-                signups = http_get_json(f"{backend}/opus/flights/{int(fid)}/signups", ua)
-                if isinstance(signups, dict):
-                    signups = [signups]
-                if isinstance(signups, list):
-                    row["signups"] = signups
-                    row["crew_slots"] = opus_crew_slots(signups, qty=row.get("qty"))
-                    row["signup_labels"] = [
-                        f"{c['seat']}:{c['user_name']}" for c in row["crew_slots"] if c.get("user_name")
-                    ]
-            except urllib.error.URLError as exc:
-                print(f"WARNING: Opus flight {fid} signups failed ({exc})", file=sys.stderr)
+            _enrich_opus_flight_row(row, backend=backend, ua=ua)
         rows.append(row)
     return rows
+
+
+def fetch_opus_flight_detail(config: dict[str, Any], flight_id: int) -> dict[str, Any]:
+    """One Opus flight with route, altitude, and crew. Raises if backend is unset."""
+    backend = (config.get("opus_backend_url") or "").rstrip("/")
+    if not backend:
+        raise RuntimeError("opus_backend_url is not set")
+    ua = config.get("user_agent", "DCS-ATC-Phrase/1.0")
+    fid = int(flight_id)
+    row: dict[str, Any] = {
+        "id": fid,
+        "callsign": "",
+        "event_date": None,
+        "vul_start": None,
+        "vul_end": None,
+        "aircraft": None,
+        "qty": None,
+        "mission": None,
+        "mission_number": None,
+        "squadron_name": None,
+        "theater_name": None,
+        "fp_route_string": None,
+        "fp_altitude": None,
+        "fp_filed_at": None,
+        "has_filed_plan": False,
+        "signups": [],
+        "signup_labels": [],
+    }
+    try:
+        listing = http_get_json(f"{backend}/opus/flights", ua)
+        if isinstance(listing, list):
+            for flight in listing:
+                if int(flight.get("id") or 0) == fid:
+                    listed = _opus_list_row(flight)
+                    if listed:
+                        row.update(listed)
+                    break
+    except urllib.error.URLError as exc:
+        print(f"WARNING: Opus flights list failed ({exc})", file=sys.stderr)
+    _enrich_opus_flight_row(row, backend=backend, ua=ua)
+    if not row.get("callsign"):
+        row["callsign"] = f"#{fid}"
+    return row
+
+
+def _opus_list_row(flight: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(flight, dict) or flight.get("id") is None:
+        return None
+    return {
+        "id": int(flight.get("id")),
+        "callsign": str(flight.get("callsign") or "").strip(),
+        "event_date": _str_or_none(flight.get("event_date")),
+        "vul_start": _str_or_none(flight.get("vul_start")),
+        "vul_end": _str_or_none(flight.get("vul_end")),
+        "aircraft": _str_or_none(flight.get("aircraft")),
+        "qty": flight.get("qty"),
+        "mission": _str_or_none(flight.get("mission")),
+        "mission_number": _str_or_none(flight.get("mission_number")),
+        "squadron_name": _str_or_none(flight.get("squadron_name")),
+        "theater_name": _str_or_none(flight.get("theater_name")),
+        "fp_route_string": _str_or_none(flight.get("fp_route_string")),
+        "fp_altitude": _str_or_none(flight.get("fp_altitude")),
+        "fp_filed_at": _str_or_none(flight.get("fp_filed_at")),
+        "has_filed_plan": bool(
+            flight.get("fp_filed_at")
+            or flight.get("fp_route_string")
+            or flight.get("fp_altitude")
+        ),
+        "signups": [],
+        "signup_labels": [],
+        "_detailed": False,
+    }
+
+
+def _enrich_opus_flight_row(
+    row: dict[str, Any],
+    *,
+    backend: str,
+    ua: str,
+) -> dict[str, Any]:
+    fid = int(row.get("id") or 0)
+    if not fid:
+        return row
+    try:
+        detail = http_get_json(f"{backend}/opus/flights/{fid}", ua)
+        if isinstance(detail, dict):
+            row["fp_route_string"] = _str_or_none(detail.get("fp_route_string")) or row.get(
+                "fp_route_string"
+            )
+            row["fp_altitude"] = _str_or_none(detail.get("fp_altitude")) or row.get(
+                "fp_altitude"
+            )
+            row["fp_filed_at"] = _str_or_none(detail.get("fp_filed_at")) or row.get(
+                "fp_filed_at"
+            )
+            row["has_filed_plan"] = bool(
+                row["fp_filed_at"] or row["fp_route_string"] or row["fp_altitude"]
+            )
+            row["event_date"] = row.get("event_date") or _str_or_none(detail.get("event_date"))
+            row["vul_start"] = row.get("vul_start") or _str_or_none(detail.get("vul_start"))
+            row["vul_end"] = row.get("vul_end") or _str_or_none(detail.get("vul_end"))
+            if detail.get("callsign") and not row.get("callsign"):
+                row["callsign"] = str(detail.get("callsign") or "").strip()
+            if detail.get("qty") is not None and row.get("qty") is None:
+                row["qty"] = detail.get("qty")
+    except urllib.error.URLError as exc:
+        print(f"WARNING: Opus flight {fid} detail failed ({exc})", file=sys.stderr)
+    try:
+        signups = http_get_json(f"{backend}/opus/flights/{fid}/signups", ua)
+        if isinstance(signups, dict):
+            signups = [signups]
+        if isinstance(signups, list):
+            row["signups"] = signups
+            row["crew_slots"] = opus_crew_slots(signups, qty=row.get("qty"))
+            row["signup_labels"] = [
+                f"{c['seat']}:{c['user_name']}" for c in row["crew_slots"] if c.get("user_name")
+            ]
+    except urllib.error.URLError as exc:
+        print(f"WARNING: Opus flight {fid} signups failed ({exc})", file=sys.stderr)
+    row["_detailed"] = True
+    return row
 
 
 def opus_crew_slots(
@@ -772,6 +894,19 @@ def resolve_active_opus_flight(config: dict[str, Any]) -> OpusFlightContext | No
     Seat: opus_seat if set, else matching signup for opus_user_name, else seat 1.
     callsign_override replaces the spoken callsign (FP still from Opus when available).
     """
+    if ownship_from_map_enabled(config):
+        mapped = map_flight_context(config)
+        if mapped is not None:
+            print(
+                f"Using map tester flight: {mapped.radio_callsign} "
+                f"route={mapped.fp_route_string} alt={mapped.fp_altitude}"
+            )
+            return apply_callsign_override(config, mapped)
+        override = callsign_override(config)
+        label = override or "MAP"
+        print(f"Using map tester callsign (no inject yet): {label}")
+        return apply_callsign_override(config, synthetic_flight_context(label))
+
     override = callsign_override(config)
     user = (config.get("opus_user_name") or "").strip()
     backend = (config.get("opus_backend_url") or "").rstrip("/")
@@ -964,6 +1099,33 @@ def _flex_runway(token: str) -> str | None:
     return f"{int(rm.group(1)):02d}{rm.group(2).upper()}"
 
 
+def _glued_dep_runway(token: str) -> str | None:
+    """Runway glued onto a SID name: PEAKS21R / FLEX03L. Not DREAM7."""
+    n = _normalize_dep_token(token)
+    m = _DEP_GLUED_RUNWAY.match(n)
+    if not m:
+        return None
+    rm = _RUNWAY_TOKEN.match(m.group(1))
+    if not rm:
+        return None
+    return f"{int(rm.group(1)):02d}{rm.group(2).upper()}"
+
+
+def _sid_token_matches_alias(tok: str, aliases: set[str]) -> bool:
+    """True when the filed token is the SID, or the SID plus a runway (PEAKS21R)."""
+    n = _normalize_dep_token(tok)
+    if n in aliases:
+        return True
+    for alias in aliases:
+        if not alias or not n.startswith(alias) or len(n) <= len(alias):
+            continue
+        rest = n[len(alias) :]
+        rm = _RUNWAY_TOKEN.match(rest)
+        if rm and len(rm.group(1)) >= 2:
+            return True
+    return False
+
+
 def _normalize_dep_token(tok: str) -> str:
     return re.sub(r"[^A-Z0-9]", "", (tok or "").upper())
 
@@ -980,6 +1142,9 @@ def runway_from_route(route: str | None) -> str | None:
         flex_rwy = _flex_runway(tok)
         if flex_rwy:
             return flex_rwy
+        glued = _glued_dep_runway(tok)
+        if glued:
+            return glued
     m = _RUNWAY_TOKEN.match(tokens[-1])
     if not m:
         return None
@@ -1095,44 +1260,193 @@ def _headwind_kt(wind_dir: float | None, wind_spd: float | None, rwy_hdg: float)
     return float(wind_spd) * math.cos(math.radians(delta))
 
 
+def _runway_magnetic_hdg(rwy: str) -> float | None:
+    """Magnetic heading implied by the runway number (21R → 210)."""
+    digits = re.sub(r"[^0-9]", "", str(rwy or ""))
+    if not digits:
+        return None
+    return float((int(digits) % 100) * 10 % 360)
+
+
+def _component_limit_kt(defs: dict[str, Any] | None) -> float:
+    """Threshold the along-runway component must *exceed* (11-250 §1.12: 10 kt)."""
+    raw = (defs or {}).get("wind_flip_min_kt", 10)
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return 10.0
+
+
+_MISSION_CLOCK_RE = re.compile(r"\b(\d{1,2}):(\d{2})(?::(\d{2}))?")
+
+
+def parse_mission_local_minutes(raw: str | None) -> int | None:
+    """'13:00:06 Z' / '13:00:06 L' / '2200' → minutes past midnight, or None."""
+    s = str(raw or "").strip()
+    if not s:
+        return None
+    m = _MISSION_CLOCK_RE.search(s)
+    if m:
+        return (int(m.group(1)) % 24) * 60 + (int(m.group(2)) % 60)
+    digits = re.sub(r"\D", "", s)
+    if len(digits) >= 3:
+        hhmm = int(digits[:4] if len(digits) >= 4 else digits)
+        return ((hhmm // 100) % 24) * 60 + (hhmm % 100) % 60
+    return None
+
+
+def caoc_mission_local_minutes(
+    config: dict[str, Any] | None = None,
+    *,
+    radar: dict[str, Any] | None = None,
+) -> int | None:
+    """
+    DCS mission clock from OPUS CAOC radar (`missionTimeZulu`).
+
+    The CAOC page publishes that string as local by rewriting the trailing Z
+    to L — 11-250 §4.1.4 2200L/0800L uses this clock, not wall-clock Pacific.
+    Tester weather override, when enabled, wins over CAOC.
+    """
+    inj = read_weather_inject()
+    if inj:
+        parsed = parse_mission_local_minutes(str(inj.get("mission_hhmm") or ""))
+        if parsed is not None:
+            return parsed
+    data = radar
+    if data is None and config:
+        data = fetch_caoc_radar(config)
+    if not isinstance(data, dict):
+        return None
+    return parse_mission_local_minutes(
+        data.get("missionTimeZulu") or data.get("missionTimeLocal")
+    )
+
+
+def _hhmm_to_minutes(raw: Any, default: int) -> int:
+    parsed = parse_mission_local_minutes(str(raw) if raw is not None else None)
+    return default if parsed is None else parsed
+
+
+def in_night_ops_window(
+    local_minutes: int | None,
+    defs: dict[str, Any] | None = None,
+) -> bool:
+    """True for 2200L–0800L (start inclusive, end exclusive) on the mission clock."""
+    if local_minutes is None:
+        return False
+    start = _hhmm_to_minutes((defs or {}).get("night_ops_start_hhmm"), 22 * 60)
+    end = _hhmm_to_minutes((defs or {}).get("night_ops_end_hhmm"), 8 * 60)
+    minutes = int(local_minutes) % (24 * 60)
+    if start == end:
+        return False
+    if start < end:
+        return start <= minutes < end
+    return minutes >= start or minutes < end
+
+
+def _calm_wind_side_for_ops(
+    defs: dict[str, Any] | None,
+    *,
+    for_departure: bool,
+    local_minutes: int | None,
+) -> str:
+    """
+    Day: prefer_runway_side (21). Night §4.1.4: departures 03, arrivals 21,
+    unless this catalog has no night window configured.
+    """
+    prefer = str((defs or {}).get("prefer_runway_side") or "21")
+    has_night = (defs or {}).get("night_ops_start_hhmm") not in (None, "") or (
+        defs or {}
+    ).get("night_departure_side") not in (None, "")
+    if not has_night or not in_night_ops_window(local_minutes, defs):
+        return prefer
+    if for_departure:
+        return str((defs or {}).get("night_departure_side") or "03")
+    return str((defs or {}).get("night_arrival_side") or prefer)
+
+
+def pick_active_runway(
+    runways: list[str],
+    wind_dir: float | None,
+    wind_speed_kt: float | None,
+    *,
+    calm_wind_side: str = "21",
+    component_limit_kt: float = 10.0,
+) -> str:
+    """
+    NellisAFBI 11-250 §1.12 active-runway selection.
+
+    RWY 21 is the calm-wind runway. Closest wind *direction* is not enough:
+    only when the prevailing headwind/tailwind *component* exceeds
+    ``component_limit_kt`` (10 kt) is the runway most nearly aligned with
+    the wind (greatest headwind) designated active.
+    """
+    if not runways:
+        return "21R" if str(calm_wind_side) == "21" else "03L"
+    prefer = str(calm_wind_side or "21")
+    calm = [r for r in runways if _runway_side(r) == prefer]
+    default = calm[0] if calm else runways[0]
+    if wind_dir is None or wind_speed_kt is None:
+        return default
+
+    scored: list[tuple[float, str]] = []
+    for rwy in runways:
+        hdg = _runway_magnetic_hdg(rwy)
+        if hdg is None:
+            continue
+        scored.append((_headwind_kt(wind_dir, wind_speed_kt, hdg), rwy))
+    if not scored:
+        return default
+
+    strongest = max(abs(hw) for hw, _ in scored)
+    if strongest > float(component_limit_kt):
+        return max(scored, key=lambda item: item[0])[1]
+    return default
+
+
 def pick_recovery_runway(
     airport: dict[str, Any],
     weather: Weather,
     *,
     instrument: bool = False,
     catalog: dict[str, Any] | None = None,
+    for_departure: bool = False,
+    config: dict[str, Any] | None = None,
+    local_minutes: int | None = None,
 ) -> str:
     """
-    Prefer the 21s. Use the 03s only when headwind on 03 is >= wind_flip_min_kt
-    (default 11) and stronger than the 21 headwind.
+    Active runway per 11-250 §1.12 / §4.1.4, snapped to ops or instrument ends.
 
+    RWY 21 is calm-wind by day. Flip to the other end only when the along-runway
+    headwind/tailwind component exceeds wind_flip_min_kt (default 10).
+    2200L–0800L (CAOC mission clock): departures default 03, arrivals 21,
+    still overridden when the component exceeds 10 kt.
     Visual ops → 21R / 03L; instrument → 21L / 03R.
     """
     cat = catalog if catalog is not None else load_approach_catalog(airport)
     defs = approach_defaults(cat)
-    prefer = str(defs.get("prefer_runway_side") or "21")
-    try:
-        min_kt = float(defs.get("wind_flip_min_kt") or 11)
-    except (TypeError, ValueError):
-        min_kt = 11.0
-
-    side = prefer
-    hw21 = _headwind_kt(weather.wind_dir, weather.wind_speed_kt, 210.0)
-    hw03 = _headwind_kt(weather.wind_dir, weather.wind_speed_kt, 30.0)
-    if prefer == "21":
-        if hw03 >= min_kt and hw03 > hw21:
-            side = "03"
-        else:
-            side = "21"
-    elif hw21 >= min_kt and hw21 > hw03:
-        side = "21"
-    else:
-        side = prefer
-
-    raw = "21R" if side == "21" else "03L"
-    if instrument:
-        raw = "21L" if side == "21" else "03R"
-    return align_runway_to_airport(airport, raw, instrument=instrument)
+    minutes = local_minutes
+    if minutes is None:
+        minutes = caoc_mission_local_minutes(config)
+    prefer = _calm_wind_side_for_ops(
+        defs, for_departure=for_departure, local_minutes=minutes
+    )
+    min_kt = _component_limit_kt(defs)
+    pool = (
+        airport_instrument_runways(airport)
+        if instrument
+        else airport_ops_runways(airport)
+    )
+    if not pool:
+        pool = ["21L", "03R"] if instrument else ["21R", "03L"]
+    picked = pick_active_runway(
+        pool,
+        weather.wind_dir,
+        weather.wind_speed_kt,
+        calm_wind_side=prefer,
+        component_limit_kt=min_kt,
+    )
+    return align_runway_to_airport(airport, picked, instrument=instrument)
 
 
 def is_vfr_recovery_weather(
@@ -1180,7 +1494,149 @@ def find_vfr_recovery(
         for a in aliases:
             if re.sub(r"[^A-Z0-9]", "", a.upper()) == want:
                 return entry
+        for feeder in entry.get("entries") or []:
+            if not isinstance(feeder, dict):
+                continue
+            feeder_aliases = [str(feeder.get("id") or "")] + [
+                str(a) for a in (feeder.get("aliases") or [])
+            ]
+            for a in feeder_aliases:
+                if re.sub(r"[^A-Z0-9]", "", a.upper()) == want:
+                    return entry
     return None
+
+
+def _fix_token(token: str | None) -> str:
+    return re.sub(r"[^A-Z0-9]", "", str(token or "").upper())
+
+
+def _vfr_feeder_entries(vfr: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(vfr, dict):
+        return []
+    return [e for e in (vfr.get("entries") or []) if isinstance(e, dict)]
+
+
+def _feeder_aliases(feeder: dict[str, Any]) -> set[str]:
+    names = [str(feeder.get("id") or "")] + [
+        str(a) for a in (feeder.get("aliases") or [])
+    ]
+    return {tok for tok in (_fix_token(n) for n in names) if tok}
+
+
+def _feeder_is_entry(feeder: dict[str, Any]) -> bool:
+    """SARAH / NIXON are range-exit entries; Gass Peak is not."""
+    flag = feeder.get("entry")
+    if flag is False:
+        return False
+    if flag is True:
+        return True
+    aliases = _feeder_aliases(feeder)
+    return bool(aliases & {"SARAH", "SARA", "NIXON"}) and not bool(
+        aliases & {"GASS", "GASSPEAK", "GASPEAK"}
+    )
+
+
+def _stryk_feeder_for_token(
+    vfr: dict[str, Any], token: str | None
+) -> dict[str, Any] | None:
+    want = _fix_token(token)
+    if not want or want in {"STRYK", "STRIKE", "STRYKER"}:
+        return None
+    for feeder in _vfr_feeder_entries(vfr):
+        if want in _feeder_aliases(feeder):
+            return feeder
+    return None
+
+
+def _stryk_feeder_from_route(
+    vfr: dict[str, Any], route: str | None
+) -> dict[str, Any] | None:
+    hit = None
+    if not route:
+        return None
+    for tok in _enroute_tokens(route):
+        feeder = _stryk_feeder_for_token(vfr, tok)
+        if feeder is not None:
+            hit = feeder
+    return hit
+
+
+def _feeder_direct(
+    feeder: dict[str, Any],
+) -> tuple[str, str, tuple[float, float] | None]:
+    fix = str(feeder.get("direct_fix") or feeder.get("id") or "")
+    say = str(feeder.get("direct_say") or feeder.get("say") or fix)
+    return fix, say, _entry_latlon(feeder)
+
+
+def resolve_vfr_direct(
+    vfr: dict[str, Any],
+    *,
+    position: Any = None,
+    route: str | None = None,
+    named: str | None = None,
+) -> tuple[str, str, tuple[float, float] | None]:
+    """
+    Direct-to for a VFR recovery.
+
+    STRYK recovery is still STRYK. Blackjack clears direct the entry in use
+    (Stryk, Nixon, or Sarah) — not Gass Peak. Approach still names Stryk recovery.
+    """
+    default_fix = str(vfr.get("direct_fix") or vfr.get("id") or "")
+    default_say = str(vfr.get("direct_say") or vfr.get("say") or default_fix)
+    default_ll = _entry_latlon(vfr)
+    if str(vfr.get("id") or "").upper() != "STRYK":
+        return default_fix, default_say, default_ll
+
+    feeder = _stryk_feeder_for_token(vfr, named)
+    if feeder is None:
+        feeder = _stryk_feeder_from_route(vfr, route)
+    if feeder is None:
+        pos = coerce_latlon(position)
+        if pos is not None and default_ll is not None:
+            plat, plon = pos
+            slat, slon = default_ll
+            d_stryk = _haversine_nm(plat, plon, slat, slon)
+            best: tuple[float, dict[str, Any]] | None = None
+            for entry in _vfr_feeder_entries(vfr):
+                if not _feeder_is_entry(entry):
+                    continue
+                fll = _entry_latlon(entry)
+                if fll is None:
+                    continue
+                d_feeder = _haversine_nm(plat, plon, fll[0], fll[1])
+                if d_feeder > 22.0 or d_feeder + 0.5 >= d_stryk:
+                    continue
+                if best is None or d_feeder < best[0]:
+                    best = (d_feeder, entry)
+            if best is not None:
+                feeder = best[1]
+    if feeder is not None:
+        return _feeder_direct(feeder)
+    return default_fix, default_say, default_ll
+
+
+def _set_vfr_direct(
+    plan: dict[str, Any],
+    vfr: dict[str, Any],
+    *,
+    position: Any = None,
+    route: str | None = None,
+    named: str | None = None,
+) -> None:
+    fix, say, ll = resolve_vfr_direct(
+        vfr,
+        position=position,
+        route=route,
+        named=named,
+    )
+    plan["direct_fix"] = fix or None
+    plan["direct_say"] = say or None
+    if ll:
+        plan["fix_lat"], plan["fix_lon"] = ll[0], ll[1]
+    else:
+        plan.pop("fix_lat", None)
+        plan.pop("fix_lon", None)
 
 
 def find_instrument_approach(
@@ -1614,6 +2070,7 @@ def assign_approach_plan(
     defs = approach_defaults(catalog)
     st = state if isinstance(state, dict) else {}
     # Pattern-only kwargs still allow the filed route to pick the fix.
+    named_fix = vfr_recovery
     explicit_fix = bool(vfr_recovery or instrument_id or iaf)
     route = (opus.fp_route_string if opus else None) or None
     route_hit = (
@@ -1694,6 +2151,21 @@ def assign_approach_plan(
                     recovery="instrument",
                     position=position,
                 )
+        # Keep STRYK recovery, but refresh Nixon / Sarah vs Stryk as the direct-to.
+        if str(plan.get("vfr_recovery") or "").upper() == "STRYK":
+            pos = coerce_latlon(position)
+            if pos is None and _ownship_fix_is_fresh(st):
+                pos = coerce_latlon(st.get("ownship_ll"))
+            vfr_sticky = find_vfr_recovery(catalog, "STRYK")
+            if vfr_sticky:
+                _set_vfr_direct(
+                    plan,
+                    vfr_sticky,
+                    position=pos,
+                    route=route,
+                    named=named_fix,
+                )
+                st["approach_plan"] = plan
         return plan
 
     if position is None and _ownship_fix_is_fresh(st):
@@ -1890,18 +2362,13 @@ def assign_approach_plan(
             plan["descend_ft"] = _int_or(
                 plan["descend_ft"], vfr.get("descend_ft"), defs.get("descend_ft")
             )
-            plan["direct_fix"] = str(
-                vfr.get("direct_fix") or vfr.get("id") or ""
-            ) or None
-            plan["direct_say"] = str(
-                vfr.get("direct_say") or vfr.get("say") or plan["direct_fix"] or ""
-            ) or None
-            try:
-                plan["fix_lat"] = float(vfr["lat"])
-                plan["fix_lon"] = float(vfr["lon"])
-            except (KeyError, TypeError, ValueError):
-                plan.pop("fix_lat", None)
-                plan.pop("fix_lon", None)
+            _set_vfr_direct(
+                plan,
+                vfr,
+                position=position,
+                route=route,
+                named=named_fix,
+            )
             # Route-named recovery on 03-only (MINTT): keep wind gate — may stay 21.
             sides = [str(s) for s in (vfr.get("runway_sides") or [])]
             side = _runway_side(plan["runway"])
@@ -1988,6 +2455,12 @@ def approach_exit_fix_latlon(
     if vfr_id:
         vfr = find_vfr_recovery(catalog, vfr_id)
         if vfr:
+            direct_id = str(p.get("direct_fix") or "").strip()
+            for feeder in _vfr_feeder_entries(vfr):
+                if direct_id and _fix_token(direct_id) in _feeder_aliases(feeder):
+                    ll = _entry_latlon(feeder)
+                    if ll:
+                        return ll
             try:
                 return float(vfr["lat"]), float(vfr["lon"])
             except (KeyError, TypeError, ValueError):
@@ -2000,6 +2473,9 @@ APPROACH_CLEARANCE_GAP_S = 6.0
 # If closer than this to the IAF / exit fix, still fire (about to arrive) —
 # clearance is meant to come before the fix, not wait until you get there.
 APPROACH_CLEARANCE_AT_FIX_NM = 3.0
+
+# First-pass auto-clearance: inbound, but not 75 NM out in Control's airspace.
+APPROACH_CLEARANCE_WITHIN_NM = 40.0
 # After an instrument missed / radar vectors back to the IAF, wait until the
 # jet is this close to the fix before auto-clearing the approach again.
 APPROACH_CLEARANCE_AFTER_MISSED_NM = 8.0
@@ -2088,10 +2564,76 @@ def approach_clearance_auto_ready(
         if dist > need:
             return False, f"{dist:.1f} NM to {name} — need ≤ {need:g} NM for clearance"
         return True, f"{dist:.1f} NM to {name} — clearance (near fix)"
-    # First recovery: still inbound or already at the fix — clear now.
+    # First recovery: clear once they are actually in Approach, not 75 NM out.
+    if dist > APPROACH_CLEARANCE_WITHIN_NM:
+        return (
+            False,
+            f"{dist:.1f} NM to {name} — need ≤ {APPROACH_CLEARANCE_WITHIN_NM:g} NM",
+        )
     if dist > APPROACH_CLEARANCE_AT_FIX_NM:
         return True, f"{dist:.1f} NM to {name} — clearance"
     return True, f"{dist:.1f} NM to {name} — clearance (near fix)"
+
+
+# NATCF → Approach before the VFR exit / IAF, not after they blow through it.
+CONTROL_HANDOFF_BEFORE_FIX_NM = 18.0
+CONTROL_HANDOFF_GAP_S = 8.0
+
+
+def control_handoff_auto_ready(
+    *,
+    airport: dict[str, Any] | None,
+    state: dict[str, Any] | None,
+    config: dict[str, Any] | None = None,
+    callsign: str | None = None,
+    opus: OpusFlightContext | None = None,
+    gap_s: float | None = None,
+) -> tuple[bool, str]:
+    """
+    True when Nellis Control may auto-hand to Approach.
+
+    After NATCF check-in (this sortie is actually with Control): wait a short
+    radio gap, then fire while still inbound to the exit fix — do not wait
+    until they arrive. Departure radar near TORYE must not steal this call.
+    """
+    st = state if isinstance(state, dict) else {}
+    hold = auto_tx_hold_reason(st)
+    if hold:
+        return False, hold
+    last_ag = str(st.get("last_agency") or "").strip().lower()
+    if last_ag not in ("control_east", "control_west"):
+        return False, "waiting for Nellis Control"
+    gap = float(CONTROL_HANDOFF_GAP_S if gap_s is None else gap_s)
+    if gap > 0:
+        try:
+            last = float(st.get("last_tx_at") or 0.0)
+        except (TypeError, ValueError):
+            last = 0.0
+        if last > 0.0:
+            left = gap - (time.time() - last)
+            if left > 0:
+                return False, f"Approach handoff in {left:.0f}s"
+
+    plan = approach_plan_from_state(st, airport=airport)
+    fix = approach_exit_fix_latlon(plan, airport=airport)
+    pos = _ownship_ll_from_state(st)
+    if pos is None:
+        pos = ownship_latlon(config, callsign=callsign, opus=opus, state=st)
+    name = str(
+        plan.get("iaf_say")
+        or plan.get("iaf")
+        or plan.get("direct_say")
+        or plan.get("vfr_recovery_say")
+        or plan.get("vfr_recovery")
+        or "exit"
+    )
+    if fix is None or pos is None:
+        return True, "after Control check-in"
+    dist = _haversine_nm(pos[0], pos[1], fix[0], fix[1])
+    need = CONTROL_HANDOFF_BEFORE_FIX_NM
+    if dist > need:
+        return False, f"{dist:.1f} NM to {name} — hand to Approach at ≤ {need:g} NM"
+    return True, f"{dist:.1f} NM to {name} — Approach handoff"
 
 
 def _enroute_tokens(route: str | None, *, dep_icao: str | None = None) -> list[str]:
@@ -2128,12 +2670,18 @@ class DepartureMatch:
     def found(self) -> bool:
         return bool(self.instrument_say or self.visual_say)
 
+    @property
+    def is_visual(self) -> bool:
+        """Flex / visual DP with no instrument SID (VFR)."""
+        return bool(self.visual_say) and not self.instrument_say
+
 
 def match_departure(airport: dict[str, Any], route: str | None) -> DepartureMatch:
     """
     Match filed route against airport departure catalog.
 
-    Instrument SIDs (DREAM7 / FYTTR7 / MMM8) only when that token is explicitly filed.
+    Instrument SIDs (DREAM7 / FYTTR7 / MMM8 / PEAKS) only when that token is
+    explicitly filed. PEAKS21R is PEAKS plus the runway, same idea as FLEX21R.
     Any FLEX / FLEX21R / FLEX21L / FLEX03R / FLEX03L token is a visual departure;
     north/west inferred from the next fix (DREAM/MINTT/JUNNO vs FYTTR).
     Bare fixes alone do not invent a SID — stay 'as filed'.
@@ -2157,16 +2705,18 @@ def match_departure(airport: dict[str, Any], route: str | None) -> DepartureMatc
         for k, v in (catalog.get("transitions") or {}).items()
     }
 
-    # --- Instrument SID: exact alias only (must be filed, e.g. DREAM7) ---
+    # --- Instrument SID: filed alias, or alias + runway (PEAKS21R) ---
     for entry in catalog.get("instrument") or []:
         aliases = {_normalize_dep_token(a) for a in (entry.get("aliases") or [])}
-        if not aliases.intersection(norms):
+        if not any(_sid_token_matches_alias(tok, aliases) for tok in norms):
             continue
         result.instrument_id = str(entry.get("id"))
         result.instrument_say = str(entry.get("say") or entry.get("id"))
         for tok in norms:
+            if _sid_token_matches_alias(tok, aliases):
+                continue
             for tk, say in (entry.get("transitions") or {}).items():
-                if tok == _normalize_dep_token(tk) and tok not in aliases:
+                if tok == _normalize_dep_token(tk):
                     result.transition_id = str(tk)
                     result.transition_say = str(say)
                     break
@@ -2268,6 +2818,8 @@ def speak_departure_clearance(airport: dict[str, Any], route: str | None) -> str
       Flex north, Dream transition
       Flex west, Fighter transition
       Dream seven departure, Mintt transition
+      Peaks departure, Hayford Peak transition
+      Peaks departure, Mormon Peak transition
       Mormon Mesa eight departure
     """
     m = match_departure(airport, route)
@@ -2294,12 +2846,14 @@ def resolve_taxi_route(
     runway: str,
     *,
     opus: OpusFlightContext | None = None,
+    config: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     """
     Runway-dependent EOR / taxi via for Nellis-style fields.
     21R → NW EOR via F, E; 03L → Alpha South via Foxtrot.
 
     Parking uses squadron overrides when known (see resolve_parking).
+    Landing exit turn / cross comes from resolve_landing_exit.
     """
     rwy = normalize_runway(runway) or str(runway or "").strip().upper()
     routes = airport.get("taxi_routes")
@@ -2320,15 +2874,23 @@ def resolve_taxi_route(
     exit_via = str(route.get("exit") or "").strip()
     intersection = str(route.get("intersection") or "").strip()
     legacy = str(airport.get("taxi_via") or "Foxtrot").strip() or "Foxtrot"
-    parking = resolve_parking(airport, opus=opus)
+    parking = resolve_parking(airport, opus=opus, config=config)
+    exit_plan = resolve_landing_exit(
+        airport, rwy, opus=opus, config=config, parking=parking
+    )
     if not eor:
         eor = "NW EOR" if rwy.startswith("21") else "Alpha South"
     if not outbound:
         outbound = legacy
     if not inbound:
         inbound = legacy
+    if parking_field_side(airport, parking) == "east":
+        inbound = str(route.get("east_inbound_via") or "Alpha").strip() or "Alpha"
     if not exit_via:
-        exit_via = "right at Alpha" if rwy.startswith("21") else "left at Alpha"
+        bits = [f"{exit_plan['turn']}"]
+        if exit_plan.get("cross"):
+            bits.append(f"cross {exit_plan['cross']}")
+        exit_via = ", ".join(bits)
     if not intersection:
         intersection = "Delta" if rwy.startswith("21") else "Bravo"
     return {
@@ -2336,8 +2898,97 @@ def resolve_taxi_route(
         "outbound_via": outbound,
         "inbound_via": inbound,
         "exit": exit_via,
+        "exit_turn": str(exit_plan.get("turn") or ""),
+        "exit_cross": str(exit_plan.get("cross") or ""),
         "parking": parking,
         "intersection": intersection,
+    }
+
+
+_EAST_PARKING_HINTS = (
+    "g revet",
+    "golf revet",
+    "g-revet",
+    "golf ramp",
+    "g ramp",
+    "g area",
+    "g-area",
+)
+
+
+def parking_field_side(airport: dict[str, Any] | None, parking: str) -> str:
+    """
+    Which side of the parallels this parking sits on.
+
+    Nellis: G / Golf revetments are east of 21L; Ramp / Knight / Row 18 / WOOL
+    are west of 21R.
+    """
+    name = str(parking or "").strip()
+    sides = (airport or {}).get("parking_sides")
+    if isinstance(sides, dict) and name:
+        raw = sides.get(name)
+        if raw is None:
+            for key, val in sides.items():
+                if str(key).strip().casefold() == name.casefold():
+                    raw = val
+                    break
+        side = str(raw or "").strip().casefold()
+        if side in ("east", "west"):
+            return side
+    low = name.casefold()
+    compact = re.sub(r"[\s_\-]+", " ", low).strip()
+    if compact in {"g", "golf"} or any(h in compact for h in _EAST_PARKING_HINTS):
+        return "east"
+    return "west"
+
+
+def runway_pair_side(runway: str) -> str:
+    """
+    East or west of a 03/21 parallel pair from the runway number.
+
+    03L / 21R sit west; 03R / 21L sit east (left when landing 21 is east).
+    """
+    n = normalize_runway(runway) or str(runway or "").strip().upper()
+    num = _runway_number(n) or 0
+    left = n.endswith("L")
+    northish = 1 <= num <= 18
+    if northish:
+        return "west" if left else "east"
+    return "east" if left else "west"
+
+
+def resolve_landing_exit(
+    airport: dict[str, Any],
+    runway: str,
+    *,
+    opus: OpusFlightContext | None = None,
+    config: dict[str, Any] | None = None,
+    parking: str | None = None,
+) -> dict[str, str]:
+    """
+    Tower rollout instruction: turn left/right, maybe cross the parallel.
+
+    Landing 21L to the west ramp → exit right, cross 21R.
+    Landing 21L to G revetments → exit left (already on the east side).
+    """
+    rwy = normalize_runway(runway) or str(runway or "").strip().upper()
+    park = parking if parking is not None else resolve_parking(
+        airport, opus=opus, config=config
+    )
+    park_side = parking_field_side(airport, park)
+    rwy_side = runway_pair_side(rwy)
+    num = _runway_number(rwy) or 0
+    left_is_east = num >= 19
+    want_east = park_side == "east"
+    turn = "left" if want_east == left_is_east else "right"
+    cross = ""
+    if park_side != rwy_side:
+        cross = _flip_runway_side(rwy) or ""
+    return {
+        "turn": turn,
+        "cross": cross,
+        "parking": park,
+        "parking_side": park_side,
     }
 
 
@@ -2346,13 +2997,17 @@ def resolve_parking(
     *,
     opus: OpusFlightContext | None = None,
     squadron_name: str | None = None,
+    config: dict[str, Any] | None = None,
 ) -> str:
     """
     Parking / ramp for taxi-in.
 
     Uses airport.parking_by_squadron match list when the Opus squadron is known,
-    else airport.parking (Nellis default Ramp).
+    else airport.parking (Nellis default Ramp). Setup `parking_override` wins.
     """
+    override = str((config or {}).get("parking_override") or "").strip()
+    if override:
+        return override
     default = str(airport.get("parking") or "parking").strip() or "parking"
     sq = (
         str(squadron_name or "").strip()
@@ -2479,15 +3134,66 @@ def cruise_climb_target_ft(
     return filed
 
 
+def departure_radar_climb_ft(
+    opus: OpusFlightContext | None = None,
+    *,
+    mission: dict[str, Any] | None = None,
+    state: dict[str, Any] | None = None,
+    step: dict[str, Any] | None = None,
+    initial_climb_ft: int | None = None,
+) -> int | None:
+    """
+    Altitude Departure assigns on radar contact.
+
+    Filed cruise when it is above the Delivery interim; otherwise the interim.
+    None → caller rolls a random initial.
+    """
+    cruise = cruise_climb_target_ft(opus, mission=mission, state=state)
+    if cruise is not None:
+        return cruise
+    interim = resolve_shared_climb_ft(step=step, mission=mission, state=state)
+    if interim is not None:
+        return interim
+    return _parse_climb_ft(initial_climb_ft)
+
+
+def climb_ft_for_readback(
+    template: str,
+    *,
+    opus: OpusFlightContext | None = None,
+    mission: dict[str, Any] | None = None,
+    state: dict[str, Any] | None = None,
+    step: dict[str, Any] | None = None,
+) -> int | None:
+    """Altitude the READ BACK card should hinge on after this template."""
+    tmpl = str(template or "").strip().lower()
+    if tmpl == "radar_contact":
+        assigned = _parse_climb_ft((state or {}).get("departure_assigned_ft"))
+        if assigned is not None:
+            return assigned
+        return departure_radar_climb_ft(
+            opus, mission=mission, state=state, step=step
+        )
+    if tmpl == "climb_cruise":
+        return cruise_climb_target_ft(opus, mission=mission, state=state)
+    return resolve_shared_climb_ft(step=step, mission=mission, state=state)
+
+
 def should_skip_cruise_climb_step(
     step: dict[str, Any] | None,
     mission: dict[str, Any] | None = None,
     state: dict[str, Any] | None = None,
     opus: OpusFlightContext | None = None,
 ) -> bool:
-    """True when there is no higher filed altitude to clear."""
+    """True when there is no higher filed altitude left to clear."""
     if str((step or {}).get("template") or "") != "climb_cruise":
         return False
+    assigned = _parse_climb_ft((state or {}).get("departure_assigned_ft"))
+    filed = filed_altitude_feet(opus.fp_altitude if opus else None)
+    if filed is None:
+        filed = _parse_climb_ft((state or {}).get("filed_altitude_ft"))
+    if assigned is not None and filed is not None and assigned >= filed:
+        return True
     return cruise_climb_target_ft(opus, mission=mission, state=state) is None
 
 
@@ -2516,7 +3222,7 @@ def speak_unrestricted_ceiling(
 
 # Templates that share one interim climb (Delivery clearance ↔ Departure/Center)
 CLIMB_SHARED_TEMPLATES = frozenset({"clearance", "radar_contact", "center_radar"})
-# After radar contact, Departure amends to filed cruise before the 18 NM handoff.
+# Backup: if radar contact had no filed altitude, amend to cruise beyond this NM.
 CRUISE_CLIMB_BEYOND_NM = 10.0
 
 DEFAULT_UNRESTRICTED_CLIMB_APPROVE_CHANCE = 0.80
@@ -2668,6 +3374,7 @@ _SORTIE_STATE_CACHE_KEYS = (
     "unrestricted_climb_ft",
     "pending_unrestricted_climb",
     "initial_climb_ft",
+    "departure_assigned_ft",
     "filed_altitude_ft",
     "approach_assigned",
     "approach_plan",
@@ -2700,6 +3407,8 @@ _SORTIE_STATE_CACHE_KEYS = (
     "pattern_land_needs_leave",
     "overhead_recovery",
     "range_exit_approved",
+    "control_checked_in",
+    "control_channel",
 )
 
 
@@ -2803,14 +3512,17 @@ HANDOFF_AGENCY_NAMES: dict[str, str] = {
     "approach": "Approach",
     "blackjack": "Blackjack",
     "bandsaw": "Bandsaw",
+    "joshua": "Joshua",
+    "control_east": "Nellis Control",
+    "control_west": "Nellis Control",
     "ops": "Ops",
     "other": "Center",
-    "center": "Center",
+    "center": "Los Angeles Center",
     "tanker": "Tanker",
 }
 
 # Skip these when auto-picking the next handoff agency from the timeline
-_HANDOFF_SKIP_CHANNELS = frozenset({"ops", "bandsaw"})
+_HANDOFF_SKIP_CHANNELS = frozenset({"ops", "bandsaw", "joshua", "tanker", "center"})
 
 
 def speak_agency_name(channel: str) -> str:
@@ -2844,20 +3556,46 @@ def resolve_handoff_channel(
     *,
     from_channel: str | None = None,
     default: str = "blackjack",
+    config: dict[str, Any] | None = None,
+    opus: OpusFlightContext | None = None,
+    airport: dict[str, Any] | None = None,
+    state: dict[str, Any] | None = None,
 ) -> str:
     """
-    Next agency for a Departure/Center handoff.
-    Prefer step.handoff_channel, else the next timeline agency (skip Ops), else default.
-    """
-    if step is not None:
-        raw = step.get("handoff_channel") or step.get("handoff_to")
-        if raw is not None and str(raw).strip():
-            return str(raw).strip().lower()
+    Next agency for a Departure / Blackjack / Center / Joshua handoff.
 
+    On Nellis Default, the filed route + reserved airspace pick the control
+    area. Custom Plans still use step.handoff_channel, then the timeline.
+    """
     from_ch = (from_channel or (step.get("channel") if step else None) or "departure")
     from_ch = str(from_ch).strip().lower()
+    picked = ""
+    lat = lon = None
+    ll = _ownship_ll_from_state(state)
+    if ll:
+        lat, lon = ll
 
-    if mission is not None and step is not None and isinstance(mission.get("steps"), list):
+    try:
+        import agencies as agencies_mod
+
+        if agencies_mod.is_default_sandbox(config):
+            plan = agencies_mod.infer_from_context(
+                airport=airport, opus=opus, config=config
+            )
+            hop = agencies_mod.handoff_from_plan(
+                from_ch, plan, airport=airport, lat=lat, lon=lon
+            )
+            if hop:
+                picked = hop
+    except Exception:
+        pass
+
+    if not picked and step is not None:
+        raw = step.get("handoff_channel") or step.get("handoff_to")
+        if raw is not None and str(raw).strip():
+            picked = str(raw).strip().lower()
+
+    if not picked and mission is not None and step is not None and isinstance(mission.get("steps"), list):
         steps = mission["steps"]
         sid = step.get("id")
         start = -1
@@ -2880,8 +3618,18 @@ def resolve_handoff_channel(
                 tmpl = str(peer.get("template") or "")
                 if tmpl in ("departure_handoff", "center_handoff", "bj_range_exit"):
                     continue
-                return ch
-    return default
+                picked = ch
+                break
+    if not picked:
+        picked = default
+    if from_ch == "blackjack" and picked == "approach":
+        try:
+            import agencies as agencies_mod
+
+            picked = agencies_mod.blackjack_exit_handoff(airport, lat, lon, picked)
+        except Exception:
+            picked = "control_east"
+    return picked
 
 
 def build_departure_handoff(
@@ -2899,11 +3647,15 @@ def build_departure_handoff(
     name = airport["name"]
     cs = speak_callsign(callsign)
     from_ch = (from_channel or "departure").strip().lower()
-    agency = (
-        f"{name} Departure"
-        if from_ch == "departure"
-        else (f"{name} Center" if from_ch in ("other", "center") else f"{name} {speak_agency_name(from_ch)}")
-    )
+    spoken = speak_agency_name(from_ch)
+    if from_ch == "departure":
+        agency = f"{name} Departure"
+    elif from_ch in ("other", "center", "control_east", "control_west"):
+        agency = spoken
+    elif from_ch in ("blackjack", "bandsaw", "joshua", "tanker"):
+        agency = spoken
+    else:
+        agency = f"{name} {spoken}"
     target = speak_agency_contact_target(airport, handoff_channel)
     return with_freq_handoff_closer(f"{cs}, {agency}, contact {target}")
 
@@ -3251,7 +4003,17 @@ def resolve_pilot_request_phase(
         return "approach"
     if ch in ("delivery", "ground", "departure"):
         return "departure"
-    if ch in ("blackjack", "bandsaw"):
+    if ch in (
+        "blackjack",
+        "bandsaw",
+        "joshua",
+        "ops",
+        "tanker",
+        "other",
+        "control_east",
+        "control_west",
+        "center",
+    ):
         return "flight"
     return ""
 
@@ -3284,6 +4046,26 @@ def should_skip_approach_step(
     They still need that call — continue straight-in / roger continue — inside
     ~12 NM; cleared-to-land stays gated at 6 NM. So nothing is skipped here.
     """
+    return False
+
+
+def should_skip_control_step(
+    step: dict[str, Any] | None,
+    state: dict[str, Any] | None = None,
+) -> bool:
+    """Skip the unused Control East/West check-in, or both after check-in."""
+    if not step or str(step.get("template") or "") != "control_check_in":
+        return False
+    st = state if isinstance(state, dict) else {}
+    if st.get("control_checked_in"):
+        return True
+    want = str(st.get("control_channel") or "").strip().lower()
+    ch = str(step.get("channel") or "").strip().lower()
+    if want in ("control_east", "control_west") and ch in (
+        "control_east",
+        "control_west",
+    ):
+        return ch != want
     return False
 
 
@@ -3395,6 +4177,11 @@ def pilot_requests_for_channel(
             continue
         if key in ("accept_rolling", "deny_rolling") and pending != "rolling":
             continue
+        # Only offer the *other* takeoff type — same-type is "ready for
+        # departure" / Play, not "expect line up and wait".
+        if key in ("request_lineup", "request_rolling") and pending != "rolling":
+            if not takeoff_request_changes_mode(key, state=state):
+                continue
         if key == "request_handoff" and str(template or "") not in _HANDOFF_REQUEST_TEMPLATES:
             continue
         if key.startswith("tanker_") and key not in (
@@ -3413,6 +4200,8 @@ def pilot_requests_for_channel(
         if show_boom:
             seen = {k for k, _ in out}
             for k, lab in tanker_chat_mod.fly_request_rows(state):
+                if k == "tanker_chat_start" and ch != "tanker":
+                    continue
                 if k not in seen:
                     out.append((k, lab))
                     seen.add(k)
@@ -3450,6 +4239,34 @@ def takeoff_offer_visible(
         resolve_pilot_request_phase(phase=phase, channel=ch, template=template)
         == "departure"
     )
+
+
+def takeoff_request_mode(request_key: str | None) -> str | None:
+    """'lineup' / 'rolling' when this request picks a takeoff type, else None."""
+    key = str(request_key or "").strip().casefold()
+    if key in ("request_lineup", "deny_rolling"):
+        return "lineup"
+    if key in ("request_rolling", "accept_rolling"):
+        return "rolling"
+    return None
+
+
+def takeoff_request_changes_mode(
+    request_key: str | None,
+    mission: dict[str, Any] | None = None,
+    state: dict[str, Any] | None = None,
+) -> bool:
+    """
+    True when the request switches takeoff type (LUAW ↔ rolling).
+
+    Same-type calls are 'I'm ready' — issue LUAW / rolling, do not TX
+    'expect line up and wait'.
+    """
+    want = takeoff_request_mode(request_key)
+    if not want:
+        return False
+    have = resolve_active_takeoff_mode(mission, state)
+    return want != have
 
 
 def set_takeoff_mode(
@@ -3519,7 +4336,13 @@ def reset_runway_to_winds(
         return str(plan.get("runway") or "")
 
     instrument = uses_instrument_runway(mission=mission, state=state)
-    picked = pick_recovery_runway(airport, weather, instrument=instrument)
+    picked = pick_recovery_runway(
+        airport,
+        weather,
+        instrument=instrument,
+        for_departure=True,
+        config=config,
+    )
     if weather.wind_dir is not None and weather.wind_speed_kt is not None:
         print(
             f"Runway reset to winds: {int(weather.wind_dir):03d}/"
@@ -4411,6 +5234,27 @@ def awaiting_option_on_the_go(state: dict[str, Any] | None = None) -> bool:
     return bool(isinstance(state, dict) and state.get("awaiting_on_the_go"))
 
 
+def runway_exit_hold_reason(state: dict[str, Any] | None = None) -> str:
+    """
+    Why Watch must not TX exit-runway / contact Ground.
+
+    A go-around, missed approach, or the option overflies the far end;
+    that is not a landing rollout.
+    """
+    if not isinstance(state, dict):
+        return ""
+    if awaiting_option_on_the_go(state):
+        return "option / low approach — not a full stop"
+    if resolve_landing_intent(state) == LANDING_INTENT_LOW_APPROACH:
+        return "cleared the option — waiting on the go or full stop"
+    last = str(state.get("last_tx_template") or "").strip().lower()
+    if last == "go_around" or go_around_readback_open(state):
+        return "go-around / missed — not exiting"
+    if state.get("rearm_tower_outside_nm") is not None:
+        return "missed approach — not exiting"
+    return ""
+
+
 def commit_option_full_stop(
     *,
     state: dict[str, Any] | None = None,
@@ -4850,39 +5694,23 @@ def build_blackjack_range_exit(
     airport: dict[str, Any],
     callsign: str,
     *,
-    handoff_channel: str = "approach",
+    handoff_channel: str = "control_east",
     plan: dict[str, Any] | None = None,
     include_handoff: bool = True,
 ) -> str:
     """
-    Blackjack range exit: proceed direct to the exit / recovery fix, and
-    start the descent to the IAF / recovery altitude at pilot discretion
-    so they can make it before Approach picks them up.
+    Blackjack range exit: push to Nellis Control early.
 
-    Approach handoff is only when include_handoff is True (inside ~40 NM).
-    Farther out they stay this frequency. Expect recovery stays on Approach.
+    Descent, proceed-direct, and the recovery clearance live on NATCF
+    check-in. Blackjack just releases them and hands off.
     """
     cs = speak_callsign(callsign)
-    p = dict(plan or {})
-    dest = _plan_direct_say(p, airport, runway=str(p.get("runway") or ""))
-    direct = f", proceed direct {dest}" if dest else ""
-    descend = ""
-    dft = p.get("descend_ft")
-    if dft:
-        try:
-            clause = speak_descend_pilot_discretion(int(dft))
-            if clause:
-                descend = f", {clause}"
-        except (TypeError, ValueError):
-            pass
+    del plan  # Routing / descent is NATCF's call.
     if not include_handoff:
-        return (
-            f"{cs}, Blackjack, range exit approved{direct}{descend}, "
-            f"remain this frequency."
-        )
-    target = speak_agency_contact_target(airport, handoff_channel or "approach")
+        return f"{cs}, Blackjack, range exit approved, remain this frequency."
+    target = speak_agency_contact_target(airport, handoff_channel or "control_east")
     return with_freq_handoff_closer(
-        f"{cs}, Blackjack, range exit approved{direct}{descend}, contact {target}"
+        f"{cs}, Blackjack, range exit approved, contact {target}"
     )
 
 
@@ -4953,6 +5781,152 @@ def build_contact_bandsaw(airport: dict[str, Any], callsign: str) -> str:
     return with_freq_handoff_closer(f"{cs}, Blackjack, contact {target}")
 
 
+def build_blackjack_c2_redirect(
+    airport: dict[str, Any],
+    callsign: str,
+    what: str = "picture",
+) -> str:
+    """Blackjack does not work picture / dope / declare — push to Bandsaw."""
+    cs = speak_callsign(callsign)
+    target = speak_agency_contact_target(airport, "bandsaw")
+    label = (what or "picture").strip() or "picture"
+    return with_freq_handoff_closer(
+        _pick(
+            f"{cs}, Blackjack, {label} is with Bandsaw. Contact {target}",
+            f"{cs}, Blackjack, unable {label} this freq, contact {target}",
+            f"{cs}, Blackjack, that's Bandsaw. Contact {target}",
+        )
+    )
+
+
+def build_joshua_check_in(callsign: str) -> str:
+    """Joshua Control check-in: radar contact, remain this frequency."""
+    cs = speak_callsign(callsign)
+    return _pick(
+        f"{cs}, Joshua, radar contact. Remain this frequency.",
+        f"{cs}, Joshua, radar contact, remain this frequency.",
+    )
+
+
+def build_joshua_check_out(
+    airport: dict[str, Any],
+    callsign: str,
+    *,
+    handoff_channel: str = "blackjack",
+) -> str:
+    """Joshua checkout — acknowledge and push back to Blackjack."""
+    cs = speak_callsign(callsign)
+    target = speak_agency_contact_target(airport, handoff_channel or "blackjack")
+    return with_freq_handoff_closer(
+        _pick(
+            f"{cs}, Joshua, copy, contact {target}",
+            f"{cs}, Joshua, roger, contact {target}",
+        )
+    )
+
+
+def build_contact_joshua(airport: dict[str, Any], callsign: str) -> str:
+    """Stub Blackjack push to Joshua."""
+    cs = speak_callsign(callsign)
+    target = speak_agency_contact_target(airport, "joshua")
+    return with_freq_handoff_closer(f"{cs}, Blackjack, contact {target}")
+
+
+def build_control_check_in(
+    callsign: str,
+    *,
+    channel: str = "control_east",
+    airport: dict[str, Any] | None = None,
+    plan: dict[str, Any] | None = None,
+) -> str:
+    """
+    Nellis Control (NATCF) check-in: radar contact plus the recovery routing.
+
+    Blackjack only handed them off. Control issues proceed-direct, the
+    descent, and expect-recovery / landing flow when a plan is assigned.
+    """
+    cs = speak_callsign(callsign)
+    del channel  # East / West share the spoken agency name; Local 7 vs 8 differentiates.
+    bits = [f"{cs}, Nellis Control, radar contact"]
+    p = dict(plan or {})
+    dest = ""
+    if airport:
+        dest = _plan_direct_say(p, airport, runway=str(p.get("runway") or ""))
+    if dest:
+        bits.append(f"proceed direct {dest}")
+    dft = p.get("descend_ft")
+    if dft:
+        try:
+            clause = speak_descend_pilot_discretion(int(dft))
+            if clause:
+                bits.append(clause)
+        except (TypeError, ValueError):
+            pass
+    if airport and p:
+        rwy = str(p.get("runway") or "")
+        name = str(airport.get("name") or "Nellis")
+        if rwy:
+            bits.append(speak_landing_flow(rwy, name))
+        rec_key = normalize_recovery_key(p.get("pattern"))
+        instrument = rec_key == "instrument" or bool(p.get("iaf"))
+        if instrument:
+            inst_say = str(p.get("instrument_say") or "").strip()
+            if inst_say:
+                bits.append(f"expect {inst_say}")
+            elif rwy:
+                bits.append(f"expect instrument approach runway {speak_runway(rwy)}")
+        else:
+            vfr_say = str(p.get("vfr_recovery_say") or p.get("vfr_recovery") or "").strip()
+            expect_key = recovery_expect(rec_key)
+            if vfr_say:
+                bits.append(speak_expect_vfr_recovery(vfr_say, expect_key, rwy))
+            elif rwy or expect_key:
+                bits.append(speak_expect_pattern(expect_key, rwy))
+    if len(bits) == 1:
+        bits.append("remain this frequency")
+    return ", ".join(bits) + "."
+
+
+def build_control_handoff(
+    airport: dict[str, Any],
+    callsign: str,
+    *,
+    handoff_channel: str = "approach",
+    from_channel: str = "control_east",
+) -> str:
+    """Nellis Control hands the recovery to Approach."""
+    cs = speak_callsign(callsign)
+    del from_channel  # Spoken as Nellis Control on both sectors.
+    target = speak_agency_contact_target(airport, handoff_channel or "approach")
+    return with_freq_handoff_closer(
+        _pick(
+            f"{cs}, Nellis Control, contact {target}",
+            f"{cs}, Nellis Control, roger, contact {target}",
+        )
+    )
+
+
+def build_contact_control(
+    airport: dict[str, Any],
+    callsign: str,
+    *,
+    handoff_channel: str = "control_east",
+) -> str:
+    """Blackjack (or Departure) push to Nellis Control (East or West by freq)."""
+    cs = speak_callsign(callsign)
+    target = speak_agency_contact_target(airport, handoff_channel or "control_east")
+    return with_freq_handoff_closer(f"{cs}, Blackjack, contact {target}")
+
+
+def build_center_check_in(callsign: str) -> str:
+    """Los Angeles Center radar contact."""
+    cs = speak_callsign(callsign)
+    return _pick(
+        f"{cs}, Los Angeles Center, radar contact. Remain this frequency.",
+        f"{cs}, Los Angeles Center, radar contact, remain this frequency.",
+    )
+
+
 # --- CAOC radar / bullseye alpha check ---------------------------------
 # Match Opus CAOC aircraft popup math (/opus/caoc): click unit → tooltip
 #   "ELVIS 305 25"  (name + mag bearing 000-359 + range NM, zero-padded to 2)
@@ -4968,6 +5942,442 @@ _CAOC_DEFAULT_BULLSEYE = {"name": "ELVIS", "lat": 37.25, "lon": -115.75}
 
 _caoc_radar_cache: dict[str, Any] = {"t": 0.0, "data": None}
 _theater_nav_cache: dict[int, list[dict[str, Any]]] = {}
+MAP_OWNSHIP_ID = "map-ownship"
+MAP_TRAFFIC_PREFIX = "map-traffic-"
+OWNSHIP_INJECT_MAX_AGE_S = 8.0
+
+
+def ownship_from_map_enabled(config: dict[str, Any] | None) -> bool:
+    """Fly checkbox: use the map tester as ownship instead of CAOC."""
+    return bool((config or {}).get("ownship_from_map"))
+
+
+def map_flight_context(config: dict[str, Any] | None) -> OpusFlightContext | None:
+    """
+    Filed plan + callsign from the map tester.
+
+    Used when Fly's 'Test: map is my jet' is on so ATC does not wait on Opus.
+    """
+    if not ownship_from_map_enabled(config):
+        return None
+    inj = read_ownship_inject(config=config)
+    if not inj:
+        return None
+    override = callsign_override(config or {})
+    cs = override or str(inj.get("callsign") or "").strip() or "MAP"
+    ctx = synthetic_flight_context(cs)
+    route = str(inj.get("fp_route_string") or "").strip()
+    if route:
+        ctx.fp_route_string = route
+        tokens = [t for t in re.split(r"\s+", route) if t]
+        ctx.dep_icao = tokens[0] if tokens else None
+        ctx.arr_icao = tokens[-1] if len(tokens) >= 2 else ctx.dep_icao
+    alt = str(inj.get("fp_altitude") or "").strip()
+    if alt:
+        ctx.fp_altitude = alt
+    return ctx
+
+
+def read_ownship_inject(
+    *,
+    config: dict[str, Any] | None = None,
+    max_age_s: float = OWNSHIP_INJECT_MAX_AGE_S,
+) -> dict[str, Any] | None:
+    """Map-jet sample. Fly only uses this when ownship_from_map is on."""
+    if config is not None and not ownship_from_map_enabled(config):
+        return None
+    path = OWNSHIP_INJECT_PATH
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("enabled") is False:
+        return None
+    persist = ownship_from_map_enabled(config)
+    if not persist:
+        try:
+            age = time.time() - float(data.get("t") or 0)
+        except (TypeError, ValueError):
+            return None
+        if age < 0 or age > max_age_s:
+            return None
+    try:
+        lat, lon = float(data["lat"]), float(data["lon"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    data["lat"] = lat
+    data["lon"] = lon
+    return data
+
+
+def clear_ownship_inject() -> None:
+    try:
+        OWNSHIP_INJECT_PATH.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def write_ownship_inject(
+    *,
+    lat: float,
+    lon: float,
+    alt_ft_agl: float | None = None,
+    heading_deg: float | None = None,
+    speed_kt: float | None = None,
+    callsign: str = "",
+    airport: dict[str, Any] | None = None,
+    fp_route_string: str | None = None,
+    fp_altitude: str | None = None,
+) -> None:
+    """Map tester publishes this; Fly / CAOC consumers treat it as ownship."""
+    import runway_position as rp
+
+    height_m = None if alt_ft_agl is None else float(alt_ft_agl) / rp.FT_PER_M
+    elev = rp.field_elev_m(airport)
+    alt_m = None if height_m is None else (0.0 if elev is None else elev) + height_m
+    payload = {
+        "enabled": True,
+        "t": time.time(),
+        "lat": float(lat),
+        "lon": float(lon),
+        "alt_ft_agl": None if alt_ft_agl is None else float(alt_ft_agl),
+        "alt_m": alt_m,
+        "heading_deg": None if heading_deg is None else float(heading_deg),
+        "speed_kt": None if speed_kt is None else float(speed_kt),
+        "callsign": str(callsign or "").strip(),
+        "fp_route_string": str(fp_route_string or "").strip() or None,
+        "fp_altitude": str(fp_altitude or "").strip() or None,
+    }
+    tmp = OWNSHIP_INJECT_PATH.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload), encoding="utf-8")
+    tmp.replace(OWNSHIP_INJECT_PATH)
+
+
+def ownship_inject_unit(
+    inj: dict[str, Any],
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    cfg = config or {}
+    cs = str(inj.get("callsign") or "").strip() or "MAP"
+    x_m, z_m = caoc_ll_to_xz(float(inj["lat"]), float(inj["lon"]))
+    alt_m = inj.get("alt_m")
+    try:
+        alt_m = float(alt_m) if alt_m is not None else None
+    except (TypeError, ValueError):
+        alt_m = None
+    hdg = inj.get("heading_deg")
+    try:
+        hdg = float(hdg) if hdg is not None else 0.0
+    except (TypeError, ValueError):
+        hdg = 0.0
+    spd_mps = None
+    try:
+        raw_kt = inj.get("speed_kt")
+        if raw_kt not in (None, ""):
+            spd_mps = max(0.0, float(raw_kt) * (1852.0 / 3600.0))
+    except (TypeError, ValueError):
+        spd_mps = None
+    unit = {
+        "id": MAP_OWNSHIP_ID,
+        "type": "air",
+        "name": cs,
+        "pilotName": str(cfg.get("opus_user_name") or cs).strip() or cs,
+        "objectName": "F-16C_50",
+        "xMeters": x_m,
+        "zMeters": z_m,
+        "altMeters": 0.0 if alt_m is None else alt_m,
+        "headingDeg": hdg,
+        "coalition": "blue",
+    }
+    if spd_mps is not None:
+        unit["groundSpeedMps"] = spd_mps
+    return unit
+
+
+def merge_ownship_inject(
+    radar: dict[str, Any] | None,
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Replace CAOC ownship with the map jet; leave tankers and everyone else."""
+    if config is not None and not ownship_from_map_enabled(config):
+        return radar
+    inj = read_ownship_inject(config=config)
+    if not inj:
+        return radar
+    unit = ownship_inject_unit(inj, config)
+    units = [
+        u
+        for u in list((radar or {}).get("units") or [])
+        if isinstance(u, dict) and str(u.get("id") or "") != MAP_OWNSHIP_ID
+    ]
+    cs = str(inj.get("callsign") or "").strip() or callsign_override(config or {}) or ""
+    real = match_caoc_unit_for_flight(units, callsign=cs, config=config or {})
+    if real is not None:
+        rid = real.get("id")
+        units = [u for u in units if u.get("id") != rid]
+    units.insert(0, unit)
+    out = dict(radar or {})
+    out["units"] = units
+    out["ownshipInject"] = True
+    return out
+
+
+def read_traffic_inject() -> list[dict[str, Any]]:
+    path = TRAFFIC_INJECT_PATH
+    if not path.is_file():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(data, dict) or data.get("enabled") is False:
+        return []
+    rows = data.get("contacts")
+    return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
+
+
+def clear_traffic_inject() -> None:
+    try:
+        TRAFFIC_INJECT_PATH.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def write_traffic_inject(
+    contacts: list[dict[str, Any]] | None,
+    *,
+    airport: dict[str, Any] | None = None,
+) -> None:
+    """Map tester bandits / friendlies for picture and declare."""
+    import runway_position as rp
+
+    rows: list[dict[str, Any]] = []
+    elev = rp.field_elev_m(airport)
+    for i, raw in enumerate(contacts or []):
+        if not isinstance(raw, dict):
+            continue
+        try:
+            lat, lon = float(raw["lat"]), float(raw["lon"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        coal = str(raw.get("coalition") or "").strip().lower()
+        coal = "red" if coal.startswith("r") else "blue"
+        alt_ft = raw.get("alt_ft_agl")
+        try:
+            alt_ft = None if alt_ft in (None, "") else float(alt_ft)
+        except (TypeError, ValueError):
+            alt_ft = None
+        height_m = None if alt_ft is None else alt_ft / rp.FT_PER_M
+        alt_m = None if height_m is None else (0.0 if elev is None else elev) + height_m
+        hdg = raw.get("heading_deg")
+        try:
+            hdg = 180.0 if hdg in (None, "") else float(hdg)
+        except (TypeError, ValueError):
+            hdg = 180.0
+        spd = raw.get("speed_kt")
+        try:
+            spd = None if spd in (None, "") else float(spd)
+        except (TypeError, ValueError):
+            spd = None
+        ident = str(raw.get("id") or "").strip() or f"{MAP_TRAFFIC_PREFIX}{i + 1}"
+        if not ident.startswith(MAP_TRAFFIC_PREFIX):
+            ident = f"{MAP_TRAFFIC_PREFIX}{ident}"
+        default_cs = f"BANDIT {i + 1}" if coal == "red" else f"FRIENDLY {i + 1}"
+        cs = str(raw.get("callsign") or "").strip() or default_cs
+        rows.append(
+            {
+                "id": ident,
+                "lat": lat,
+                "lon": lon,
+                "alt_ft_agl": alt_ft,
+                "alt_m": alt_m,
+                "heading_deg": hdg,
+                "speed_kt": spd,
+                "coalition": coal,
+                "callsign": cs,
+            }
+        )
+    if not rows:
+        clear_traffic_inject()
+        return
+    payload = {"enabled": True, "t": time.time(), "contacts": rows}
+    tmp = TRAFFIC_INJECT_PATH.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload), encoding="utf-8")
+    tmp.replace(TRAFFIC_INJECT_PATH)
+
+
+def traffic_inject_unit(row: dict[str, Any]) -> dict[str, Any] | None:
+    try:
+        lat, lon = float(row["lat"]), float(row["lon"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    x_m, z_m = caoc_ll_to_xz(lat, lon)
+    coal = "red" if str(row.get("coalition") or "").lower().startswith("r") else "blue"
+    cs = str(row.get("callsign") or "").strip() or (
+        "BANDIT" if coal == "red" else "FRIENDLY"
+    )
+    alt_m = row.get("alt_m")
+    try:
+        alt_m = 0.0 if alt_m is None else float(alt_m)
+    except (TypeError, ValueError):
+        alt_m = 0.0
+    hdg = row.get("heading_deg")
+    try:
+        hdg = 180.0 if hdg is None else float(hdg)
+    except (TypeError, ValueError):
+        hdg = 180.0
+    spd_mps = None
+    try:
+        raw_kt = row.get("speed_kt")
+        if raw_kt not in (None, ""):
+            spd_mps = max(0.0, float(raw_kt) * (1852.0 / 3600.0))
+    except (TypeError, ValueError):
+        spd_mps = None
+    ident = str(row.get("id") or "").strip() or f"{MAP_TRAFFIC_PREFIX}{cs}"
+    unit = {
+        "id": ident,
+        "type": "air",
+        "name": cs,
+        "pilotName": cs,
+        "objectName": "Su-27" if coal == "red" else "F-16C_50",
+        "coalition": coal,
+        "xMeters": x_m,
+        "zMeters": z_m,
+        "altMeters": alt_m,
+        "headingDeg": hdg,
+    }
+    if spd_mps is not None:
+        unit["groundSpeedMps"] = spd_mps
+    return unit
+
+
+def merge_traffic_inject(
+    radar: dict[str, Any] | None,
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Splice tester red/blue contacts into the CAOC picture; leave tankers."""
+    if config is not None and not ownship_from_map_enabled(config):
+        return radar
+    rows = read_traffic_inject()
+    extra = [u for u in (traffic_inject_unit(r) for r in rows) if u]
+    units = [
+        u
+        for u in list((radar or {}).get("units") or [])
+        if isinstance(u, dict)
+        and not str(u.get("id") or "").startswith(MAP_TRAFFIC_PREFIX)
+    ]
+    if not extra:
+        if radar is None:
+            return None
+        out = dict(radar)
+        out["units"] = units
+        return out
+    units.extend(extra)
+    out = dict(radar or {})
+    out["units"] = units
+    out["trafficInject"] = True
+    return out
+
+
+def read_weather_inject() -> dict[str, Any] | None:
+    """Tester weather / mission-clock sample. None means use Opus METAR and CAOC time."""
+    path = WEATHER_INJECT_PATH
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("enabled") is False:
+        return None
+    return data
+
+
+def clear_weather_inject() -> None:
+    try:
+        WEATHER_INJECT_PATH.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def write_weather_inject(
+    *,
+    wind_dir: int | None = None,
+    wind_speed_kt: int | None = None,
+    altimeter_inhg: float | None = None,
+    visibility_sm: float | None = None,
+    ceiling_ft: int | None = None,
+    metar: str = "",
+    mission_hhmm: str = "",
+) -> None:
+    """Map tester publishes this; Fly uses it instead of Opus METAR / CAOC clock."""
+    payload = {
+        "enabled": True,
+        "t": time.time(),
+        "wind_dir": wind_dir,
+        "wind_speed_kt": wind_speed_kt,
+        "altimeter_inhg": altimeter_inhg,
+        "visibility_sm": visibility_sm,
+        "ceiling_ft": ceiling_ft,
+        "metar": str(metar or "").strip(),
+        "mission_hhmm": str(mission_hhmm or "").strip(),
+    }
+    tmp = WEATHER_INJECT_PATH.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload), encoding="utf-8")
+    tmp.replace(WEATHER_INJECT_PATH)
+
+
+def weather_from_inject(data: dict[str, Any]) -> Weather:
+    raw = str(data.get("metar") or "").strip()
+    if raw:
+        wx = parse_metar(raw)
+        if (
+            wx.wind_dir is not None
+            or wx.wind_speed_kt is not None
+            or wx.altimeter_inhg is not None
+        ):
+            return wx
+
+    def _int(key: str) -> int | None:
+        try:
+            val = data.get(key)
+            return None if val in (None, "") else int(float(val))
+        except (TypeError, ValueError):
+            return None
+
+    def _float(key: str) -> float | None:
+        try:
+            val = data.get(key)
+            return None if val in (None, "") else float(val)
+        except (TypeError, ValueError):
+            return None
+
+    return Weather(
+        _int("wind_dir"),
+        _int("wind_speed_kt"),
+        _float("altimeter_inhg"),
+        raw,
+        ceiling_ft=_int("ceiling_ft"),
+        visibility_sm=_float("visibility_sm"),
+    )
+
+
+def apply_mission_clock_inject(radar: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Stamp CAOC missionTime* from the tester clock so night-ops runway logic sees it."""
+    inj = read_weather_inject()
+    if not inj or radar is None:
+        return radar
+    minutes = parse_mission_local_minutes(str(inj.get("mission_hhmm") or ""))
+    if minutes is None:
+        return radar
+    hour, minute = divmod(int(minutes) % (24 * 60), 60)
+    clock = f"{hour:02d}:{minute:02d}:00"
+    out = dict(radar)
+    out["missionTimeZulu"] = f"{clock} Z"
+    out["missionTimeLocal"] = f"{clock} L"
+    return out
 
 
 def speak_natural_number(n: int) -> str:
@@ -5119,6 +6529,49 @@ def _true_bearing_deg(lat1: float, lon1: float, lat2: float, lon2: float) -> flo
     return (math.degrees(math.atan2(y, x)) + 360.0) % 360.0
 
 
+def declination_east_deg(config: dict[str, Any] | None = None) -> float:
+    """East magnetic declination (true − mag). NTTR default 12°E, overridable."""
+    raw = (config or {}).get(
+        "bullseye_magnetic_declination_deg", _NTTR_MAG_DECLINATION_E_DEG
+    )
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return float(_NTTR_MAG_DECLINATION_E_DEG)
+
+
+def true_to_magnetic_deg(
+    true_brg: float,
+    *,
+    config: dict[str, Any] | None = None,
+    declination_e_deg: float | None = None,
+) -> float:
+    """True heading/bearing → magnetic (subtract east declination)."""
+    decl = (
+        float(declination_e_deg)
+        if declination_e_deg is not None
+        else declination_east_deg(config)
+    )
+    return (float(true_brg) - decl) % 360.0
+
+
+def magnetic_bearing_deg(
+    lat1: float,
+    lon1: float,
+    lat2: float,
+    lon2: float,
+    *,
+    config: dict[str, Any] | None = None,
+    declination_e_deg: float | None = None,
+) -> float:
+    """Initial magnetic bearing point 1 → 2. Spoken BRAA / bullseye use this."""
+    return true_to_magnetic_deg(
+        _true_bearing_deg(lat1, lon1, lat2, lon2),
+        config=config,
+        declination_e_deg=declination_e_deg,
+    )
+
+
 def caoc_bullseye_brg_rng_nm(
     unit_lat: float,
     unit_lon: float,
@@ -5128,8 +6581,13 @@ def caoc_bullseye_brg_rng_nm(
     magnetic_declination_e_deg: float = _NTTR_MAG_DECLINATION_E_DEG,
 ) -> tuple[int, int]:
     """Magnetic bearing + range NM from bullseye → unit (CAOC popup rounding)."""
-    true_brg = _true_bearing_deg(be_lat, be_lon, unit_lat, unit_lon)
-    mag_brg = (true_brg - float(magnetic_declination_e_deg)) % 360.0
+    mag_brg = magnetic_bearing_deg(
+        be_lat,
+        be_lon,
+        unit_lat,
+        unit_lon,
+        declination_e_deg=magnetic_declination_e_deg,
+    )
     rng_nm = _haversine_nm(be_lat, be_lon, unit_lat, unit_lon)
     return int(round(mag_brg)) % 360, int(round(rng_nm))
 
@@ -5181,21 +6639,27 @@ def fetch_caoc_radar(config: dict[str, Any], *, max_age_s: float = 5.0) -> dict[
     """Latest CAOC radar snapshot from Opus (`GET /opus/caoc/radar`)."""
     now = time.time()
     cached = _caoc_radar_cache.get("data")
+    data: Any = None
     if cached is not None and (now - float(_caoc_radar_cache.get("t") or 0)) < max_age_s:
-        return cached
-    backend = (config.get("opus_backend_url") or "").rstrip("/")
-    if not backend:
-        return None
-    ua = str(config.get("user_agent") or "DCS-ATC-Phrase/1.0")
-    try:
-        data = http_get_json(f"{backend}/opus/caoc/radar", ua)
-    except Exception:
-        return cached if isinstance(cached, dict) else None
-    if not isinstance(data, dict):
-        return None
-    _caoc_radar_cache["t"] = now
-    _caoc_radar_cache["data"] = data
-    return data
+        data = cached
+    else:
+        backend = (config.get("opus_backend_url") or "").rstrip("/")
+        if backend:
+            ua = str(config.get("user_agent") or "DCS-ATC-Phrase/1.0")
+            try:
+                data = http_get_json(f"{backend}/opus/caoc/radar", ua)
+            except Exception:
+                data = cached if isinstance(cached, dict) else None
+            if isinstance(data, dict) and data is not cached:
+                _caoc_radar_cache["t"] = now
+                _caoc_radar_cache["data"] = data
+            elif not isinstance(data, dict):
+                data = None
+        else:
+            data = None
+    merged = merge_ownship_inject(data if isinstance(data, dict) else None, config)
+    merged = merge_traffic_inject(merged, config)
+    return apply_mission_clock_inject(merged)
 
 
 def fetch_theater_navpoints(config: dict[str, Any], theater_id: int) -> list[dict[str, Any]]:
@@ -5264,6 +6728,81 @@ def caoc_air_units(units: list[dict[str, Any]]) -> list[dict[str, Any]]:
             continue
         out.append(u)
     return out
+
+
+# Shot-down / ejected tracks still linger on the CAOC feed as type=air.
+# DCS names the chute / wreck "Pilot"; Opus shows that on the map.
+_PICTURE_DEAD_NAMES = frozenset({"pilot", "parachutist", "parachute"})
+_PICTURE_DEAD_NAME_RE = re.compile(r"^pilot\s*#?\d*$", re.I)
+_PICTURE_DEAD_OBJECT_TOKENS: tuple[str, ...] = (
+    "PARACHUT",
+    "PARACHUTE",
+    "WRECK",
+    "INFANTRY",
+    "SOLDIER",
+)
+_FALSEY = frozenset({False, 0, 0.0, "0", "false", "no", "off"})
+_TRUTHY = frozenset({True, 1, 1.0, "1", "true", "yes", "on"})
+
+
+def caoc_unit_is_dead_or_wreck(unit: dict[str, Any] | None) -> bool:
+    """
+    True for shot-down, ejected, or wreck tracks that should not fill a picture.
+
+    Opus often keeps the slot after a kill; the map label becomes "Pilot".
+    """
+    if not isinstance(unit, dict):
+        return True
+    for key in ("alive", "isAlive", "Alive"):
+        if key in unit and unit.get(key) in _FALSEY:
+            return True
+    for key in ("dead", "isDead", "destroyed", "isDestroyed", "crashed", "shotDown"):
+        if unit.get(key) in _TRUTHY:
+            return True
+    life = unit.get("life")
+    if life is None:
+        life = unit.get("Life")
+    if life is not None:
+        try:
+            if float(life) <= 0:
+                return True
+        except (TypeError, ValueError):
+            pass
+    life_state = unit.get("lifeState")
+    if life_state is None:
+        life_state = unit.get("LifeState")
+    if life_state is not None:
+        try:
+            if int(life_state) >= 1:
+                return True
+        except (TypeError, ValueError):
+            blob = str(life_state).casefold()
+            if blob in {"dead", "dying", "destroyed", "crashed"}:
+                return True
+    name = str(unit.get("name") or "").strip()
+    pilot = str(unit.get("pilotName") or "").strip()
+    if name.casefold() in _PICTURE_DEAD_NAMES or _PICTURE_DEAD_NAME_RE.fullmatch(name):
+        return True
+    if pilot.casefold() in _PICTURE_DEAD_NAMES or _PICTURE_DEAD_NAME_RE.fullmatch(pilot):
+        # Living players have a flight label / callsign; ejected slots do not.
+        if not (
+            str(unit.get("flightLabel") or "").strip()
+            or str(unit.get("unitCallsign") or "").strip()
+        ):
+            return True
+    obj = str(unit.get("objectName") or unit.get("object_name") or "").upper()
+    if any(tok in obj for tok in _PICTURE_DEAD_OBJECT_TOKENS):
+        return True
+    if "PILOT" in obj and "F-16" not in obj and "F16" not in obj:
+        return True
+    return False
+
+
+def caoc_unit_is_picture_eligible(unit: dict[str, Any] | None) -> bool:
+    """Air track that may appear on picture / declare / bogey dope."""
+    if not isinstance(unit, dict):
+        return False
+    return not caoc_unit_is_dead_or_wreck(unit)
 
 
 # Theater fixtures that are always on the CAOC picture (hostile tanker / AWACS).
@@ -5531,6 +7070,9 @@ def match_caoc_unit_for_flight(
     air = caoc_air_units(units)
     if not air:
         return None
+    for u in air:
+        if str(u.get("id") or "") == MAP_OWNSHIP_ID:
+            return u
 
     fid = opus.flight_id if opus else configured_opus_flight_id(config)
     mode3 = (opus.mode3 if opus else None) or None
@@ -5646,7 +7188,7 @@ def ownship_latlon(
     max_age_s: float = 10.0,
 ) -> tuple[float, float] | None:
     """
-    Own aircraft position from the CAOC feed, cached into state.
+    Own aircraft position: map inject if the tester is driving, else CAOC.
 
     Approach uses this to hand out the recovery/plate nearest the jet. The feed
     is often unavailable (no mission, no backend), so callers must treat None as
@@ -5654,8 +7196,7 @@ def ownship_latlon(
     OWNSHIP_MISS_BACKOFF_S so a dead backend never stalls phrase building.
     """
     global _ownship_miss_until
-    if not config:
-        return None
+
     def _cached_ll() -> tuple[float, float] | None:
         if not isinstance(state, dict):
             return None
@@ -5665,6 +7206,19 @@ def ownship_latlon(
                 return (float(raw[0]), float(raw[1]))
         except (TypeError, ValueError):
             return None
+        return None
+
+    inj = read_ownship_inject(config=config)
+    if inj:
+        ll = (inj["lat"], inj["lon"])
+        if isinstance(state, dict):
+            state["ownship_ll"] = [ll[0], ll[1]]
+            state["ownship_ll_t"] = time.time()
+        return ll
+    if ownship_from_map_enabled(config):
+        return _cached_ll()
+
+    if not config:
         return None
 
     now = time.time()
@@ -5695,6 +7249,29 @@ def ownship_latlon(
         state["ownship_ll"] = [ll[0], ll[1]]
         state["ownship_ll_t"] = time.time()
     return ll
+
+
+def control_channel_for_ownship(
+    airport: dict[str, Any] | None,
+    *,
+    config: dict[str, Any] | None = None,
+    callsign: str | None = None,
+    opus: OpusFlightContext | None = None,
+    state: dict[str, Any] | None = None,
+    default: str = "control_east",
+) -> str:
+    """Control East vs West from live lat/lon. Falls back to `default` with no position."""
+    try:
+        import agencies as agencies_mod
+
+        ll = ownship_latlon(config, callsign=callsign, opus=opus, state=state)
+        if ll:
+            return agencies_mod.control_for_ll(
+                airport, ll[0], ll[1], default=default
+            )
+    except Exception:
+        pass
+    return default
 
 
 _airspace_schedule_cache: dict[str, Any] = {"t": 0.0, "key": "", "rows": None}
@@ -5846,6 +7423,8 @@ _AIRSPACE_ZONE_SPOKEN: dict[str, str] = {
     "REVSOUTH": "Reveille South",
     "SALLY": "Sally Corridor",
     "SALLYCORRIDOR": "Sally Corridor",
+    "LEE": "Lee Corridor",
+    "LEECORRIDOR": "Lee Corridor",
     # Alamo / R-4806
     "ALAMO": "Alamo",
     "ALAMOA": "Alamo Alpha",
@@ -6272,7 +7851,12 @@ def speak_zulu_clock(raw: str | None) -> str | None:
 
 
 def speak_zulu_now() -> str:
-    """Current UTC clock as spoken HHMM zulu."""
+    """Current UTC clock as spoken HHMM zulu, or the tester mission clock if set."""
+    inj = read_weather_inject()
+    if inj:
+        spoken = speak_zulu_clock(str(inj.get("mission_hhmm") or ""))
+        if spoken:
+            return spoken
     now = datetime.now(timezone.utc)
     return speak_zulu_clock(f"{now.hour:02d}:{now.minute:02d}") or "time unavailable"
 
@@ -6349,7 +7933,8 @@ def situation_fields(situation: str) -> list[dict[str, Any]]:
     """Field specs for the Plan → Phrase helper modal."""
     agencies = [(c, HANDOFF_AGENCY_NAMES.get(c, c.title())) for c in (
         "delivery", "ground", "tower", "departure", "approach",
-        "blackjack", "bandsaw", "ops", "other",
+        "blackjack", "bandsaw", "joshua", "control_east", "control_west",
+        "center", "ops", "other", "tanker",
     )]
     recovery_opts = list(RECOVERY_CHOICES) + [("__custom__", "Custom…")]
     pattern_opts = list(APPROACH_PATTERN_CHOICES) + [("__custom__", "Custom…")]
@@ -6367,7 +7952,7 @@ def situation_fields(situation: str) -> list[dict[str, Any]]:
         ]
     if situation == "bj_range_exit":
         return [
-            {"key": "handoff_channel", "label": "Contact", "kind": "choice", "choices": agencies, "default": "approach"},
+            {"key": "handoff_channel", "label": "Contact", "kind": "choice", "choices": agencies, "default": "control_east"},
         ]
     if situation == "bj_alpha_check":
         return [
@@ -6491,7 +8076,7 @@ def generate_situation_phrase(
         return build_approach_tower_handoff(airport, callsign)
 
     if situation == "bj_range_exit":
-        handoff = str(params.get("handoff_channel") or "approach").strip().lower() or "approach"
+        handoff = str(params.get("handoff_channel") or "control_east").strip().lower() or "control_east"
         return build_blackjack_range_exit(airport, callsign, handoff_channel=handoff)
 
     if situation == "bj_alpha_check":
@@ -6513,7 +8098,10 @@ def generate_situation_phrase(
         agency = speak_agency_name(ch)
         spoken = (
             f"{name} {agency}"
-            if ch not in ("blackjack", "bandsaw", "ops", "other")
+            if ch not in (
+                "blackjack", "bandsaw", "joshua", "ops", "other",
+                "control_east", "control_west", "center", "tanker",
+            )
             else agency
         )
         if ch == "other":
@@ -6830,7 +8418,10 @@ def build_readback_checklist(
         )
 
     if tmpl == "clearance":
-        if opus and opus.has_filed_plan and opus.arr_icao:
+        if not opus or not opus.has_filed_plan:
+            # Nothing to copy — Delivery did not issue an IFR clearance.
+            return items
+        if opus.arr_icao:
             dest = speak_icao_or_name(opus.arr_icao, airport)
             add("destination", "Cleared to", str(opus.arr_icao).upper(), dest)
         dep_via = speak_departure_clearance(airport, opus.fp_route_string if opus else None)
@@ -6841,6 +8432,12 @@ def build_readback_checklist(
         if climb_ft:
             spoken_climb = speak_altitude_value(str(climb_ft), prefer_fl_below=1000) or str(climb_ft)
             add("climb", "Climb / maintain", f"{climb_ft:,} ft", spoken_climb)
+        else:
+            dep_match = match_departure(
+                airport, opus.fp_route_string if opus else None
+            )
+            if dep_match.is_visual:
+                add("climb", "Climb", "as published", "climb as published")
         filed = speak_filed_altitude(opus.fp_altitude if opus else None)
         if filed:
             add("expect", "Expect", filed, filed)
@@ -7125,8 +8722,6 @@ def uses_instrument_runway(
         "clear_takeoff_intersection",
         "clear_takeoff_rolling",
         "remain_position",
-        "exit_runway",
-        "taxi_in",
         "monitor_tower",
         "contact_tower",
         "radar_contact",
@@ -7170,6 +8765,7 @@ def pick_departure_runway(
     mission: dict[str, Any] | None = None,
     state: dict[str, Any] | None = None,
     template: str | None = None,
+    local_minutes: int | None = None,
 ) -> str:
     """
     Runway selection order:
@@ -7177,8 +8773,8 @@ def pick_departure_runway(
     2. Pilot-requested runway (Fly) — honored as-is
     3. Manual runway_override from Setup — honored as-is
     4. Runway coded on the filed Opus route (snapped)
-    5. Wind-preferred recovery runway (prefer 21; 03 only with >= 11 kt
-       headwind on 03) — not nearest-heading alone
+    5. 11-250: wind component > 10 kt → most aligned; else day calm-wind 21,
+       or 2200L–0800L split (dep 03 / arr 21) from the CAOC mission clock
 
     FP/wind results snap to ops runways (21R / 03L), or to instrument
     runways (21L / 03R) only for instrument-approach phrases. Explicit
@@ -7230,14 +8826,29 @@ def pick_departure_runway(
             return align_runway_to_airport(
                 airport, plan_rwy, instrument=plan_instrument or instrument
             )
-        picked = pick_recovery_runway(airport, weather, instrument=instrument)
+        picked = pick_recovery_runway(
+            airport,
+            weather,
+            instrument=instrument,
+            for_departure=False,
+            config=config,
+            local_minutes=local_minutes,
+        )
         print(f"Runway (recovery bias): {picked}")
         return picked
 
     raw: str | None = runway_from_route(opus.fp_route_string if opus else None)
     if raw is None:
-        # Prefer-21 wind gate — do not use nearest-heading (081/07 → 03).
-        raw = pick_recovery_runway(airport, weather, instrument=instrument)
+        # 11-250 §1.12 component + §4.1.4 night dep 03 / arr 21.
+        raw = pick_recovery_runway(
+            airport,
+            weather,
+            instrument=instrument,
+            for_departure=True,
+            config=config,
+            local_minutes=local_minutes,
+        )
+        print(f"Runway (wind/night): {raw}")
     aligned = align_runway_to_airport(airport, raw, instrument=instrument)
     if aligned != raw:
         kind = "instrument" if instrument else "ops"
@@ -7308,24 +8919,19 @@ def build_clearance_delivery(
 ) -> tuple[str, int]:
     """
     NATCF clearance (455 wiki + Bruiser PDF):
-      With SID/Flex: Cleared to DEST via the [procedure], then as filed, …
-      No procedure:  Cleared to DEST as filed, …
-      Then climb / expect / departure channel / squawk.
+      With SID:     … via the [SID], then as filed, climb via the SID …
+      With Flex/VFR: … via the Flex …, then as filed, climb as published …
+      No procedure:  Cleared to DEST as filed, climb and maintain …
+      Then expect / departure channel / squawk.
+      No flight plan: advise nothing is on file — do not invent a climb or IFR.
 
-    Returns (phrase, climb_feet_used).
+    Returns (phrase, climb_feet_used). Climb is 0 when no plan is on file.
     """
     del weather  # clearance does not include altimeter
     del runway
     name = airport["name"]
     agency = clearance_spoken_agency(airport, channel=channel or "delivery")
     cs = speak_callsign(callsign)
-    filed_alt = speak_filed_altitude(opus.fp_altitude if opus else None)
-    squawk = squawk_clearance_phrase(opus)
-    dep_clause = speak_departure_freq_or_local(airport)
-    climb_ft = random_initial_climb_feet(initial_climb_ft)
-    climb = speak_altitude_value(str(climb_ft), prefer_fl_below=1000)
-    minutes = expect_minutes_value(airport)
-    natural = speak_minutes_natural(minutes)
 
     if not opus or not opus.has_filed_plan:
         no_fp = _pick(
@@ -7333,13 +8939,16 @@ def build_clearance_delivery(
             "negative flight plan on file",
             "I have no flight plan on file",
         )
-        parts = [f"{cs}, {name} {agency}, {no_fp}"]
-        if climb:
-            parts.append(f"climb and maintain {climb}")
-        parts.append(dep_clause)
-        if squawk:
-            parts.append(squawk)
-        return f"{', '.join(parts)}.", climb_ft
+        remain = _pick("remain this frequency", "say intentions")
+        return f"{cs}, {name} {agency}, {no_fp}, {remain}.", 0
+
+    filed_alt = speak_filed_altitude(opus.fp_altitude if opus else None)
+    squawk = squawk_clearance_phrase(opus)
+    dep_clause = speak_departure_freq_or_local(airport)
+    climb_ft = random_initial_climb_feet(initial_climb_ft)
+    climb = speak_altitude_value(str(climb_ft), prefer_fl_below=1000)
+    minutes = expect_minutes_value(airport)
+    natural = speak_minutes_natural(minutes)
 
     dest = speak_icao_or_name(opus.arr_icao, airport)
     dep_match = match_departure(airport, opus.fp_route_string)
@@ -7356,14 +8965,19 @@ def build_clearance_delivery(
         parts = [f"{cs}, {name} {agency}, cleared to {dest} as filed"]
 
     has_instrument_sid = bool(dep_match.instrument_say)
-    # Vertical: Climb via the SID / Climb as published, SID with interim cap, or direct + expect
-    if has_instrument_sid:
+    # Vertical: instrument SID → climb via the SID. VFR Flex is not a SID.
+    if dep_match.is_visual:
+        parts.append("climb as published")
+        if filed_alt:
+            parts.append(f"expect {filed_alt} {natural} minutes after departure")
+        climb_ft = 0
+    elif has_instrument_sid:
         direct_alt = (
             f"climb and maintain {climb}, expect {filed_alt} {natural} minutes after departure"
             if filed_alt
             else f"climb and maintain {climb}"
         )
-        sid_climb = _pick("climb via the SID", "climb as published")
+        sid_climb = "climb via the SID"
         if initial_climb_ft is not None:
             # Rebuild/Hear: keep published-SID climb (don't re-roll to direct)
             parts.append(sid_climb)
@@ -7377,7 +8991,7 @@ def build_clearance_delivery(
             else:
                 parts.append(direct_alt)
     else:
-        # Flex / visual — Bruiser-style maintain + expect filed
+        # No DP — Bruiser-style maintain + expect filed
         if climb:
             parts.append(_pick(f"maintain {climb}", f"climb and maintain {climb}"))
         if filed_alt:
@@ -7405,6 +9019,7 @@ def build_clearance_readback(
     weather: Weather,
     runway: str,
     channel: str | None = None,
+    opus: OpusFlightContext | None = None,
 ) -> str:
     """
     After pilot readback — Delivery hands off to Ground:
@@ -7414,6 +9029,13 @@ def build_clearance_readback(
     name = airport["name"]
     agency = clearance_spoken_agency(airport, channel=channel or "delivery")
     cs = speak_callsign(callsign)
+    if not opus or not opus.has_filed_plan:
+        no_fp = _pick(
+            "I show no flight plan on file",
+            "negative flight plan on file",
+            "unable, no flight plan on file",
+        )
+        return f"{cs}, {name} {agency}, {no_fp}, remain this frequency."
     ground = speak_ground_contact_target(airport)
     return (
         f"{cs}, {name} {agency}, readback correct, "
@@ -7762,7 +9384,16 @@ def parse_metar(raw: str) -> Weather:
     )
 
 
-def fetch_metar(config: dict[str, Any], icao: str) -> Weather:
+def fetch_metar(
+    config: dict[str, Any],
+    icao: str,
+    *,
+    skip_inject: bool = False,
+) -> Weather:
+    if not skip_inject:
+        inj = read_weather_inject()
+        if inj:
+            return weather_from_inject(inj)
     url = config["opus_metar_url"].format(icao=icao)
     cache_key = f"{url}|{icao.strip().upper()}"
     now = time.time()
@@ -7817,23 +9448,22 @@ def heading_delta(a: float, b: float) -> float:
     return min(d, 360 - d)
 
 
-def active_runway(runways: list[str], wind_dir: int | None) -> str:
-    if not runways:
-        return "21"
-    if wind_dir is None:
-        return runways[0]
-    best = runways[0]
-    best_delta = 999.0
-    for rwy in runways:
-        digits = re.sub(r"[^0-9]", "", rwy)
-        if not digits:
-            continue
-        hdg = (int(digits) * 10) % 360
-        delta = heading_delta(float(wind_dir), float(hdg))
-        if delta < best_delta:
-            best_delta = delta
-            best = rwy
-    return best
+def active_runway(
+    runways: list[str],
+    wind_dir: int | None,
+    wind_speed_kt: float | None = None,
+    *,
+    calm_wind_side: str = "21",
+    component_limit_kt: float = 10.0,
+) -> str:
+    """11-250 §1.12: calm-wind 21 until the HW/TW component exceeds 10 kt."""
+    return pick_active_runway(
+        runways,
+        wind_dir,
+        wind_speed_kt,
+        calm_wind_side=calm_wind_side,
+        component_limit_kt=component_limit_kt,
+    )
 
 
 def channel_radio(airport: dict[str, Any], channel: str) -> tuple[float, str, str]:
@@ -8474,6 +10104,49 @@ def google_credentials_path(config: dict[str, Any]) -> Path | None:
     return resolve_repo_path(raw)
 
 
+def tts_session_id(config: dict[str, Any] | None) -> str:
+    """Host stamps this on each pilot session so Google usage is attributed."""
+    return str((config or {}).get("_tts_session_id") or "").strip()
+
+
+def redact_secrets(value: Any) -> Any:
+    """Copy of a JSON-ish object with credential fields removed."""
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for key, item in value.items():
+            if str(key) in SECRET_CONFIG_KEYS:
+                continue
+            out[str(key)] = redact_secrets(item)
+        return out
+    if isinstance(value, list):
+        return [redact_secrets(item) for item in value]
+    return value
+
+
+def pin_google_credentials_to_secrets(src: Path | str) -> Path:
+    """
+    Copy a service-account JSON into atc/secrets/google-tts.json when it lives
+    elsewhere (Downloads, iCloud, Desktop). Already-under-secrets paths stay.
+    """
+    path = Path(src).expanduser()
+    if not path.is_file():
+        raise FileNotFoundError(f"Google credentials file not found: {path}")
+    resolved = path.resolve()
+    secrets = SECRETS_DIR.resolve()
+    try:
+        resolved.relative_to(secrets)
+        return resolved
+    except ValueError:
+        pass
+    secrets.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(resolved, DEFAULT_GOOGLE_CREDS_FILE)
+    return DEFAULT_GOOGLE_CREDS_FILE.resolve()
+
+
+def windows_fallback_voice() -> str:
+    return WINDOWS_FALLBACK_VOICE
+
+
 def is_google_voice_name(voice_name: str) -> bool:
     low = voice_name.casefold()
     return any(x in low for x in ("neural2", "wavenet", "chirp", "studio", "standard"))
@@ -8614,11 +10287,21 @@ def build_template_text(
     rwy = speak_runway(runway)
     alt = speak_altimeter(weather.altimeter_inhg or 29.92)
     wind = speak_wind(weather.wind_dir, weather.wind_speed_kt)
-    taxi = resolve_taxi_route(airport, runway, opus=opus)
+    taxi = resolve_taxi_route(airport, runway, opus=opus, config=config)
     tower = airport.get("tower") or {"freq_mhz": 327.0}
     departure = airport.get("departure") or {"freq_mhz": 350.0}
     twr_local = speak_local_preset(airport, "tower")
     climb_ft = random_initial_climb_feet(initial_climb_ft)
+    if template == "radar_contact":
+        radar_ft = departure_radar_climb_ft(
+            opus,
+            mission=mission,
+            state=state,
+            step=step,
+            initial_climb_ft=initial_climb_ft if initial_climb_ft is not None else climb_ft,
+        )
+        if radar_ft is not None:
+            climb_ft = radar_ft
     climb = speak_altitude_value(str(climb_ft), prefer_fl_below=1000)
     if climb_ft_out is not None and template in ("radar_contact", "center_radar"):
         climb_ft_out.append(climb_ft)
@@ -8637,12 +10320,17 @@ def build_template_text(
             initial_climb_ft=initial_climb_ft,
             channel=channel or "delivery",
         )
-        if climb_ft_out is not None:
+        if climb_ft_out is not None and used_climb:
             climb_ft_out.append(used_climb)
         return text
     if template == "clearance_readback":
         return build_clearance_readback(
-            airport, callsign, weather, runway, channel=channel or "delivery"
+            airport,
+            callsign,
+            weather,
+            runway,
+            channel=channel or "delivery",
+            opus=opus,
         )
 
     # Takeoff: mention VFR Flex west when route/departure match is Flex west
@@ -8683,8 +10371,19 @@ def build_template_text(
             f"{speak_freq(float(tower['freq_mhz']))}"
         )
     if template == "exit_runway":
-        # 21R → right at Alpha (Alpha North area); 03L → left at Alpha
-        return f"{cs}, {name} Tower, exit {speak_place_label(taxi['exit'])}."
+        plan = resolve_landing_exit(
+            airport, runway, opus=opus, config=config, parking=taxi.get("parking")
+        )
+        turn = str(plan.get("turn") or "right")
+        bits = [f"exit {turn}"]
+        cross = str(plan.get("cross") or "").strip()
+        if cross:
+            bits.append(f"cross {speak_runway(cross)}")
+        ground = speak_ground_contact_target(airport)
+        bits.append(f"contact {ground}")
+        return with_freq_handoff_closer(
+            f"{cs}, {name} Tower, {', '.join(bits)}"
+        )
     if template == "taxi_in":
         parking = speak_place_label(taxi["parking"])
         via = speak_taxi_via(taxi["inbound_via"])
@@ -8812,6 +10511,10 @@ def build_template_text(
             mission=mission,
             from_channel=channel or "departure",
             default="blackjack",
+            config=config,
+            opus=opus,
+            airport=airport,
+            state=state,
         )
         if step is not None:
             step["handoff_channel"] = next_ch
@@ -8943,13 +10646,25 @@ def build_template_text(
             step=step,
             mission=mission,
             from_channel=channel or "blackjack",
-            default="approach",
+            default="control_east",
+            config=config,
+            opus=opus,
+            airport=airport,
+            state=state,
         )
+        if next_ch in ("control_east", "control_west"):
+            next_ch = control_channel_for_ownship(
+                airport,
+                config=config,
+                callsign=callsign,
+                opus=opus,
+                state=state,
+                default=next_ch,
+            )
         if step is not None:
             step["handoff_channel"] = next_ch
-        # Pre-assign so Blackjack can clear to the exit / recovery fix;
-        # Approach issues expect recovery + clearance on check-in.
-        plan = assign_approach_plan(
+        # Pre-assign so NATCF can issue proceed-direct / descent / expect.
+        assign_approach_plan(
             airport,
             weather,
             mission=mission,
@@ -8957,12 +10672,10 @@ def build_template_text(
             opus=opus,
             force=False,
         )
-        if isinstance(state, dict) and state.get("range_exit_approved"):
-            return build_blackjack_approach_handoff(
-                airport, callsign, handoff_channel=next_ch
-            )
+        if isinstance(state, dict) and next_ch:
+            state["control_channel"] = next_ch
         return build_blackjack_range_exit(
-            airport, callsign, handoff_channel=next_ch, plan=plan
+            airport, callsign, handoff_channel=next_ch
         )
     if template == "contact_bandsaw":
         return build_contact_bandsaw(airport, callsign)
@@ -8992,12 +10705,66 @@ def build_template_text(
         return build_bandsaw_check_out(
             airport, callsign, handoff_channel=handoff
         )
+    if template == "contact_joshua":
+        return build_contact_joshua(airport, callsign)
+    if template == "joshua_check_in":
+        return build_joshua_check_in(callsign)
+    if template == "joshua_check_out":
+        handoff = resolve_handoff_channel(
+            step=step,
+            mission=mission,
+            from_channel="joshua",
+            default="blackjack",
+            config=config,
+            opus=opus,
+            airport=airport,
+            state=state,
+        )
+        if step is not None:
+            step["handoff_channel"] = handoff
+        return build_joshua_check_out(
+            airport, callsign, handoff_channel=handoff
+        )
+    if template == "control_check_in":
+        plan = assign_approach_plan(
+            airport,
+            weather,
+            mission=mission,
+            state=state,
+            opus=opus,
+            force=False,
+        )
+        if isinstance(state, dict):
+            state["control_checked_in"] = True
+        return build_control_check_in(
+            callsign,
+            channel=channel or "control_east",
+            airport=airport,
+            plan=plan,
+        )
+    if template == "control_handoff":
+        next_ch = resolve_handoff_channel(
+            step=step,
+            mission=mission,
+            from_channel=channel or "control_east",
+            default="approach",
+            config=config,
+            opus=opus,
+            airport=airport,
+            state=state,
+        )
+        if step is not None:
+            step["handoff_channel"] = next_ch
+        return build_control_handoff(
+            airport,
+            callsign,
+            handoff_channel=next_ch,
+            from_channel=channel or "control_east",
+        )
     if template == "ops_check_in":
         return f"{cs}, Ops, go ahead."
-    if template == "center_radar":
-        return (
-            f"{cs}, radar contact, climb and maintain {climb}."
-        )
+    if template in ("center_radar", "center_check_in"):
+        return build_center_check_in(callsign)
     if template == "center_handoff":
         # Center/Other → next agency (same auto target as departure_handoff)
         next_ch = resolve_handoff_channel(
@@ -9005,6 +10772,10 @@ def build_template_text(
             mission=mission,
             from_channel=channel or "other",
             default="blackjack",
+            config=config,
+            opus=opus,
+            airport=airport,
+            state=state,
         )
         return build_departure_handoff(
             airport,
@@ -9061,13 +10832,19 @@ TEMPLATE_CHOICES = [
     ("bj_check_in", "Blackjack — Check-in / alpha"),
     ("bj_alpha_check", "Blackjack — Alpha check (standalone)"),
     ("bj_range_entry", "Blackjack — Alpha approved (optional)"),
-    ("bj_range_exit", "Blackjack — Range exit → Approach"),
+    ("bj_range_exit", "Blackjack — Range exit → Nellis Control"),
     ("contact_bandsaw", "Blackjack — Contact Bandsaw"),
     ("bandsaw_check_in", "Bandsaw — Check-in + alpha"),
     ("bandsaw_check_out", "Bandsaw — Check-out → Blackjack"),
+    ("contact_joshua", "Blackjack — Contact Joshua"),
+    ("joshua_check_in", "Joshua — Check-in (R-2508)"),
+    ("joshua_check_out", "Joshua — Check-out → Blackjack"),
+    ("control_check_in", "Nellis Control — Check-in (NATCF)"),
+    ("control_handoff", "Nellis Control — Handoff → Approach"),
     ("ops_check_in", "Ops — Check-in"),
-    ("center_radar", "Other — Center radar contact"),
-    ("center_handoff", "Other — Center / handoff"),
+    ("center_check_in", "LA Center — Radar contact"),
+    ("center_radar", "LA Center — Radar contact"),
+    ("center_handoff", "LA Center — Handoff"),
     ("radio_check", "Other — Radio check"),
 ]
 
@@ -9079,6 +10856,10 @@ CHANNELS = [
     "approach",
     "blackjack",
     "bandsaw",
+    "joshua",
+    "control_east",
+    "control_west",
+    "center",
     "ops",
     "tanker",
     "other",
@@ -9138,6 +10919,16 @@ def build_flow_step_phrase(
             climb_fixed = resolve_shared_climb_ft(
                 step=step, mission=mission, state=state
             )
+        if tmpl == "radar_contact":
+            radar_ft = departure_radar_climb_ft(
+                opus,
+                mission=mission,
+                state=state,
+                step=step,
+                initial_climb_ft=climb_fixed,
+            )
+            if radar_ft is not None:
+                climb_fixed = radar_ft
         climb_out: list[int] = []
         text = build_template_text(
             airport,
@@ -9154,9 +10945,14 @@ def build_flow_step_phrase(
             config=config,
             state=state,
         )
-        # Sticky shared climb: Delivery clearance ↔ Departure / Center radar
+        # Sticky shared climb: Delivery clearance ↔ Center radar.
+        # Radar contact may amend to filed cruise — do not rewrite Delivery's interim.
         if climb_out:
-            stick_shared_climb_ft(climb_out[0], step=step, mission=mission)
+            if tmpl == "radar_contact":
+                if isinstance(state, dict):
+                    state["departure_assigned_ft"] = int(climb_out[0])
+            else:
+                stick_shared_climb_ft(climb_out[0], step=step, mission=mission)
     freq, mod, tx_name = channel_radio(airport, channel)
     return text, tx_name, freq, mod
 
@@ -9273,6 +11069,12 @@ def tts_usage_month_key(when: float | None = None) -> str:
     return time.strftime("%Y-%m", time.localtime(when if when is not None else time.time()))
 
 
+def tts_usage_file() -> Path:
+    if _tts_usage_path_override is not None:
+        return _tts_usage_path_override
+    return TTS_USAGE_PATH
+
+
 def load_tts_usage() -> dict[str, Any]:
     """Load local usage file, auto-resetting when the calendar month rolls over."""
     month = tts_usage_month_key()
@@ -9281,45 +11083,86 @@ def load_tts_usage() -> dict[str, Any]:
         "total_chars": 0,
         "calls": 0,
         "by_family": {},
+        "by_session": {},
     }
-    if not TTS_USAGE_PATH.is_file():
+    path = tts_usage_file()
+    if not path.is_file():
         return empty
     try:
-        data = json.loads(TTS_USAGE_PATH.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return empty
     if not isinstance(data, dict) or str(data.get("month") or "") != month:
         return empty
     by_family = data.get("by_family") if isinstance(data.get("by_family"), dict) else {}
+    by_session = data.get("by_session") if isinstance(data.get("by_session"), dict) else {}
     return {
         "month": month,
         "total_chars": int(data.get("total_chars") or 0),
         "calls": int(data.get("calls") or 0),
         "by_family": {str(k): int(v or 0) for k, v in by_family.items()},
+        "by_session": {str(k): int(v or 0) for k, v in by_session.items()},
     }
 
 
 def save_tts_usage(data: dict[str, Any]) -> None:
-    TTS_USAGE_PATH.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    tts_usage_file().write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
-def record_google_tts_usage(voice: str, text: str) -> dict[str, Any]:
+def record_google_tts_usage(
+    voice: str, text: str, *, session_id: str = ""
+) -> dict[str, Any]:
     """Increment local monthly character counter after a successful Google synth."""
     chars = len(text or "")
     if chars <= 0:
         return load_tts_usage()
-    data = load_tts_usage()
-    family = voice_billing_family(voice)
-    by_family = data.setdefault("by_family", {})
-    by_family[family] = int(by_family.get(family) or 0) + chars
-    data["total_chars"] = int(data.get("total_chars") or 0) + chars
-    data["calls"] = int(data.get("calls") or 0) + 1
-    data["month"] = tts_usage_month_key()
+    with _TTS_USAGE_LOCK:
+        data = load_tts_usage()
+        family = voice_billing_family(voice)
+        by_family = data.setdefault("by_family", {})
+        by_family[family] = int(by_family.get(family) or 0) + chars
+        sid = str(session_id or "").strip()
+        if sid:
+            by_session = data.setdefault("by_session", {})
+            by_session[sid] = int(by_session.get(sid) or 0) + chars
+        data["total_chars"] = int(data.get("total_chars") or 0) + chars
+        data["calls"] = int(data.get("calls") or 0) + 1
+        data["month"] = tts_usage_month_key()
+        try:
+            save_tts_usage(data)
+        except OSError as exc:
+            print(f"WARNING: could not save TTS usage: {exc}", file=sys.stderr)
+        return data
+
+
+def session_char_cap(config: dict[str, Any] | None = None) -> int:
+    """Monthly Google chars allowed per pilot session on the Host. 0 = no per-pilot cap."""
+    raw = (config or {}).get("tts_session_char_cap")
+    if raw is None or str(raw).strip() == "":
+        return TTS_CHARS_PER_SESSION_MONTH
     try:
-        save_tts_usage(data)
-    except OSError as exc:
-        print(f"WARNING: could not save TTS usage: {exc}", file=sys.stderr)
-    return data
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return TTS_CHARS_PER_SESSION_MONTH
+
+
+def session_google_chars(session_id: str) -> int:
+    sid = str(session_id or "").strip()
+    if not sid:
+        return 0
+    data = load_tts_usage()
+    return int((data.get("by_session") or {}).get(sid) or 0)
+
+
+def session_over_google_cap(
+    session_id: str, config: dict[str, Any] | None = None
+) -> bool:
+    """True when this pilot has used their share of the Host's Google key this month."""
+    sid = str(session_id or "").strip()
+    cap = session_char_cap(config)
+    if not sid or cap <= 0:
+        return False
+    return session_google_chars(sid) >= cap
 
 
 def estimate_tts_overage_usd(family: str, chars: int) -> float:
@@ -9389,6 +11232,11 @@ def format_tts_usage_lines(summary: dict[str, Any] | None = None) -> list[str]:
     lines.append(
         f"Estimated bill this month: ${s['est_usd']:.2f} "
         "(local counter; Cloud Billing is authoritative)"
+    )
+    cap = TTS_CHARS_PER_SESSION_MONTH
+    lines.append(
+        f"Per-pilot Google cap (Host): {cap:,} chars/month "
+        "(that jet falls back to Windows; others keep Google)"
     )
     return lines
 
@@ -10163,6 +12011,8 @@ def synthesize_google_tts(
     voice: str,
     text: str,
     speed: float | int | None = None,
+    *,
+    session_id: str = "",
 ) -> Path:
     """Synthesize text with Google Cloud TTS to a temp LINEAR16 WAV path."""
     voice = (voice or "").strip()
@@ -10290,7 +12140,7 @@ def synthesize_google_tts(
     except OSError as exc:
         print(f"WARNING: could not cache TTS WAV: {exc}", file=sys.stderr)
 
-    record_google_tts_usage(voice, plain)
+    record_google_tts_usage(voice, plain, session_id=session_id)
     return out
 
 
@@ -10318,6 +12168,94 @@ def preview_google_voice_local(
             pass
 
 
+def synthesize_windows_tts(
+    voice: str,
+    text: str,
+    *,
+    volume: float = 0.8,
+    speed: float | int | None = None,
+) -> Path:
+    """Synthesize Windows SAPI speech to a temp WAV (does not play)."""
+    voice = (voice or "").strip()
+    spoken = prepare_radio_tts_text(text, voice=voice)
+    if not spoken:
+        raise ValueError("Preview text is empty.")
+    fd, tmp = tempfile.mkstemp(prefix="atc_sapi_", suffix=".wav")
+    os.close(fd)
+    out = Path(tmp)
+    safe_voice = voice.replace("'", "''")
+    safe_text = spoken.replace("'", "''").replace("\r", " ").replace("\n", " ")
+    safe_path = str(out).replace("'", "''")
+    vol = max(0, min(100, int(float(volume) * 100)))
+    rate = tts_speed(speed=speed)
+    ps = f"""
+Add-Type -AssemblyName System.Speech
+$s = New-Object System.Speech.Synthesis.SpeechSynthesizer
+if ('{safe_voice}') {{ $s.SelectVoice('{safe_voice}') }}
+$s.Volume = {vol}
+$s.Rate = {rate}
+$s.SetOutputToWaveFile('{safe_path}')
+$s.Speak('{safe_text}')
+$s.Dispose()
+"""
+    try:
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps],
+            capture_output=True,
+            text=True,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
+            check=False,
+            timeout=60,
+        )
+        if proc.returncode != 0 or not out.is_file() or out.stat().st_size < 44:
+            detail = (proc.stderr or proc.stdout or "").strip()[:300]
+            raise RuntimeError(detail or f"SAPI WAV synth failed (exit {proc.returncode})")
+        return out
+    except Exception:
+        try:
+            out.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
+def synthesize_tts_wav(
+    config: dict[str, Any],
+    text: str,
+    *,
+    channel: str | None = None,
+    voice_override: str | None = None,
+    step: dict[str, Any] | None = None,
+) -> Path:
+    """Pre-render TTS to a WAV for queued SRS transmit."""
+    if voice_override and str(voice_override).strip():
+        voice = str(voice_override).strip()
+    else:
+        voice, _gender = voice_for_channel(config, channel)
+    speed = tts_speed_for_step(config, step=step)
+    provider = tts_provider(config)
+    sid = tts_session_id(config)
+    want_google = provider == "google" or is_google_voice_name(voice)
+    if want_google and sid and session_over_google_cap(sid, config):
+        print(
+            f"WARNING: Google TTS cap reached for {sid} — "
+            "Windows voice for this jet to protect the Host key",
+            file=sys.stderr,
+        )
+        want_google = False
+        voice = windows_fallback_voice()
+    if want_google:
+        creds = google_credentials_path(config)
+        if creds is None or not creds.is_file():
+            raise RuntimeError("Google TTS pre-render needs google_credentials in Setup.")
+        return synthesize_google_tts(
+            creds, voice, text, speed=speed, session_id=sid
+        )
+    return synthesize_windows_tts(
+        voice, text, volume=float(config.get("tts_volume", 0.8)), speed=speed
+    )
+
+
 def preview_voice_local(
     voice: str,
     text: str,
@@ -10332,14 +12270,16 @@ def preview_voice_local(
     creds: Path | None = None
     if google_credentials:
         creds = Path(google_credentials)
-    if creds is not None or is_google_voice_name(voice):
-        if creds is None or not creds.is_file():
+    if creds is not None:
+        if not creds.is_file():
             raise RuntimeError(
                 "Google voice preview needs a valid google_credentials JSON path in Setup."
             )
         # Pass original phrase so synthesize can place SSML breaks on commas
         preview_google_voice_local(creds, voice, text, volume=volume, speed=speed)
         return
+    if is_google_voice_name(voice):
+        voice = windows_fallback_voice()
 
     spoken = prepare_radio_tts_text(text, voice=voice)
     if not spoken:
@@ -10462,6 +12402,16 @@ def transmit(
     else:
         voice, gender = voice_for_channel(config, channel)
     speed = tts_speed_for_step(config, step=step, speed=speed_override)
+    sid = tts_session_id(config)
+    if provider == "google" and sid and session_over_google_cap(sid, config):
+        print(
+            f"WARNING: Google TTS cap reached for {sid} — "
+            "Windows voice for this jet to protect the Host key",
+            file=sys.stderr,
+        )
+        provider = "windows"
+        voice = windows_fallback_voice()
+        gender = voice_gender(voice)
 
     # Google: synthesize locally (same path as Hear locally), then TX as WAV.
     # Avoids ExternalAudio Google/gRPC hangs that left ghost SRS clients.
@@ -10488,7 +12438,7 @@ def transmit(
         wav_path: Path | None = None
         try:
             wav_path = synthesize_google_tts(
-                google_creds, voice, text, speed=speed
+                google_creds, voice, text, speed=speed, session_id=sid
             )
             return transmit_file(config, airport, str(wav_path), tx_name, freq, mod)
         except Exception as exc:  # noqa: BLE001

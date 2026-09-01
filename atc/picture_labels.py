@@ -108,6 +108,7 @@ def speak_bullseye_location(name: str, bearing: int, range_nm: int) -> str:
 
 
 def speak_braa(bearing: int, range_nm: int) -> str:
+    """Spoken magnetic BRAA (HUD / compass heading)."""
     brg = max(0, min(360, int(bearing))) % 360
     rng = max(0, int(range_nm))
     return (
@@ -163,8 +164,17 @@ def braa_from_own(
     own_lon: float,
     tgt_lat: float,
     tgt_lon: float,
+    *,
+    config: dict[str, Any] | None = None,
 ) -> tuple[int, int]:
-    brg = int(round(_bearing_deg(own_lat, own_lon, tgt_lat, tgt_lon))) % 360
+    """Magnetic BRAA bearing (HUD / compass) from ownship to the group."""
+    brg = int(
+        round(
+            atc_phrase.magnetic_bearing_deg(
+                own_lat, own_lon, tgt_lat, tgt_lon, config=config
+            )
+        )
+    ) % 360
     rng = int(round(atc_phrase._haversine_nm(own_lat, own_lon, tgt_lat, tgt_lon)))
     return brg, max(0, rng)
 

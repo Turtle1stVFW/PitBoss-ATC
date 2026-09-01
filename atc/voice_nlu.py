@@ -82,6 +82,12 @@ def allowed_intents(
             continue
         if intent.id == "acknowledge_readback" and not awaiting_readback:
             continue
+        # Repeating taxi instructions is the readback — not a new taxi call.
+        if awaiting_readback and intent.id == "ready_taxi":
+            continue
+        # LUAW is already the plan — "ready for departure" issues it.
+        if (expected or "").strip().lower() in ("lineup", "line_up_and_wait") and intent.id == "request_lineup":
+            continue
         if intent.id in voice_intent._C2_INTENT_IDS and not voice_intent.step_offers_c2(
             current_step, channel=ch
         ):
@@ -157,7 +163,10 @@ def match_from_choice(
         "approach_continue",
     ):
         vfr = voice_intent.extract_vfr_recovery(transcript)
-        if vfr:
+        feeder = voice_intent.extract_stryk_feeder(transcript)
+        if feeder:
+            slots["vfr_recovery"] = feeder
+        elif vfr:
             slots["vfr_recovery"] = vfr
         iaf = voice_intent.extract_iaf(transcript)
         if iaf:

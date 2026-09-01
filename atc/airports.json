@@ -31,8 +31,24 @@
           "wool"
         ],
         "parking": "WOOL Ramp"
+      },
+      {
+        "match": [
+          "64th",
+          "64 agrs",
+          "aggressor",
+          "red air"
+        ],
+        "parking": "G Revetments"
       }
     ],
+    "parking_sides": {
+      "Ramp": "west",
+      "Row 18": "west",
+      "Knight Ramp": "west",
+      "WOOL Ramp": "west",
+      "G Revetments": "east"
+    },
     "taxi_via": "Foxtrot",
     "clearance_consolidated_with_ground": false,
     "taxi_routes": {
@@ -48,6 +64,20 @@
         "outbound_via": "Foxtrot",
         "inbound_via": "Foxtrot",
         "exit": "left at Alpha",
+        "intersection": "Bravo"
+      },
+      "21L": {
+        "eor": "NW EOR",
+        "outbound_via": "F, E",
+        "inbound_via": "Alpha, Foxtrot",
+        "east_inbound_via": "Alpha",
+        "intersection": "Delta"
+      },
+      "03R": {
+        "eor": "Alpha South",
+        "outbound_via": "Foxtrot",
+        "inbound_via": "Alpha, Foxtrot",
+        "east_inbound_via": "Alpha",
         "intersection": "Bravo"
       }
     },
@@ -96,6 +126,28 @@
       "mod": "AM",
       "source": "local"
     },
+    "joshua": {
+      "freq_mhz": 348.7,
+      "mod": "AM",
+      "source": "local"
+    },
+    "control_east": {
+      "freq_mhz": 317.525,
+      "mod": "AM",
+      "source": "opus",
+      "local_preset": 7
+    },
+    "control_west": {
+      "freq_mhz": 254.4,
+      "mod": "AM",
+      "source": "opus",
+      "local_preset": 8
+    },
+    "center": {
+      "freq_mhz": 353.6,
+      "mod": "AM",
+      "source": "local"
+    },
     "ops": {
       "freq_mhz": 255.0,
       "mod": "AM",
@@ -108,8 +160,9 @@
     },
     "geometry": {
       "calibrated": true,
-      "note": "Drawn on a map with tools/zone_server.py, 2026-08-10. Coordinates are lat/lon.",
+      "note": "Drawn on a map with tools/zone_server.py, 2026-09-01. Coordinates are lat/lon.",
       "field_elev_ft": 1870,
+      "parallel_offset_m": 305,
       "zones": [
         {
           "id": "in_position-03l",
@@ -117,6 +170,7 @@
           "kind": "polygon",
           "name": "Runway 03L",
           "runway": "03L",
+          "locked": true,
           "max_alt_ft": 100.0,
           "points": [
             {
@@ -135,8 +189,7 @@
               "lat": 36.229112,
               "lon": -115.044864
             }
-          ],
-          "locked": true
+          ]
         },
         {
           "id": "eor-03l",
@@ -144,6 +197,7 @@
           "kind": "polygon",
           "name": "AS EOR",
           "runway": "03L",
+          "locked": true,
           "max_alt_ft": 100.0,
           "points": [
             {
@@ -162,8 +216,7 @@
               "lat": 36.225524,
               "lon": -115.049106
             }
-          ],
-          "locked": true
+          ]
         },
         {
           "id": "eor-03l-2",
@@ -171,6 +224,7 @@
           "kind": "polygon",
           "name": "AN EOR",
           "runway": "03L",
+          "locked": true,
           "max_alt_ft": 100.0,
           "points": [
             {
@@ -189,8 +243,7 @@
               "lat": 36.227549,
               "lon": -115.046952
             }
-          ],
-          "locked": true
+          ]
         },
         {
           "id": "eor-21r",
@@ -198,6 +251,7 @@
           "kind": "polygon",
           "name": "NW EOR",
           "runway": "21R",
+          "locked": true,
           "max_alt_ft": 100.0,
           "points": [
             {
@@ -224,8 +278,7 @@
               "lat": 36.246462,
               "lon": -115.029404
             }
-          ],
-          "locked": true
+          ]
         },
         {
           "id": "in_position-21r",
@@ -244,47 +297,663 @@
               "lon": -115.028512
             },
             {
-              "lat": 36.244701,
-              "lon": -115.026693
+              "lat": 36.246618,
+              "lon": -115.024613
             },
             {
-              "lat": 36.245164,
-              "lon": -115.027396
+              "lat": 36.247354,
+              "lon": -115.025901
             }
-          ],
-          "locked": true
+          ]
         },
         {
           "id": "tower",
           "trigger": "tower",
           "kind": "circle",
           "name": "KLSV Tower",
+          "locked": true,
           "max_alt_ft": 6000.0,
           "centre": {
             "lat": 36.2348583,
             "lon": -115.0385284
           },
-          "radius_m": 18683.8,
-          "locked": true
+          "radius_m": 18683.8
         },
         {
           "id": "approach",
           "trigger": "approach",
           "kind": "circle",
           "name": "KLSV APP Departure Zone",
+          "locked": true,
           "max_alt_ft": 18000.0,
           "centre": {
             "lat": 36.2354122,
             "lon": -115.0350952
           },
-          "radius_m": 74858.9,
-          "locked": true
+          "radius_m": 74858.9
         },
         {
-          "id": "other",
-          "trigger": "other",
+          "id": "sally-desert-moa",
+          "trigger": "control_east",
+          "kind": "polygon",
+          "name": "Sally \u2014 Desert MOA",
+          "locked": true,
+          "max_alt_ft": 60000.0,
+          "points": [
+            {
+              "lat": 37.8236,
+              "lon": -113.7003
+            },
+            {
+              "lat": 36.7167,
+              "lon": -114.6008
+            },
+            {
+              "lat": 36.7167,
+              "lon": -115.0508
+            },
+            {
+              "lat": 36.4333,
+              "lon": -115.3008
+            },
+            {
+              "lat": 37.2833,
+              "lon": -115.3008
+            },
+            {
+              "lat": 37.2833,
+              "lon": -115.5842
+            },
+            {
+              "lat": 37.4667,
+              "lon": -115.5842
+            },
+            {
+              "lat": 37.4667,
+              "lon": -115.8008
+            },
+            {
+              "lat": 37.55,
+              "lon": -115.8008
+            },
+            {
+              "lat": 37.55,
+              "lon": -115.8842
+            },
+            {
+              "lat": 37.7,
+              "lon": -115.8842
+            },
+            {
+              "lat": 37.7,
+              "lon": -116.1842
+            },
+            {
+              "lat": 37.8833,
+              "lon": -116.1842
+            },
+            {
+              "lat": 38.0167,
+              "lon": -114.5008
+            },
+            {
+              "lat": 38.0167,
+              "lon": -114.2
+            },
+            {
+              "lat": 37.8956,
+              "lon": -113.7008
+            }
+          ]
+        },
+        {
+          "id": "sally-r4806e",
+          "trigger": "control_east",
+          "kind": "polygon",
+          "name": "Sally \u2014 R-4806E",
+          "locked": true,
+          "max_alt_ft": 60000.0,
+          "points": [
+            {
+              "lat": 36.8,
+              "lon": -115.1178
+            },
+            {
+              "lat": 36.6333,
+              "lon": -115.3008
+            },
+            {
+              "lat": 37.2833,
+              "lon": -115.3008
+            },
+            {
+              "lat": 37.2833,
+              "lon": -115.1845
+            },
+            {
+              "lat": 37.2,
+              "lon": -115.1175
+            }
+          ]
+        },
+        {
+          "id": "sally-reveille-n",
+          "trigger": "control_east",
+          "kind": "polygon",
+          "name": "Sally \u2014 Reveille North MOA",
+          "locked": true,
+          "max_alt_ft": 60000.0,
+          "points": [
+            {
+              "lat": 37.9997,
+              "lon": -114.7017
+            },
+            {
+              "lat": 37.9992,
+              "lon": -116.667
+            },
+            {
+              "lat": 38.2333,
+              "lon": -116.3145
+            },
+            {
+              "lat": 38.2333,
+              "lon": -115.0
+            },
+            {
+              "lat": 38.0167,
+              "lon": -114.2008
+            }
+          ]
+        },
+        {
+          "id": "sally-reveille-s",
+          "trigger": "control_east",
+          "kind": "polygon",
+          "name": "Sally \u2014 Reveille South MOA",
+          "locked": true,
+          "max_alt_ft": 60000.0,
+          "points": [
+            {
+              "lat": 37.8833,
+              "lon": -116.8222
+            },
+            {
+              "lat": 37.9992,
+              "lon": -116.667
+            },
+            {
+              "lat": 37.9997,
+              "lon": -114.7017
+            },
+            {
+              "lat": 37.8833,
+              "lon": -116.1842
+            }
+          ]
+        },
+        {
+          "id": "lee-r4807a",
+          "trigger": "control_west",
+          "kind": "polygon",
+          "name": "Lee \u2014 R-4807A",
+          "locked": true,
+          "max_alt_ft": 60000.0,
+          "points": [
+            {
+              "lat": 37.8833,
+              "lon": -116.1842
+            },
+            {
+              "lat": 37.7,
+              "lon": -116.1842
+            },
+            {
+              "lat": 37.7,
+              "lon": -115.8842
+            },
+            {
+              "lat": 37.55,
+              "lon": -115.8842
+            },
+            {
+              "lat": 37.55,
+              "lon": -115.8008
+            },
+            {
+              "lat": 37.4667,
+              "lon": -115.8008
+            },
+            {
+              "lat": 37.4667,
+              "lon": -116.0008
+            },
+            {
+              "lat": 37.2667,
+              "lon": -116.0008
+            },
+            {
+              "lat": 37.2667,
+              "lon": -116.1842
+            },
+            {
+              "lat": 37.3333,
+              "lon": -116.1842
+            },
+            {
+              "lat": 37.3833,
+              "lon": -116.2842
+            },
+            {
+              "lat": 37.35,
+              "lon": -116.5675
+            },
+            {
+              "lat": 37.1333,
+              "lon": -116.4508
+            },
+            {
+              "lat": 36.9167,
+              "lon": -116.4508
+            },
+            {
+              "lat": 36.9167,
+              "lon": -116.5592
+            },
+            {
+              "lat": 36.85,
+              "lon": -116.5592
+            },
+            {
+              "lat": 37.4417,
+              "lon": -117.0758
+            },
+            {
+              "lat": 37.8833,
+              "lon": -117.0947
+            },
+            {
+              "lat": 37.8833,
+              "lon": -116.9175
+            },
+            {
+              "lat": 37.7833,
+              "lon": -116.9175
+            },
+            {
+              "lat": 37.55,
+              "lon": -116.7175
+            },
+            {
+              "lat": 37.55,
+              "lon": -116.4342
+            },
+            {
+              "lat": 37.8833,
+              "lon": -116.4342
+            }
+          ]
+        },
+        {
+          "id": "lee-r4807b",
+          "trigger": "control_west",
+          "kind": "polygon",
+          "name": "Lee \u2014 R-4807B",
+          "locked": true,
+          "max_alt_ft": 60000.0,
+          "points": [
+            {
+              "lat": 37.2667,
+              "lon": -116.1842
+            },
+            {
+              "lat": 37.2667,
+              "lon": -116.5175
+            },
+            {
+              "lat": 37.35,
+              "lon": -116.5675
+            },
+            {
+              "lat": 37.3833,
+              "lon": -116.2842
+            },
+            {
+              "lat": 37.3333,
+              "lon": -116.1842
+            }
+          ]
+        },
+        {
+          "id": "lee-r4808s",
+          "trigger": "control_west",
+          "kind": "polygon",
+          "name": "Lee \u2014 R-4808S",
+          "locked": true,
+          "max_alt_ft": 60000.0,
+          "points": [
+            {
+              "lat": 36.6833,
+              "lon": -116.2467
+            },
+            {
+              "lat": 36.6833,
+              "lon": -116.4425
+            },
+            {
+              "lat": 36.7667,
+              "lon": -116.4425
+            }
+          ]
+        },
+        {
+          "id": "lee-r4809",
+          "trigger": "control_west",
+          "kind": "polygon",
+          "name": "Lee \u2014 R-4809",
+          "locked": true,
+          "max_alt_ft": 60000.0,
+          "points": [
+            {
+              "lat": 37.55,
+              "lon": -116.4342
+            },
+            {
+              "lat": 37.55,
+              "lon": -116.7175
+            },
+            {
+              "lat": 37.7833,
+              "lon": -116.9175
+            },
+            {
+              "lat": 37.8833,
+              "lon": -116.9175
+            },
+            {
+              "lat": 37.8833,
+              "lon": -116.4342
+            }
+          ]
+        },
+        {
+          "id": "bj-r4806w",
+          "trigger": "blackjack",
+          "kind": "polygon",
+          "name": "Blackjack \u2014 R-4806W",
+          "locked": true,
+          "max_alt_ft": 60000.0,
+          "points": [
+            {
+              "lat": 37.2833,
+              "lon": -115.3008
+            },
+            {
+              "lat": 36.4333,
+              "lon": -115.3008
+            },
+            {
+              "lat": 36.4333,
+              "lon": -115.3842
+            },
+            {
+              "lat": 36.5833,
+              "lon": -115.6175
+            },
+            {
+              "lat": 36.6,
+              "lon": -115.9342
+            },
+            {
+              "lat": 37.1,
+              "lon": -115.9342
+            },
+            {
+              "lat": 37.1,
+              "lon": -115.5842
+            },
+            {
+              "lat": 37.2833,
+              "lon": -115.5842
+            }
+          ]
+        },
+        {
+          "id": "bj-r4806e",
+          "trigger": "blackjack",
+          "kind": "polygon",
+          "name": "Blackjack \u2014 R-4806E",
+          "locked": true,
+          "max_alt_ft": 60000.0,
+          "points": [
+            {
+              "lat": 36.8,
+              "lon": -115.1178
+            },
+            {
+              "lat": 36.6333,
+              "lon": -115.3008
+            },
+            {
+              "lat": 37.2833,
+              "lon": -115.3008
+            },
+            {
+              "lat": 37.2833,
+              "lon": -115.1845
+            },
+            {
+              "lat": 37.2,
+              "lon": -115.1175
+            }
+          ]
+        },
+        {
+          "id": "bj-r4807a",
+          "trigger": "blackjack",
+          "kind": "polygon",
+          "name": "Blackjack \u2014 R-4807A",
+          "locked": true,
+          "max_alt_ft": 60000.0,
+          "points": [
+            {
+              "lat": 37.8833,
+              "lon": -116.1842
+            },
+            {
+              "lat": 37.7,
+              "lon": -116.1842
+            },
+            {
+              "lat": 37.7,
+              "lon": -115.8842
+            },
+            {
+              "lat": 37.55,
+              "lon": -115.8842
+            },
+            {
+              "lat": 37.55,
+              "lon": -115.8008
+            },
+            {
+              "lat": 37.4667,
+              "lon": -115.8008
+            },
+            {
+              "lat": 37.4667,
+              "lon": -116.0008
+            },
+            {
+              "lat": 37.2667,
+              "lon": -116.0008
+            },
+            {
+              "lat": 37.2667,
+              "lon": -116.1842
+            },
+            {
+              "lat": 37.3333,
+              "lon": -116.1842
+            },
+            {
+              "lat": 37.3833,
+              "lon": -116.2842
+            },
+            {
+              "lat": 37.35,
+              "lon": -116.5675
+            },
+            {
+              "lat": 37.1333,
+              "lon": -116.4508
+            },
+            {
+              "lat": 36.9167,
+              "lon": -116.4508
+            },
+            {
+              "lat": 36.9167,
+              "lon": -116.5592
+            },
+            {
+              "lat": 36.85,
+              "lon": -116.5592
+            },
+            {
+              "lat": 37.4417,
+              "lon": -117.0758
+            },
+            {
+              "lat": 37.8833,
+              "lon": -117.0947
+            },
+            {
+              "lat": 37.8833,
+              "lon": -116.9175
+            },
+            {
+              "lat": 37.7833,
+              "lon": -116.9175
+            },
+            {
+              "lat": 37.55,
+              "lon": -116.7175
+            },
+            {
+              "lat": 37.55,
+              "lon": -116.4342
+            },
+            {
+              "lat": 37.8833,
+              "lon": -116.4342
+            }
+          ]
+        },
+        {
+          "id": "bj-r4807b",
+          "trigger": "blackjack",
+          "kind": "polygon",
+          "name": "Blackjack \u2014 R-4807B",
+          "locked": true,
+          "max_alt_ft": 60000.0,
+          "points": [
+            {
+              "lat": 37.2667,
+              "lon": -116.1842
+            },
+            {
+              "lat": 37.2667,
+              "lon": -116.5175
+            },
+            {
+              "lat": 37.35,
+              "lon": -116.5675
+            },
+            {
+              "lat": 37.3833,
+              "lon": -116.2842
+            },
+            {
+              "lat": 37.3333,
+              "lon": -116.1842
+            }
+          ]
+        },
+        {
+          "id": "bj-r4809",
+          "trigger": "blackjack",
+          "kind": "polygon",
+          "name": "Blackjack \u2014 R-4809",
+          "locked": true,
+          "max_alt_ft": 60000.0,
+          "points": [
+            {
+              "lat": 37.55,
+              "lon": -116.4342
+            },
+            {
+              "lat": 37.55,
+              "lon": -116.7175
+            },
+            {
+              "lat": 37.7833,
+              "lon": -116.9175
+            },
+            {
+              "lat": 37.8833,
+              "lon": -116.9175
+            },
+            {
+              "lat": 37.8833,
+              "lon": -116.4342
+            }
+          ]
+        },
+        {
+          "id": "lee-corridor",
+          "trigger": "control_west",
+          "kind": "polygon",
+          "name": "Lee Corridor (inferred 11-250)",
+          "locked": true,
+          "max_alt_ft": 27000.0,
+          "points": [
+            {
+              "lat": 36.32,
+              "lon": -115.18
+            },
+            {
+              "lat": 36.48,
+              "lon": -115.52
+            },
+            {
+              "lat": 36.59,
+              "lon": -115.67
+            },
+            {
+              "lat": 36.68,
+              "lon": -116.25
+            },
+            {
+              "lat": 36.78,
+              "lon": -116.5
+            },
+            {
+              "lat": 36.55,
+              "lon": -115.95
+            },
+            {
+              "lat": 36.38,
+              "lon": -115.45
+            }
+          ]
+        },
+        {
+          "id": "joshua",
+          "trigger": "joshua",
           "kind": "polygon",
           "name": "R-2508 Joshua Control",
+          "locked": true,
           "max_alt_ft": 18000.0,
           "points": [
             {
@@ -327,19 +996,18 @@
               "lat": 36.892801,
               "lon": -118.723755
             }
-          ],
-          "locked": true
+          ]
         }
       ],
       "runways": {
         "03L": {
           "threshold": {
-            "lat": 36.247527,
-            "lon": -115.024281
-          },
-          "far_end": {
             "lat": 36.226792,
             "lon": -115.046639
+          },
+          "far_end": {
+            "lat": 36.247527,
+            "lon": -115.024281
           },
           "width_m": 45,
           "eor": {
@@ -351,12 +1019,12 @@
         },
         "21R": {
           "threshold": {
-            "lat": 36.226792,
-            "lon": -115.046639
-          },
-          "far_end": {
             "lat": 36.247527,
             "lon": -115.024281
+          },
+          "far_end": {
+            "lat": 36.226792,
+            "lon": -115.046639
           },
           "width_m": 45,
           "eor": {

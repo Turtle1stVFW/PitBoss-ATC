@@ -12,7 +12,6 @@ and bullseye wait until asked.
 
 from __future__ import annotations
 
-import math
 import random
 import re
 import time
@@ -50,6 +49,37 @@ _TANKER_STATE_KEYS = (
     "tanker_resume_channel",
     "tanker_seen_tune",
     "tanker_needs_c2_checkin",
+)
+
+# Boom chat lives with the jet on AAR, not on the shared C2 cursor.
+_CHAT_STATE_KEYS = (
+    "tanker_chat",
+    "tanker_chat_last_id",
+    "tanker_chat_recent",
+    "tanker_chat_history",
+    "tanker_chat_greeted",
+    "tanker_chat_llm_note",
+    "tanker_chat_guard_until",
+    "tanker_chat_last_spoke",
+)
+
+SEAT_STATE_KEYS = _TANKER_STATE_KEYS + _CHAT_STATE_KEYS
+
+# Copied to the other ship in the element (1-2 or 3-4). Not boom chat.
+_OVERLAY_COPY_KEYS = (
+    "tanker_overlay",
+    "tanker_resume_index",
+    "tanker_resume_step_id",
+    "tanker_resume_channel",
+    "tanker_needs_c2_checkin",
+    "tanker_seen_tune",
+    "tanker_id",
+    "tanker_callsign",
+    "tanker_freq_mhz",
+    "tanker_phase",
+    "tanker_aircraft",
+    "tanker_track",
+    "tanker_tcn",
 )
 
 # Receiver position in the boom pattern.
@@ -343,8 +373,12 @@ def _enrich_live(
             out["distance_nm"] = atc_phrase._haversine_nm(
                 own_ll[0], own_ll[1], float(out["lat"]), float(out["lon"])
             )
-            out["bearing_deg"] = _bearing_deg(
-                own_ll[0], own_ll[1], float(out["lat"]), float(out["lon"])
+            out["bearing_deg"] = atc_phrase.magnetic_bearing_deg(
+                own_ll[0],
+                own_ll[1],
+                float(out["lat"]),
+                float(out["lon"]),
+                config=config,
             )
             aspect = pl.aspect_to_fighter(
                 own_lat=own_ll[0],
@@ -359,16 +393,6 @@ def _enrich_live(
             pass
     out["live"] = True
     return out
-
-
-def _bearing_deg(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    rlat1, rlat2 = math.radians(lat1), math.radians(lat2)
-    dlon = math.radians(lon2 - lon1)
-    x = math.sin(dlon) * math.cos(rlat2)
-    y = math.cos(rlat1) * math.sin(rlat2) - math.sin(rlat1) * math.cos(rlat2) * math.cos(
-        dlon
-    )
-    return (math.degrees(math.atan2(x, y)) + 360.0) % 360.0
 
 
 def _find_named_row(
@@ -580,7 +604,7 @@ def _tanker_altitude_speech(tanker: dict[str, Any] | None) -> str:
 
 
 def speak_tanker_braa(bearing: int, range_nm: int) -> str:
-    """Spoken BRAA — 'braw', not letter-by-letter B-R-A-A."""
+    """Spoken magnetic BRAA — 'braw', not letter-by-letter B-R-A-A."""
     brg = max(0, min(360, int(bearing))) % 360
     rng = max(0, int(range_nm))
     return (
@@ -739,6 +763,71 @@ def tanker_overlay_active(state: dict[str, Any] | None) -> bool:
     return bool(isinstance(state, dict) and state.get("tanker_overlay"))
 
 
+def element_seats(seat: Any) -> tuple[int, int]:
+    """Lead element is 1-2; second element is 3-4; then 5-6, …"""
+    try:
+        n = int(seat)
+    except (TypeError, ValueError):
+        n = 1
+    if n <= 0:
+        n = 1
+    start = n - 1 if n % 2 == 0 else n
+    return (start, start + 1)
+
+
+def snapshot_seat_state(state: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(state, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for key in SEAT_STATE_KEYS:
+        if key in state:
+            out[key] = state[key]
+    return out
+
+
+def apply_seat_state(
+    state: dict[str, Any] | None, local: dict[str, Any] | None
+) -> None:
+    if not isinstance(state, dict):
+        return
+    local = local if isinstance(local, dict) else {}
+    for key in SEAT_STATE_KEYS:
+        if key in local:
+            state[key] = local[key]
+        else:
+            state.pop(key, None)
+
+
+def strip_seat_state(state: dict[str, Any] | None) -> None:
+    if not isinstance(state, dict):
+        return
+    for key in SEAT_STATE_KEYS:
+        state.pop(key, None)
+
+
+def copy_overlay(dst: dict[str, Any], src: dict[str, Any] | None) -> None:
+    """Share AAR parking with the other jet in the element; keep boom chat local."""
+    src = src if isinstance(src, dict) else {}
+    for key in _OVERLAY_COPY_KEYS:
+        if key in src:
+            dst[key] = src[key]
+        else:
+            dst.pop(key, None)
+
+
+def park_tanker_index(engine: Any) -> None:
+    """Point the cursor at the tanker step without rewriting resume."""
+    if engine is None:
+        return
+    state = engine.state if isinstance(getattr(engine, "state", None), dict) else None
+    if state is None:
+        return
+    for i, step in enumerate(list(getattr(engine, "steps", None) or [])):
+        if is_tanker_step(step):
+            state["index"] = i
+            return
+
+
 def is_tanker_step(step: dict[str, Any] | None) -> bool:
     """Timeline parking spot for AAR — not part of the C2 sequence."""
     if not isinstance(step, dict):
@@ -747,6 +836,59 @@ def is_tanker_step(step: dict[str, Any] | None) -> bool:
         return True
     tmpl = str(step.get("template") or "").strip().lower()
     return tmpl == "tanker" or tmpl.startswith("tanker_")
+
+
+_AAR_CHANNELS = frozenset(
+    {
+        "tanker",
+        "blackjack",
+        "bandsaw",
+        "joshua",
+        "ops",
+        "control_east",
+        "control_west",
+        "center",
+    }
+)
+
+
+def step_allows_aar(step: dict[str, Any] | None) -> bool:
+    """True when this cursor can honestly be on an AAR side trip."""
+    if is_tanker_step(step):
+        return True
+    ch = str((step or {}).get("channel") or "").strip().lower()
+    return ch in _AAR_CHANNELS
+
+
+def clear_aar_state(state: dict[str, Any] | None) -> None:
+    """Drop overlay, boom chat, and rejoin — the ramp is not Texaco."""
+    strip_seat_state(state)
+
+
+def reconcile_aar_overlay(engine: Any) -> bool:
+    """
+    flow_state.json / a leftover request can keep tanker_overlay and
+    tanker_rejoined while the timeline is back on Delivery. Strip that.
+    """
+    if engine is None:
+        return False
+    state = engine.state if isinstance(getattr(engine, "state", None), dict) else None
+    if state is None:
+        return False
+    dirty = tanker_overlay_active(state) or has_rejoined(state) or bool(
+        state.get("tanker_chat") or state.get("tanker_chat_last_spoke")
+    )
+    if not dirty:
+        return False
+    steps = list(getattr(engine, "steps", None) or [])
+    idx = int(state.get("index") or 0)
+    cur = steps[idx] if 0 <= idx < len(steps) else None
+    if step_allows_aar(cur):
+        return False
+    clear_aar_state(state)
+    if hasattr(engine, "save_state"):
+        engine.save_state()
+    return True
 
 
 def should_skip_tanker_step(
@@ -801,7 +943,7 @@ def leave_tanker_overlay(
     checkin: bool = False,
 ) -> str:
     """
-    End the tanker side trip and land on Blackjack or Bandsaw.
+    End the tanker side trip and land on Blackjack, Bandsaw, or Joshua.
 
     `agency` is the live radio (tune or addressed). Checking in clears the
     AAR flag; a tune-only return keeps it so C2 still gets a continue call.
@@ -816,8 +958,10 @@ def leave_tanker_overlay(
     state["tanker_overlay"] = False
     state.pop("tanker_seen_tune", None)
     ch = str(agency or "").strip().lower()
-    if ch not in ("blackjack", "bandsaw"):
-        ch = resume_ch if resume_ch in ("blackjack", "bandsaw") else "blackjack"
+    if ch not in ("blackjack", "bandsaw", "joshua", "control_east", "control_west"):
+        ch = resume_ch if resume_ch in (
+            "blackjack", "bandsaw", "joshua", "control_east", "control_west"
+        ) else "blackjack"
     if checkin:
         state["tanker_needs_c2_checkin"] = False
         apply_tanker_phase(state, PHASE_DEPARTED)
@@ -851,6 +995,12 @@ def leave_tanker_overlay(
     if ch == "bandsaw":
         if not _seek_template("bandsaw_check_in"):
             _seek_channel("bandsaw")
+    elif ch == "joshua":
+        if not _seek_template("joshua_check_in"):
+            _seek_channel("joshua")
+    elif ch in ("control_east", "control_west"):
+        if not _seek_template("control_check_in"):
+            _seek_channel(ch)
     else:
         restored = False
         try:
@@ -880,7 +1030,7 @@ def note_tanker_tune(state: dict[str, Any] | None, tuned: str | None) -> bool:
     """
     Follow the radio during an AAR side trip.
 
-    Returns True when the cursor should leave tanker for Blackjack / Bandsaw
+    Returns True when the cursor should leave tanker for Blackjack / Bandsaw / Joshua
     (they have been on tanker UHF, then retuned to C2).
     """
     if not tanker_overlay_active(state):
@@ -889,7 +1039,7 @@ def note_tanker_tune(state: dict[str, Any] | None, tuned: str | None) -> bool:
     if ch == "tanker":
         state["tanker_seen_tune"] = True
         return False
-    if ch not in ("blackjack", "bandsaw"):
+    if ch not in ("blackjack", "bandsaw", "joshua", "control_east", "control_west"):
         return False
     return bool(state.get("tanker_seen_tune"))
 
@@ -919,6 +1069,19 @@ def dcs_tanker_radio_hint(action: str) -> str:
     if key in ("tanker_disconnect", "tanker_depart", "tanker_dcs_abort"):
         return "DCS tanker radio — Abort refueling / disconnect"
     return "DCS tanker radio — Ready pre-contact (cleared contact)"
+
+
+def build_tanker_depart_reply(
+    callsign: str, tanker: dict[str, Any] | None
+) -> str:
+    """Boom goodbye after they call exit high/low or thank you for the gas."""
+    cs = atc_phrase.speak_callsign(callsign)
+    tcs = speak_tanker_callsign(str((tanker or {}).get("callsign") or "Tanker"))
+    return atc_phrase._pick(
+        f"{cs}, {tcs}, copy, you're cleared off. Thanks for flying with us.",
+        f"{cs}, {tcs}, copy exit, looking good. See you next time.",
+        f"{cs}, {tcs}, roger, thanks for the trade. You're cleared off.",
+    )
 
 
 def build_tanker_check_in(callsign: str, tanker: dict[str, Any] | None) -> str:

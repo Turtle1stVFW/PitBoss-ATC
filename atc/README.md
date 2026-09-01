@@ -4,15 +4,59 @@
 Double-click either:
 - `Open-ATC-Setup.cmd`
 - `Open-Flight-Flow.cmd`
+- `Start-ATC-Host.cmd` (same UI; use this on the dedicated-server Host)
+
+They locate `python.exe` even when the `py` launcher is missing. If Python is not
+installed, the window tells you to install it from python.org with tcl/tk.
 
 Both open the same polished UI. `Open-Zone-Editor.cmd` is the separate map for
 drawing the areas that fire steps automatically — the app has a button for it too.
+`Open-Route-Tester.cmd` is the same server’s `/tester` page: a map Fly treats
+as your jet (talk on the Fly tab; tankers still come from CAOC).
 
 ## Tabs
 1. **Plan Flight** — build the full sortie timeline (TTS template, custom text, or MP3/OGG). No JSON editing.
 2. **Fly** — big Next / Back / Reset / Flip for mid-flight.
-3. **Setup** — Opus username, voice, airport freqs, SRS host, TTS provider, optional runway override, and **Controls** (HOTAS / hotkeys / voice).
-4. **Help** — in-app how-tos (Getting started, Google JSON setup, Plan Flight tips, troubleshooting). Also the top-right **Help** button.
+3. **Traffic** — connected pilots and per-frequency TX queues (Host role).
+4. **Setup** — Opus username, voice, airport freqs, SRS host, TTS provider, optional runway override, **Squadron** (solo/host/client), and **Controls** (HOTAS / hotkeys / voice).
+5. **Help** — in-app how-tos (Getting started, Google JSON setup, Plan Flight tips, troubleshooting). Also the top-right **Help** button.
+
+## Multi-pilot (optional, this branch)
+
+Default role is still **Solo** — one PC, same as today. To run ATC for several pilots:
+
+1. Pick **one** machine as Host (the Windows DCS dedicated server is fine). It needs **Python 3.10+ with tcl/tk** — the `.cmd` files find `python.exe` without the `py` launcher. Setup → **Squadron** → Host. Save. Allow Windows inbound on the ATC port (default `8766`). That box needs ExternalAudio + TTS and network to the squadron SRS server.
+2. Put the same **shared token** on every PC.
+3. Each pilot: Setup → Squadron → **Client**, **Address pilots type** = the same IP/hostname they already use for DCS/SRS, ATC port **8766** (not SRS 5002), same token. Click **Test connection**, then Save.
+4. Off-LAN (flying PC on `10.x`, DCS server on `192.168.50.x`) is expected. Do not join the server LAN. On the **DCS server’s router**, forward/route **TCP 8766** to `192.168.50.20`, the same way SRS 5002 already is. Then point the client at that reachable address (often the SRS host, not the server’s private 192.168.50.20).
+5. Host **Traffic** tab shows who is connected, which frequency is talking, and the per-channel queue.
+
+**Same Opus flight = one timeline.** Every Client that picks the same Opus flight shares the Host C2 cursor. Dash-1 checking in with Ground (or Play Next) moves dash-3’s Fly tab too. Picture / declare from number 3 work on that shared C2 step — say *Fleece 1* or *Fleece 1-3*. A different Opus flight stays on its own cursor.
+
+**Tanker is a side trip per element.** Seats 1–2 are the lead element, 3–4 the second. Whoever requests tanker (voice or Fly) parks **their element** on Texaco; the other element stays with Blackjack / Bandsaw. Dash-3/4 peeling off does not walk the flight off the CAP. When they check back in or retune C2, they rejoin the flight’s current step. Both elements can tank if both request. Each talking jet still needs the Client app on their PC.
+
+Ground talks to one jet at a time. Tower / Blackjack can talk at the same time as Ground. Pilots never transmit ATC from their own ExternalAudio.
+
+### Google TTS key (Host only)
+
+The Host is the only PC that should hold `atc/secrets/google-tts.json`. Clients never receive it over the LAN API. Setup copies a browsed/pasted JSON into that gitignored folder (so it is not left in Downloads or iCloud).
+
+Share the **squadron token**, not the Google file. Usage is counted on the Host: free-tier fallback at 90%, plus a per-pilot cap (default 80,000 characters/month, then that jet uses Windows voices).
+
+Do not copy `atc/secrets/` onto pilot PCs.
+
+### Test on one PC
+
+You do not need a second computer.
+
+1. Double-click `Open-ATC-Setup.cmd`
+2. Setup → **Squadron** → **Host** → Save
+3. Open the **Traffic** tab
+4. Double-click `Test-Fake-Pilots.cmd` (or `py -3 fake_pilots.py`)
+
+That registers **Fleece 1** and **Viper 3** and has both Advance. Traffic should list both; Delivery should queue them one after the other. If SRS is running on this PC you will hear two Delivery calls in order. The script keeps them connected for 20 seconds so you can watch the tab.
+
+`check_multi_pilot.py` is the offline unit test (no UI, no SRS).
 
 ## Typical workflow
 1. Title bar — type your CAOC name and click the green flight chip to pick the
@@ -125,6 +169,24 @@ seconds, so a new zone is in the picker without a restart. Live CAOC tracks are
 drawn on the same map, which is how you check that a jet parked on the runway in
 DCS also sits inside the area you traced. Details of the drawing tools, imports
 from Google Earth KML and the `calibrated` flag are in `tools/README.md`.
+
+### Map jet (Fly test mode)
+
+**Fly tab → Test: map is my jet** (checked) reads ownship from the local map
+instead of Opus. Uncheck it to go back to CAOC position. **Setup → Map is my
+jet…** (or `Open-Route-Tester.cmd`) opens `http://127.0.0.1:8777/tester` and
+turns that checkbox on. The red jet is what Fly treats as you — drag it or
+**Play** along a plotted route. Talk and hear ATC on the **Fly** tab (PTT,
+Whisper, TTS, SRS). Tankers and other traffic still come from CAOC; only your
+position is taken from the map. Click **Add red** / **Add blue** on the tester to
+drop hostile or friendly planes for picture and declare (Fly must be in map-jet
+test mode). Check **Override Opus weather and time of day**
+on the tester to set winds, altimeter, ceiling, and the mission clock Fly uses
+instead of Opus METAR / CAOC time (Night 2300L calm-wind departures are 03s).
+Leave **Drive Fly ownship** on and **Watch live position** on so zone steps fire.
+Named NTTR points come from `NTTR.kml`.
+
+`py -3 check_route_tester.py` exercises the evaluation with synthetic positions.
 
 ### Any step can fire off a zone
 
@@ -275,13 +337,16 @@ Calls it understands:
 | "Bandsaw, checking in" / picture / bogey dope / declare | Optional C2 on Bandsaw |
 | "Bandsaw, checking out / switch Blackjack" | Leave Bandsaw → contact Blackjack (not check-in) |
 | "Blackjack, request Bandsaw" | Push to Bandsaw (optional; you can also self-tune) |
+| "Joshua, checking in" | Optional R-2508 agency (built into Nellis Default). No picture/declare unless you check **C2 services** on that step |
+| "Joshua, checking out / switch Blackjack" | Leave Joshua → contact Blackjack |
+| "Blackjack, request Joshua" | Push to Joshua (optional; you can also self-tune) |
 | "Blackjack / Bandsaw, request tanker" | Track (e.g. *track A R two tree one Victor*) + braw with altitude to the Opus **KC-135 boom** — never KC-130 or KC-135MPRS. Ends with *Frequency change approved.* AAR is a **side trip**: the cursor jumps to Tanker, then when you retune **Blackjack or Bandsaw** (or check back in) it returns to that agency — not the next timeline step. |
 | "Say TACAN" / "say tanker frequency" / "say tanker bullseye" | On-request C2: TACAN, UHF, live bullseye |
 | "Texaco, request rejoin" / "request reform" | Cleared rejoin left, sometimes left observation (tanker does not say *identified*) |
-| Boom / reform small talk | After rejoin, Texaco starts boom chat once you have been **0.1–0.5 NM** from the tanker for **30–60 seconds** with a receiver in that envelope. Fly **Texaco starts chat** makes Texaco talk first. Mix of A/B polls, open questions, and random riffs — answer in a word, say anything, or just listen. With Ollama/Gemini/OpenAI on, freeform replies get a **live riff** (not locked to the two buttons). Texaco keeps chatting with short breaks until you **stop chat** / say *talk later* / *standing by*, or leave the tanker. LLM falls back to the library if slow. |
+| Boom / reform small talk | After rejoin, say **how's it going** / **small talk** (or Fly **Texaco starts chat**) to start boom chat — it does not auto-fire. The **first** line is a time-of-day hello (*Good morning, sir*) — later bits are A/B polls, open questions, and riffs. Answer in a word, say anything, or just listen. With Ollama/Gemini/OpenAI on, freeform replies get a **live riff** (not locked to the two buttons). Texaco keeps chatting with short breaks until you **stop talking** / **talk later** / **standing by**, or leave the tanker. LLM falls back to the library if slow. The boom operator is always a woman. |
 | DCS tanker radio | **Ready pre-contact** → DCS *cleared contact* (boom). **Abort refueling** to disconnect. Do not use SRS for those. |
 | "Blackjack / Bandsaw, back from the tanker" / "checking in" after AAR | Radar contact, continue — returns to **whichever C2 freq you tuned** (Blackjack or Bandsaw) |
-| "Blackjack, off station / range complete" | Range checkout → Approach (required after Blackjack check-in) |
+| "Blackjack, off station / range complete" | Range checkout → **Nellis Control** East (ch 7) or West (ch 8) immediately. NATCF gives proceed-direct, descent, and the recovery clearance; Control hands to Approach **before** the exit fix |
 | "Approach, checking in" / "inbound" | Approach assigns recovery from METAR (VMC → VFR recovery + TAC overhead; IFR → instrument + IAF). Prefers RWY 21 |
 | "Request ARCOE / TORYE / STRYK / MINTT / overhead / instrument" | Change the assigned recovery / approach |
 | "Request hold" / "cancel hold" | Spoken hold / continue (simple state) |
@@ -299,16 +364,19 @@ The mission timeline uses three **mission phases** (separate from the radio agen
 | Phase | Agencies |
 |-------|----------|
 | **Departure** | Delivery, Ground, Tower, Departure |
-| **Flight / airwork** | Blackjack, Bandsaw, Ops, Other (en-route / C2) |
+| **Flight / airwork** | Blackjack, Bandsaw, Joshua, Nellis Control (East/West), Ops, Other (en-route / C2) |
 | **Approach** | Approach, Tower, Ground |
 
-After Blackjack check-in you are in Flight: stay on Blackjack, push or self-tune to
-**Bandsaw** for picture/C2 work, or do other range tasks. **You can say** tips follow
-the frequency you are actually tuned to within that phase (Blackjack tips on 377.8,
-Bandsaw tips on 378.225). When finished with Bandsaw, **check out** on that net
-(“checking out” / “switch Blackjack”) — that call advances past Bandsaw;
-check-in alone does not. Then return to Blackjack for range exit before Approach.
-Bandsaw is optional and does not block that handoff.
+After Blackjack check-in you are in Flight. **Nellis Default** reads the Opus
+flight plan and reserved airspace to decide which **control areas** this hop
+needs (Fly shows `hop Blackjack, Nellis Control, Approach`). A local NTTR strip
+is Departure → Blackjack → Nellis Control → Approach. An R-2508 route is
+Departure → Nellis Control → **LA Center** (the ~100 NM transit) → **Joshua**
+only inside **15 NM of R-2508** — never a Departure-to-Joshua jump.
+Enroute VORs also add Center. **Bandsaw** and **tanker** are never inferred —
+tune those when tasked. **You can say** tips follow the frequency you are
+actually tuned to. Mixed packages on one Host share this same default plan —
+each Opus flight has its own cursor.
 
 **Approach / recovery (NAFBI 11-250):** Blackjack range exit says **proceed direct**
 to the exit / recovery fix (e.g. Arcoe / Torye / Dudbe) and hands you to Approach.
@@ -328,9 +396,13 @@ TAC Overhead runway two one right, cleared direct Arcoe, …”* (or Torye / Str
 Mintt for that recovery; landing north when the 03s are active; instrument uses
 the plate name + IAF). Descend altitude comes from the VFR recovery or the
 **plate IAF altitude** in `approaches/nellis.json`. Speed is **not** cleared
-unless traffic (or similar) sets a restriction. Recoveries prefer the **21s**;
-the **03s** are used only when headwind on 03 is **11 kt or greater**. You can
-request a different recovery, hold, or vectors. “Airport in sight / request tower”
+unless traffic (or similar) sets a restriction. Recoveries prefer the **21s** and use the **03s** only when the prevailing
+headwind/tailwind **component** exceeds **10 kt** (NAFBI 11-250 §1.12 — RWY 21 is
+the calm-wind runway; closest wind direction alone is not enough, so 090/15 stays
+on 21). From **2200L–0800L** on the OPUS CAOC mission clock (§4.1.4) departures
+default to the **03s** and arrivals stay on the **21s**, still overridden when
+that component exceeds 10 kt (or by a spoken / Setup runway). You can request a
+different recovery, hold, or vectors. “Airport in sight / request tower”
 clears you to Tower.
 
 After an **instrument missed**, Approach sends you back to the IAF (e.g. Arcoe).
@@ -462,13 +534,15 @@ Server ATIS is unchanged (still server-side).
 ### Free tier notes
 - Google gives a monthly free character allowance for WaveNet / Neural2 (see current Google TTS pricing).
 - Phrase-board usage is tiny; you will rarely leave the free tier.
+- Host: JSON stays in `atc/secrets/` (gitignored). Clients never receive it. Per-pilot cap defaults to 80,000 chars/month (`tts_session_char_cap`; `0` disables).
 - If credentials are missing/invalid, transmits fail with a clear error instead of falling back silently.
 
 ### Config keys (`config.json`)
 | Key | Example | Meaning |
 |-----|---------|---------|
 | `tts_provider` | `"google"` or `"windows"` | Which engine ExternalAudio uses |
-| `google_credentials` | `C:\\Users\\you\\...\\google-tts.json` | Path to service-account JSON |
+| `google_credentials` | `atc/secrets/google-tts.json` | Path to service-account JSON (Host/Solo only) |
+| `tts_session_char_cap` | `80000` | Per-pilot Google chars/month on the Host (`0` = no per-pilot cap) |
 | `tts_voices` | `"en-US-Neural2-D"` etc. | Per-agency Google voice ids |
 
 Voice catalog: https://cloud.google.com/text-to-speech/docs/voices

@@ -51,6 +51,12 @@ DEFAULTS: dict[str, float] = {
     "eor_radius_m": 250.0,
     "eor_max_speed_mps": 12.0,
     "auto_clearance_dwell_s": 3.0,
+    # Last ~2,000 ft of the landing roll — Tower's exit / contact Ground call.
+    "runway_end_remaining_m": 600.0,
+    # Rollout vs a low pass / missed: wheels on the deck and slowing, not
+    # 150 kt at 100 ft over the far end.
+    "runway_end_max_agl_m": 12.0,
+    "runway_end_max_speed_mps": 50.0,
     # match_caoc_unit_for_flight returns its best guess even on thin evidence, so
     # with nobody flying it will happily hand back some AI flight. Anything this
     # far from the field is not the jet about to depart, whatever it matched.
@@ -93,19 +99,70 @@ def is_calibrated(airport: dict[str, Any] | None) -> bool:
 def runway_geometry(
     airport: dict[str, Any] | None, runway: str | None
 ) -> dict[str, Any] | None:
-    """Geometry for one runway direction, tolerant of 21R / 21r / rwy 21R."""
+    """Geometry for one runway direction, tolerant of 21R / 21r / rwy 21R.
+
+    When only one of a parallel pair is traced (Nellis 21R / 03L), the
+    instrument side (21L / 03R) is offset from that centreline.
+    """
     runways = airport_geometry(airport).get("runways")
     if not isinstance(runways, dict):
         return None
     want = atc_phrase.normalize_runway(runway) or str(runway or "").strip().upper()
     if not want:
         return None
+    found = _runway_geometry_entry(runways, want)
+    if found is not None:
+        return found
+    return _synthetic_parallel_geometry(airport, want, runways)
+
+
+def _runway_geometry_entry(
+    runways: dict[str, Any], want: str
+) -> dict[str, Any] | None:
     for key, val in runways.items():
         if not isinstance(val, dict):
             continue
         if (atc_phrase.normalize_runway(key) or str(key).strip().upper()) == want:
             return val
     return None
+
+
+def _synthetic_parallel_geometry(
+    airport: dict[str, Any] | None,
+    want: str,
+    runways: dict[str, Any],
+) -> dict[str, Any] | None:
+    flipped = atc_phrase._flip_runway_side(want)
+    if not flipped:
+        return None
+    src = _runway_geometry_entry(runways, flipped)
+    if src is None:
+        return None
+    frame = RunwayFrame.build(flipped, src)
+    if frame is None:
+        return None
+    try:
+        offset = float(airport_geometry(airport).get("parallel_offset_m") or 305.0)
+    except (TypeError, ValueError):
+        offset = 305.0
+    if offset <= 0:
+        return None
+    # Lateral +ve is right of the source heading. 21R→21L is left; 03L→03R is right.
+    sign = -1.0 if want.endswith("L") else 1.0
+    dx, dz = frame.fx - frame.tx, frame.fz - frame.tz
+    ux, uz = dx / frame.length_m, dz / frame.length_m
+    rx, rz = uz, -ux
+    ox, oz = sign * offset * rx, sign * offset * rz
+    tlat, tlon = atc_phrase.caoc_xz_to_ll(frame.tx + ox, frame.tz + oz)
+    flat, flon = atc_phrase.caoc_xz_to_ll(frame.fx + ox, frame.fz + oz)
+    return {
+        "threshold": {"lat": tlat, "lon": tlon},
+        "far_end": {"lat": flat, "lon": flon},
+        "width_m": frame.width_m,
+        "length_m": frame.length_m,
+        "synthetic": True,
+        "parallel_of": flipped,
+    }
 
 
 def point_xz(obj: Any) -> tuple[float, float] | None:
@@ -393,6 +450,14 @@ def _bearing_deg(dx_east: float, dz_north: float) -> float:
     return (math.degrees(math.atan2(dx_east, dz_north)) + 360.0) % 360.0
 
 
+def _runway_number_heading_deg(runway: str) -> float | None:
+    """Magnetic-ish heading implied by the runway number (21R → 210)."""
+    digits = re.sub(r"[^0-9]", "", str(runway or ""))
+    if not digits:
+        return None
+    return float((int(digits) % 100) * 10 % 360)
+
+
 def angle_diff(a: float, b: float) -> float:
     """Smallest absolute difference between two bearings, 0–180."""
     return abs((float(a) - float(b) + 180.0) % 360.0 - 180.0)
@@ -425,6 +490,15 @@ class RunwayFrame:
         length = math.hypot(dx, dz)
         if length < 100.0:  # not a runway; bad or half-captured geometry
             return None
+        heading = _bearing_deg(dx, dz)
+        # KML / drawn lines are sometimes stored departure-end last. If the
+        # centreline points the wrong way vs the runway number, flip it so
+        # lineup heading (21R ≈ 210) is not compared against the reciprocal.
+        expected = _runway_number_heading_deg(runway)
+        if expected is not None and angle_diff(heading, expected) > 90.0:
+            thr, far = far, thr
+            dx, dz = far[0] - thr[0], far[1] - thr[1]
+            heading = _bearing_deg(dx, dz)
         try:
             width = float(geo.get("width_m") or 45.0)
         except (TypeError, ValueError):
@@ -436,7 +510,7 @@ class RunwayFrame:
             fx=far[0],
             fz=far[1],
             length_m=length,
-            heading_deg=_bearing_deg(dx, dz),
+            heading_deg=heading,
             width_m=width,
         )
 
@@ -489,6 +563,36 @@ class UnitFix:
         return " · ".join(bits)
 
 
+def _eor_zone(zone: dict[str, Any] | None) -> bool:
+    """True for an end-of-runway pad — heading vs takeoff course does not apply."""
+    if not isinstance(zone, dict):
+        return False
+    trig = str(zone.get("trigger") or "").strip().lower()
+    if trig == "eor":
+        return True
+    name = str(zone.get("name") or zone.get("id") or "").strip().lower()
+    return "eor" in name
+
+
+def _settled_heading_err_deg(
+    zone: dict[str, Any] | None, fix: UnitFix
+) -> float | None:
+    """
+    Heading error that can fail a settled zone.
+
+    In-position uses runway takeoff heading. At EOR the jet is often parallel
+    but reciprocal (or pad-oriented), which is not the lineup heading flip —
+    accept runway heading or its reciprocal, and ignore heading when the pad
+    is tagged EOR so a parked hammerhead still arms monitor tower.
+    """
+    err = fix.heading_err_deg
+    if err is None:
+        return None
+    if _eor_zone(zone):
+        return None
+    return float(err)
+
+
 def zone_admits(
     zone: dict[str, Any] | None,
     fix: UnitFix,
@@ -507,6 +611,7 @@ def zone_admits(
 
     Permissive where the feed is silent, as elsewhere in this module: a missing
     altitude or heading does not disqualify an aircraft that is plainly inside.
+    EOR pads skip heading: the jet is holding, not lined up for takeoff.
     """
     if not point_in_zone(fix.x_m, fix.z_m, zone):
         return False
@@ -522,9 +627,41 @@ def zone_admits(
         return False
     if fix.speed_mps is not None and fix.speed_mps > settled_speed:
         return False
-    if fix.heading_err_deg is not None and fix.heading_err_deg > hdg_tol:
+    hdg_err = _settled_heading_err_deg(zone, fix)
+    if hdg_err is not None and hdg_err > hdg_tol:
         return False
     return True
+
+
+def zone_wait_reason(
+    zone: dict[str, Any] | None,
+    fix: UnitFix,
+    *,
+    settled: bool = True,
+    hdg_tol: float = DEFAULTS["position_heading_tolerance_deg"],
+    settled_speed: float = DEFAULTS["position_settled_speed_mps"],
+    alt_tol: float = DEFAULTS["position_alt_tolerance_m"],
+) -> str:
+    """Why a jet that is over this area still does not count, or ''."""
+    if not point_in_zone(fix.x_m, fix.z_m, zone):
+        return ""
+    bits: list[str] = []
+    lo, hi = zone_alt_band_m(zone)
+    if fix.height_m is not None:
+        agl_ft = fix.height_m * FT_PER_M
+        if lo is not None and fix.height_m < lo:
+            bits.append(f"{agl_ft:.0f} ft AGL, zone min {lo * FT_PER_M:.0f} ft")
+        elif hi is not None and fix.height_m > hi:
+            bits.append(f"{agl_ft:.0f} ft AGL, zone max {hi * FT_PER_M:.0f} ft")
+        elif settled and abs(fix.height_m) > alt_tol:
+            bits.append(f"{agl_ft:.0f} ft AGL, need on deck")
+    if settled:
+        if fix.speed_mps is not None and fix.speed_mps > settled_speed:
+            bits.append(f"{fix.speed_mps * 1.94384:.0f} kt, still moving")
+        hdg_err = _settled_heading_err_deg(zone, fix)
+        if hdg_err is not None and hdg_err > hdg_tol:
+            bits.append(f"heading {hdg_err:.0f}° off")
+    return ", ".join(bits)
 
 
 @dataclass(frozen=True)
@@ -539,6 +676,7 @@ class ZoneCount:
     own_seen: bool = False
     own_inside: bool = False
     own_qualified: bool = False
+    detail: str = ""
 
     def ok(self, *, need_full: bool = True) -> bool:
         if not self.total:
@@ -562,9 +700,9 @@ class ZoneCount:
         have = self.qualified if need_full else int(self.ok(need_full=False))
         word = "settled in" if self.settled else "in"
         out = f"{have}/{need} {word} {self.label}"
-        # Inside but not settled is the interesting case: the flight is where it
-        # should be and the call is waiting on the jets, not on the geometry.
-        if self.settled and self.inside > self.qualified:
+        if self.detail:
+            out += f" ({self.detail})"
+        elif self.settled and self.inside > self.qualified:
             out += f" ({self.inside} inside, still moving)"
         return out
 
@@ -584,6 +722,7 @@ class FlightStatus:
     calibrated: bool = True
     has_position_area: bool = False
     has_eor_area: bool = False
+    runway_length_m: float = 0.0
     # Thresholds evaluate() used, so a later in_zone() call matches the verdicts
     # above without the caller re-reading config.
     tuning: dict[str, float] = field(default_factory=dict)
@@ -624,6 +763,7 @@ class FlightStatus:
         inside = qualified = 0
         own_seen = own_inside = own_qualified = False
         hit_name = ""
+        own_why = ""
         for fix in self.fixes:
             own_seen = own_seen or fix.own
             in_any = False
@@ -637,6 +777,14 @@ class FlightStatus:
                 if not settled or zone_admits(zone, fix, settled=True, **tol):
                     ok_any = True
                     break
+            if fix.own and not ok_any:
+                for zone in zones_l:
+                    why = zone_wait_reason(zone, fix, settled=settled, **tol)
+                    if why:
+                        own_why = why
+                        if not hit_name:
+                            hit_name = zone_label(zone)
+                        break
             if not in_any:
                 continue
             inside += 1
@@ -660,6 +808,7 @@ class FlightStatus:
             own_seen=own_seen,
             own_inside=own_inside,
             own_qualified=own_qualified,
+            detail=own_why,
         )
 
     def summary(self, *, need_full: bool = True) -> str:
@@ -769,6 +918,40 @@ def gap_remaining(
         return 0.0
     elapsed = (time.time() if now is None else now) - last
     return max(0.0, trigger.gap_s - elapsed)
+
+
+def skip_auto_tx_already_played(
+    *,
+    fire_id: str,
+    current_step_id: str,
+    last_step_id: str,
+    template: str = "",
+    hold_for_landing: bool = False,
+    playing_id: str = "",
+) -> bool:
+    """
+    True when Watch must not transmit.
+
+    Manual Play (or voice) already sent this step, or the cursor has moved on.
+    play_id() would otherwise seek back and TX it a second time. Multi-ship
+    landings are the exception: the same clear_land step fires once per seat
+    after Play has finished talking.
+    """
+    want = str(fire_id or "").strip()
+    if not want:
+        return False
+    current = str(current_step_id or "").strip()
+    last = str(last_step_id or "").strip()
+    playing = str(playing_id or "").strip()
+    if playing == want:
+        return True
+    if current and current != want:
+        return True
+    if last == want and not (
+        str(template or "").strip().lower() == "clear_land" and hold_for_landing
+    ):
+        return True
+    return False
 
 
 def _trigger_float(val: Any) -> float | None:
@@ -910,6 +1093,51 @@ def within_nm_held(
     return held, waiting
 
 
+RUNWAY_END_ZONES = frozenset({"runway_end", "departure_end", "rollout_end"})
+
+
+def runway_end_held(
+    trigger: StepTrigger,
+    status: FlightStatus,
+    *,
+    config: dict[str, Any] | None = None,
+) -> tuple[bool, str]:
+    """
+    Ownship rolling out near the departure end of the landing runway.
+
+    Tower's exit / contact-Ground call. Uses the landing centreline, not a
+    drawn box — 21L is offset from 21R when only one strip is traced.
+    """
+    del trigger
+    if not status.ok:
+        return False, status.reason or "no position data"
+    length = float(status.runway_length_m or 0.0)
+    if length < 100.0:
+        return False, f"no centreline for {status.runway or 'the runway'}"
+    own = next((fix for fix in status.fixes if fix.own), None)
+    if own is None:
+        return False, "own aircraft not in the flight sample"
+    remaining = rule(config, "runway_end_remaining_m")
+    max_agl = rule(config, "runway_end_max_agl_m")
+    max_spd = rule(config, "runway_end_max_speed_mps")
+    left = length - own.along_m
+    airborne = own.height_m is not None and abs(own.height_m) > max_agl
+    fast = own.speed_mps is not None and own.speed_mps > max_spd
+    near = (length - remaining) <= own.along_m <= (length + 80.0)
+    on_strip = own.on_runway or abs(own.lateral_m) <= 50.0
+    if airborne:
+        return False, "still airborne — rollout not started"
+    if fast:
+        return False, "too fast for rollout (go-around / low approach)"
+    if near and on_strip:
+        return True, f"departure end ({max(0.0, left):.0f} m remaining)"
+    if own.along_m < 0:
+        return False, "short of the threshold"
+    if left > remaining:
+        return False, f"{left:.0f} m remaining to the departure end"
+    return False, "not on the landing runway"
+
+
 def field_proximity_applies(watch: list[dict[str, Any]] | None) -> bool:
     """
     Whether evaluate() should reject a track far from the field.
@@ -952,6 +1180,9 @@ def condition_held(
 
     need_full = trigger.need_full(config)
     zone_list = [z for z in (zones or []) if isinstance(z, dict)]
+    zone_name = str(trigger.zone or "").strip().casefold()
+    if zone_name in RUNWAY_END_ZONES:
+        return runway_end_held(trigger, status, config=config)
 
     held_dist = False
     waiting_dist = ""
@@ -1261,6 +1492,33 @@ def resolve_step_trigger(
             explicit=True,
         )
 
+    if tmpl == "exit_runway":
+        gap = _trigger_float(raw.get("gap_s"))
+        dwell = _trigger_float(raw.get("dwell_s"))
+        flight = str(raw.get("flight") or (base.flight if base else "") or "").strip().casefold()
+        zone = ""
+        if base and base.zone:
+            zone = str(base.zone)
+        else:
+            zone = str(raw.get("zone") or "").strip()
+        if zone and zone.casefold() not in RUNWAY_END_ZONES:
+            return base
+        gap_s = 5.0
+        if gap is not None:
+            gap_s = float(gap)
+        elif base is not None:
+            gap_s = float(base.gap_s or 5.0)
+        return StepTrigger(
+            zone="runway_end",
+            when="inside",
+            flight=flight if flight in ("all", "me") else "me",
+            settled=False,
+            dwell_s=0.0 if dwell is None else dwell,
+            gap_s=gap_s,
+            enabled_key=base.enabled_key if base else "",
+            explicit=True,
+        )
+
     return base
 
 
@@ -1316,6 +1574,8 @@ class PositionTracker:
         self._fired: set[str] = set()
         self._entered: set[str] = set()
         self.pending_latch: str = ""
+        self.playing_step_id: str = ""
+        self._manual_consumed: dict[str, str] = {}
 
     # -- motion ----------------------------------------------------------
     def _speed_mps(self, unit: dict[str, Any], now: float) -> float | None:
@@ -1323,6 +1583,17 @@ class PositionTracker:
         pos = unit_xz(unit)
         if not uid or pos is None:
             return None
+        # Map tester publishes the slider speed. CAOC groundSpeedMps is not
+        # trusted — it reads 0 even when the jet is moving.
+        if uid == atc_phrase.MAP_OWNSHIP_ID:
+            for key in ("groundSpeedMps", "speedMps"):
+                raw = unit.get(key)
+                if raw is None:
+                    continue
+                try:
+                    return max(0.0, float(raw))
+                except (TypeError, ValueError):
+                    continue
         prev = self._last.get(uid)
         self._last[uid] = (now, pos[0], pos[1])
         if not prev:
@@ -1368,9 +1639,46 @@ class PositionTracker:
         self._fired.add(key)
         return True
 
+    def mark_step_played(self, step_id: str) -> None:
+        """Manual Play started — Watch must not TX this step until it finishes."""
+        sid = str(step_id or "").strip()
+        if not sid:
+            return
+        self.playing_step_id = sid
+        pending = str(self.pending_latch or "")
+        if pending and sid in pending.split(":"):
+            self._fired.add(pending)
+            self._manual_consumed[sid] = pending
+            self.pending_latch = ""
+
+    def unmark_step_played(self, step_id: str) -> None:
+        """Play failed — let Watch fire this step again."""
+        sid = str(step_id or "").strip()
+        if self.playing_step_id == sid:
+            self.playing_step_id = ""
+        consumed = self._manual_consumed.pop(sid, "")
+        if consumed:
+            self._fired.discard(consumed)
+            if not self.pending_latch:
+                self.pending_latch = consumed
+
+    def finish_manual_tx(self, step_id: str = "") -> None:
+        """Play finished talking — Watch may arm the next seat / step."""
+        sid = str(step_id or self.playing_step_id or "").strip()
+        if self.playing_step_id == sid or not sid:
+            self.playing_step_id = ""
+        self._manual_consumed.pop(sid, None)
+
     def armed(self, key: str) -> bool:
         """Whether `fire_once` would still fire for this key."""
-        return key not in self._fired
+        token = str(key or "")
+        if token in self._fired:
+            return False
+        parts = token.split(":")
+        if len(parts) >= 2 and parts[0] == "fire":
+            if self.playing_step_id and parts[1] == self.playing_step_id:
+                return False
+        return True
 
     def clear_fired(self, predicate: Any = None) -> int:
         """
@@ -1397,6 +1705,8 @@ class PositionTracker:
         self._fired.clear()
         self._entered.clear()
         self.pending_latch = ""
+        self.playing_step_id = ""
+        self._manual_consumed.clear()
 
     # -- main evaluation -------------------------------------------------
     def evaluate(
@@ -1422,6 +1732,8 @@ class PositionTracker:
         # The centreline is only needed for heading and for the fallback box —
         # a drawn "in position" zone stands on its own.
         frame = RunwayFrame.build(rwy, geo)
+        if frame is not None:
+            status.runway_length_m = frame.length_m
         pos_zones = zones_for(airport, "in_position", rwy)
         eor_zones = zones_for(airport, "eor", rwy)
         extra = [z for z in (watch or []) if isinstance(z, dict)]
@@ -1440,19 +1752,32 @@ class PositionTracker:
         status.has_eor_area = bool(eor_zones) or point_xz((geo or {}).get("eor")) is not None
 
         radar = atc_phrase.fetch_caoc_radar(config, max_age_s=max_age_s)
+        map_own = atc_phrase.ownship_from_map_enabled(config)
         if not radar:
-            status.reason = "CAOC radar feed unavailable"
+            status.reason = (
+                "map jet not published — move the aircraft on the map"
+                if map_own
+                else "CAOC radar feed unavailable"
+            )
             return status
         units = atc_phrase.caoc_air_units(list(radar.get("units") or []))
         if not units:
-            status.reason = "no air tracks in the feed"
+            status.reason = (
+                "map jet not published — move the aircraft on the map"
+                if map_own
+                else "no air tracks in the feed"
+            )
             return status
 
         own = atc_phrase.match_caoc_unit_for_flight(
             units, callsign=callsign, opus=opus, config=config
         )
-        if not own:
-            status.reason = "own aircraft not found in the feed"
+        if not own or (map_own and str(own.get("id") or "") != atc_phrase.MAP_OWNSHIP_ID):
+            status.reason = (
+                "map jet not published — move the aircraft on the map"
+                if map_own
+                else "own aircraft not found in the feed"
+            )
             return status
 
         status.own_label = atc_phrase.radio_callsign_from_caoc_unit(own)

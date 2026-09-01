@@ -1,0 +1,254 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    <name>NTTR agency airspace (Sally / Lee / Blackjack)</name>
+    <description>Field boxes drawn in zone_server.py. NTTR agency polygons from FAA AIS Special Use Airspace (generalized NASR). Control East/Sally = Desert MOA + R-4806E + Reveille. Control West/Lee = R-4807A/B + R-4808S + R-4809 + an inferred Lee Corridor (11-250; not a published SUA). Blackjack = working restricted areas. Joshua = R-2508 sketch. Not a substitute for the IFG chart.</description>
+    <Folder><name>Sally / Control East (ch 7 317.525)</name>
+      <Placemark>
+        <name>Sally — Desert MOA</name>
+        <description>sally-desert-moa · control_east · faa_sua</description>
+        <Style><PolyStyle><color>7f00aa55</color><fill>1</fill><outline>1</outline></PolyStyle><LineStyle><color>ff00aa55</color><width>2</width></LineStyle></Style>
+        <ExtendedData>
+        <Data name="trigger"><value>control_east</value></Data>
+        <Data name="id"><value>sally-desert-moa</value></Data>
+        <Data name="max_alt_ft"><value>60000</value></Data>
+        <Data name="source"><value>faa_sua</value></Data>
+        </ExtendedData>
+        <Polygon><altitudeMode>clampToGround</altitudeMode><outerBoundaryIs><LinearRing><coordinates>
+          -113.70030,37.82360,0 -114.60080,36.71670,0 -115.05080,36.71670,0 -115.30080,36.43330,0 -115.30080,37.28330,0 -115.58420,37.28330,0 -115.58420,37.46670,0 -115.80080,37.46670,0 -115.80080,37.55000,0 -115.88420,37.55000,0 -115.88420,37.70000,0 -116.18420,37.70000,0 -116.18420,37.88330,0 -114.50080,38.01670,0 -114.20000,38.01670,0 -113.70080,37.89560,0 -113.70030,37.82360,0
+        </coordinates></LinearRing></outerBoundaryIs></Polygon>
+      </Placemark>
+      <Placemark>
+        <name>Sally — R-4806E</name>
+        <description>sally-r4806e · control_east · faa_sua</description>
+        <Style><PolyStyle><color>7f00aa55</color><fill>1</fill><outline>1</outline></PolyStyle><LineStyle><color>ff00aa55</color><width>2</width></LineStyle></Style>
+        <ExtendedData>
+        <Data name="trigger"><value>control_east</value></Data>
+        <Data name="id"><value>sally-r4806e</value></Data>
+        <Data name="max_alt_ft"><value>60000</value></Data>
+        <Data name="source"><value>faa_sua</value></Data>
+        </ExtendedData>
+        <Polygon><altitudeMode>clampToGround</altitudeMode><outerBoundaryIs><LinearRing><coordinates>
+          -115.11780,36.80000,0 -115.30080,36.63330,0 -115.30080,37.28330,0 -115.18450,37.28330,0 -115.11750,37.20000,0 -115.11780,36.80000,0
+        </coordinates></LinearRing></outerBoundaryIs></Polygon>
+      </Placemark>
+      <Placemark>
+        <name>Sally — Reveille North MOA</name>
+        <description>sally-reveille-n · control_east · faa_sua</description>
+        <Style><PolyStyle><color>7f00aa55</color><fill>1</fill><outline>1</outline></PolyStyle><LineStyle><color>ff00aa55</color><width>2</width></LineStyle></Style>
+        <ExtendedData>
+        <Data name="trigger"><value>control_east</value></Data>
+        <Data name="id"><value>sally-reveille-n</value></Data>
+        <Data name="max_alt_ft"><value>60000</value></Data>
+        <Data name="source"><value>faa_sua</value></Data>
+        </ExtendedData>
+        <Polygon><altitudeMode>clampToGround</altitudeMode><outerBoundaryIs><LinearRing><coordinates>
+          -114.70170,37.99970,0 -116.66700,37.99920,0 -116.31450,38.23330,0 -115.00000,38.23330,0 -114.20080,38.01670,0 -114.70170,37.99970,0
+        </coordinates></LinearRing></outerBoundaryIs></Polygon>
+      </Placemark>
+      <Placemark>
+        <name>Sally — Reveille South MOA</name>
+        <description>sally-reveille-s · control_east · faa_sua</description>
+        <Style><PolyStyle><color>7f00aa55</color><fill>1</fill><outline>1</outline></PolyStyle><LineStyle><color>ff00aa55</color><width>2</width></LineStyle></Style>
+        <ExtendedData>
+        <Data name="trigger"><value>control_east</value></Data>
+        <Data name="id"><value>sally-reveille-s</value></Data>
+        <Data name="max_alt_ft"><value>60000</value></Data>
+        <Data name="source"><value>faa_sua</value></Data>
+        </ExtendedData>
+        <Polygon><altitudeMode>clampToGround</altitudeMode><outerBoundaryIs><LinearRing><coordinates>
+          -116.82220,37.88330,0 -116.66700,37.99920,0 -114.70170,37.99970,0 -116.18420,37.88330,0 -116.82220,37.88330,0
+        </coordinates></LinearRing></outerBoundaryIs></Polygon>
+      </Placemark>
+    </Folder>
+    <Folder><name>Lee / Control West (ch 8 254.400)</name>
+      <Placemark>
+        <name>Lee — R-4807A</name>
+        <description>lee-r4807a · control_west · faa_sua</description>
+        <Style><PolyStyle><color>7f0066ff</color><fill>1</fill><outline>1</outline></PolyStyle><LineStyle><color>ff0066ff</color><width>2</width></LineStyle></Style>
+        <ExtendedData>
+        <Data name="trigger"><value>control_west</value></Data>
+        <Data name="id"><value>lee-r4807a</value></Data>
+        <Data name="max_alt_ft"><value>60000</value></Data>
+        <Data name="source"><value>faa_sua</value></Data>
+        </ExtendedData>
+        <Polygon><altitudeMode>clampToGround</altitudeMode><outerBoundaryIs><LinearRing><coordinates>
+          -116.18420,37.88330,0 -116.18420,37.70000,0 -115.88420,37.70000,0 -115.88420,37.55000,0 -115.80080,37.55000,0 -115.80080,37.46670,0 -116.00080,37.46670,0 -116.00080,37.26670,0 -116.18420,37.26670,0 -116.18420,37.33330,0 -116.28420,37.38330,0 -116.56750,37.35000,0 -116.45080,37.13330,0 -116.45080,36.91670,0 -116.55920,36.91670,0 -116.55920,36.85000,0 -117.07580,37.44170,0 -117.09470,37.88330,0 -116.91750,37.88330,0 -116.91750,37.78330,0 -116.71750,37.55000,0 -116.43420,37.55000,0 -116.43420,37.88330,0 -116.18420,37.88330,0
+        </coordinates></LinearRing></outerBoundaryIs></Polygon>
+      </Placemark>
+      <Placemark>
+        <name>Lee — R-4807B</name>
+        <description>lee-r4807b · control_west · faa_sua</description>
+        <Style><PolyStyle><color>7f0066ff</color><fill>1</fill><outline>1</outline></PolyStyle><LineStyle><color>ff0066ff</color><width>2</width></LineStyle></Style>
+        <ExtendedData>
+        <Data name="trigger"><value>control_west</value></Data>
+        <Data name="id"><value>lee-r4807b</value></Data>
+        <Data name="max_alt_ft"><value>60000</value></Data>
+        <Data name="source"><value>faa_sua</value></Data>
+        </ExtendedData>
+        <Polygon><altitudeMode>clampToGround</altitudeMode><outerBoundaryIs><LinearRing><coordinates>
+          -116.18420,37.26670,0 -116.51750,37.26670,0 -116.56750,37.35000,0 -116.28420,37.38330,0 -116.18420,37.33330,0 -116.18420,37.26670,0
+        </coordinates></LinearRing></outerBoundaryIs></Polygon>
+      </Placemark>
+      <Placemark>
+        <name>Lee — R-4808S</name>
+        <description>lee-r4808s · control_west · faa_sua</description>
+        <Style><PolyStyle><color>7f0066ff</color><fill>1</fill><outline>1</outline></PolyStyle><LineStyle><color>ff0066ff</color><width>2</width></LineStyle></Style>
+        <ExtendedData>
+        <Data name="trigger"><value>control_west</value></Data>
+        <Data name="id"><value>lee-r4808s</value></Data>
+        <Data name="max_alt_ft"><value>60000</value></Data>
+        <Data name="source"><value>faa_sua</value></Data>
+        </ExtendedData>
+        <Polygon><altitudeMode>clampToGround</altitudeMode><outerBoundaryIs><LinearRing><coordinates>
+          -116.24670,36.68330,0 -116.44250,36.68330,0 -116.44250,36.76670,0 -116.24670,36.68330,0
+        </coordinates></LinearRing></outerBoundaryIs></Polygon>
+      </Placemark>
+      <Placemark>
+        <name>Lee — R-4809</name>
+        <description>lee-r4809 · control_west · faa_sua</description>
+        <Style><PolyStyle><color>7f0066ff</color><fill>1</fill><outline>1</outline></PolyStyle><LineStyle><color>ff0066ff</color><width>2</width></LineStyle></Style>
+        <ExtendedData>
+        <Data name="trigger"><value>control_west</value></Data>
+        <Data name="id"><value>lee-r4809</value></Data>
+        <Data name="max_alt_ft"><value>60000</value></Data>
+        <Data name="source"><value>faa_sua</value></Data>
+        </ExtendedData>
+        <Polygon><altitudeMode>clampToGround</altitudeMode><outerBoundaryIs><LinearRing><coordinates>
+          -116.43420,37.55000,0 -116.71750,37.55000,0 -116.91750,37.78330,0 -116.91750,37.88330,0 -116.43420,37.88330,0 -116.43420,37.55000,0
+        </coordinates></LinearRing></outerBoundaryIs></Polygon>
+      </Placemark>
+      <Placemark>
+        <name>Lee Corridor (inferred 11-250)</name>
+        <description>lee-corridor · control_west · inferred_11_250</description>
+        <Style><PolyStyle><color>7f0066ff</color><fill>1</fill><outline>1</outline></PolyStyle><LineStyle><color>ff0066ff</color><width>2</width></LineStyle></Style>
+        <ExtendedData>
+        <Data name="trigger"><value>control_west</value></Data>
+        <Data name="id"><value>lee-corridor</value></Data>
+        <Data name="max_alt_ft"><value>27000.0</value></Data>
+        <Data name="source"><value>inferred_11_250</value></Data>
+        </ExtendedData>
+        <Polygon><altitudeMode>clampToGround</altitudeMode><outerBoundaryIs><LinearRing><coordinates>
+          -115.18000,36.32000,0 -115.52000,36.48000,0 -115.67000,36.59000,0 -116.25000,36.68000,0 -116.50000,36.78000,0 -115.95000,36.55000,0 -115.45000,36.38000,0 -115.18000,36.32000,0
+        </coordinates></LinearRing></outerBoundaryIs></Polygon>
+      </Placemark>
+    </Folder>
+    <Folder><name>Blackjack (range)</name>
+      <Placemark>
+        <name>Blackjack — R-4806W</name>
+        <description>bj-r4806w · blackjack · faa_sua</description>
+        <Style><PolyStyle><color>7f0000aa</color><fill>1</fill><outline>1</outline></PolyStyle><LineStyle><color>ff0000aa</color><width>2</width></LineStyle></Style>
+        <ExtendedData>
+        <Data name="trigger"><value>blackjack</value></Data>
+        <Data name="id"><value>bj-r4806w</value></Data>
+        <Data name="max_alt_ft"><value>60000</value></Data>
+        <Data name="source"><value>faa_sua</value></Data>
+        </ExtendedData>
+        <Polygon><altitudeMode>clampToGround</altitudeMode><outerBoundaryIs><LinearRing><coordinates>
+          -115.30080,37.28330,0 -115.30080,36.43330,0 -115.38420,36.43330,0 -115.61750,36.58330,0 -115.93420,36.60000,0 -115.93420,37.10000,0 -115.58420,37.10000,0 -115.58420,37.28330,0 -115.30080,37.28330,0
+        </coordinates></LinearRing></outerBoundaryIs></Polygon>
+      </Placemark>
+      <Placemark>
+        <name>Blackjack — R-4806E</name>
+        <description>bj-r4806e · blackjack · faa_sua</description>
+        <Style><PolyStyle><color>7f0000aa</color><fill>1</fill><outline>1</outline></PolyStyle><LineStyle><color>ff0000aa</color><width>2</width></LineStyle></Style>
+        <ExtendedData>
+        <Data name="trigger"><value>blackjack</value></Data>
+        <Data name="id"><value>bj-r4806e</value></Data>
+        <Data name="max_alt_ft"><value>60000</value></Data>
+        <Data name="source"><value>faa_sua</value></Data>
+        </ExtendedData>
+        <Polygon><altitudeMode>clampToGround</altitudeMode><outerBoundaryIs><LinearRing><coordinates>
+          -115.11780,36.80000,0 -115.30080,36.63330,0 -115.30080,37.28330,0 -115.18450,37.28330,0 -115.11750,37.20000,0 -115.11780,36.80000,0
+        </coordinates></LinearRing></outerBoundaryIs></Polygon>
+      </Placemark>
+      <Placemark>
+        <name>Blackjack — R-4807A</name>
+        <description>bj-r4807a · blackjack · faa_sua</description>
+        <Style><PolyStyle><color>7f0000aa</color><fill>1</fill><outline>1</outline></PolyStyle><LineStyle><color>ff0000aa</color><width>2</width></LineStyle></Style>
+        <ExtendedData>
+        <Data name="trigger"><value>blackjack</value></Data>
+        <Data name="id"><value>bj-r4807a</value></Data>
+        <Data name="max_alt_ft"><value>60000</value></Data>
+        <Data name="source"><value>faa_sua</value></Data>
+        </ExtendedData>
+        <Polygon><altitudeMode>clampToGround</altitudeMode><outerBoundaryIs><LinearRing><coordinates>
+          -116.18420,37.88330,0 -116.18420,37.70000,0 -115.88420,37.70000,0 -115.88420,37.55000,0 -115.80080,37.55000,0 -115.80080,37.46670,0 -116.00080,37.46670,0 -116.00080,37.26670,0 -116.18420,37.26670,0 -116.18420,37.33330,0 -116.28420,37.38330,0 -116.56750,37.35000,0 -116.45080,37.13330,0 -116.45080,36.91670,0 -116.55920,36.91670,0 -116.55920,36.85000,0 -117.07580,37.44170,0 -117.09470,37.88330,0 -116.91750,37.88330,0 -116.91750,37.78330,0 -116.71750,37.55000,0 -116.43420,37.55000,0 -116.43420,37.88330,0 -116.18420,37.88330,0
+        </coordinates></LinearRing></outerBoundaryIs></Polygon>
+      </Placemark>
+      <Placemark>
+        <name>Blackjack — R-4807B</name>
+        <description>bj-r4807b · blackjack · faa_sua</description>
+        <Style><PolyStyle><color>7f0000aa</color><fill>1</fill><outline>1</outline></PolyStyle><LineStyle><color>ff0000aa</color><width>2</width></LineStyle></Style>
+        <ExtendedData>
+        <Data name="trigger"><value>blackjack</value></Data>
+        <Data name="id"><value>bj-r4807b</value></Data>
+        <Data name="max_alt_ft"><value>60000</value></Data>
+        <Data name="source"><value>faa_sua</value></Data>
+        </ExtendedData>
+        <Polygon><altitudeMode>clampToGround</altitudeMode><outerBoundaryIs><LinearRing><coordinates>
+          -116.18420,37.26670,0 -116.51750,37.26670,0 -116.56750,37.35000,0 -116.28420,37.38330,0 -116.18420,37.33330,0 -116.18420,37.26670,0
+        </coordinates></LinearRing></outerBoundaryIs></Polygon>
+      </Placemark>
+      <Placemark>
+        <name>Blackjack — R-4809</name>
+        <description>bj-r4809 · blackjack · faa_sua</description>
+        <Style><PolyStyle><color>7f0000aa</color><fill>1</fill><outline>1</outline></PolyStyle><LineStyle><color>ff0000aa</color><width>2</width></LineStyle></Style>
+        <ExtendedData>
+        <Data name="trigger"><value>blackjack</value></Data>
+        <Data name="id"><value>bj-r4809</value></Data>
+        <Data name="max_alt_ft"><value>60000</value></Data>
+        <Data name="source"><value>faa_sua</value></Data>
+        </ExtendedData>
+        <Polygon><altitudeMode>clampToGround</altitudeMode><outerBoundaryIs><LinearRing><coordinates>
+          -116.43420,37.55000,0 -116.71750,37.55000,0 -116.91750,37.78330,0 -116.91750,37.88330,0 -116.43420,37.88330,0 -116.43420,37.55000,0
+        </coordinates></LinearRing></outerBoundaryIs></Polygon>
+      </Placemark>
+    </Folder>
+    <Folder><name>Approach / Departure</name>
+      <Placemark>
+        <name>KLSV APP Departure Zone</name>
+        <description>approach · approach</description>
+        <Style><PolyStyle><color>7faa5500</color><fill>1</fill><outline>1</outline></PolyStyle><LineStyle><color>ffaa5500</color><width>2</width></LineStyle></Style>
+        <ExtendedData>
+        <Data name="trigger"><value>approach</value></Data>
+        <Data name="id"><value>approach</value></Data>
+        <Data name="max_alt_ft"><value>18000.0</value></Data>
+        </ExtendedData>
+        <Polygon><altitudeMode>clampToGround</altitudeMode><outerBoundaryIs><LinearRing><coordinates>
+          -114.20139,36.23541,0 -114.20852,36.32319,0 -114.22979,36.40946,0 -114.26485,36.49275,0 -114.31308,36.57165,0 -114.37367,36.64478,0 -114.44557,36.71092,0 -114.52757,36.76892,0 -114.61824,36.81778,0 -114.71605,36.85669,0 -114.81932,36.88496,0 -114.92627,36.90213,0 -115.03510,36.90788,0 -115.14392,36.90213,0 -115.25088,36.88496,0 -115.35414,36.85669,0 -115.45195,36.81778,0 -115.54263,36.76892,0 -115.62462,36.71092,0 -115.69652,36.64478,0 -115.75711,36.57165,0 -115.80534,36.49275,0 -115.84040,36.40946,0 -115.86167,36.32319,0 -115.86880,36.23541,0 -115.86167,36.14764,0 -115.84040,36.06137,0 -115.80534,35.97807,0 -115.75711,35.89918,0 -115.69652,35.82604,0 -115.62462,35.75991,0 -115.54263,35.70191,0 -115.45195,35.65304,0 -115.35414,35.61413,0 -115.25088,35.58586,0 -115.14392,35.56870,0 -115.03510,35.56295,0 -114.92627,35.56870,0 -114.81932,35.58586,0 -114.71605,35.61413,0 -114.61824,35.65304,0 -114.52757,35.70191,0 -114.44557,35.75991,0 -114.37367,35.82604,0 -114.31308,35.89918,0 -114.26485,35.97807,0 -114.22979,36.06137,0 -114.20852,36.14764,0 -114.20139,36.23541,0
+        </coordinates></LinearRing></outerBoundaryIs></Polygon>
+      </Placemark>
+    </Folder>
+    <Folder><name>Joshua (R-2508 sketch)</name>
+      <Placemark>
+        <name>R-2508 Joshua Control</name>
+        <description>joshua · joshua</description>
+        <Style><PolyStyle><color>7faa00aa</color><fill>1</fill><outline>1</outline></PolyStyle><LineStyle><color>ffaa00aa</color><width>2</width></LineStyle></Style>
+        <ExtendedData>
+        <Data name="trigger"><value>joshua</value></Data>
+        <Data name="id"><value>joshua</value></Data>
+        <Data name="max_alt_ft"><value>18000.0</value></Data>
+        </ExtendedData>
+        <Polygon><altitudeMode>clampToGround</altitudeMode><outerBoundaryIs><LinearRing><coordinates>
+          -118.70727,37.33086,0 -118.50952,37.33522,0 -117.92175,37.33086,0 -117.29553,37.27842,0 -115.80688,35.56351,0 -116.70227,34.75967,0 -118.21838,34.65580,0 -118.91602,35.17830,0 -119.02588,36.35053,0 -118.72375,36.89280,0 -118.70727,37.33086,0
+        </coordinates></LinearRing></outerBoundaryIs></Polygon>
+      </Placemark>
+    </Folder>
+    <Folder><name>Tower</name>
+      <Placemark>
+        <name>KLSV Tower</name>
+        <description>tower · tower</description>
+        <Style><PolyStyle><color>7f555555</color><fill>1</fill><outline>1</outline></PolyStyle><LineStyle><color>ff555555</color><width>2</width></LineStyle></Style>
+        <ExtendedData>
+        <Data name="trigger"><value>tower</value></Data>
+        <Data name="id"><value>tower</value></Data>
+        <Data name="max_alt_ft"><value>6000.0</value></Data>
+        </ExtendedData>
+        <Polygon><altitudeMode>clampToGround</altitudeMode><outerBoundaryIs><LinearRing><coordinates>
+          -114.83045,36.23486,0 -114.83223,36.25677,0 -114.83754,36.27830,0 -114.84629,36.29909,0 -114.85832,36.31878,0 -114.87345,36.33703,0 -114.89139,36.35354,0 -114.91186,36.36801,0 -114.93449,36.38021,0 -114.95890,36.38992,0 -114.98467,36.39698,0 -115.01137,36.40126,0 -115.03853,36.40270,0 -115.06569,36.40126,0 -115.09238,36.39698,0 -115.11816,36.38992,0 -115.14257,36.38021,0 -115.16520,36.36801,0 -115.18566,36.35354,0 -115.20361,36.33703,0 -115.21873,36.31878,0 -115.23077,36.29909,0 -115.23952,36.27830,0 -115.24483,36.25677,0 -115.24661,36.23486,0 -115.24483,36.21295,0 -115.23952,36.19142,0 -115.23077,36.17063,0 -115.21873,36.15094,0 -115.20361,36.13268,0 -115.18566,36.11618,0 -115.16520,36.10170,0 -115.14257,36.08951,0 -115.11816,36.07980,0 -115.09238,36.07274,0 -115.06569,36.06846,0 -115.03853,36.06702,0 -115.01137,36.06846,0 -114.98467,36.07274,0 -114.95890,36.07980,0 -114.93449,36.08951,0 -114.91186,36.10170,0 -114.89139,36.11618,0 -114.87345,36.13268,0 -114.85832,36.15094,0 -114.84629,36.17063,0 -114.83754,36.19142,0 -114.83223,36.21295,0 -114.83045,36.23486,0
+        </coordinates></LinearRing></outerBoundaryIs></Polygon>
+      </Placemark>
+    </Folder>
+  </Document>
+</kml>

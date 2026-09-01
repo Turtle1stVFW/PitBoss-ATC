@@ -1,6 +1,12 @@
 # Local ATC config / runtime state (use config.example.json)
 atc/config.json
 atc/flow_state.json
+atc/ownship_inject.json
+atc/ownship_inject.json.tmp
+atc/weather_inject.json
+atc/weather_inject.json.tmp
+atc/traffic_inject.json
+atc/traffic_inject.json.tmp
 atc/state.json
 atc/tts_usage.json
 atc/__pycache__/
@@ -21,6 +27,9 @@ atc/kneeboard/*.pdf
 # Large reference packs for the zone editor (drop locally under tools/overlays/)
 tools/overlays/*
 !tools/overlays/README.txt
+
+# FAA SUA cache used by tools/import_nttr_agencies.py
+tools/_nttr_sua.geojson
 
 # Scratch downloads / plate probes (never commit)
 atc/_tmp*
