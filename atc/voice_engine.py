@@ -894,8 +894,29 @@ def execute_intent(
             ch = _resolve_tx_channel(engine, airport, match) or "control_east"
             if ch not in ("control_east", "control_west"):
                 ch = "control_east"
-            text = atc_phrase.build_control_check_in(callsign, channel=ch)
-            return _transmit(engine, airport, text, ch)
+            plan = atc_phrase.assign_approach_plan(
+                airport,
+                weather,
+                mission=getattr(engine, "mission", None),
+                state=engine.state,
+                opus=opus,
+                force=False,
+            )
+            engine.state["control_checked_in"] = True
+            engine.state["control_channel"] = ch
+            if hasattr(engine, "save_state"):
+                engine.save_state()
+            text = atc_phrase.build_control_check_in(
+                callsign, channel=ch, airport=airport, plan=plan
+            )
+            result = _transmit(engine, airport, text, ch)
+            if hasattr(engine, "_seek_template"):
+                engine._seek_template("control_handoff")
+                if hasattr(engine, "_advance_past_skippable"):
+                    engine._advance_past_skippable()
+            if hasattr(engine, "save_state"):
+                engine.save_state()
+            return result
         if intent == "control_handoff" or match.template == "control_handoff":
             played = _play_step(engine, match)
             if played.get("action") != "none":
@@ -960,34 +981,6 @@ def execute_intent(
             text = atc_phrase.build_blackjack_continue(callsign)
             return _transmit(engine, airport, text, "blackjack")
         if intent == "range_exit" or match.template == "bj_range_exit":
-            ready, waiting = (False, "")
-            if hasattr(engine, "range_exit_ready"):
-                ready, waiting = engine.range_exit_ready()
-            if not ready:
-                already = bool(
-                    isinstance(engine.state, dict)
-                    and engine.state.get("range_exit_approved")
-                )
-                if already and hasattr(engine, "acknowledge_blackjack_continue"):
-                    detail = engine.acknowledge_blackjack_continue()
-                    return {
-                        "action": "play",
-                        "text": detail.get("text"),
-                        "channel": "blackjack",
-                        "detail": detail,
-                        "blackjack_continue": True,
-                        "range_exit_waiting": waiting,
-                    }
-                if hasattr(engine, "release_range_exit"):
-                    detail = engine.release_range_exit()
-                    return {
-                        "action": "play",
-                        "text": detail.get("text"),
-                        "channel": "blackjack",
-                        "detail": detail,
-                        "range_exit_released": True,
-                        "range_exit_waiting": waiting,
-                    }
             played = _play_step(engine, match)
             if played.get("action") != "none":
                 return played

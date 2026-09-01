@@ -322,6 +322,7 @@ class FlowEngine:
             tanker_skip
             or atc_phrase.should_skip_takeoff_step(step, self.mission, self.state)
             or atc_phrase.should_skip_approach_step(step, self.mission, self.state)
+            or atc_phrase.should_skip_control_step(step, self.state)
             or atc_phrase.should_skip_cruise_climb_step(step, self.mission, self.state)
         )
 
@@ -521,6 +522,11 @@ class FlowEngine:
         if filed is not None:
             self.state["filed_altitude_ft"] = filed
         channel = step.get("channel") or step.get("phase") or "other"
+        tmpl = str(step.get("template") or "")
+        if tmpl in ("control_check_in", "control_handoff"):
+            live = str(self.state.get("control_channel") or "").strip().lower()
+            if live in ("control_east", "control_west"):
+                channel = live
         runway = atc_phrase.pick_departure_runway(
             airport,
             weather,
@@ -997,67 +1003,13 @@ class FlowEngine:
 
     def range_exit_ready(self) -> tuple[bool, str]:
         """
-        True when Blackjack may hand to Approach (near APP / field boundary).
+        True when Blackjack may hand to Nellis Control.
 
-        Range-complete far from the field only releases to the exit fix;
-        Approach waits for the approach zone or ≤40 NM from the field.
+        Range exit is an early NATCF push — voice / Play always hand off.
+        Watch still uses the leaving-blackjack trigger separately.
         """
-        try:
-            import runway_position as rp
-        except Exception:
-            return True, ""
-        step = self.current_step() or {}
-        if str(step.get("template") or "") != "bj_range_exit":
-            step = {
-                "template": "bj_range_exit",
-                "trigger": {"zone": "approach", "within_nm": 40},
-            }
-        trigger = rp.resolve_step_trigger(
-            step, mission=self.mission, state=self.state
-        )
-        if trigger is None:
-            return True, ""
-        airport = self.airport()
-        opus, _wx = atc_phrase.resolve_opus_and_metar(self.config, airport["icao"])
-        if not opus:
-            opus = atc_phrase.synthetic_flight_context(
-                atc_phrase.callsign_override(self.config) or "CALLSIGN"
-            )
-        callsign = opus.radio_callsign
-        dist = rp.ownship_distance_nm(
-            airport,
-            config=self.config,
-            callsign=callsign,
-            opus=opus,
-            state=self.state,
-        )
-        waiting_bits: list[str] = []
-        if trigger.within_nm is not None:
-            held, waiting = rp.within_nm_held(trigger, dist)
-            if held:
-                return True, ""
-            if waiting:
-                waiting_bits.append(waiting)
-        if trigger.zone:
-            zones = rp.zones_by_ref(airport, trigger.zone, None)
-            if zones:
-                status = rp.PositionTracker().evaluate(
-                    self.config,
-                    airport,
-                    None,
-                    callsign=callsign,
-                    opus=opus,
-                    watch=zones,
-                )
-                count = status.in_zones(zones, settled=False)
-                if count.ok(need_full=False):
-                    return True, ""
-                desc = count.describe(need_full=False)
-                if desc:
-                    waiting_bits.append(desc)
-        if not waiting_bits and trigger.within_nm is None and not trigger.zone:
-            return True, ""
-        return False, " · ".join(waiting_bits) or "need closer to range exit"
+        return True, ""
+
     def acknowledge_blackjack_continue(
         self, *, bypass_freq_gate: bool = False, seek_range_exit: bool = True
     ) -> dict[str, Any]:
@@ -1123,7 +1075,7 @@ class FlowEngine:
         }
 
     def release_range_exit(self, *, bypass_freq_gate: bool = False) -> dict[str, Any]:
-        """Range complete far out: proceed direct the fix, remain this frequency."""
+        """Range complete: hand to Nellis Control immediately."""
         airport = self.airport()
         opus, weather = atc_phrase.resolve_opus_and_metar(self.config, airport["icao"])
         if not opus:
@@ -1140,7 +1092,7 @@ class FlowEngine:
             force=False,
         )
         text = atc_phrase.build_blackjack_range_exit(
-            airport, callsign, plan=plan, include_handoff=False
+            airport, callsign, plan=plan, include_handoff=True
         )
         channel = "blackjack"
         cur = self.current_step() or {}
@@ -1189,20 +1141,9 @@ class FlowEngine:
         *,
         bypass_freq_gate: bool = False,
     ) -> dict[str, Any] | None:
-        """Outside the Approach gate: release to the fix, or remain if already released."""
-        if str((step or {}).get("template") or "") != "bj_range_exit":
-            return None
-        ready, waiting = self.range_exit_ready()
-        if ready:
-            return None
-        if self.state.get("range_exit_approved"):
-            result = self.acknowledge_blackjack_continue(
-                bypass_freq_gate=bypass_freq_gate
-            )
-        else:
-            result = self.release_range_exit(bypass_freq_gate=bypass_freq_gate)
-        result["range_exit_waiting"] = waiting or "need closer to range exit"
-        return result
+        """Play/voice always hands to NATCF — Watch uses the leaving-range trigger."""
+        del step, bypass_freq_gate
+        return None
 
     def replay_last_tx(self, *, bypass_freq_gate: bool = False) -> dict[str, Any]:
         """

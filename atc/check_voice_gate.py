@@ -96,6 +96,7 @@ CASES = [
     ("Texaco, Fleece 1, disconnect", "tanker", "flight", True, "tanker_disconnect"),
     ("Texaco, Fleece 1, request departure", "tanker", "flight", True, "tanker_depart"),
     ("Texaco, Fleece 1, how's it going", "tanker", "flight", True, "tanker_chat_start"),
+    ("Texaco, Fleece 1, stop talking", "tanker", "flight", True, "tanker_chat_stop"),
     ("Blackjack, Fleece 1, push Bandsaw", "blackjack", "flight", True, "request_bandsaw"),
     ("Blackjack, Fleece 1, request ANSA", "blackjack", "flight", True, "request_bandsaw"),
     ("Blackjack, Fleece 1, off station, range complete", "blackjack", "flight", True, "range_exit"),
@@ -237,14 +238,14 @@ def extras() -> int:
     if "expect" in bj_exit.lower():
         print(f"  FAIL Blackjack range exit must not say expect recovery: {bj_exit}")
         bad += 1
-    elif "proceed direct arcoe" not in bj_exit.lower():
-        print(f"  FAIL Blackjack range exit should proceed direct the fix: {bj_exit}")
+    elif "proceed direct" in bj_exit.lower():
+        print(f"  FAIL Blackjack range exit should leave routing to Control: {bj_exit}")
         bad += 1
     elif "cleared" in bj_exit.lower():
         print(f"  FAIL Blackjack range exit should not say cleared: {bj_exit}")
         bad += 1
-    elif "descend pilot discretion" not in bj_exit.lower():
-        print(f"  FAIL Blackjack range exit should start the IAF descent: {bj_exit}")
+    elif "descend" in bj_exit.lower():
+        print(f"  FAIL Blackjack range exit should leave descent to Control: {bj_exit}")
         bad += 1
     elif "nellis control" not in bj_exit.lower():
         print(f"  FAIL Blackjack range exit should hand to Nellis Control: {bj_exit}")
@@ -254,6 +255,20 @@ def extras() -> int:
         bad += 1
     else:
         print(f"blackjack range exit — {bj_exit}")
+    ctrl_vmc = atc_phrase.build_control_check_in(
+        "Fleece 1", airport=nellis, plan=plan_vmc
+    )
+    if "proceed direct arcoe" not in ctrl_vmc.lower():
+        print(f"  FAIL Control check-in should proceed direct the fix: {ctrl_vmc}")
+        bad += 1
+    elif "descend pilot discretion" not in ctrl_vmc.lower():
+        print(f"  FAIL Control check-in should start the IAF descent: {ctrl_vmc}")
+        bad += 1
+    elif "expect" not in ctrl_vmc.lower():
+        print(f"  FAIL Control check-in should issue expect recovery: {ctrl_vmc}")
+        bad += 1
+    else:
+        print(f"control check-in — {ctrl_vmc}")
     import time as _time
 
     old_miss = atc_phrase._ownship_miss_until
@@ -279,20 +294,14 @@ def extras() -> int:
     bj_hold = atc_phrase.build_blackjack_range_exit(
         nellis, "Fleece 1", plan=plan_vmc, include_handoff=False
     )
-    if "proceed direct arcoe" not in bj_hold.lower():
-        print(f"  FAIL far-out range exit should proceed direct the fix: {bj_hold}")
-        bad += 1
-    elif "contact" in bj_hold.lower():
-        print(f"  FAIL far-out range exit must not hand to Approach: {bj_hold}")
+    if "contact" in bj_hold.lower():
+        print(f"  FAIL remain-freq range exit must not hand off: {bj_hold}")
         bad += 1
     elif "remain this frequency" not in bj_hold.lower():
-        print(f"  FAIL far-out range exit should remain this frequency: {bj_hold}")
-        bad += 1
-    elif "descend pilot discretion" not in bj_hold.lower():
-        print(f"  FAIL far-out range exit should start the IAF descent: {bj_hold}")
+        print(f"  FAIL remain-freq range exit wording: {bj_hold}")
         bad += 1
     else:
-        print(f"blackjack range exit (far) — {bj_hold}")
+        print(f"blackjack range exit (remain) — {bj_hold}")
     bj_app = atc_phrase.build_blackjack_approach_handoff(nellis, "Fleece 1")
     bj_after = atc_phrase.build_template_text(
         nellis,
@@ -305,11 +314,11 @@ def extras() -> int:
     if "contact" not in bj_app.lower() or "proceed direct" in bj_app.lower():
         print(f"  FAIL Approach handoff should be contact only: {bj_app}")
         bad += 1
-    elif "descend" in bj_app.lower() or "descend" in bj_after.lower():
-        print(f"  FAIL later Approach handoff must not re-issue descent: {bj_app} / {bj_after}")
+    elif "descend" in bj_app.lower():
+        print(f"  FAIL Approach handoff must not re-issue descent: {bj_app}")
         bad += 1
-    elif "contact" not in bj_after.lower() or "proceed direct" in bj_after.lower():
-        print(f"  FAIL already-released range exit is Approach only: {bj_after}")
+    elif "nellis control" not in bj_after.lower() or "proceed direct" in bj_after.lower():
+        print(f"  FAIL already-released range exit still hands to Control: {bj_after}")
         bad += 1
     else:
         print(f"blackjack Approach handoff — {bj_app}")
@@ -377,17 +386,17 @@ def extras() -> int:
             f"IAF {plan_ifr.get('iaf')} RWY {plan_ifr.get('runway')} "
             f"desc {plan_ifr.get('descend_ft')} (no speed)"
         )
-    bj_ifr = atc_phrase.build_blackjack_range_exit(
-        nellis, "Fleece 1", plan=plan_ifr, include_handoff=False
+    ctrl_ifr = atc_phrase.build_control_check_in(
+        "Fleece 1", airport=nellis, plan=plan_ifr
     )
-    if "descend pilot discretion" not in bj_ifr.lower():
-        print(f"  FAIL IFR range exit should start the IAF descent: {bj_ifr}")
+    if "descend pilot discretion" not in ctrl_ifr.lower():
+        print(f"  FAIL IFR Control check-in should start the IAF descent: {ctrl_ifr}")
         bad += 1
-    elif "fifteen" not in bj_ifr.lower() and "one five" not in bj_ifr.lower() and "one fife" not in bj_ifr.lower():
-        print(f"  FAIL IFR range exit should use the 15000 IAF altitude: {bj_ifr}")
+    elif "fifteen" not in ctrl_ifr.lower() and "one five" not in ctrl_ifr.lower() and "one fife" not in ctrl_ifr.lower():
+        print(f"  FAIL IFR Control check-in should use the 15000 IAF altitude: {ctrl_ifr}")
         bad += 1
     else:
-        print(f"blackjack range exit (IFR IAF) — {bj_ifr}")
+        print(f"control check-in (IFR IAF) — {ctrl_ifr}")
     expect_ifr = atc_phrase.build_approach_recovery(
         nellis, "Fleece 1", ifr, str(plan_ifr.get("runway") or "21L"), plan=plan_ifr
     )
@@ -574,6 +583,9 @@ def extras() -> int:
     bj_imc = atc_phrase.build_blackjack_range_exit(
         nellis, "Fleece 1", plan=plan_near_sheet
     )
+    ctrl_imc = atc_phrase.build_control_check_in(
+        "Fleece 1", airport=nellis, plan=plan_near_sheet
+    )
     clear_near = atc_phrase.build_iaf_clearance(
         nellis, "Fleece 1", plan=plan_near_sheet
     )
@@ -583,17 +595,20 @@ def extras() -> int:
     elif "sheet" in bj_imc.lower() or "five thousand" in bj_imc.lower():
         print(f"  FAIL Blackjack must not clear SHEET/5k in IMC: {bj_imc}")
         bad += 1
-    elif "proceed direct arcoe" not in bj_imc.lower():
-        print(f"  FAIL Blackjack IMC exit should proceed direct Arcoe: {bj_imc}")
+    elif "proceed direct" in bj_imc.lower() or "nellis control" not in bj_imc.lower():
+        print(f"  FAIL Blackjack IMC exit should only hand to Control: {bj_imc}")
+        bad += 1
+    elif "proceed direct arcoe" not in ctrl_imc.lower():
+        print(f"  FAIL Control IMC check-in should proceed direct Arcoe: {ctrl_imc}")
         bad += 1
     elif "cross arcoe" not in clear_near.lower():
-        print(f"  FAIL Approach clearance should match Blackjack gate: {clear_near}")
+        print(f"  FAIL Approach clearance should match Control gate: {clear_near}")
         bad += 1
-    elif "fifteen thousand" not in bj_imc.lower() and "one fife" not in bj_imc.lower():
-        print(f"  FAIL Blackjack IMC descend should be 15k: {bj_imc}")
+    elif "fifteen thousand" not in ctrl_imc.lower() and "one fife" not in ctrl_imc.lower():
+        print(f"  FAIL Control IMC descend should be 15k: {ctrl_imc}")
         bad += 1
     else:
-        print(f"blackjack/approach IMC align — {bj_imc}")
+        print(f"blackjack/control IMC align — {bj_imc}")
 
     # Sticky SHEET leftover from an old position pick must rebuild to the gate.
     st_sheet = {
@@ -689,20 +704,20 @@ def extras() -> int:
             bad += 1
             entries_ok = False
     if entries_ok:
-        bj_sarah = atc_phrase.build_blackjack_range_exit(
-            nellis, "Fleece 1", plan=p_sarah
+        bj_sarah = atc_phrase.build_control_check_in(
+            "Fleece 1", airport=nellis, plan=p_sarah
         )
-        bj_nixon = atc_phrase.build_blackjack_range_exit(
-            nellis, "Fleece 1", plan=p_nixon
+        bj_nixon = atc_phrase.build_control_check_in(
+            "Fleece 1", airport=nellis, plan=p_nixon
         )
         app_sarah = atc_phrase.build_approach_recovery(
             nellis, "Fleece 1", vmc, str(p_sarah.get("runway") or "21R"), plan=p_sarah
         )
         if "direct sarah" not in bj_sarah.lower() or "gass peak" in bj_sarah.lower():
-            print(f"  FAIL Blackjack SARAH exit should be direct Sarah: {bj_sarah}")
+            print(f"  FAIL Control SARAH check-in should be direct Sarah: {bj_sarah}")
             bad += 1
         elif "direct nixon" not in bj_nixon.lower() or "gass peak" in bj_nixon.lower():
-            print(f"  FAIL Blackjack NIXON exit should be direct Nixon: {bj_nixon}")
+            print(f"  FAIL Control NIXON check-in should be direct Nixon: {bj_nixon}")
             bad += 1
         elif "stryk" not in app_sarah.lower() or "gass peak" in app_sarah.lower():
             print(f"  FAIL Approach should still expect Stryk recovery: {app_sarah}")
@@ -2918,6 +2933,34 @@ def extras() -> int:
         else:
             print("tanker rejoin — left / left observation, never identified")
 
+        own_lat, own_lon = 36.2362, -115.0343
+        tgt_lat, tgt_lon = 36.2362, -114.0343
+        tx, tz = atc_phrase.caoc_ll_to_xz(tgt_lat, tgt_lon)
+        live = tanker_mod._enrich_live(
+            {"callsign": "TEXACO 1"},
+            {
+                "xMeters": tx,
+                "zMeters": tz,
+                "headingDeg": 90,
+                "altMeters": 7000,
+            },
+            {"bullseye_magnetic_declination_deg": 12},
+            own_ll=(own_lat, own_lon),
+        )
+        true_brg = atc_phrase._true_bearing_deg(own_lat, own_lon, tgt_lat, tgt_lon)
+        mag_brg = float(live.get("bearing_deg") or 0)
+        if abs(mag_brg - ((true_brg - 12.0) % 360.0)) > 0.5:
+            print(
+                f"  FAIL tanker BRAA magnetic: true={true_brg:.1f} "
+                f"live={mag_brg:.1f}"
+            )
+            bad += 1
+        else:
+            print(
+                f"tanker BRAA is magnetic "
+                f"({mag_brg:.0f} vs true {true_brg:.0f})"
+            )
+
         import tanker_chat as tanker_chat_mod
 
         st = {}
@@ -3462,7 +3505,7 @@ def extras() -> int:
             or "not an airliner" not in prompt_ban.casefold()
             or "military" not in prompt_ban.casefold()
             or "gas-up chatter" not in prompt_ban.casefold()
-            or "you are the kc-135 boom operator" not in prompt_ban.casefold()
+            or "kc-135 boom operator" not in prompt_ban.casefold()
             or "Recent chat:" not in prompt_ban
             or coffee_picks > 0
             or "Dunkin" not in hist_after
@@ -3598,7 +3641,7 @@ def extras() -> int:
             or "YOU (boom operator)" not in llm_hist
             or "F-16 (them" not in llm_hist
             or "Pilot:" in llm_hist
-            or "you are the kc-135 boom operator" not in sys_plain.casefold()
+            or "kc-135 boom operator" not in sys_plain.casefold()
             or "pilot: really" not in sys_plain.casefold()
             or "do not write a pilot:" not in react_p.casefold()
             or "end with a question mark" not in react_p.casefold()
@@ -3715,9 +3758,20 @@ def extras() -> int:
             bad += 1
         else:
             print(
-                "tanker boom chat — Texaco starts after 30–60s in 0.1–0.5 NM; "
+                "tanker boom chat — proximity gate still scores range; "
                 "Fly start-chat button only on tanker freq"
             )
+        if (
+            not tanker_chat_mod.match_stop("Texaco stop talking")
+            or not tanker_chat_mod.match_stop("stop")
+            or not tanker_chat_mod.match_stop("that's enough")
+            or not tanker_chat_mod.match_stop("that s enough")
+            or tanker_chat_mod.match_stop("how's it going")
+        ):
+            print("  FAIL tanker chat stop phrases")
+            bad += 1
+        else:
+            print("tanker chat stop — stop / stop talking / that's enough")
 
         import voice_nlu
 
@@ -4745,6 +4799,40 @@ def agency_sandbox() -> int:
     if "nellis control" not in chk_e.lower():
         print(f"  FAIL Control East check-in should speak Nellis Control: {chk_e}")
         bad += 1
+    ready_far, wait_far = atc_phrase.control_handoff_auto_ready(
+        airport=nellis,
+        state={
+            "approach_plan": {"vfr_recovery": "ARCOE", "vfr_recovery_say": "Arcoe"},
+            "ownship_ll": [37.4, -114.5],
+            "last_tx_at": 1.0,
+            "control_checked_in": True,
+        },
+        gap_s=0,
+    )
+    # ~40+ NM north of ARCOE should wait; a point near the fix should fire.
+    ready_near, wait_near = atc_phrase.control_handoff_auto_ready(
+        airport=nellis,
+        state={
+            "approach_plan": {"vfr_recovery": "ARCOE", "vfr_recovery_say": "Arcoe"},
+            "ownship_ll": [36.85, -114.85],
+            "last_tx_at": 1.0,
+            "control_checked_in": True,
+        },
+        gap_s=0,
+    )
+    if ready_far:
+        print(f"  FAIL Control handoff should wait far from the exit: {wait_far}")
+        bad += 1
+    elif not ready_near:
+        print(f"  FAIL Control handoff should fire before the exit fix: {wait_near}")
+        bad += 1
+    else:
+        print(
+            "control handoff gate — far="
+            + wait_far.replace("\u2264", "<=")
+            + " near="
+            + wait_near.replace("\u2264", "<=")
+        )
     chk_w = atc_phrase.build_control_check_in("Fleece 1", channel="control_west")
     if "nellis control" not in chk_w.lower():
         print(f"  FAIL Control West check-in should speak Nellis Control: {chk_w}")

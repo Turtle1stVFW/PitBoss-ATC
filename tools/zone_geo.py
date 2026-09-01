@@ -186,6 +186,28 @@ def runway_in_text(raw: Any) -> str:
     return ""
 
 
+def _runway_number_heading_deg(runway: str) -> float | None:
+    """Magnetic-ish heading implied by the runway number (21R → 210)."""
+    digits = re.sub(r"[^0-9]", "", str(runway or ""))
+    if not digits:
+        return None
+    return float((int(digits) % 100) * 10 % 360)
+
+
+def _ll_heading_deg(start: tuple[float, float], end: tuple[float, float]) -> float:
+    """Initial true heading from start lat/lon to end lat/lon."""
+    lat1, lon1 = math.radians(start[0]), math.radians(start[1])
+    lat2, lon2 = math.radians(end[0]), math.radians(end[1])
+    dlon = lon2 - lon1
+    x = math.sin(dlon) * math.cos(lat2)
+    y = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(dlon)
+    return (math.degrees(math.atan2(x, y)) + 360.0) % 360.0
+
+
+def _heading_diff_deg(a: float, b: float) -> float:
+    return abs((float(a) - float(b) + 180.0) % 360.0 - 180.0)
+
+
 def reciprocal_runway(runway: str) -> str:
     """'21R' → '03L'. The other way to use the same concrete."""
     norm = normalize_runway(runway)
@@ -528,6 +550,13 @@ def shapes_to_geometry(
                 warnings.append(f"skipped centreline {shape.label!r}: no runway tag")
                 continue
             thr, far = shape.points[0], shape.points[-1]
+            # First point is the threshold. If the line was drawn the wrong
+            # way, flip so 21R faces ~210 not 030.
+            want = _runway_number_heading_deg(shape.runway)
+            if want is not None:
+                got = _ll_heading_deg(thr, far)
+                if _heading_diff_deg(got, want) > 90.0:
+                    thr, far = far, thr
             length = round(haversine_m(thr, far), 1)
             runways[shape.runway] = {
                 "threshold": _ll(thr),

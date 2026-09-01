@@ -3,7 +3,7 @@
     "name": "Nellis",
     "icao": "KLSV",
     "coalition": 2,
-    "srs_host": "127.0.0.1",
+    "srs_host": "showtime.455aew.com",
     "srs_port": 5002,
     "runways": [
       "21R",
@@ -986,12 +986,12 @@
       "runways": {
         "03L": {
           "threshold": {
-            "lat": 36.247527,
-            "lon": -115.024281
-          },
-          "far_end": {
             "lat": 36.226792,
             "lon": -115.046639
+          },
+          "far_end": {
+            "lat": 36.247527,
+            "lon": -115.024281
           },
           "width_m": 45,
           "eor": {
@@ -1003,12 +1003,12 @@
         },
         "21R": {
           "threshold": {
-            "lat": 36.226792,
-            "lon": -115.046639
-          },
-          "far_end": {
             "lat": 36.247527,
             "lon": -115.024281
+          },
+          "far_end": {
+            "lat": 36.226792,
+            "lon": -115.046639
           },
           "width_m": 45,
           "eor": {

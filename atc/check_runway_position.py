@@ -34,8 +34,8 @@ def main() -> int:
     if not 2900 <= frame.length_m <= 3300:
         print("  FAIL runway length is not ~10,100 ft")
         bad += 1
-    if rp.angle_diff(frame.heading_deg, 32.6) > 1.0:
-        print("  FAIL 03L should run about 032.6° true")
+    if rp.angle_diff(frame.heading_deg, 41.2) > 1.0:
+        print("  FAIL 03L should run about 041° true (030 magnetic)")
         bad += 1
 
     # Reverse direction must be the same strip, opposite heading.
@@ -44,6 +44,26 @@ def main() -> int:
     if rp.angle_diff(rev.heading_deg, frame.heading_deg + 180.0) > 1.0:
         print("  FAIL 21R should be the reciprocal of 03L")
         bad += 1
+    if rp.angle_diff(rev.heading_deg, 221.2) > 2.0:
+        print(f"  FAIL 21R should run about 221° true (210 magnetic), got {rev.heading_deg:.1f}")
+        bad += 1
+    # Drawn backwards (threshold at the far end) must still face 21, not 03.
+    swapped = rp.RunwayFrame.build(
+        "21R",
+        {
+            "threshold": {"lat": 36.226792, "lon": -115.046639},
+            "far_end": {"lat": 36.247527, "lon": -115.024281},
+            "width_m": 45,
+        },
+    )
+    if swapped is None or rp.angle_diff(swapped.heading_deg, 221.2) > 2.0:
+        print(
+            "  FAIL backwards 21R geometry should flip to ~221° "
+            f"(got {None if swapped is None else f'{swapped.heading_deg:.1f}'})"
+        )
+        bad += 1
+    else:
+        print(f"ok   backwards 21R geometry flipped to {swapped.heading_deg:.1f}°")
 
     show("projection")
     # A point 500 m down the centreline from the 03L threshold.

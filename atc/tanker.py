@@ -12,7 +12,6 @@ and bullseye wait until asked.
 
 from __future__ import annotations
 
-import math
 import random
 import re
 import time
@@ -374,8 +373,12 @@ def _enrich_live(
             out["distance_nm"] = atc_phrase._haversine_nm(
                 own_ll[0], own_ll[1], float(out["lat"]), float(out["lon"])
             )
-            out["bearing_deg"] = _bearing_deg(
-                own_ll[0], own_ll[1], float(out["lat"]), float(out["lon"])
+            out["bearing_deg"] = atc_phrase.magnetic_bearing_deg(
+                own_ll[0],
+                own_ll[1],
+                float(out["lat"]),
+                float(out["lon"]),
+                config=config,
             )
             aspect = pl.aspect_to_fighter(
                 own_lat=own_ll[0],
@@ -390,16 +393,6 @@ def _enrich_live(
             pass
     out["live"] = True
     return out
-
-
-def _bearing_deg(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    rlat1, rlat2 = math.radians(lat1), math.radians(lat2)
-    dlon = math.radians(lon2 - lon1)
-    x = math.sin(dlon) * math.cos(rlat2)
-    y = math.cos(rlat1) * math.sin(rlat2) - math.sin(rlat1) * math.cos(rlat2) * math.cos(
-        dlon
-    )
-    return (math.degrees(math.atan2(x, y)) + 360.0) % 360.0
 
 
 def _find_named_row(
@@ -611,7 +604,7 @@ def _tanker_altitude_speech(tanker: dict[str, Any] | None) -> str:
 
 
 def speak_tanker_braa(bearing: int, range_nm: int) -> str:
-    """Spoken BRAA — 'braw', not letter-by-letter B-R-A-A."""
+    """Spoken magnetic BRAA — 'braw', not letter-by-letter B-R-A-A."""
     brg = max(0, min(360, int(bearing))) % 360
     rng = max(0, int(range_nm))
     return (

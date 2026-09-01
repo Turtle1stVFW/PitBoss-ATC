@@ -968,9 +968,9 @@ class MissionPlanner(tk.Tk):
             tmpl = str(step.get("template") or "")
             handoff = ""
             if tmpl == "bj_range_exit":
-                handoff = "  →  Nellis Control (≤40 NM)"
+                handoff = "  →  Nellis Control (leaving the range)"
             elif tmpl == "control_handoff":
-                handoff = "  →  Approach"
+                handoff = "  →  Approach (before the exit fix)"
             elif tmpl == "bandsaw_check_out":
                 handoff = "  →  Blackjack"
             elif tmpl == "climb_cruise":
@@ -1312,16 +1312,11 @@ class MissionPlanner(tk.Tk):
             if not tanker_mod.has_rejoined(engine.state):
                 self._ui_call(lambda: self._set_boom_status(""))
                 return
-            voice = getattr(self, "_voice", None)
-            if voice is not None and getattr(voice, "ptt_held", False):
-                self._ui_call(
-                    lambda: self._set_boom_status(
-                        "BOOM: waiting — you are transmitting"
-                    )
+            self._ui_call(
+                lambda: self._set_boom_status(
+                    "BOOM: say how's it going to start chat"
                 )
-                return
-            result = voice_engine.resolve_tanker_chat(engine)
-            self._ui_call(lambda: self._finish_boom_tx(engine, result, opening=True))
+            )
         except Exception as exc:  # noqa: BLE001
             err = str(exc)
             self._ui_call(lambda: self._set_boom_status(f"BOOM: {err}"))
@@ -1355,6 +1350,9 @@ class MissionPlanner(tk.Tk):
                 str(result.get("detail") or "Blocked off frequency"),
                 action="auto",
             )
+        if not tanker_chat_mod.is_session_active(engine.state):
+            self._cancel_tanker_chat()
+            return
         again = result.get("deferred") if isinstance(result, dict) else None
         if isinstance(again, dict) and again.get("kind") == "tanker_chat_continue":
             self._schedule_tanker_chat(again)
@@ -1540,6 +1538,24 @@ class MissionPlanner(tk.Tk):
             tracker = self._position_tracker()
         step_id = str(step.get("id") or step.get("template") or "step")
         tmpl = str(step.get("template") or "")
+
+        # NATCF → Approach: after check-in, while still inbound to the exit fix.
+        if tmpl == "control_handoff":
+            ready, waiting = atc_phrase.control_handoff_auto_ready(
+                airport=airport,
+                state=state,
+                config=cfg,
+                callsign=callsign or None,
+                opus=opus,
+            )
+            if not ready:
+                return "", waiting
+            key = f"{step_id}:control_handoff"
+            latch = f"fire:{key}"
+            if not tracker.armed(latch):
+                return "", waiting
+            tracker.pending_latch = latch
+            return step_id, waiting
 
         # Approach clearance: auto after check-in (short radio gap), while still
         # inbound to the IAF / VFR exit — not a field-NM or drawn-zone gate.
@@ -2504,6 +2520,16 @@ class MissionPlanner(tk.Tk):
 
         self.after(delay_ms, kick)
 
+    def _cancel_tanker_chat(self) -> None:
+        job = getattr(self, "_tanker_chat_after", None)
+        if job is None:
+            return
+        try:
+            self.after_cancel(job)
+        except Exception:
+            pass
+        self._tanker_chat_after = None
+
     def _schedule_tanker_chat(self, deferred: dict[str, Any]) -> None:
         """After rejoin (or between answers), Texaco comes back with boom small talk."""
         kind = str(deferred.get("kind") or "tanker_chat")
@@ -2517,9 +2543,15 @@ class MissionPlanner(tk.Tk):
         continue_session = kind == "tanker_chat_continue"
 
         def kick() -> None:
+            self._tanker_chat_after = None
+
             def work() -> None:
                 try:
                     engine = self._live_engine()
+                    import tanker_chat as tanker_chat_mod
+
+                    if not tanker_chat_mod.is_session_active(engine.state):
+                        return
                     result = voice_engine.resolve_tanker_chat(
                         engine, continue_session=continue_session
                     )
@@ -2539,7 +2571,8 @@ class MissionPlanner(tk.Tk):
 
             threading.Thread(target=work, daemon=True).start()
 
-        self.after(delay_ms, kick)
+        self._cancel_tanker_chat()
+        self._tanker_chat_after = self.after(delay_ms, kick)
 
     def _voice_log(self, line: str) -> None:
         text = line.rstrip() + "\n"

@@ -393,6 +393,14 @@ def _bearing_deg(dx_east: float, dz_north: float) -> float:
     return (math.degrees(math.atan2(dx_east, dz_north)) + 360.0) % 360.0
 
 
+def _runway_number_heading_deg(runway: str) -> float | None:
+    """Magnetic-ish heading implied by the runway number (21R → 210)."""
+    digits = re.sub(r"[^0-9]", "", str(runway or ""))
+    if not digits:
+        return None
+    return float((int(digits) % 100) * 10 % 360)
+
+
 def angle_diff(a: float, b: float) -> float:
     """Smallest absolute difference between two bearings, 0–180."""
     return abs((float(a) - float(b) + 180.0) % 360.0 - 180.0)
@@ -425,6 +433,15 @@ class RunwayFrame:
         length = math.hypot(dx, dz)
         if length < 100.0:  # not a runway; bad or half-captured geometry
             return None
+        heading = _bearing_deg(dx, dz)
+        # KML / drawn lines are sometimes stored departure-end last. If the
+        # centreline points the wrong way vs the runway number, flip it so
+        # lineup heading (21R ≈ 210) is not compared against the reciprocal.
+        expected = _runway_number_heading_deg(runway)
+        if expected is not None and angle_diff(heading, expected) > 90.0:
+            thr, far = far, thr
+            dx, dz = far[0] - thr[0], far[1] - thr[1]
+            heading = _bearing_deg(dx, dz)
         try:
             width = float(geo.get("width_m") or 45.0)
         except (TypeError, ValueError):
@@ -436,7 +453,7 @@ class RunwayFrame:
             fx=far[0],
             fz=far[1],
             length_m=length,
-            heading_deg=_bearing_deg(dx, dz),
+            heading_deg=heading,
             width_m=width,
         )
 

@@ -2535,6 +2535,63 @@ def approach_clearance_auto_ready(
     return True, f"{dist:.1f} NM to {name} — clearance (near fix)"
 
 
+# NATCF → Approach before the VFR exit / IAF, not after they blow through it.
+CONTROL_HANDOFF_BEFORE_FIX_NM = 18.0
+CONTROL_HANDOFF_GAP_S = 8.0
+
+
+def control_handoff_auto_ready(
+    *,
+    airport: dict[str, Any] | None,
+    state: dict[str, Any] | None,
+    config: dict[str, Any] | None = None,
+    callsign: str | None = None,
+    opus: OpusFlightContext | None = None,
+    gap_s: float | None = None,
+) -> tuple[bool, str]:
+    """
+    True when Nellis Control may auto-hand to Approach.
+
+    After NATCF check-in: wait a short radio gap, then fire while still
+    inbound to the exit fix — do not wait until they arrive.
+    """
+    st = state if isinstance(state, dict) else {}
+    hold = auto_tx_hold_reason(st)
+    if hold:
+        return False, hold
+    gap = float(CONTROL_HANDOFF_GAP_S if gap_s is None else gap_s)
+    if gap > 0:
+        try:
+            last = float(st.get("last_tx_at") or 0.0)
+        except (TypeError, ValueError):
+            last = 0.0
+        if last > 0.0:
+            left = gap - (time.time() - last)
+            if left > 0:
+                return False, f"Approach handoff in {left:.0f}s"
+
+    plan = approach_plan_from_state(st, airport=airport)
+    fix = approach_exit_fix_latlon(plan, airport=airport)
+    pos = _ownship_ll_from_state(st)
+    if pos is None:
+        pos = ownship_latlon(config, callsign=callsign, opus=opus, state=st)
+    name = str(
+        plan.get("iaf_say")
+        or plan.get("iaf")
+        or plan.get("direct_say")
+        or plan.get("vfr_recovery_say")
+        or plan.get("vfr_recovery")
+        or "exit"
+    )
+    if fix is None or pos is None:
+        return True, "after Control check-in"
+    dist = _haversine_nm(pos[0], pos[1], fix[0], fix[1])
+    need = CONTROL_HANDOFF_BEFORE_FIX_NM
+    if dist > need:
+        return False, f"{dist:.1f} NM to {name} — hand to Approach at ≤ {need:g} NM"
+    return True, f"{dist:.1f} NM to {name} — Approach handoff"
+
+
 def _enroute_tokens(route: str | None, *, dep_icao: str | None = None) -> list[str]:
     tokens = parse_route_tokens(route)
     if not tokens:
@@ -3819,6 +3876,26 @@ def should_skip_approach_step(
     They still need that call — continue straight-in / roger continue — inside
     ~12 NM; cleared-to-land stays gated at 6 NM. So nothing is skipped here.
     """
+    return False
+
+
+def should_skip_control_step(
+    step: dict[str, Any] | None,
+    state: dict[str, Any] | None = None,
+) -> bool:
+    """Skip the unused Control East/West check-in, or both after check-in."""
+    if not step or str(step.get("template") or "") != "control_check_in":
+        return False
+    st = state if isinstance(state, dict) else {}
+    if st.get("control_checked_in"):
+        return True
+    want = str(st.get("control_channel") or "").strip().lower()
+    ch = str(step.get("channel") or "").strip().lower()
+    if want in ("control_east", "control_west") and ch in (
+        "control_east",
+        "control_west",
+    ):
+        return ch != want
     return False
 
 
@@ -5398,34 +5475,18 @@ def build_blackjack_range_exit(
     include_handoff: bool = True,
 ) -> str:
     """
-    Blackjack range exit: proceed direct to the exit / recovery fix, and
-    start the descent to the IAF / recovery altitude at pilot discretion
-    so they can make it before Approach picks them up.
+    Blackjack range exit: push to Nellis Control early.
 
-    Approach handoff is only when include_handoff is True (inside ~40 NM).
-    Farther out they stay this frequency. Expect recovery stays on Approach.
+    Descent, proceed-direct, and the recovery clearance live on NATCF
+    check-in. Blackjack just releases them and hands off.
     """
     cs = speak_callsign(callsign)
-    p = dict(plan or {})
-    dest = _plan_direct_say(p, airport, runway=str(p.get("runway") or ""))
-    direct = f", proceed direct {dest}" if dest else ""
-    descend = ""
-    dft = p.get("descend_ft")
-    if dft:
-        try:
-            clause = speak_descend_pilot_discretion(int(dft))
-            if clause:
-                descend = f", {clause}"
-        except (TypeError, ValueError):
-            pass
+    del plan  # Routing / descent is NATCF's call.
     if not include_handoff:
-        return (
-            f"{cs}, Blackjack, range exit approved{direct}{descend}, "
-            f"remain this frequency."
-        )
+        return f"{cs}, Blackjack, range exit approved, remain this frequency."
     target = speak_agency_contact_target(airport, handoff_channel or "control_east")
     return with_freq_handoff_closer(
-        f"{cs}, Blackjack, range exit approved{direct}{descend}, contact {target}"
+        f"{cs}, Blackjack, range exit approved, contact {target}"
     )
 
 
@@ -5529,14 +5590,59 @@ def build_contact_joshua(airport: dict[str, Any], callsign: str) -> str:
     return with_freq_handoff_closer(f"{cs}, Blackjack, contact {target}")
 
 
-def build_control_check_in(callsign: str, *, channel: str = "control_east") -> str:
-    """Nellis Control check-in — radar contact, remain this frequency."""
+def build_control_check_in(
+    callsign: str,
+    *,
+    channel: str = "control_east",
+    airport: dict[str, Any] | None = None,
+    plan: dict[str, Any] | None = None,
+) -> str:
+    """
+    Nellis Control (NATCF) check-in: radar contact plus the recovery routing.
+
+    Blackjack only handed them off. Control issues proceed-direct, the
+    descent, and expect-recovery / landing flow when a plan is assigned.
+    """
     cs = speak_callsign(callsign)
     del channel  # East / West share the spoken agency name; Local 7 vs 8 differentiates.
-    return _pick(
-        f"{cs}, Nellis Control, radar contact. Remain this frequency.",
-        f"{cs}, Nellis Control, radar contact, remain this frequency.",
-    )
+    bits = [f"{cs}, Nellis Control, radar contact"]
+    p = dict(plan or {})
+    dest = ""
+    if airport:
+        dest = _plan_direct_say(p, airport, runway=str(p.get("runway") or ""))
+    if dest:
+        bits.append(f"proceed direct {dest}")
+    dft = p.get("descend_ft")
+    if dft:
+        try:
+            clause = speak_descend_pilot_discretion(int(dft))
+            if clause:
+                bits.append(clause)
+        except (TypeError, ValueError):
+            pass
+    if airport and p:
+        rwy = str(p.get("runway") or "")
+        name = str(airport.get("name") or "Nellis")
+        if rwy:
+            bits.append(speak_landing_flow(rwy, name))
+        rec_key = normalize_recovery_key(p.get("pattern"))
+        instrument = rec_key == "instrument" or bool(p.get("iaf"))
+        if instrument:
+            inst_say = str(p.get("instrument_say") or "").strip()
+            if inst_say:
+                bits.append(f"expect {inst_say}")
+            elif rwy:
+                bits.append(f"expect instrument approach runway {speak_runway(rwy)}")
+        else:
+            vfr_say = str(p.get("vfr_recovery_say") or p.get("vfr_recovery") or "").strip()
+            expect_key = recovery_expect(rec_key)
+            if vfr_say:
+                bits.append(speak_expect_vfr_recovery(vfr_say, expect_key, rwy))
+            elif rwy or expect_key:
+                bits.append(speak_expect_pattern(expect_key, rwy))
+    if len(bits) == 1:
+        bits.append("remain this frequency")
+    return ", ".join(bits) + "."
 
 
 def build_control_handoff(
@@ -6181,6 +6287,49 @@ def _true_bearing_deg(lat1: float, lon1: float, lat2: float, lon2: float) -> flo
     return (math.degrees(math.atan2(y, x)) + 360.0) % 360.0
 
 
+def declination_east_deg(config: dict[str, Any] | None = None) -> float:
+    """East magnetic declination (true − mag). NTTR default 12°E, overridable."""
+    raw = (config or {}).get(
+        "bullseye_magnetic_declination_deg", _NTTR_MAG_DECLINATION_E_DEG
+    )
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return float(_NTTR_MAG_DECLINATION_E_DEG)
+
+
+def true_to_magnetic_deg(
+    true_brg: float,
+    *,
+    config: dict[str, Any] | None = None,
+    declination_e_deg: float | None = None,
+) -> float:
+    """True heading/bearing → magnetic (subtract east declination)."""
+    decl = (
+        float(declination_e_deg)
+        if declination_e_deg is not None
+        else declination_east_deg(config)
+    )
+    return (float(true_brg) - decl) % 360.0
+
+
+def magnetic_bearing_deg(
+    lat1: float,
+    lon1: float,
+    lat2: float,
+    lon2: float,
+    *,
+    config: dict[str, Any] | None = None,
+    declination_e_deg: float | None = None,
+) -> float:
+    """Initial magnetic bearing point 1 → 2. Spoken BRAA / bullseye use this."""
+    return true_to_magnetic_deg(
+        _true_bearing_deg(lat1, lon1, lat2, lon2),
+        config=config,
+        declination_e_deg=declination_e_deg,
+    )
+
+
 def caoc_bullseye_brg_rng_nm(
     unit_lat: float,
     unit_lon: float,
@@ -6190,8 +6339,13 @@ def caoc_bullseye_brg_rng_nm(
     magnetic_declination_e_deg: float = _NTTR_MAG_DECLINATION_E_DEG,
 ) -> tuple[int, int]:
     """Magnetic bearing + range NM from bullseye → unit (CAOC popup rounding)."""
-    true_brg = _true_bearing_deg(be_lat, be_lon, unit_lat, unit_lon)
-    mag_brg = (true_brg - float(magnetic_declination_e_deg)) % 360.0
+    mag_brg = magnetic_bearing_deg(
+        be_lat,
+        be_lon,
+        unit_lat,
+        unit_lon,
+        declination_e_deg=magnetic_declination_e_deg,
+    )
     rng_nm = _haversine_nm(be_lat, be_lon, unit_lat, unit_lon)
     return int(round(mag_brg)) % 360, int(round(rng_nm))
 
@@ -6332,6 +6486,81 @@ def caoc_air_units(units: list[dict[str, Any]]) -> list[dict[str, Any]]:
             continue
         out.append(u)
     return out
+
+
+# Shot-down / ejected tracks still linger on the CAOC feed as type=air.
+# DCS names the chute / wreck "Pilot"; Opus shows that on the map.
+_PICTURE_DEAD_NAMES = frozenset({"pilot", "parachutist", "parachute"})
+_PICTURE_DEAD_NAME_RE = re.compile(r"^pilot\s*#?\d*$", re.I)
+_PICTURE_DEAD_OBJECT_TOKENS: tuple[str, ...] = (
+    "PARACHUT",
+    "PARACHUTE",
+    "WRECK",
+    "INFANTRY",
+    "SOLDIER",
+)
+_FALSEY = frozenset({False, 0, 0.0, "0", "false", "no", "off"})
+_TRUTHY = frozenset({True, 1, 1.0, "1", "true", "yes", "on"})
+
+
+def caoc_unit_is_dead_or_wreck(unit: dict[str, Any] | None) -> bool:
+    """
+    True for shot-down, ejected, or wreck tracks that should not fill a picture.
+
+    Opus often keeps the slot after a kill; the map label becomes "Pilot".
+    """
+    if not isinstance(unit, dict):
+        return True
+    for key in ("alive", "isAlive", "Alive"):
+        if key in unit and unit.get(key) in _FALSEY:
+            return True
+    for key in ("dead", "isDead", "destroyed", "isDestroyed", "crashed", "shotDown"):
+        if unit.get(key) in _TRUTHY:
+            return True
+    life = unit.get("life")
+    if life is None:
+        life = unit.get("Life")
+    if life is not None:
+        try:
+            if float(life) <= 0:
+                return True
+        except (TypeError, ValueError):
+            pass
+    life_state = unit.get("lifeState")
+    if life_state is None:
+        life_state = unit.get("LifeState")
+    if life_state is not None:
+        try:
+            if int(life_state) >= 1:
+                return True
+        except (TypeError, ValueError):
+            blob = str(life_state).casefold()
+            if blob in {"dead", "dying", "destroyed", "crashed"}:
+                return True
+    name = str(unit.get("name") or "").strip()
+    pilot = str(unit.get("pilotName") or "").strip()
+    if name.casefold() in _PICTURE_DEAD_NAMES or _PICTURE_DEAD_NAME_RE.fullmatch(name):
+        return True
+    if pilot.casefold() in _PICTURE_DEAD_NAMES or _PICTURE_DEAD_NAME_RE.fullmatch(pilot):
+        # Living players have a flight label / callsign; ejected slots do not.
+        if not (
+            str(unit.get("flightLabel") or "").strip()
+            or str(unit.get("unitCallsign") or "").strip()
+        ):
+            return True
+    obj = str(unit.get("objectName") or unit.get("object_name") or "").upper()
+    if any(tok in obj for tok in _PICTURE_DEAD_OBJECT_TOKENS):
+        return True
+    if "PILOT" in obj and "F-16" not in obj and "F16" not in obj:
+        return True
+    return False
+
+
+def caoc_unit_is_picture_eligible(unit: dict[str, Any] | None) -> bool:
+    """Air track that may appear on picture / declare / bogey dope."""
+    if not isinstance(unit, dict):
+        return False
+    return not caoc_unit_is_dead_or_wreck(unit)
 
 
 # Theater fixtures that are always on the CAOC picture (hostile tanker / AWACS).
@@ -10171,9 +10400,8 @@ def build_template_text(
             )
         if step is not None:
             step["handoff_channel"] = next_ch
-        # Pre-assign so Blackjack can clear to the exit / recovery fix;
-        # Approach issues expect recovery + clearance on check-in.
-        plan = assign_approach_plan(
+        # Pre-assign so NATCF can issue proceed-direct / descent / expect.
+        assign_approach_plan(
             airport,
             weather,
             mission=mission,
@@ -10181,12 +10409,10 @@ def build_template_text(
             opus=opus,
             force=False,
         )
-        if isinstance(state, dict) and state.get("range_exit_approved"):
-            return build_blackjack_approach_handoff(
-                airport, callsign, handoff_channel=next_ch
-            )
+        if isinstance(state, dict) and next_ch:
+            state["control_channel"] = next_ch
         return build_blackjack_range_exit(
-            airport, callsign, handoff_channel=next_ch, plan=plan
+            airport, callsign, handoff_channel=next_ch
         )
     if template == "contact_bandsaw":
         return build_contact_bandsaw(airport, callsign)
@@ -10237,7 +10463,22 @@ def build_template_text(
             airport, callsign, handoff_channel=handoff
         )
     if template == "control_check_in":
-        return build_control_check_in(callsign, channel=channel or "control_east")
+        plan = assign_approach_plan(
+            airport,
+            weather,
+            mission=mission,
+            state=state,
+            opus=opus,
+            force=False,
+        )
+        if isinstance(state, dict):
+            state["control_checked_in"] = True
+        return build_control_check_in(
+            callsign,
+            channel=channel or "control_east",
+            airport=airport,
+            plan=plan,
+        )
     if template == "control_handoff":
         next_ch = resolve_handoff_channel(
             step=step,

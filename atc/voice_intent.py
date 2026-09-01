@@ -995,6 +995,10 @@ INTENTS: tuple[Intent, ...] = (
                 "whats for lunch",
                 "shoot the breeze",
                 "small talk",
+                "got time to talk",
+                "wanna chat",
+                "want to chat",
+                "start chatting",
             ),
         ),
         kind="request",
@@ -1003,6 +1007,26 @@ INTENTS: tuple[Intent, ...] = (
         weight=1.05,
         example="how's it going",
         does="boom / reform small talk",
+    ),
+    Intent(
+        "tanker_chat_stop",
+        (
+            (
+                "stop talking",
+                "stop chatting",
+                "stop the chat",
+                "quit talking",
+                "that's enough",
+                "thats enough",
+                "talk later",
+            ),
+        ),
+        kind="request",
+        channels=("tanker",),
+        phases=("flight",),
+        weight=1.2,
+        example="stop talking",
+        does="end boom small talk",
     ),
     Intent(
         "say_again",
@@ -2459,6 +2483,8 @@ def _altitudes_equivalent(a: int, b: int) -> bool:
 
 def _climb_readback_hit(text: str, item: dict[str, Any] | None) -> bool:
     """True when the assigned climb altitude was heard (flexible phrasing)."""
+    if item is None:
+        return False
     assigned = _assigned_climb_ft(item)
     if assigned is None:
         return False
@@ -3344,6 +3370,7 @@ def evaluate(
             "tanker_depart",
             "tanker_dcs_precontact",
             "tanker_dcs_abort",
+            "tanker_chat_stop",
             "say_again",
         }
     ):

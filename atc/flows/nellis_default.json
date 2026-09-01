@@ -19,7 +19,7 @@
       "file": null,
       "enabled": true,
       "text": null,
-      "initial_climb_ft": 13000
+      "initial_climb_ft": 17000
     },
     {
       "id": "del_readback",
@@ -105,7 +105,7 @@
       "file": null,
       "enabled": true,
       "text": null,
-      "initial_climb_ft": 13000
+      "initial_climb_ft": 17000
     },
     {
       "id": "dep_cruise",
@@ -243,9 +243,8 @@
       "text": null,
       "handoff_channel": "control_east",
       "trigger": {
-        "zone": "approach",
-        "within_nm": 40,
-        "when": "inside",
+        "zone": "blackjack",
+        "when": "leaving",
         "settled": false,
         "dwell_s": 0,
         "gap_s": 5
@@ -261,7 +260,7 @@
       "file": null,
       "enabled": true,
       "text": null,
-      "hold": true
+      "hold": false
     },
     {
       "id": "control_west_checkin",
@@ -273,7 +272,7 @@
       "file": null,
       "enabled": true,
       "text": null,
-      "hold": true
+      "hold": false
     },
     {
       "id": "control_to_approach",
@@ -285,7 +284,8 @@
       "file": null,
       "enabled": true,
       "text": null,
-      "handoff_channel": "approach"
+      "handoff_channel": "approach",
+      "_comment": "Auto-fires while inbound to the IAF / VFR exit (before the fix)."
     },
     {
       "id": "app_checkin",
@@ -383,5 +383,5 @@
   ],
   "active_takeoff_mode": "lineup",
   "landing_intent": "full_stop",
-  "initial_climb_ft": 13000
+  "initial_climb_ft": 17000
 }

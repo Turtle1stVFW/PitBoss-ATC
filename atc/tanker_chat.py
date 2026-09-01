@@ -2,8 +2,9 @@
 Boom / reform small talk on tanker freq (ATP-56 join is separate).
 
 Texaco keeps an informal side-channel going while the receiver is in reform or
-on the boom — no callsign addressing. The boom operator is enlisted USAF talking
-to an F-16 officer on a military tanker: dry and funny, not buddy-buddy, not
+on the boom — no callsign addressing. The boom operator is a female enlisted
+USAF talking to an F-16 officer on a military tanker: dry and funny, not
+buddy-buddy, not
 airline. Bits are mixed:
 
   • hello — first contact only: time-of-day pleasantry (Good morning, sir)
@@ -116,6 +117,16 @@ _STOP_HITS = (
     "checking out",
     "stop chatting",
     "stop the chat",
+    "stop talking",
+    "stop speaking",
+    "quit talking",
+    "quit chatting",
+    "be quiet",
+    "quiet down",
+    "that's enough",
+    "thats enough",
+    "that is enough",
+    "that s enough",
     "end chat",
     "enough chat",
     "enough talking",
@@ -126,6 +137,7 @@ _STOP_HITS = (
     "that will be all",
     "later texaco",
     "see you later",
+    "stop",
 )
 
 _STOP_REPLY = "Standing by, sir — looking good."
@@ -1361,6 +1373,14 @@ def llm_json(
     return parsed if isinstance(parsed, dict) else None
 
 
+_BOOM_GENDER = (
+    "You are a woman — a female USAF KC-135 boom operator. "
+    "Never describe yourself as a man, guy, dude, male, or 'one of the guys'. "
+    "Do not joke that you are a man or switch gender. "
+    "Talking about other men on the crew is fine. "
+)
+
+
 _BOOM_RANK_TONE = (
     "You are an enlisted USAF KC-135 boom operator talking to an F-16 officer "
     "while you gas the fighter on a military tanker track. "
@@ -1372,8 +1392,8 @@ _BOOM_RANK_TONE = (
 
 
 _BOOM_IDENTITY = (
-    "You ARE the KC-135 boom operator. First person, on the radio, talking to "
-    "a real F-16 officer on your boom. You are not a narrator and you are not "
+    "You ARE the female KC-135 boom operator. First person, on the radio, talking "
+    "to a real F-16 officer on your boom. You are not a narrator and you are not "
     "writing a screenplay. Never invent the fighter's next line. Never output "
     "labels like Pilot:, Boom:, Texaco:, You:, MIC:, or F-16:. Speak only YOUR "
     "radio words, then STOP and wait — the human answers. This is dialogue: "
@@ -1405,12 +1425,14 @@ def _boom_llm_system(*, json_out: bool) -> str:
     if json_out:
         return (
             f"{_BOOM_IDENTITY}"
+            f"{_BOOM_GENDER}"
             "Return exactly one JSON object only. opener is only YOUR next "
             "radio sentence — never a fake pilot answer. "
             "Never concatenate multiple objects. No markdown."
         )
     return (
         f"{_BOOM_IDENTITY}"
+        f"{_BOOM_GENDER}"
         "Answer the F-16 directly and stay on their topic. "
         "Plain radio text only. No JSON. No markdown. "
         'Good: "Ha — that\'s the view I live with. Boom pad or Viper seat, who got robbed?" '
@@ -1445,6 +1467,7 @@ def _llm_prompt(
     return (
         "You write one short boom-operator radio bit for a KC-135 refueling an F-16. "
         f"{_BOOM_IDENTITY}"
+        f"{_BOOM_GENDER}"
         f"{_BOOM_RANK_TONE}"
         f"{_BOOM_SETTING}"
         f"{_BOOM_STYLE}"
@@ -1498,6 +1521,7 @@ def _llm_riff_prompt(
     return (
         "Write one short KC-135 boom-operator QUESTION an F-16 officer can answer. "
         f"{_BOOM_IDENTITY}"
+        f"{_BOOM_GENDER}"
         f"{_BOOM_RANK_TONE}"
         f"{_BOOM_SETTING}"
         f"{_BOOM_STYLE}"
@@ -1532,6 +1556,7 @@ def _llm_react_prompt(
     return (
         "You ARE the KC-135 boom operator answering on the radio. "
         f"{_BOOM_IDENTITY}"
+        f"{_BOOM_GENDER}"
         f"{_BOOM_RANK_TONE}"
         f"{_BOOM_SETTING}"
         f"{_BOOM_STYLE}"
@@ -1574,6 +1599,7 @@ def _llm_answer_prompt(
     return (
         "You ARE the KC-135 boom operator. Short informal radio reply. "
         f"{_BOOM_IDENTITY}"
+        f"{_BOOM_GENDER}"
         f"{_BOOM_RANK_TONE}"
         f"{_BOOM_SETTING}"
         f"{_BOOM_STYLE}"
@@ -1602,6 +1628,7 @@ def _llm_dialogue_nudge_prompt(
     hist = (history or "").strip() or "(none)"
     return (
         f"{_BOOM_IDENTITY}"
+        f"{_BOOM_GENDER}"
         f"{coffee_rule}"
         "One or two short radio sentences as the boom operator. Answer what they "
         "said, then end with a real question mark so they can talk back. No labels. "
