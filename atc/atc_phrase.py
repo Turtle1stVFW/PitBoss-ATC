@@ -7089,6 +7089,53 @@ def list_caoc_air_bullseyes(
     return rows
 
 
+def _scrub_pilot_label(raw: str) -> str:
+    text = str(raw or "").strip()
+    text = re.sub(r"\s*[@#]IFF:.*$", "", text, flags=re.I).strip()
+    if "|" in text:
+        text = text.split("|")[-1].strip()
+    return text
+
+
+def _pilot_name_match_score(want: str, unit: dict[str, Any]) -> int:
+    """
+    Score a CAOC track against the Opus / CAOC username.
+
+    Flight labels are often wrong or empty; DCS puts the player in `pilotName`
+    or `name`. Exact, substring, and last-token matches all count.
+    """
+    want_n = _norm_match_token(want)
+    if len(want_n) < 3:
+        return 0
+    fields = [
+        _scrub_pilot_label(str(unit.get(k) or ""))
+        for k in ("pilotName", "name", "unitName", "unitCallsign")
+    ]
+    best = 0
+    for raw in fields:
+        have = _norm_match_token(raw)
+        if not have or have in {"pilot", "player", "f16", "f16c", "f15", "f18"}:
+            continue
+        if have == want_n:
+            return 90
+        if len(want_n) >= 4 and (want_n in have or have in want_n):
+            best = max(best, 85)
+            continue
+        want_toks = [
+            _norm_match_token(t)
+            for t in re.split(r"[\s._-]+", want)
+            if len(_norm_match_token(t)) >= 4
+        ]
+        have_toks = [
+            _norm_match_token(t)
+            for t in re.split(r"[\s._-]+", raw)
+            if len(_norm_match_token(t)) >= 4
+        ]
+        if want_toks and have_toks and set(want_toks) & set(have_toks):
+            best = max(best, 80)
+    return best
+
+
 def match_caoc_unit_for_flight(
     units: list[dict[str, Any]],
     *,
@@ -7115,7 +7162,6 @@ def match_caoc_unit_for_flight(
     fid = opus.flight_id if opus else configured_opus_flight_id(config)
     mode3 = (opus.mode3 if opus else None) or None
     pilot = (config.get("opus_user_name") or "").strip()
-    pilot_n = _norm_match_token(pilot)
     raw_cs = (opus.radio_callsign if opus else None) or callsign or ""
     label_cs = clean_flight_callsign(str(config.get("opus_flight_label") or ""))
     cs = clean_flight_callsign(raw_cs) or label_cs
@@ -7129,18 +7175,6 @@ def match_caoc_unit_for_flight(
     # when the name+number are already in `cs`.
     if cs_name and cs_num:
         cs_tokens = [t for t in cs_tokens if not t.isdigit() or t == cs_num]
-
-    def _unit_pilot_blob(u: dict[str, Any]) -> str:
-        for key in ("pilotName", "name"):
-            raw = str(u.get(key) or "").strip()
-            if not raw:
-                continue
-            raw = re.sub(r"\s*[@#]IFF:.*$", "", raw, flags=re.I).strip()
-            if "|" in raw:
-                raw = raw.split("|")[-1].strip()
-            if raw:
-                return raw
-        return ""
 
     scored: list[tuple[int, dict[str, Any]]] = []
     for u in air:
@@ -7157,9 +7191,7 @@ def match_caoc_unit_for_flight(
         ]
         if cs and any(same_flight_callsign(cs, lab) for lab in labels if lab):
             score += 80
-        unit_pilot = _unit_pilot_blob(u)
-        if pilot_n and unit_pilot and _norm_match_token(unit_pilot) == pilot_n:
-            score += 90
+        score += _pilot_name_match_score(pilot, u)
         if mode3 and u.get("squawk"):
             sq = re.sub(r"\D", "", str(u.get("squawk")))
             m3 = re.sub(r"\D", "", str(mode3))
@@ -12432,6 +12464,7 @@ def transmit(
     voice_override: str | None = None,
     step: dict[str, Any] | None = None,
     speed_override: float | int | None = None,
+    radio: Any = None,
 ) -> int:
     import srs_radio  # local — EAM common-PTT overrides TX freq
 
@@ -12441,7 +12474,8 @@ def transmit(
         return 2
 
     # EAM strip: common PTT → only the selected radio's MHz goes on the wire.
-    freq, mod = srs_radio.maybe_force_eam_tx_freq(config, freq, mod)
+    # `radio` is the calling pilot (client session), not the host PC's SRS.
+    freq, mod = srs_radio.maybe_force_eam_tx_freq(config, freq, mod, radio=radio)
 
     provider = tts_provider(config)
     google_creds = google_credentials_path(config)
@@ -12489,7 +12523,9 @@ def transmit(
             wav_path = synthesize_google_tts(
                 google_creds, voice, text, speed=speed, session_id=sid
             )
-            return transmit_file(config, airport, str(wav_path), tx_name, freq, mod)
+            return transmit_file(
+                config, airport, str(wav_path), tx_name, freq, mod, radio=radio
+            )
         except Exception as exc:  # noqa: BLE001
             print(f"ERROR: Google local synth/TX failed: {exc}", file=sys.stderr)
             return 2
@@ -12539,6 +12575,7 @@ def transmit_file(
     tx_name: str,
     freq: float,
     mod: str,
+    radio: Any = None,
 ) -> int:
     import srs_radio  # local — EAM common-PTT overrides TX freq
 
@@ -12551,7 +12588,7 @@ def transmit_file(
         print(f"Audio file not found: {path}", file=sys.stderr)
         return 2
 
-    freq, mod = srs_radio.maybe_force_eam_tx_freq(config, freq, mod)
+    freq, mod = srs_radio.maybe_force_eam_tx_freq(config, freq, mod, radio=radio)
 
     cmd = [
         str(exe),

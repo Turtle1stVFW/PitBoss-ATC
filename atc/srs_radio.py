@@ -382,18 +382,29 @@ def maybe_force_eam_tx_freq(
     config: dict[str, Any] | None,
     freq: float,
     mod: str,
+    radio: RadioState | None = None,
 ) -> tuple[float, str]:
     """
     Common-PTT EAM mode: ExternalAudio must TX only on the selected radio.
 
-    Prefer the live SRS client selection; fall back to the manual EAM strip.
+    Prefer the calling pilot's radios (host session), then this PC's SRS
+    client, then the manual EAM strip. A dedicated host must not steal the
+    TX frequency from its own (or empty) radio bank.
     """
     apply_config(config)
     if not _eam_enabled:
         return float(freq), mod
+    if radio is not None and radio.fresh:
+        if radio.selected_mhz is not None:
+            return float(radio.selected_mhz), mod
+        if radio.freqs_mhz:
+            return float(radio.freqs_mhz[0]), mod
     srs = read_srs_client_selected()
-    if srs.fresh and srs.freqs_mhz:
-        return float(srs.freqs_mhz[0]), mod
+    if srs.fresh:
+        if srs.selected_mhz is not None:
+            return float(srs.selected_mhz), mod
+        if srs.freqs_mhz:
+            return float(srs.freqs_mhz[0]), mod
     active = eam_active_mhz()
     if active is None:
         return float(freq), mod

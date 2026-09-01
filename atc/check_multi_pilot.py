@@ -437,6 +437,21 @@ def test_injected_radio_gate() -> list[str]:
     )
     if allowed2 or result2 != "mismatch":
         fails.append(f"client VHF should miss Ground, got {result2}")
+    eam_cfg = _host_config(freq_gate_eam_enabled=True)
+    srs_radio.apply_config(eam_cfg)
+    client_sel = srs_radio.RadioState(
+        source="client",
+        freqs_mhz=[123.625],
+        selected_mhz=123.625,
+        fresh=True,
+        age_s=0.0,
+    )
+    forced, _mod = srs_radio.maybe_force_eam_tx_freq(
+        eam_cfg, 289.4, "AM", radio=client_sel
+    )
+    if abs(forced - 123.625) > 0.01:
+        fails.append(f"EAM host TX should use client selected 123.625, got {forced}")
+    srs_radio.apply_config(_host_config(freq_gate_eam_enabled=False))
     return fails
 
 
@@ -514,6 +529,32 @@ def test_wild6_ownship_and_shared_cursor() -> list[str]:
     )
     if not own or str(own.get("id")) != "wild":
         fails.append(f"ownship should be WILD 61, got {own}")
+
+    by_pilot = atc_phrase.match_caoc_unit_for_flight(
+        [
+            {
+                "type": "air",
+                "id": "wrong-cs",
+                "name": "F-16C_50",
+                "flightLabel": "HOBO 11",
+                "pilotName": "Sterling",
+                "xMeters": 0,
+                "zMeters": 0,
+            },
+            {
+                "type": "air",
+                "id": "other",
+                "name": "Viper",
+                "flightLabel": "VIPER 11",
+                "xMeters": 1,
+                "zMeters": 1,
+            },
+        ],
+        callsign="WILD 6",
+        config={"opus_user_name": "Sterling"},
+    )
+    if not by_pilot or str(by_pilot.get("id")) != "wrong-cs":
+        fails.append(f"pilot-name fallback should find Sterling, got {by_pilot}")
 
     host_eng = flow_engine.FlowEngine(
         config=_host_config(),

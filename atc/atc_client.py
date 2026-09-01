@@ -28,6 +28,7 @@ class AtcClient:
         self.callsign = ""
         self.last_status: dict[str, Any] = {}
         self.last_error = ""
+        self._rehello_guard = False
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
@@ -65,9 +66,12 @@ class AtcClient:
         self.last_error = ""
         return data
 
-    def post_intent(self, match: voice_intent.Match) -> dict[str, Any]:
+    def _ensure_session(self) -> None:
         if not self.session_id:
             self.hello()
+
+    def post_intent(self, match: voice_intent.Match) -> dict[str, Any]:
+        self._ensure_session()
         body = {
             "session_id": self.session_id,
             "intent": match.intent,
@@ -85,6 +89,7 @@ class AtcClient:
         return self._request("POST", "/v1/intent", body)
 
     def action(self, command: str, **fields: Any) -> dict[str, Any]:
+        self._ensure_session()
         body = {"session_id": self.session_id}
         body.update(fields)
         body.update(_radio_payload(self.config))
@@ -106,6 +111,7 @@ class AtcClient:
     def _heartbeat_loop(self) -> None:
         while not self._stop.wait(1.0):
             try:
+                self._ensure_session()
                 body = {"session_id": self.session_id}
                 body.update(_radio_payload(self.config))
                 data = self._request("POST", "/v1/heartbeat", body)
@@ -113,6 +119,13 @@ class AtcClient:
                 self.last_error = ""
             except Exception as exc:  # noqa: BLE001
                 self.last_error = str(exc)
+                if "unknown session" in str(exc).casefold():
+                    self.session_id = ""
+                    try:
+                        self.hello()
+                        self.last_error = ""
+                    except Exception as hello_exc:  # noqa: BLE001
+                        self.last_error = str(hello_exc)
 
     def _request(
         self,
@@ -142,6 +155,21 @@ class AtcClient:
                 msg = str(parsed.get("error") or detail)
             except Exception:
                 msg = detail or str(exc)
+            if (
+                exc.code == 404
+                and "unknown session" in msg.casefold()
+                and "/hello" not in path
+                and not getattr(self, "_rehello_guard", False)
+            ):
+                self.session_id = ""
+                self._rehello_guard = True
+                try:
+                    self.hello()
+                    if body is not None:
+                        body["session_id"] = self.session_id
+                    return self._request(method, path, body, headers=headers)
+                finally:
+                    self._rehello_guard = False
             raise AtcClientError(f"{exc.code} {msg} [{url}]") from exc
         except urllib.error.URLError as exc:
             raise AtcClientError(

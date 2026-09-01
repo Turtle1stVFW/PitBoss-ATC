@@ -248,13 +248,20 @@ class FlowEngine:
             "step": step,
             "config": self.config,
             "airport": self.airport(),
+            "radio": self.remote_radios,
         }
         if self.defer_tx:
             self.pending_tx = payload
             return 0
         if file_path:
             return atc_phrase.transmit_file(
-                self.config, self.airport(), file_path, tx_name, freq, mod
+                self.config,
+                self.airport(),
+                file_path,
+                tx_name,
+                freq,
+                mod,
+                radio=self.remote_radios,
             )
         return atc_phrase.transmit(
             self.config,
@@ -266,6 +273,7 @@ class FlowEngine:
             channel=channel,
             voice_override=voice_override,
             step=step,
+            radio=self.remote_radios,
         )
 
     def take_pending_tx(self) -> dict[str, Any] | None:
