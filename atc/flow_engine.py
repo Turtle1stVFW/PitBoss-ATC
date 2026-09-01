@@ -307,6 +307,7 @@ class FlowEngine:
         while idx < len(steps) and self._step_is_skippable(steps[idx]):
             idx += 1
         self.state["index"] = idx
+        self._park_pending_departure_handoff()
 
     def _step_is_skippable(self, step: dict[str, Any] | None) -> bool:
         if not step:
@@ -386,6 +387,37 @@ class FlowEngine:
         if random.random() < chance:
             self.state["pending_takeoff_offer"] = "rolling"
         self.save_state()
+
+    def _park_pending_departure_handoff(self) -> None:
+        """
+        After Departure radar / climb, stay on the Blackjack handoff.
+
+        Skipping the unused climb-to-cruise step must not walk the cursor onto
+        Control → Approach. A leftover recovery cursor plus a filed TORYE
+        (outbound local hop) made Watch hand to Approach instead of Blackjack.
+        """
+        last_id = str(self.state.get("last_step_id") or "").strip()
+        last_tmpl = str(self.state.get("last_tx_template") or "").strip().lower()
+        played_tmpl = last_tmpl
+        for step in self.steps:
+            if str(step.get("id") or "").strip() == last_id:
+                played_tmpl = str(step.get("template") or last_tmpl).strip().lower()
+                break
+        if played_tmpl not in ("radar_contact", "climb_cruise"):
+            return
+        handoff_i = next(
+            (
+                i
+                for i, step in enumerate(self.steps)
+                if str(step.get("template") or "") == "departure_handoff"
+            ),
+            None,
+        )
+        if handoff_i is None:
+            return
+        idx = int(self.state.get("index") or 0)
+        if idx > handoff_i:
+            self.state["index"] = handoff_i
 
     def prepare_takeoff_cursor(self) -> None:
         """Skip LUAW if needed + maybe arm a rolling offer for the current step."""
@@ -717,7 +749,10 @@ class FlowEngine:
             return
         steps = self.steps
         idx = int(self.state.get("index") or 0)
-        prev = steps[idx - 1] if steps and 1 <= idx <= len(steps) else None
+        prev_i = idx - 1
+        while prev_i > 0 and self._step_is_skippable(steps[prev_i]):
+            prev_i -= 1
+        prev = steps[prev_i] if steps and 0 <= prev_i < len(steps) else None
         if not prev:
             self._clear_readback_state()
             return
@@ -966,12 +1001,16 @@ class FlowEngine:
                 "app_tower",
                 "twr_clear",
                 "twr_right",
+                "exit_runway",
+                "twr_exit",
             ]
         else:
             # VFR closed / Flex / Duck: already with Tower — new land on final.
             self.state["clear_position_fire_substrings"] = [
                 "clear_land",
                 "twr_clear",
+                "exit_runway",
+                "twr_exit",
             ]
         if kind == "instrument_missed":
             if not self._seek_template("approach_check_in"):

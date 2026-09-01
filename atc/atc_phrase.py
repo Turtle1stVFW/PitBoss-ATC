@@ -315,6 +315,8 @@ _RUNWAY_TOKEN = re.compile(r"^(\d{1,2})([LCR]?)$", re.IGNORECASE)
 _FIX_TRAIL_DIGITS = re.compile(r"^([A-Za-z]+)(\d+)$")
 # Opus visual Flex: FLEX, FLEX21R, FLEX21L, FLEX03, FLEX03L, FLEX03R, …
 _FLEX_DEP_TOKEN = re.compile(r"^FLEX(\d{1,2}[LCR]?)?$", re.IGNORECASE)
+# SID + two-digit runway glued on (PEAKS21R, FLEX03L). Not DREAM7 / MMM8.
+_DEP_GLUED_RUNWAY = re.compile(r"^[A-Z]+(\d{2}[LCR]?)$")
 
 # Map our agency channels -> substrings in Opus theater radio preset names
 OPUS_FREQ_NAME_MAP: dict[str, tuple[str, ...]] = {
@@ -1097,6 +1099,33 @@ def _flex_runway(token: str) -> str | None:
     return f"{int(rm.group(1)):02d}{rm.group(2).upper()}"
 
 
+def _glued_dep_runway(token: str) -> str | None:
+    """Runway glued onto a SID name: PEAKS21R / FLEX03L. Not DREAM7."""
+    n = _normalize_dep_token(token)
+    m = _DEP_GLUED_RUNWAY.match(n)
+    if not m:
+        return None
+    rm = _RUNWAY_TOKEN.match(m.group(1))
+    if not rm:
+        return None
+    return f"{int(rm.group(1)):02d}{rm.group(2).upper()}"
+
+
+def _sid_token_matches_alias(tok: str, aliases: set[str]) -> bool:
+    """True when the filed token is the SID, or the SID plus a runway (PEAKS21R)."""
+    n = _normalize_dep_token(tok)
+    if n in aliases:
+        return True
+    for alias in aliases:
+        if not alias or not n.startswith(alias) or len(n) <= len(alias):
+            continue
+        rest = n[len(alias) :]
+        rm = _RUNWAY_TOKEN.match(rest)
+        if rm and len(rm.group(1)) >= 2:
+            return True
+    return False
+
+
 def _normalize_dep_token(tok: str) -> str:
     return re.sub(r"[^A-Z0-9]", "", (tok or "").upper())
 
@@ -1113,6 +1142,9 @@ def runway_from_route(route: str | None) -> str | None:
         flex_rwy = _flex_runway(tok)
         if flex_rwy:
             return flex_rwy
+        glued = _glued_dep_runway(tok)
+        if glued:
+            return glued
     m = _RUNWAY_TOKEN.match(tokens[-1])
     if not m:
         return None
@@ -2441,6 +2473,9 @@ APPROACH_CLEARANCE_GAP_S = 6.0
 # If closer than this to the IAF / exit fix, still fire (about to arrive) —
 # clearance is meant to come before the fix, not wait until you get there.
 APPROACH_CLEARANCE_AT_FIX_NM = 3.0
+
+# First-pass auto-clearance: inbound, but not 75 NM out in Control's airspace.
+APPROACH_CLEARANCE_WITHIN_NM = 40.0
 # After an instrument missed / radar vectors back to the IAF, wait until the
 # jet is this close to the fix before auto-clearing the approach again.
 APPROACH_CLEARANCE_AFTER_MISSED_NM = 8.0
@@ -2529,7 +2564,12 @@ def approach_clearance_auto_ready(
         if dist > need:
             return False, f"{dist:.1f} NM to {name} — need ≤ {need:g} NM for clearance"
         return True, f"{dist:.1f} NM to {name} — clearance (near fix)"
-    # First recovery: still inbound or already at the fix — clear now.
+    # First recovery: clear once they are actually in Approach, not 75 NM out.
+    if dist > APPROACH_CLEARANCE_WITHIN_NM:
+        return (
+            False,
+            f"{dist:.1f} NM to {name} — need ≤ {APPROACH_CLEARANCE_WITHIN_NM:g} NM",
+        )
     if dist > APPROACH_CLEARANCE_AT_FIX_NM:
         return True, f"{dist:.1f} NM to {name} — clearance"
     return True, f"{dist:.1f} NM to {name} — clearance (near fix)"
@@ -2552,13 +2592,17 @@ def control_handoff_auto_ready(
     """
     True when Nellis Control may auto-hand to Approach.
 
-    After NATCF check-in: wait a short radio gap, then fire while still
-    inbound to the exit fix — do not wait until they arrive.
+    After NATCF check-in (this sortie is actually with Control): wait a short
+    radio gap, then fire while still inbound to the exit fix — do not wait
+    until they arrive. Departure radar near TORYE must not steal this call.
     """
     st = state if isinstance(state, dict) else {}
     hold = auto_tx_hold_reason(st)
     if hold:
         return False, hold
+    last_ag = str(st.get("last_agency") or "").strip().lower()
+    if last_ag not in ("control_east", "control_west"):
+        return False, "waiting for Nellis Control"
     gap = float(CONTROL_HANDOFF_GAP_S if gap_s is None else gap_s)
     if gap > 0:
         try:
@@ -2626,12 +2670,18 @@ class DepartureMatch:
     def found(self) -> bool:
         return bool(self.instrument_say or self.visual_say)
 
+    @property
+    def is_visual(self) -> bool:
+        """Flex / visual DP with no instrument SID (VFR)."""
+        return bool(self.visual_say) and not self.instrument_say
+
 
 def match_departure(airport: dict[str, Any], route: str | None) -> DepartureMatch:
     """
     Match filed route against airport departure catalog.
 
-    Instrument SIDs (DREAM7 / FYTTR7 / MMM8) only when that token is explicitly filed.
+    Instrument SIDs (DREAM7 / FYTTR7 / MMM8 / PEAKS) only when that token is
+    explicitly filed. PEAKS21R is PEAKS plus the runway, same idea as FLEX21R.
     Any FLEX / FLEX21R / FLEX21L / FLEX03R / FLEX03L token is a visual departure;
     north/west inferred from the next fix (DREAM/MINTT/JUNNO vs FYTTR).
     Bare fixes alone do not invent a SID — stay 'as filed'.
@@ -2655,16 +2705,18 @@ def match_departure(airport: dict[str, Any], route: str | None) -> DepartureMatc
         for k, v in (catalog.get("transitions") or {}).items()
     }
 
-    # --- Instrument SID: exact alias only (must be filed, e.g. DREAM7) ---
+    # --- Instrument SID: filed alias, or alias + runway (PEAKS21R) ---
     for entry in catalog.get("instrument") or []:
         aliases = {_normalize_dep_token(a) for a in (entry.get("aliases") or [])}
-        if not aliases.intersection(norms):
+        if not any(_sid_token_matches_alias(tok, aliases) for tok in norms):
             continue
         result.instrument_id = str(entry.get("id"))
         result.instrument_say = str(entry.get("say") or entry.get("id"))
         for tok in norms:
+            if _sid_token_matches_alias(tok, aliases):
+                continue
             for tk, say in (entry.get("transitions") or {}).items():
-                if tok == _normalize_dep_token(tk) and tok not in aliases:
+                if tok == _normalize_dep_token(tk):
                     result.transition_id = str(tk)
                     result.transition_say = str(say)
                     break
@@ -2766,6 +2818,8 @@ def speak_departure_clearance(airport: dict[str, Any], route: str | None) -> str
       Flex north, Dream transition
       Flex west, Fighter transition
       Dream seven departure, Mintt transition
+      Peaks departure, Hayford Peak transition
+      Peaks departure, Mormon Peak transition
       Mormon Mesa eight departure
     """
     m = match_departure(airport, route)
@@ -2792,12 +2846,14 @@ def resolve_taxi_route(
     runway: str,
     *,
     opus: OpusFlightContext | None = None,
+    config: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     """
     Runway-dependent EOR / taxi via for Nellis-style fields.
     21R → NW EOR via F, E; 03L → Alpha South via Foxtrot.
 
     Parking uses squadron overrides when known (see resolve_parking).
+    Landing exit turn / cross comes from resolve_landing_exit.
     """
     rwy = normalize_runway(runway) or str(runway or "").strip().upper()
     routes = airport.get("taxi_routes")
@@ -2818,15 +2874,23 @@ def resolve_taxi_route(
     exit_via = str(route.get("exit") or "").strip()
     intersection = str(route.get("intersection") or "").strip()
     legacy = str(airport.get("taxi_via") or "Foxtrot").strip() or "Foxtrot"
-    parking = resolve_parking(airport, opus=opus)
+    parking = resolve_parking(airport, opus=opus, config=config)
+    exit_plan = resolve_landing_exit(
+        airport, rwy, opus=opus, config=config, parking=parking
+    )
     if not eor:
         eor = "NW EOR" if rwy.startswith("21") else "Alpha South"
     if not outbound:
         outbound = legacy
     if not inbound:
         inbound = legacy
+    if parking_field_side(airport, parking) == "east":
+        inbound = str(route.get("east_inbound_via") or "Alpha").strip() or "Alpha"
     if not exit_via:
-        exit_via = "right at Alpha" if rwy.startswith("21") else "left at Alpha"
+        bits = [f"{exit_plan['turn']}"]
+        if exit_plan.get("cross"):
+            bits.append(f"cross {exit_plan['cross']}")
+        exit_via = ", ".join(bits)
     if not intersection:
         intersection = "Delta" if rwy.startswith("21") else "Bravo"
     return {
@@ -2834,8 +2898,97 @@ def resolve_taxi_route(
         "outbound_via": outbound,
         "inbound_via": inbound,
         "exit": exit_via,
+        "exit_turn": str(exit_plan.get("turn") or ""),
+        "exit_cross": str(exit_plan.get("cross") or ""),
         "parking": parking,
         "intersection": intersection,
+    }
+
+
+_EAST_PARKING_HINTS = (
+    "g revet",
+    "golf revet",
+    "g-revet",
+    "golf ramp",
+    "g ramp",
+    "g area",
+    "g-area",
+)
+
+
+def parking_field_side(airport: dict[str, Any] | None, parking: str) -> str:
+    """
+    Which side of the parallels this parking sits on.
+
+    Nellis: G / Golf revetments are east of 21L; Ramp / Knight / Row 18 / WOOL
+    are west of 21R.
+    """
+    name = str(parking or "").strip()
+    sides = (airport or {}).get("parking_sides")
+    if isinstance(sides, dict) and name:
+        raw = sides.get(name)
+        if raw is None:
+            for key, val in sides.items():
+                if str(key).strip().casefold() == name.casefold():
+                    raw = val
+                    break
+        side = str(raw or "").strip().casefold()
+        if side in ("east", "west"):
+            return side
+    low = name.casefold()
+    compact = re.sub(r"[\s_\-]+", " ", low).strip()
+    if compact in {"g", "golf"} or any(h in compact for h in _EAST_PARKING_HINTS):
+        return "east"
+    return "west"
+
+
+def runway_pair_side(runway: str) -> str:
+    """
+    East or west of a 03/21 parallel pair from the runway number.
+
+    03L / 21R sit west; 03R / 21L sit east (left when landing 21 is east).
+    """
+    n = normalize_runway(runway) or str(runway or "").strip().upper()
+    num = _runway_number(n) or 0
+    left = n.endswith("L")
+    northish = 1 <= num <= 18
+    if northish:
+        return "west" if left else "east"
+    return "east" if left else "west"
+
+
+def resolve_landing_exit(
+    airport: dict[str, Any],
+    runway: str,
+    *,
+    opus: OpusFlightContext | None = None,
+    config: dict[str, Any] | None = None,
+    parking: str | None = None,
+) -> dict[str, str]:
+    """
+    Tower rollout instruction: turn left/right, maybe cross the parallel.
+
+    Landing 21L to the west ramp → exit right, cross 21R.
+    Landing 21L to G revetments → exit left (already on the east side).
+    """
+    rwy = normalize_runway(runway) or str(runway or "").strip().upper()
+    park = parking if parking is not None else resolve_parking(
+        airport, opus=opus, config=config
+    )
+    park_side = parking_field_side(airport, park)
+    rwy_side = runway_pair_side(rwy)
+    num = _runway_number(rwy) or 0
+    left_is_east = num >= 19
+    want_east = park_side == "east"
+    turn = "left" if want_east == left_is_east else "right"
+    cross = ""
+    if park_side != rwy_side:
+        cross = _flip_runway_side(rwy) or ""
+    return {
+        "turn": turn,
+        "cross": cross,
+        "parking": park,
+        "parking_side": park_side,
     }
 
 
@@ -2844,13 +2997,17 @@ def resolve_parking(
     *,
     opus: OpusFlightContext | None = None,
     squadron_name: str | None = None,
+    config: dict[str, Any] | None = None,
 ) -> str:
     """
     Parking / ramp for taxi-in.
 
     Uses airport.parking_by_squadron match list when the Opus squadron is known,
-    else airport.parking (Nellis default Ramp).
+    else airport.parking (Nellis default Ramp). Setup `parking_override` wins.
     """
+    override = str((config or {}).get("parking_override") or "").strip()
+    if override:
+        return override
     default = str(airport.get("parking") or "parking").strip() or "parking"
     sq = (
         str(squadron_name or "").strip()
@@ -3250,6 +3407,8 @@ _SORTIE_STATE_CACHE_KEYS = (
     "pattern_land_needs_leave",
     "overhead_recovery",
     "range_exit_approved",
+    "control_checked_in",
+    "control_channel",
 )
 
 
@@ -3410,6 +3569,11 @@ def resolve_handoff_channel(
     """
     from_ch = (from_channel or (step.get("channel") if step else None) or "departure")
     from_ch = str(from_ch).strip().lower()
+    picked = ""
+    lat = lon = None
+    ll = _ownship_ll_from_state(state)
+    if ll:
+        lat, lon = ll
 
     try:
         import agencies as agencies_mod
@@ -3418,24 +3582,20 @@ def resolve_handoff_channel(
             plan = agencies_mod.infer_from_context(
                 airport=airport, opus=opus, config=config
             )
-            lat = lon = None
-            ll = _ownship_ll_from_state(state)
-            if ll:
-                lat, lon = ll
-            picked = agencies_mod.handoff_from_plan(
+            hop = agencies_mod.handoff_from_plan(
                 from_ch, plan, airport=airport, lat=lat, lon=lon
             )
-            if picked:
-                return picked
+            if hop:
+                picked = hop
     except Exception:
         pass
 
-    if step is not None:
+    if not picked and step is not None:
         raw = step.get("handoff_channel") or step.get("handoff_to")
         if raw is not None and str(raw).strip():
-            return str(raw).strip().lower()
+            picked = str(raw).strip().lower()
 
-    if mission is not None and step is not None and isinstance(mission.get("steps"), list):
+    if not picked and mission is not None and step is not None and isinstance(mission.get("steps"), list):
         steps = mission["steps"]
         sid = step.get("id")
         start = -1
@@ -3458,8 +3618,18 @@ def resolve_handoff_channel(
                 tmpl = str(peer.get("template") or "")
                 if tmpl in ("departure_handoff", "center_handoff", "bj_range_exit"):
                     continue
-                return ch
-    return default
+                picked = ch
+                break
+    if not picked:
+        picked = default
+    if from_ch == "blackjack" and picked == "approach":
+        try:
+            import agencies as agencies_mod
+
+            picked = agencies_mod.blackjack_exit_handoff(airport, lat, lon, picked)
+        except Exception:
+            picked = "control_east"
+    return picked
 
 
 def build_departure_handoff(
@@ -4007,6 +4177,11 @@ def pilot_requests_for_channel(
             continue
         if key in ("accept_rolling", "deny_rolling") and pending != "rolling":
             continue
+        # Only offer the *other* takeoff type — same-type is "ready for
+        # departure" / Play, not "expect line up and wait".
+        if key in ("request_lineup", "request_rolling") and pending != "rolling":
+            if not takeoff_request_changes_mode(key, state=state):
+                continue
         if key == "request_handoff" and str(template or "") not in _HANDOFF_REQUEST_TEMPLATES:
             continue
         if key.startswith("tanker_") and key not in (
@@ -4064,6 +4239,34 @@ def takeoff_offer_visible(
         resolve_pilot_request_phase(phase=phase, channel=ch, template=template)
         == "departure"
     )
+
+
+def takeoff_request_mode(request_key: str | None) -> str | None:
+    """'lineup' / 'rolling' when this request picks a takeoff type, else None."""
+    key = str(request_key or "").strip().casefold()
+    if key in ("request_lineup", "deny_rolling"):
+        return "lineup"
+    if key in ("request_rolling", "accept_rolling"):
+        return "rolling"
+    return None
+
+
+def takeoff_request_changes_mode(
+    request_key: str | None,
+    mission: dict[str, Any] | None = None,
+    state: dict[str, Any] | None = None,
+) -> bool:
+    """
+    True when the request switches takeoff type (LUAW ↔ rolling).
+
+    Same-type calls are 'I'm ready' — issue LUAW / rolling, do not TX
+    'expect line up and wait'.
+    """
+    want = takeoff_request_mode(request_key)
+    if not want:
+        return False
+    have = resolve_active_takeoff_mode(mission, state)
+    return want != have
 
 
 def set_takeoff_mode(
@@ -5031,6 +5234,27 @@ def awaiting_option_on_the_go(state: dict[str, Any] | None = None) -> bool:
     return bool(isinstance(state, dict) and state.get("awaiting_on_the_go"))
 
 
+def runway_exit_hold_reason(state: dict[str, Any] | None = None) -> str:
+    """
+    Why Watch must not TX exit-runway / contact Ground.
+
+    A go-around, missed approach, or the option overflies the far end;
+    that is not a landing rollout.
+    """
+    if not isinstance(state, dict):
+        return ""
+    if awaiting_option_on_the_go(state):
+        return "option / low approach — not a full stop"
+    if resolve_landing_intent(state) == LANDING_INTENT_LOW_APPROACH:
+        return "cleared the option — waiting on the go or full stop"
+    last = str(state.get("last_tx_template") or "").strip().lower()
+    if last == "go_around" or go_around_readback_open(state):
+        return "go-around / missed — not exiting"
+    if state.get("rearm_tower_outside_nm") is not None:
+        return "missed approach — not exiting"
+    return ""
+
+
 def commit_option_full_stop(
     *,
     state: dict[str, Any] | None = None,
@@ -5555,6 +5779,24 @@ def build_contact_bandsaw(airport: dict[str, Any], callsign: str) -> str:
     cs = speak_callsign(callsign)
     target = speak_agency_contact_target(airport, "bandsaw")
     return with_freq_handoff_closer(f"{cs}, Blackjack, contact {target}")
+
+
+def build_blackjack_c2_redirect(
+    airport: dict[str, Any],
+    callsign: str,
+    what: str = "picture",
+) -> str:
+    """Blackjack does not work picture / dope / declare — push to Bandsaw."""
+    cs = speak_callsign(callsign)
+    target = speak_agency_contact_target(airport, "bandsaw")
+    label = (what or "picture").strip() or "picture"
+    return with_freq_handoff_closer(
+        _pick(
+            f"{cs}, Blackjack, {label} is with Bandsaw. Contact {target}",
+            f"{cs}, Blackjack, unable {label} this freq, contact {target}",
+            f"{cs}, Blackjack, that's Bandsaw. Contact {target}",
+        )
+    )
 
 
 def build_joshua_check_in(callsign: str) -> str:
@@ -8190,6 +8432,12 @@ def build_readback_checklist(
         if climb_ft:
             spoken_climb = speak_altitude_value(str(climb_ft), prefer_fl_below=1000) or str(climb_ft)
             add("climb", "Climb / maintain", f"{climb_ft:,} ft", spoken_climb)
+        else:
+            dep_match = match_departure(
+                airport, opus.fp_route_string if opus else None
+            )
+            if dep_match.is_visual:
+                add("climb", "Climb", "as published", "climb as published")
         filed = speak_filed_altitude(opus.fp_altitude if opus else None)
         if filed:
             add("expect", "Expect", filed, filed)
@@ -8474,8 +8722,6 @@ def uses_instrument_runway(
         "clear_takeoff_intersection",
         "clear_takeoff_rolling",
         "remain_position",
-        "exit_runway",
-        "taxi_in",
         "monitor_tower",
         "contact_tower",
         "radar_contact",
@@ -8673,9 +8919,10 @@ def build_clearance_delivery(
 ) -> tuple[str, int]:
     """
     NATCF clearance (455 wiki + Bruiser PDF):
-      With SID/Flex: Cleared to DEST via the [procedure], then as filed, …
-      No procedure:  Cleared to DEST as filed, …
-      Then climb / expect / departure channel / squawk.
+      With SID:     … via the [SID], then as filed, climb via the SID …
+      With Flex/VFR: … via the Flex …, then as filed, climb as published …
+      No procedure:  Cleared to DEST as filed, climb and maintain …
+      Then expect / departure channel / squawk.
       No flight plan: advise nothing is on file — do not invent a climb or IFR.
 
     Returns (phrase, climb_feet_used). Climb is 0 when no plan is on file.
@@ -8718,14 +8965,19 @@ def build_clearance_delivery(
         parts = [f"{cs}, {name} {agency}, cleared to {dest} as filed"]
 
     has_instrument_sid = bool(dep_match.instrument_say)
-    # Vertical: Climb via the SID / Climb as published, SID with interim cap, or direct + expect
-    if has_instrument_sid:
+    # Vertical: instrument SID → climb via the SID. VFR Flex is not a SID.
+    if dep_match.is_visual:
+        parts.append("climb as published")
+        if filed_alt:
+            parts.append(f"expect {filed_alt} {natural} minutes after departure")
+        climb_ft = 0
+    elif has_instrument_sid:
         direct_alt = (
             f"climb and maintain {climb}, expect {filed_alt} {natural} minutes after departure"
             if filed_alt
             else f"climb and maintain {climb}"
         )
-        sid_climb = _pick("climb via the SID", "climb as published")
+        sid_climb = "climb via the SID"
         if initial_climb_ft is not None:
             # Rebuild/Hear: keep published-SID climb (don't re-roll to direct)
             parts.append(sid_climb)
@@ -8739,7 +8991,7 @@ def build_clearance_delivery(
             else:
                 parts.append(direct_alt)
     else:
-        # Flex / visual — Bruiser-style maintain + expect filed
+        # No DP — Bruiser-style maintain + expect filed
         if climb:
             parts.append(_pick(f"maintain {climb}", f"climb and maintain {climb}"))
         if filed_alt:
@@ -10035,7 +10287,7 @@ def build_template_text(
     rwy = speak_runway(runway)
     alt = speak_altimeter(weather.altimeter_inhg or 29.92)
     wind = speak_wind(weather.wind_dir, weather.wind_speed_kt)
-    taxi = resolve_taxi_route(airport, runway, opus=opus)
+    taxi = resolve_taxi_route(airport, runway, opus=opus, config=config)
     tower = airport.get("tower") or {"freq_mhz": 327.0}
     departure = airport.get("departure") or {"freq_mhz": 350.0}
     twr_local = speak_local_preset(airport, "tower")
@@ -10119,8 +10371,19 @@ def build_template_text(
             f"{speak_freq(float(tower['freq_mhz']))}"
         )
     if template == "exit_runway":
-        # 21R → right at Alpha (Alpha North area); 03L → left at Alpha
-        return f"{cs}, {name} Tower, exit {speak_place_label(taxi['exit'])}."
+        plan = resolve_landing_exit(
+            airport, runway, opus=opus, config=config, parking=taxi.get("parking")
+        )
+        turn = str(plan.get("turn") or "right")
+        bits = [f"exit {turn}"]
+        cross = str(plan.get("cross") or "").strip()
+        if cross:
+            bits.append(f"cross {speak_runway(cross)}")
+        ground = speak_ground_contact_target(airport)
+        bits.append(f"contact {ground}")
+        return with_freq_handoff_closer(
+            f"{cs}, {name} Tower, {', '.join(bits)}"
+        )
     if template == "taxi_in":
         parking = speak_place_label(taxi["parking"])
         via = speak_taxi_via(taxi["inbound_via"])

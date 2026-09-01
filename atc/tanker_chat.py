@@ -1415,8 +1415,9 @@ _BOOM_SETTING = (
 _BOOM_STYLE = (
     "While the boom is in, talk like real tanker/fighter gas-up chatter: "
     "morale-boosting, a little goofy, two-way. Short riddles, food they miss "
-    "from home, who has the worse seat (boom pad vs Viper), TDY boredom. "
+    "from home, TDY boredom, squadron life, pets, sports, cars, movies. "
     "You lead, they answer, you riff back. Not a briefing. Not scenery narration. "
+    "Do not ask boom pad vs Viper seat — that joke is worn out. "
     "Riddles must be short and answerable on the radio. "
 )
 
@@ -1435,7 +1436,7 @@ def _boom_llm_system(*, json_out: bool) -> str:
         f"{_BOOM_GENDER}"
         "Answer the F-16 directly and stay on their topic. "
         "Plain radio text only. No JSON. No markdown. "
-        'Good: "Ha — that\'s the view I live with. Boom pad or Viper seat, who got robbed?" '
+        'Good: "Ha — In-N-Out or Whataburger, which one are you missing?" '
         'Bad: "The pad\'s wider. Pilot: really?"'
     )
 
@@ -1486,9 +1487,10 @@ def _llm_prompt(
         "said instead of starting a brand-new random topic. "
         f"{coffee_rule}"
         "Good topic pool (rotate): short riddles, food they miss from home "
-        "(Chick-fil-A / Whataburger / In-N-Out — not only coffee), boom pad vs "
-        "Viper seat, Viper / Eagle / Mudhen / Navy jokes, boom-pod life, range days, "
+        "(Chick-fil-A / Whataburger / In-N-Out — not only coffee), "
+        "Viper / Eagle / Mudhen / Navy jokes, boom-pod life, range days, "
         "TDY, chow, dorms, squadron, pets, sports, cars, weekends, movies. "
+        "Do not ask boom pad vs Viper seat. "
         "Not airline, not passenger flying. "
         "Avoid these recent ids: "
         f"{avoid}.\n\nRecent chat:\n{hist}\n\n"
@@ -1530,9 +1532,9 @@ def _llm_riff_prompt(
         "(rejoin, contact, disconnect, abort, observation, altitude, airspeed). "
         "Continue the recent chat when there is history. "
         f"{coffee_rule}"
-        "Topics: riddles, food from home, worse seat, Viper/Eagle/Mudhen/Navy "
+        "Topics: riddles, food from home, Viper/Eagle/Mudhen/Navy "
         "jokes, chow, TDY, snacks, boom boredom, pets, sports — military crew, "
-        "not airline. "
+        "not airline. Do not ask boom pad vs Viper seat. "
         f"Avoid sounding like these recent ids: {avoid}.\n\n"
         f"Recent chat:\n{hist}\n\n"
         "Return JSON only: {\"id\":\"...\",\"kind\":\"open\",\"opener\":\"...\"}. "

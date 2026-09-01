@@ -7,6 +7,7 @@
   "opus_flight_label": "",
   "callsign_override": "",
   "runway_override": "",
+  "parking_override": "",
   "opus_theater_id": 1,
   "bullseye_navpoint": "ELVIS",
   "bullseye_magnetic_declination_deg": 12,

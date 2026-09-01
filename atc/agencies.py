@@ -74,13 +74,13 @@ _CORE: dict[str, dict[str, Any]] = {
         "kind": "c2",
         "spoken": "Blackjack",
         "handoff": "control_east",
-        "services": ("range", "picture", "tanker"),
+        "services": ("range", "tanker"),
     },
     "bandsaw": {
         "kind": "gci",
         "spoken": "Bandsaw",
         "handoff": "blackjack",
-        "services": ("picture",),
+        "services": ("picture", "bogey_dope", "declare"),
     },
     "joshua": {
         "kind": "control",
@@ -241,6 +241,14 @@ _NTTR_FIXES = frozenset(
         "ELGIN",
         "SALLY",
         "LEE",
+        "PEAKS",
+        "HAYFD",
+        "HAYFORD",
+        "HAYFORDPK",
+        "MORPK",
+        "MORMON",
+        "MORMONPK",
+        "MORMONPEAK",
         "STLOUIS",
     }
 )
@@ -359,7 +367,7 @@ def _token_hits_nttr(tokens: list[str]) -> bool:
     for tok in tokens:
         if tok in _NTTR_FIXES:
             return True
-        if tok.startswith("FLEX"):
+        if tok.startswith("FLEX") or tok.startswith("PEAKS"):
             return True
     return False
 
@@ -609,7 +617,7 @@ def handoff_from_plan(
             return AREA_CENTER
         if near_joshua:
             return AREA_JOSHUA
-        return "approach" if plan.recover_nellis else transit()
+        return control_ch() if plan.recover_nellis else transit()
     if from_ch in CONTROL:
         if near_joshua:
             return AREA_JOSHUA
@@ -688,6 +696,8 @@ def reset_contact(state: dict[str, Any] | None) -> None:
         return
     state["contact_phase"] = "field"
     state["last_agency"] = "delivery"
+    state.pop("control_checked_in", None)
+    state.pop("control_channel", None)
 
 
 def field_agency(engine: Any) -> str:
@@ -900,4 +910,25 @@ def control_for_ll(
     if ll_in_agency(airport, "control_east", lat_f, lon_f):
         return "control_east"
     return default
+
+
+def blackjack_exit_handoff(
+    airport: dict[str, Any] | None,
+    lat: float | None,
+    lon: float | None,
+    picked: str,
+) -> str:
+    """
+    Blackjack range exit: Nellis Control until inside Approach airspace.
+
+    Custom plans sometimes list Approach as the next agency. That is only
+    correct once the jet is in the Approach circle — 75 NM out is still NATCF.
+    """
+    want = (picked or "").strip().lower()
+    if want != "approach":
+        return want or "control_east"
+    dist = nm_to_agency(airport, "approach", lat, lon)
+    if dist is None or dist > 0.0:
+        return control_for_ll(airport, lat, lon)
+    return "approach"
 

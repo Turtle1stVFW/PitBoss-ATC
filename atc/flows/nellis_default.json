@@ -19,7 +19,7 @@
       "file": null,
       "enabled": true,
       "text": null,
-      "initial_climb_ft": 17000
+      "initial_climb_ft": 15000
     },
     {
       "id": "del_readback",
@@ -105,7 +105,7 @@
       "file": null,
       "enabled": true,
       "text": null,
-      "initial_climb_ft": 17000
+      "initial_climb_ft": 15000
     },
     {
       "id": "dep_cruise",
@@ -367,7 +367,15 @@
       "template": "exit_runway",
       "file": null,
       "enabled": true,
-      "text": null
+      "text": null,
+      "trigger": {
+        "zone": "runway_end",
+        "when": "inside",
+        "flight": "me",
+        "settled": false,
+        "dwell_s": 0,
+        "gap_s": 5
+      }
     },
     {
       "id": "gnd_taxi_in",
@@ -383,5 +391,5 @@
   ],
   "active_takeoff_mode": "lineup",
   "landing_intent": "full_stop",
-  "initial_climb_ft": 17000
+  "initial_climb_ft": 15000
 }

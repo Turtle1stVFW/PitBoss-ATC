@@ -1071,6 +1071,19 @@ def dcs_tanker_radio_hint(action: str) -> str:
     return "DCS tanker radio — Ready pre-contact (cleared contact)"
 
 
+def build_tanker_depart_reply(
+    callsign: str, tanker: dict[str, Any] | None
+) -> str:
+    """Boom goodbye after they call exit high/low or thank you for the gas."""
+    cs = atc_phrase.speak_callsign(callsign)
+    tcs = speak_tanker_callsign(str((tanker or {}).get("callsign") or "Tanker"))
+    return atc_phrase._pick(
+        f"{cs}, {tcs}, copy, you're cleared off. Thanks for flying with us.",
+        f"{cs}, {tcs}, copy exit, looking good. See you next time.",
+        f"{cs}, {tcs}, roger, thanks for the trade. You're cleared off.",
+    )
+
+
 def build_tanker_check_in(callsign: str, tanker: dict[str, Any] | None) -> str:
     """Missing official join: cleared rejoin left, sometimes left observation."""
     cs = atc_phrase.speak_callsign(callsign)

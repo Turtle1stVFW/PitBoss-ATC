@@ -399,6 +399,8 @@ class VoiceController:
             tanker_chat_last_spoke=str(context.get("tanker_chat_last_spoke") or ""),
             tanker_chat_guard_until=float(context.get("tanker_chat_guard_until") or 0),
             seat=_context_seat(context),
+            tuned_channel=str(context.get("tuned_channel") or "") or None,
+            cursor_channel=str(context.get("cursor_channel") or ""),
         )
         if evaluation.match is None:
             try:
@@ -669,11 +671,22 @@ def execute_intent(
 
     if intent in ("accept_rolling", "deny_rolling", "request_lineup", "request_rolling"):
         answering = _rolling_offer_open(engine)
+        last_tx = str(engine.state.get("last_tx_template") or "")
+        # Repeating LUAW after Tower already issued it is the readback, not a
+        # new request (which would TX "expect line up and wait").
+        if (
+            intent == "request_lineup"
+            and not answering
+            and last_tx in ("lineup", "line_up_and_wait")
+        ):
+            return _acknowledge(engine, match)
+        mode_change = atc_phrase.takeoff_request_changes_mode(
+            intent, engine.mission, engine.state
+        )
         atc_phrase.apply_pilot_request(intent, mission=engine.mission, state=engine.state)
         engine.save_state()
         # LUAW / takeoff readback is a different clearance — drop it so the
         # rolling (or LUAW) request is not stuck behind "say the runway".
-        last_tx = str(engine.state.get("last_tx_template") or "")
         if (
             hasattr(engine, "clear_readback")
             and engine.state.get("awaiting_readback")
@@ -694,6 +707,17 @@ def execute_intent(
             played = play_rolling_offer_reply(engine, intent)
             if played.get("action") != "none":
                 return played
+        # Same takeoff type as already planned — they're ready; issue it.
+        # "Expect…" is only for switching LUAW ↔ rolling.
+        if not mode_change:
+            if intent in ("request_lineup", "deny_rolling"):
+                played = _play_lineup(engine)
+                if played.get("action") != "none":
+                    return played
+            elif intent in ("request_rolling", "accept_rolling"):
+                played = _play_clear_takeoff(engine)
+                if played.get("action") != "none":
+                    return played
         return _ack(intent, engine, airport, callsign, match=match)
 
     if intent == "request_unrestricted_climb":
@@ -809,6 +833,15 @@ def execute_intent(
         # Taxi + runway change in one transmission: apply the runway first so
         # the taxi clearance uses it.
         if match.template == "taxi" or intent == "ready_taxi":
+            last_tx = str(engine.state.get("last_tx_template") or "")
+            if engine.state.get("awaiting_readback"):
+                # Repeating taxi instructions is the readback, not a new call.
+                if last_tx == "taxi":
+                    return _acknowledge(engine, match)
+                return {
+                    "action": "none",
+                    "detail": "finish readback first",
+                }
             rwy = _apply_runway_if_heard(engine, match, airport)
             result = _play_step(engine, match)
             if rwy:
@@ -954,7 +987,12 @@ def execute_intent(
             from_tanker = tanker_mod.tanker_needs_c2_checkin(
                 engine.state
             ) or tanker_mod.tanker_overlay_active(engine.state)
-            if tmpl == "bj_range_exit" or from_tanker:
+            already_in = str(engine.state.get("last_tx_template") or "") in (
+                "bj_check_in",
+                "bj_continue",
+                "bj_alpha_check",
+            )
+            if tmpl == "bj_range_exit" or from_tanker or already_in:
                 if from_tanker:
                     tanker_mod.leave_tanker_overlay(
                         engine, "blackjack", checkin=True
@@ -1372,6 +1410,19 @@ def _speak_reply(
     else:
         if channel not in ("blackjack", "bandsaw", "joshua", "ops", "other"):
             channel = "blackjack"
+        if channel == "blackjack" and intent in (
+            "request_picture",
+            "request_bogey_dope",
+            "request_declare",
+        ):
+            if intent == "request_bogey_dope":
+                what = "bogey dope"
+            elif intent == "request_declare":
+                what = "declare"
+            else:
+                what = "picture"
+            text = atc_phrase.build_blackjack_c2_redirect(airport, callsign, what)
+            return _transmit(engine, airport, text, "blackjack")
         agency = atc_phrase.speak_agency_name(channel)
         cs = atc_phrase.speak_callsign(callsign)
         try:
@@ -1711,6 +1762,18 @@ def execute_tanker_action(
             tanker_chat_mod.end_chat(engine.state)
         if hasattr(engine, "save_state"):
             engine.save_state()
+        if action == "tanker_depart":
+            text = tanker_mod.build_tanker_depart_reply(callsign, tanker)
+            freq = tanker_mod.tanker_target_mhz(engine.state)
+            if freq is None and tanker:
+                try:
+                    freq = float(tanker.get("freq_mhz") or 0) or None
+                except (TypeError, ValueError):
+                    freq = None
+            result = _transmit(engine, ap, text, "tanker", freq_mhz=freq)
+            result["hint"] = tanker_mod.dcs_tanker_radio_hint(action)
+            result["detail"] = result.get("hint")
+            return result
         hint = tanker_mod.dcs_tanker_radio_hint(action)
         return {
             "action": "hint",

@@ -381,7 +381,7 @@ _AGENCY_TERMS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("control_west", ("lee", "control west", "nellis control west")),
     ("center", ("los angeles center", "la center", "center", "centre")),
     ("ops", ("ops", "operations", "base ops")),
-    ("tanker", ("texaco", "shell", "arco", "esso", "tanker")),
+    ("tanker", ("texaco", "shell", "arco", "esso", "tanker", "boom")),
     ("other", ()),
 )
 
@@ -973,13 +973,27 @@ INTENTS: tuple[Intent, ...] = (
     ),
     Intent(
         "tanker_depart",
-        (("request departure", "cleared to depart", "done with the tanker"),),
+        (
+            (
+                "request departure",
+                "cleared to depart",
+                "done with the tanker",
+                "exit high",
+                "exit low",
+                "going high",
+                "going low",
+                "thanks for the fuel",
+                "thanks for the gas",
+                "appreciate the fuel",
+                "appreciate the gas",
+            ),
+        ),
         kind="request",
         channels=("tanker",),
         phases=("flight",),
-        weight=1.15,
-        example="request departure",
-        does="use DCS tanker radio to leave",
+        weight=1.2,
+        example="going exit high, thanks for the fuel",
+        does="boom goodbye + DCS disconnect",
     ),
     Intent(
         "tanker_chat_start",
@@ -989,6 +1003,9 @@ INTENTS: tuple[Intent, ...] = (
                 "hows it going",
                 "how you doing",
                 "how are you",
+                "hey boom",
+                "hey texaco",
+                "hi boom",
                 "you busy",
                 "pretty quiet",
                 "what's for lunch",
@@ -1079,8 +1096,15 @@ INTENTS: tuple[Intent, ...] = (
     Intent(
         "request_lineup",
         (
-            ("line up", "lineup", "position and hold"),
-            ("request", "requesting", "ready", "like"),
+            (
+                "line up and wait",
+                "lineup and wait",
+                "position and hold",
+                "request line up",
+                "request lineup",
+                "ready for line up",
+                "ready for lineup",
+            ),
         ),
         channels=("tower",),
         phases=("departure",),
@@ -1152,7 +1176,17 @@ INTENTS: tuple[Intent, ...] = (
     ),
     Intent(
         "ready_taxi",
-        (("taxi",), ("request", "requesting", "ready", "like")),
+        (
+            ("taxi",),
+            (
+                "request",
+                "requesting",
+                "ready",
+                "we d like",
+                "i d like",
+                "would like",
+            ),
+        ),
         kind="step",
         template="taxi",
         channels=("ground",),
@@ -1239,7 +1273,7 @@ INTENTS: tuple[Intent, ...] = (
         template="clear_takeoff",
         channels=("tower",),
         phases=("departure",),
-        veto=("remain", "holding short", "rolling"),
+        veto=("remain", "holding short", "rolling", "line up and wait", "and wait"),
         weight=1.2,
         example="in position",
         does="cleared for takeoff",
@@ -1913,8 +1947,17 @@ def step_advance_keyword_text(
 
 def cue_needs_agency(intent: Intent, *, expected: str = "", awaiting_readback: bool = False) -> bool:
     """True when the Fly tip should show an agency opener as required."""
-    _ = (intent, expected)
-    return not awaiting_readback
+    if awaiting_readback:
+        return False
+    if intent.id in (
+        "tanker_chat_start",
+        "tanker_chat_stop",
+        "tanker_depart",
+    ):
+        return False
+    if intent.id == "request_landing" and (expected or "").strip().lower() == "clear_land":
+        return False
+    return True
 
 
 def step_is_authored(step: dict[str, Any] | None) -> bool:
@@ -1959,7 +2002,9 @@ def step_holds_after_play(step: dict[str, Any] | None) -> bool:
     """
     True when Play transmits but leaves the cursor on this step.
 
-    Bandsaw check-in holds until checkout. Custom/file steps with a leftover
+    Bandsaw check-in holds until checkout. Blackjack check-in holds so the
+    optional Bandsaw / tanker steps do not steal the cursor (tune and call
+    Bandsaw to talk to them). Custom/file steps with a leftover
     Bandsaw template do not — set `hold: true` to opt back in.
     """
     if not isinstance(step, dict):
@@ -1969,7 +2014,7 @@ def step_holds_after_play(step: dict[str, Any] | None) -> bool:
     if step_is_authored(step):
         return False
     tmpl = str(step.get("template") or "").strip().lower()
-    if tmpl == "bandsaw_check_in":
+    if tmpl in ("bj_check_in", "bandsaw_check_in"):
         return True
     if tmpl in ("joshua_check_in", "control_check_in", "center_check_in", "center_radar"):
         return True
@@ -2120,7 +2165,17 @@ def _group_hit(text: str, options: tuple[str, ...], *, fuzzy: bool = True) -> st
 # Intents that may omit the agency opener while a readback is outstanding —
 # the exchange is already open from ATC's last transmission.
 _ADDRESS_OPTIONAL_INTENTS = frozenset(
-    {"acknowledge_readback", "say_again"}
+    {
+        "acknowledge_readback",
+        "say_again",
+        "tanker_chat_start",
+        "tanker_chat_stop",
+        "tanker_depart",
+    }
+)
+
+_PICTURE_INTENT_IDS = frozenset(
+    {"request_picture", "request_bogey_dope", "request_declare"}
 )
 
 
@@ -2848,6 +2903,10 @@ def _score_intents(
             continue
         if awaiting_readback and intent.template == "monitor_tower":
             continue
+        # Ground already issued taxi — repeating "taxi via … runway 21R" is
+        # the readback, not a new request that re-plays the taxi clearance.
+        if awaiting_readback and intent.id == "ready_taxi":
+            continue
         # Departure radar contact is an airborne check-in — not weather.
         if expected == "radar_contact" and intent.id in _DEPARTURE_CHECKIN_SKIP_IDS:
             continue
@@ -2864,6 +2923,14 @@ def _score_intents(
         if intent.id == "ready_departure" and expected in (
             *_TAKEOFF_CLEAR_TEMPLATES,
             "rolling_accept",
+        ):
+            continue
+        # Tower already issued LUAW — repeating / "ready for line up" is the
+        # readback, not a new request that answers "expect line up and wait".
+        if (
+            awaiting_readback
+            and expected in ("lineup", "line_up_and_wait")
+            and intent.id in ("request_lineup", "ready_departure")
         ):
             continue
         # Rolling offer is accept / decline — not "in position" / takeoff.
@@ -3268,6 +3335,8 @@ def evaluate(
     tanker_chat_last_spoke: str = "",
     tanker_chat_guard_until: float = 0.0,
     seat: int | None = None,
+    tuned_channel: str | None = None,
+    cursor_channel: str = "",
 ) -> Evaluation:
     """
     Decide whether a transmission is ATC business, and if so what it asks for.
@@ -3293,15 +3362,20 @@ def evaluate(
         if seat_n is not None and seat_n <= 0:
             seat_n = None
     address = analyze_address(text, callsign, raw=transcript, seat=seat_n)
-    # Who the pilot called outranks where the timeline cursor happens to sit.
+    # Who the pilot called, then the radio they are actually on, outranks
+    # where the timeline cursor happens to sit (e.g. optional Bandsaw).
     import agencies
 
+    context_ch = (channel or "").strip().lower()
+    tun = (tuned_channel or "").strip().lower() or None
+    cursor = (cursor_channel or "").strip().lower()
     channel = agencies.resolve(
-        tuned_channel=(channel or "").strip().lower() or None,
+        tuned_channel=tun or context_ch or None,
         addressed=address.agency,
-        cursor_channel=(channel or "").strip().lower(),
+        cursor_channel=cursor or context_ch,
         mission_phase=phase,
-    ) or (address.agency or channel)
+        transcript=transcript,
+    ) or (address.agency or context_ch)
     phase = normalize_mission_phase(phase, channel=channel or "")
     if step_is_authored(step_by_id(steps, current_step_id)):
         expected = ""
@@ -3458,9 +3532,21 @@ def evaluate(
 
     # ATC has just spoken and is holding for an answer, so the reply it is
     # waiting on does not have to open with the agency all over again.
-    # Every other call — at EOR, taxi, check-in, in position — must address
+    # Boom chat on tanker freq, and gear-down once Tower is waiting to land
+    # (overhead / TAC), may omit the opener. Every other call must address
     # the agency, not just a couple of cue words.
     address_optional = bool(awaiting_readback)
+    if candidate.intent in (
+        "tanker_chat_start",
+        "tanker_chat_stop",
+        "tanker_depart",
+    ) and (channel or "").strip().lower() == "tanker":
+        address_optional = True
+    if (
+        candidate.intent == "request_landing"
+        and (expected or "").strip().lower() == "clear_land"
+    ):
+        address_optional = True
     if require_address and not address_optional and not address.to_atc:
         result.reason = "no agency addressed"
         result.advice = (
@@ -3654,6 +3740,9 @@ def suggestions(
             current_step, channel=channel_l
         ):
             continue
+        # Picture / dope / declare are Bandsaw — don't tip them on Blackjack.
+        if intent.id in _PICTURE_INTENT_IDS and channel_l == "blackjack":
+            continue
         # This step has its own wording — don't also tip the stock template call.
         if (
             current_phrases
@@ -3676,6 +3765,19 @@ def suggestions(
                 or expected_l in ("taxi", "monitor_tower")
             )
         ):
+            continue
+        # After Tower has issued LUAW, tip the readback — not another request.
+        if (
+            awaiting_readback
+            and expected_l in ("lineup", "line_up_and_wait")
+            and intent.id in ("request_lineup", "ready_departure")
+        ):
+            continue
+        # After Ground has issued taxi, tip the readback — not another request.
+        if awaiting_readback and intent.id == "ready_taxi":
+            continue
+        # LUAW is the default — don't tip "request line up" next to ready.
+        if expected_l in ("lineup", "line_up_and_wait") and intent.id == "request_lineup":
             continue
         # Taxi-to-EOR is outbound — don't offer taxi-in / clear-of-runway yet.
         if expected_l == "taxi" and intent.id == "clear_of_runway":

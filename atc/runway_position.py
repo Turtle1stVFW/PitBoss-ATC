@@ -51,6 +51,12 @@ DEFAULTS: dict[str, float] = {
     "eor_radius_m": 250.0,
     "eor_max_speed_mps": 12.0,
     "auto_clearance_dwell_s": 3.0,
+    # Last ~2,000 ft of the landing roll — Tower's exit / contact Ground call.
+    "runway_end_remaining_m": 600.0,
+    # Rollout vs a low pass / missed: wheels on the deck and slowing, not
+    # 150 kt at 100 ft over the far end.
+    "runway_end_max_agl_m": 12.0,
+    "runway_end_max_speed_mps": 50.0,
     # match_caoc_unit_for_flight returns its best guess even on thin evidence, so
     # with nobody flying it will happily hand back some AI flight. Anything this
     # far from the field is not the jet about to depart, whatever it matched.
@@ -93,19 +99,70 @@ def is_calibrated(airport: dict[str, Any] | None) -> bool:
 def runway_geometry(
     airport: dict[str, Any] | None, runway: str | None
 ) -> dict[str, Any] | None:
-    """Geometry for one runway direction, tolerant of 21R / 21r / rwy 21R."""
+    """Geometry for one runway direction, tolerant of 21R / 21r / rwy 21R.
+
+    When only one of a parallel pair is traced (Nellis 21R / 03L), the
+    instrument side (21L / 03R) is offset from that centreline.
+    """
     runways = airport_geometry(airport).get("runways")
     if not isinstance(runways, dict):
         return None
     want = atc_phrase.normalize_runway(runway) or str(runway or "").strip().upper()
     if not want:
         return None
+    found = _runway_geometry_entry(runways, want)
+    if found is not None:
+        return found
+    return _synthetic_parallel_geometry(airport, want, runways)
+
+
+def _runway_geometry_entry(
+    runways: dict[str, Any], want: str
+) -> dict[str, Any] | None:
     for key, val in runways.items():
         if not isinstance(val, dict):
             continue
         if (atc_phrase.normalize_runway(key) or str(key).strip().upper()) == want:
             return val
     return None
+
+
+def _synthetic_parallel_geometry(
+    airport: dict[str, Any] | None,
+    want: str,
+    runways: dict[str, Any],
+) -> dict[str, Any] | None:
+    flipped = atc_phrase._flip_runway_side(want)
+    if not flipped:
+        return None
+    src = _runway_geometry_entry(runways, flipped)
+    if src is None:
+        return None
+    frame = RunwayFrame.build(flipped, src)
+    if frame is None:
+        return None
+    try:
+        offset = float(airport_geometry(airport).get("parallel_offset_m") or 305.0)
+    except (TypeError, ValueError):
+        offset = 305.0
+    if offset <= 0:
+        return None
+    # Lateral +ve is right of the source heading. 21R→21L is left; 03L→03R is right.
+    sign = -1.0 if want.endswith("L") else 1.0
+    dx, dz = frame.fx - frame.tx, frame.fz - frame.tz
+    ux, uz = dx / frame.length_m, dz / frame.length_m
+    rx, rz = uz, -ux
+    ox, oz = sign * offset * rx, sign * offset * rz
+    tlat, tlon = atc_phrase.caoc_xz_to_ll(frame.tx + ox, frame.tz + oz)
+    flat, flon = atc_phrase.caoc_xz_to_ll(frame.fx + ox, frame.fz + oz)
+    return {
+        "threshold": {"lat": tlat, "lon": tlon},
+        "far_end": {"lat": flat, "lon": flon},
+        "width_m": frame.width_m,
+        "length_m": frame.length_m,
+        "synthetic": True,
+        "parallel_of": flipped,
+    }
 
 
 def point_xz(obj: Any) -> tuple[float, float] | None:
@@ -506,6 +563,36 @@ class UnitFix:
         return " · ".join(bits)
 
 
+def _eor_zone(zone: dict[str, Any] | None) -> bool:
+    """True for an end-of-runway pad — heading vs takeoff course does not apply."""
+    if not isinstance(zone, dict):
+        return False
+    trig = str(zone.get("trigger") or "").strip().lower()
+    if trig == "eor":
+        return True
+    name = str(zone.get("name") or zone.get("id") or "").strip().lower()
+    return "eor" in name
+
+
+def _settled_heading_err_deg(
+    zone: dict[str, Any] | None, fix: UnitFix
+) -> float | None:
+    """
+    Heading error that can fail a settled zone.
+
+    In-position uses runway takeoff heading. At EOR the jet is often parallel
+    but reciprocal (or pad-oriented), which is not the lineup heading flip —
+    accept runway heading or its reciprocal, and ignore heading when the pad
+    is tagged EOR so a parked hammerhead still arms monitor tower.
+    """
+    err = fix.heading_err_deg
+    if err is None:
+        return None
+    if _eor_zone(zone):
+        return None
+    return float(err)
+
+
 def zone_admits(
     zone: dict[str, Any] | None,
     fix: UnitFix,
@@ -524,6 +611,7 @@ def zone_admits(
 
     Permissive where the feed is silent, as elsewhere in this module: a missing
     altitude or heading does not disqualify an aircraft that is plainly inside.
+    EOR pads skip heading: the jet is holding, not lined up for takeoff.
     """
     if not point_in_zone(fix.x_m, fix.z_m, zone):
         return False
@@ -539,7 +627,8 @@ def zone_admits(
         return False
     if fix.speed_mps is not None and fix.speed_mps > settled_speed:
         return False
-    if fix.heading_err_deg is not None and fix.heading_err_deg > hdg_tol:
+    hdg_err = _settled_heading_err_deg(zone, fix)
+    if hdg_err is not None and hdg_err > hdg_tol:
         return False
     return True
 
@@ -569,8 +658,9 @@ def zone_wait_reason(
     if settled:
         if fix.speed_mps is not None and fix.speed_mps > settled_speed:
             bits.append(f"{fix.speed_mps * 1.94384:.0f} kt, still moving")
-        if fix.heading_err_deg is not None and fix.heading_err_deg > hdg_tol:
-            bits.append(f"heading {fix.heading_err_deg:.0f}° off")
+        hdg_err = _settled_heading_err_deg(zone, fix)
+        if hdg_err is not None and hdg_err > hdg_tol:
+            bits.append(f"heading {hdg_err:.0f}° off")
     return ", ".join(bits)
 
 
@@ -632,6 +722,7 @@ class FlightStatus:
     calibrated: bool = True
     has_position_area: bool = False
     has_eor_area: bool = False
+    runway_length_m: float = 0.0
     # Thresholds evaluate() used, so a later in_zone() call matches the verdicts
     # above without the caller re-reading config.
     tuning: dict[str, float] = field(default_factory=dict)
@@ -1002,6 +1093,51 @@ def within_nm_held(
     return held, waiting
 
 
+RUNWAY_END_ZONES = frozenset({"runway_end", "departure_end", "rollout_end"})
+
+
+def runway_end_held(
+    trigger: StepTrigger,
+    status: FlightStatus,
+    *,
+    config: dict[str, Any] | None = None,
+) -> tuple[bool, str]:
+    """
+    Ownship rolling out near the departure end of the landing runway.
+
+    Tower's exit / contact-Ground call. Uses the landing centreline, not a
+    drawn box — 21L is offset from 21R when only one strip is traced.
+    """
+    del trigger
+    if not status.ok:
+        return False, status.reason or "no position data"
+    length = float(status.runway_length_m or 0.0)
+    if length < 100.0:
+        return False, f"no centreline for {status.runway or 'the runway'}"
+    own = next((fix for fix in status.fixes if fix.own), None)
+    if own is None:
+        return False, "own aircraft not in the flight sample"
+    remaining = rule(config, "runway_end_remaining_m")
+    max_agl = rule(config, "runway_end_max_agl_m")
+    max_spd = rule(config, "runway_end_max_speed_mps")
+    left = length - own.along_m
+    airborne = own.height_m is not None and abs(own.height_m) > max_agl
+    fast = own.speed_mps is not None and own.speed_mps > max_spd
+    near = (length - remaining) <= own.along_m <= (length + 80.0)
+    on_strip = own.on_runway or abs(own.lateral_m) <= 50.0
+    if airborne:
+        return False, "still airborne — rollout not started"
+    if fast:
+        return False, "too fast for rollout (go-around / low approach)"
+    if near and on_strip:
+        return True, f"departure end ({max(0.0, left):.0f} m remaining)"
+    if own.along_m < 0:
+        return False, "short of the threshold"
+    if left > remaining:
+        return False, f"{left:.0f} m remaining to the departure end"
+    return False, "not on the landing runway"
+
+
 def field_proximity_applies(watch: list[dict[str, Any]] | None) -> bool:
     """
     Whether evaluate() should reject a track far from the field.
@@ -1044,6 +1180,9 @@ def condition_held(
 
     need_full = trigger.need_full(config)
     zone_list = [z for z in (zones or []) if isinstance(z, dict)]
+    zone_name = str(trigger.zone or "").strip().casefold()
+    if zone_name in RUNWAY_END_ZONES:
+        return runway_end_held(trigger, status, config=config)
 
     held_dist = False
     waiting_dist = ""
@@ -1353,6 +1492,33 @@ def resolve_step_trigger(
             explicit=True,
         )
 
+    if tmpl == "exit_runway":
+        gap = _trigger_float(raw.get("gap_s"))
+        dwell = _trigger_float(raw.get("dwell_s"))
+        flight = str(raw.get("flight") or (base.flight if base else "") or "").strip().casefold()
+        zone = ""
+        if base and base.zone:
+            zone = str(base.zone)
+        else:
+            zone = str(raw.get("zone") or "").strip()
+        if zone and zone.casefold() not in RUNWAY_END_ZONES:
+            return base
+        gap_s = 5.0
+        if gap is not None:
+            gap_s = float(gap)
+        elif base is not None:
+            gap_s = float(base.gap_s or 5.0)
+        return StepTrigger(
+            zone="runway_end",
+            when="inside",
+            flight=flight if flight in ("all", "me") else "me",
+            settled=False,
+            dwell_s=0.0 if dwell is None else dwell,
+            gap_s=gap_s,
+            enabled_key=base.enabled_key if base else "",
+            explicit=True,
+        )
+
     return base
 
 
@@ -1566,6 +1732,8 @@ class PositionTracker:
         # The centreline is only needed for heading and for the fallback box —
         # a drawn "in position" zone stands on its own.
         frame = RunwayFrame.build(rwy, geo)
+        if frame is not None:
+            status.runway_length_m = frame.length_m
         pos_zones = zones_for(airport, "in_position", rwy)
         eor_zones = zones_for(airport, "eor", rwy)
         extra = [z for z in (watch or []) if isinstance(z, dict)]

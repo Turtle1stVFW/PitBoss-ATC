@@ -416,7 +416,15 @@
       "template": "exit_runway",
       "file": null,
       "enabled": true,
-      "text": null
+      "text": null,
+      "trigger": {
+        "zone": "runway_end",
+        "when": "inside",
+        "flight": "me",
+        "settled": false,
+        "dwell_s": 0,
+        "gap_s": 5
+      }
     },
     {
       "id": "gnd_taxi_in",

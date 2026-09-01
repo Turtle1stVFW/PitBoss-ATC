@@ -1,5 +1,5 @@
 {
-  "_comment": "Nellis (KLSV) departures. Instrument SIDs (DREAM7/FYTTR7/MMM8) only when explicitly filed. Any FLEX token is a visual DP, including runway-coded forms: FLEX, FLEX21, FLEX21L, FLEX21R, FLEX03, FLEX03L, FLEX03R. North/west inferred from the next fix (DREAM/MINTT/JUNNO vs FYTTR). Otherwise clearance stays plain 'as filed'.",
+  "_comment": "Nellis (KLSV) departures. Instrument SIDs (DREAM7/FYTTR7/MMM8/PEAKS) only when explicitly filed. PEAKS21R is the SID plus runway, same idea as FLEX21R. Any FLEX token is a visual DP, including runway-coded forms: FLEX, FLEX21, FLEX21L, FLEX21R, FLEX03, FLEX03L, FLEX03R. North/west inferred from the next fix (DREAM/MINTT/JUNNO vs FYTTR). Otherwise clearance stays plain 'as filed'.",
   "instrument": [
     {
       "id": "DREAM7",
@@ -27,6 +27,21 @@
       "kind": "instrument",
       "transitions": {
         "MMM": "Mormon Mesa"
+      }
+    },
+    {
+      "id": "PEAKS",
+      "aliases": ["PEAKS"],
+      "say": "Peaks",
+      "kind": "instrument",
+      "transitions": {
+        "HAYFD": "Hayford Peak",
+        "HAYFORD": "Hayford Peak",
+        "HAYFORDPK": "Hayford Peak",
+        "MORPK": "Mormon Peak",
+        "MORMON": "Mormon Peak",
+        "MORMONPK": "Mormon Peak",
+        "MORMONPEAK": "Mormon Peak"
       }
     }
   ],
@@ -68,6 +83,13 @@
     "JUNNO": "Junno",
     "DREAM": "Dream",
     "FYTTR": "Fighter",
-    "MMM": "Mormon Mesa"
+    "MMM": "Mormon Mesa",
+    "HAYFD": "Hayford Peak",
+    "HAYFORD": "Hayford Peak",
+    "HAYFORDPK": "Hayford Peak",
+    "MORPK": "Mormon Peak",
+    "MORMON": "Mormon Peak",
+    "MORMONPK": "Mormon Peak",
+    "MORMONPEAK": "Mormon Peak"
   }
 }

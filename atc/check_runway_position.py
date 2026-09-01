@@ -65,6 +65,80 @@ def main() -> int:
     else:
         print(f"ok   backwards 21R geometry flipped to {swapped.heading_deg:.1f}°")
 
+    ils = rp.RunwayFrame.build("21L", rp.runway_geometry(AIRPORT, "21L"))
+    if ils is None:
+        print("  FAIL 21L should be synthesized from 21R")
+        bad += 1
+    elif rp.angle_diff(ils.heading_deg, 221.2) > 2.0:
+        print(f"  FAIL 21L should parallel 21R (~221°), got {ils.heading_deg:.1f}")
+        bad += 1
+    elif ils.tx <= rev.tx:
+        print("  FAIL 21L threshold should sit east of 21R")
+        bad += 1
+    else:
+        print(f"ok   21L parallel offset east of 21R ({ils.tx - rev.tx:.0f} m)")
+
+    end_status = rp.FlightStatus(
+        runway="21L",
+        ok=True,
+        runway_length_m=3000.0,
+        fixes=[
+            rp.UnitFix(
+                unit_id="me",
+                label="Fleece 1",
+                along_m=2500.0,
+                lateral_m=2.0,
+                heading_err_deg=0.0,
+                alt_m=570.0,
+                height_m=5.0,
+                speed_mps=40.0,
+                own=True,
+                on_runway=True,
+            )
+        ],
+        tuning={"alt_tol": 60.0},
+    )
+    trig_end = rp.StepTrigger(zone="runway_end", settled=False, flight="me", explicit=True)
+    held_end, wait_end = rp.runway_end_held(trig_end, end_status, config={})
+    if not held_end:
+        print(f"  FAIL 500 m remaining should be the departure end: {wait_end}")
+        bad += 1
+    end_status.fixes[0].along_m = 1200.0
+    held_mid, wait_mid = rp.runway_end_held(trig_end, end_status, config={})
+    if held_mid:
+        print(f"  FAIL midfield rollout must wait: {wait_mid}")
+        bad += 1
+    end_status.fixes[0].along_m = 2500.0
+    end_status.fixes[0].height_m = 40.0
+    held_low, wait_low = rp.runway_end_held(trig_end, end_status, config={})
+    if held_low:
+        print(f"  FAIL a low approach / missed must not look like rollout: {wait_low}")
+        bad += 1
+    end_status.fixes[0].height_m = 5.0
+    end_status.fixes[0].speed_mps = 80.0
+    held_fast, wait_fast = rp.runway_end_held(trig_end, end_status, config={})
+    if held_fast:
+        print(f"  FAIL 150 kt over the far end must not be an exit: {wait_fast}")
+        bad += 1
+    end_status.fixes[0].speed_mps = 40.0
+    if atc_phrase.runway_exit_hold_reason({"awaiting_on_the_go": True}):
+        pass
+    else:
+        print("  FAIL option / low approach must suppress the exit call")
+        bad += 1
+    if not atc_phrase.runway_exit_hold_reason({"last_tx_template": "go_around"}):
+        print("  FAIL go-around / missed must suppress the exit call")
+        bad += 1
+    if atc_phrase.runway_exit_hold_reason({"last_tx_template": "clear_land"}):
+        print("  FAIL a full-stop land must still be allowed to exit")
+        bad += 1
+    trig_exit = rp.resolve_step_trigger({"template": "exit_runway"})
+    if trig_exit is None or trig_exit.zone != "runway_end" or trig_exit.flight != "me":
+        print(f"  FAIL exit_runway should arm on runway_end: {trig_exit}")
+        bad += 1
+    else:
+        print("ok   exit_runway arms at the departure end")
+
     show("projection")
     # A point 500 m down the centreline from the 03L threshold.
     ux = math.sin(math.radians(frame.heading_deg))
@@ -504,6 +578,20 @@ def check_zone_admission() -> int:
         bad += 1
     else:
         print(f"ok   airborne over EOR: {desc}")
+
+    # Recreate on-deck, 180° from takeoff heading — monitor tower must still arm.
+    status.fixes = [
+        fix(unit_id="1", own=True, heading_err_deg=180.0, height_m=0.0, speed_mps=0.0)
+    ]
+    recip = status.in_zone(eor_cap, settled=True)
+    if not recip.ok(need_full=False):
+        print(
+            f"  FAIL EOR reciprocal heading should still settle: "
+            f"{recip.describe(need_full=False)}"
+        )
+        bad += 1
+    else:
+        print("ok   EOR reciprocal heading still settles (not the lineup heading)")
 
     # Leaving: nobody inside is what a "clear of the runway" step waits for.
     status.fixes = [fix(unit_id="1", own=True, x_m=5000.0), fix(unit_id="2", x_m=5000.0)]

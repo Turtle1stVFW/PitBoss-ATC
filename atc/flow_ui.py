@@ -868,6 +868,14 @@ class MissionPlanner(tk.Tk):
                 self._refresh_voice_prompts()
             if hasattr(self, "_sync_fly_pilot_request_ui"):
                 self._sync_fly_pilot_request_ui(tuned or None)
+            # YOU ARE WITH follows the radio; NEXT TX stays the upcoming step.
+            if (
+                tuned != prev
+                and hasattr(self, "fly_freq")
+                and not getattr(self, "_refreshing_fly_status", False)
+            ):
+                self._refresh_fly_status()
+                return
         _ok, msg, result = srs_radio.check_freq_gate(
             self.config_data,
             airport,
@@ -1601,10 +1609,14 @@ class MissionPlanner(tk.Tk):
 
         # Instrument missed → Approach rewind: do not auto contact-tower / land
         # while still inside the rearm bubble (near-field misfire guard).
-        if tmpl in ("cleared_approach", "contact_tower", "right_break", "clear_land"):
+        if tmpl in ("cleared_approach", "contact_tower", "right_break", "clear_land", "exit_runway"):
             ok_rearm, wait_rearm = atc_phrase.tower_land_gates_allowed(state, distance_nm)
             if not ok_rearm:
                 return "", wait_rearm
+        if tmpl == "exit_runway":
+            exit_hold = atc_phrase.runway_exit_hold_reason(state)
+            if exit_hold:
+                return "", exit_hold
 
         held, waiting = runway_position.condition_held(
             trigger,
@@ -1715,13 +1727,23 @@ class MissionPlanner(tk.Tk):
             return
         if tracker is None:
             tracker = self._position_tracker()
-        latch = tracker.pending_latch or f"fire:{fire}:{status.runway or 'field'}"
         live_engine = engine
         if bind_live:
             try:
                 live_engine = self._live_engine()
             except Exception:
                 live_engine = engine
+        if str(step.get("template") or tmpl) == "exit_runway":
+            try:
+                exit_hold = atc_phrase.runway_exit_hold_reason(
+                    getattr(live_engine, "state", None)
+                )
+            except Exception:
+                exit_hold = ""
+            if exit_hold:
+                tracker.pending_latch = ""
+                return
+        latch = tracker.pending_latch or f"fire:{fire}:{status.runway or 'field'}"
         live_step = {}
         try:
             live_step = live_engine.current_step() or {}
@@ -5546,7 +5568,7 @@ class MissionPlanner(tk.Tk):
                 if step.get("speed_kt"):
                     seeds["speed_kt"] = str(step.get("speed_kt"))
             elif sit == "bj_range_exit":
-                seeds["handoff_channel"] = str(step.get("handoff_channel") or "approach")
+                seeds["handoff_channel"] = str(step.get("handoff_channel") or "control_east")
             elif sit == "approach_clearance":
                 seeds["pattern"] = atc_phrase.normalize_recovery_key(
                     step.get("approach_pattern") or step.get("pattern") or step.get("recovery")
@@ -5799,7 +5821,7 @@ class MissionPlanner(tk.Tk):
                     pat = params.get("pattern_custom") or pat
                 step["approach_pattern"] = atc_phrase.normalize_recovery_key(pat)
             elif sit == "bj_range_exit":
-                step["handoff_channel"] = params.get("handoff_channel") or "approach"
+                step["handoff_channel"] = params.get("handoff_channel") or "control_east"
             elif sit == "bj_alpha_check":
                 fix = atc_phrase.resolve_situation_alpha_fix(self.config_data, params)
                 if fix:
@@ -6463,6 +6485,8 @@ class MissionPlanner(tk.Tk):
         # opus_flight_id / opus_seat live only in config_data (set by flight picker)
         if hasattr(self, "var_runway_override"):
             self.config_data["runway_override"] = self.var_runway_override.get().strip()
+        if hasattr(self, "var_parking_override"):
+            self.config_data["parking_override"] = self.var_parking_override.get().strip()
         if hasattr(self, "var_tts_provider"):
             self.config_data["tts_provider"] = atc_phrase.tts_provider(
                 {"tts_provider": self.var_tts_provider.get()}
@@ -7670,6 +7694,9 @@ class MissionPlanner(tk.Tk):
             opus, weather = atc_phrase.resolve_opus_and_metar(
                 self.config_data, ap["icao"]
             )
+            mode_change = atc_phrase.takeoff_request_changes_mode(
+                request_key, self.mission, self.engine.state
+            )
             result = atc_phrase.apply_pilot_request(
                 request_key,
                 mission=self.mission,
@@ -7793,6 +7820,27 @@ class MissionPlanner(tk.Tk):
                     self._ui_call(lambda m=err: messagebox.showerror("Pilot request", m))
 
             threading.Thread(target=offer_work, daemon=True).start()
+            return
+        # Same takeoff type as already planned — issue LUAW / rolling, don't
+        # TX "expect line up and wait".
+        if (
+            not mode_change
+            and request_key in ("request_lineup", "request_rolling")
+        ):
+            def issue_work() -> None:
+                try:
+                    if request_key == "request_lineup":
+                        played = voice_engine._play_lineup(self.engine)
+                    else:
+                        played = voice_engine._play_clear_takeoff(self.engine)
+                    if isinstance(played, dict) and played.get("action") == "none":
+                        raise RuntimeError(played.get("detail") or "no takeoff step")
+                    self._ui_call(lambda p=played: self._on_rolling_offer_done(p))
+                except Exception as exc:  # noqa: BLE001
+                    err = str(exc)
+                    self._ui_call(lambda m=err: messagebox.showerror("Pilot request", m))
+
+            threading.Thread(target=issue_work, daemon=True).start()
             return
         ack_kind = str(result.get("ack_kind") or "")
         if not ack_kind:
@@ -8284,6 +8332,15 @@ class MissionPlanner(tk.Tk):
     def _refresh_fly_status(self) -> None:
         # Keep the live Plan mission (Keywords / voice_phrases included). reload()
         # re-reads the flow file and would drop unsaved step edits.
+        if getattr(self, "_refreshing_fly_status", False):
+            return
+        self._refreshing_fly_status = True
+        try:
+            self._refresh_fly_status_body()
+        finally:
+            self._refreshing_fly_status = False
+
+    def _refresh_fly_status_body(self) -> None:
         self._sync_client_flow_cursor()
         self.engine.config = self.config_data
         self.engine.airports = self.airports
@@ -8348,17 +8405,9 @@ class MissionPlanner(tk.Tk):
                 self.fly_step_name.set(label)
             ch, freq, mod, tx = self._fly_upcoming_radio(step)
             display_ch = ch
-            if sandbox and live_ch:
-                try:
-                    live_freq, live_mod, live_tx = atc_phrase.channel_radio(
-                        self.engine.airport(), live_ch
-                    )
-                    freq = srs_radio.format_mhz(live_freq)
-                    mod = live_mod
-                    tx = live_tx
-                    display_ch = live_ch.upper().replace("_", " ")
-                except Exception:
-                    display_ch = live_ch.upper().replace("_", " ")
+            # NEXT TX FREQUENCY is the upcoming step, not the radio you are
+            # tuned to (that is YOU ARE ON / YOU ARE WITH). Overwriting with
+            # live Ground after a Tower handoff left the hero on GND.
             self.fly_freq.set(freq)
             self.fly_mod.set(mod)
             self.fly_channel.set(display_ch)
@@ -8419,9 +8468,7 @@ class MissionPlanner(tk.Tk):
                 except Exception:
                     pass
             self.fly_hint.set(hint)
-            color = CHANNEL_COLORS.get(
-                (live_ch or ch).lower() if sandbox else ch.lower(), C_ACCENT
-            )
+            color = CHANNEL_COLORS.get(ch.lower(), C_ACCENT)
             if hasattr(self, "_fly_channel_lbl"):
                 self._fly_channel_lbl.configure(fg=color)
             if hasattr(self, "_fly_step_name_lbl"):
@@ -9567,6 +9614,7 @@ class MissionPlanner(tk.Tk):
         self.var_coalition = tk.StringVar()
         self.var_runways = tk.StringVar()
         self.var_runway_override = tk.StringVar()
+        self.var_parking_override = tk.StringVar()
         self.var_expect_minutes = tk.StringVar()
         self.var_known_sids = tk.StringVar()
         self.freq_vars = {ch: tk.StringVar() for ch in atc_phrase.CHANNELS}
@@ -9602,8 +9650,18 @@ class MissionPlanner(tk.Tk):
             width=10,
             command=self._clear_setup_runway_override,
         ).pack(side=tk.LEFT, padx=(8, 0))
-        self._setup_field(lf, 8, "Expect FL (min)", self.var_expect_minutes, width=28)
-        self._setup_field(lf, 9, "Known SIDs", self.var_known_sids, width=28)
+        self._setup_field(lf, 8, "Manual parking", self.var_parking_override, width=28)
+        park_hint = tk.Frame(lf, bg=C_PANEL)
+        park_hint.grid(row=9, column=1, sticky="w")
+        tk.Label(
+            park_hint,
+            text="Blank = squadron (e.g. G Revetments or Ramp)",
+            bg=C_PANEL,
+            fg=C_MUTED,
+            font=("Segoe UI", 8),
+        ).pack(side=tk.LEFT)
+        self._setup_field(lf, 10, "Expect FL (min)", self.var_expect_minutes, width=28)
+        self._setup_field(lf, 11, "Known SIDs", self.var_known_sids, width=28)
         lf.columnconfigure(1, weight=1)
 
         tk.Label(right, text="Frequencies (MHz)", bg=C_PANEL, fg=C_LABEL, font=("Segoe UI Semibold", 10)).pack(
@@ -11037,6 +11095,8 @@ class MissionPlanner(tk.Tk):
         self._update_opus_flight_label()
         self._refresh_opus_identity_bar()
         self.var_runway_override.set(c.get("runway_override", "") or "")
+        if hasattr(self, "var_parking_override"):
+            self.var_parking_override.set(c.get("parking_override", "") or "")
         self.var_volume.set(float(c.get("tts_volume", 0.8)))
         provider = atc_phrase.tts_provider(c)
         self.var_tts_provider.set(provider)
@@ -11167,6 +11227,8 @@ class MissionPlanner(tk.Tk):
         self.config_data["opus_backend_url"] = self.var_backend.get().strip()
         self.config_data["callsign_override"] = self.var_callsign_override.get().strip()
         self.config_data["runway_override"] = self.var_runway_override.get().strip()
+        if hasattr(self, "var_parking_override"):
+            self.config_data["parking_override"] = self.var_parking_override.get().strip()
         provider = atc_phrase.tts_provider({"tts_provider": self.var_tts_provider.get()})
         self.config_data["tts_provider"] = provider
         creds_path = self.var_google_credentials.get().strip()
