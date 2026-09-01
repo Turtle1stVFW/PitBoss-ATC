@@ -154,6 +154,7 @@ class AtcServer:
         self.bind_host = "0.0.0.0"
         self.port = int(config.get("atc_port") or atc_net.DEFAULT_ATC_PORT)
         self.firewall_status = ""
+        self.host_engine: flow_engine.FlowEngine | None = None
 
     def start(self, host: str | None = None, port: int | None = None) -> None:
         self.bind_host = host or "0.0.0.0"
@@ -235,11 +236,51 @@ class AtcServer:
         engine = self.engines.get(flow)
         if engine is not None and self._flow_alive(flow):
             return engine
+        shared = self._maybe_host_engine(flow, identity)
+        if shared is not None:
+            _apply_identity_to_config(shared.config, identity)
+            self.engines[flow] = shared
+            return shared
         engine = _new_session_engine(
             self.config, self.airports, self.mission_provider(), identity
         )
         self.engines[flow] = engine
         return engine
+
+    def _maybe_host_engine(
+        self, flow: str, identity: dict[str, Any]
+    ) -> flow_engine.FlowEngine | None:
+        """
+        Reuse the Host Fly timeline so a client's Step ▶ moves the same cursor.
+
+        Share when the host picked the same Opus flight, or the host has no
+        flight of its own (dedicated box watching that client).
+        """
+        host_eng = self.host_engine
+        if host_eng is None:
+            return None
+        host_fid = atc_phrase.configured_opus_flight_id(self.config)
+        sess_fid = identity.get("opus_flight_id")
+        try:
+            same = (
+                host_fid is not None
+                and sess_fid not in (None, "")
+                and int(host_fid) == int(sess_fid)
+            )
+        except (TypeError, ValueError):
+            same = False
+        if same:
+            return host_eng
+        if host_fid is None:
+            live_flows = {
+                s.flow_key
+                for s in self.sessions.values()
+                if time.time() - s.last_seen <= atc_net.SESSION_TTL_S
+            }
+            live_flows.add(flow)
+            if len(live_flows) <= 1:
+                return host_eng
+        return None
 
     def unique_flow_sessions(self) -> list[PilotSession]:
         """One live session per shared timeline (prefer seat 1) for CAOC auto-clearance."""
@@ -419,6 +460,9 @@ class AtcServer:
 
         result = self.run_action(sess, work, body)
         result["ok"] = True
+        status = sess.public_status(self.hub.snapshot())
+        for key, value in status.items():
+            result.setdefault(key, value)
         return result
 
     def heartbeat(self, sess: PilotSession, body: dict[str, Any]) -> dict[str, Any]:
@@ -487,16 +531,21 @@ def _identity_from_hello(body: dict[str, Any], host_config: dict[str, Any]) -> d
         "opus_flight_label": str(body.get("opus_flight_label") or "").strip(),
         "callsign_override": str(body.get("callsign_override") or "").strip(),
     }
-    cfg = dict(host_config)
-    _apply_identity_to_config(cfg, ident)
+    # Do not use the host process Opus cache — that is whoever the host
+    # last resolved, not this client's Wild 6 / Fleece 1.
     callsign = ident["callsign_override"]
     if not callsign:
+        callsign = atc_phrase.clean_flight_callsign(ident["opus_flight_label"])
+    if not callsign:
+        cfg = dict(host_config)
+        _apply_identity_to_config(cfg, ident)
         try:
-            callsign = str(atc_phrase.cached_radio_callsign(cfg) or "")
+            ctx = atc_phrase.resolve_active_opus_flight(cfg)
+            callsign = str(getattr(ctx, "radio_callsign", "") or "")
         except Exception:
             callsign = ""
-        if not callsign:
-            callsign = ident["opus_flight_label"] or ident["opus_user_name"] or "CALLSIGN"
+    if not callsign:
+        callsign = ident["opus_user_name"] or "CALLSIGN"
     ident["callsign"] = callsign
     return ident
 

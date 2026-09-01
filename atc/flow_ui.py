@@ -1106,6 +1106,12 @@ class MissionPlanner(tk.Tk):
         if not hasattr(self, "fly_position"):
             return
         if self._atc_role() == "client":
+            if not getattr(self, "_pos_busy", False):
+                self._pos_busy = True
+                threading.Thread(
+                    target=lambda: self._position_work(allow_fire=False),
+                    daemon=True,
+                ).start()
             self._kick_tanker_boom_watch()
             return
         if not bool(self.config_data.get("auto_clearance_enabled")):
@@ -1163,6 +1169,7 @@ class MissionPlanner(tk.Tk):
                 self.airports,
                 lambda: self.mission,
             )
+            self._atc_server.host_engine = self.engine
             try:
                 self._atc_server.start(
                     port=int(self.config_data.get("atc_port") or atc_net.DEFAULT_ATC_PORT)
@@ -1392,6 +1399,7 @@ class MissionPlanner(tk.Tk):
         bind_live: bool = True,
         session: Any = None,
         busy_attr: str = "_pos_busy",
+        allow_fire: bool = True,
     ) -> None:
         if tracker is None:
             tracker = self._position_tracker()
@@ -1488,6 +1496,8 @@ class MissionPlanner(tk.Tk):
                 config=engine.config,
                 tracker=tracker,
             )
+            if not allow_fire:
+                fire = ""
         except Exception as exc:  # noqa: BLE001
             err = str(exc)
             if bind_live:
@@ -8342,7 +8352,20 @@ class MissionPlanner(tk.Tk):
 
     def _refresh_fly_status_body(self) -> None:
         self._sync_client_flow_cursor()
+        keep: dict[str, Any] = {}
+        if self._atc_role() == "host":
+            for key in (
+                "opus_flight_id",
+                "opus_seat",
+                "opus_flight_label",
+                "opus_user_name",
+            ):
+                if self.config_data.get(key) in (None, ""):
+                    keep[key] = (self.engine.config or {}).get(key)
         self.engine.config = self.config_data
+        for key, value in keep.items():
+            if value not in (None, ""):
+                self.engine.config[key] = value
         self.engine.airports = self.airports
         self.engine.mission = self.mission
         self._consume_position_fire_clears()
@@ -11477,6 +11500,13 @@ class MissionPlanner(tk.Tk):
         self._refresh_opus_identity_bar()
         if refresh_opus:
             self._refresh_callsign()
+        client = getattr(self, "_atc_client", None)
+        if self._atc_role() == "client" and client is not None:
+            try:
+                client.config = self.config_data
+                client.hello()
+            except Exception:
+                pass
 
     def _commit_identity_user(self, _evt: object | None = None) -> None:
         """Push the visible CAOC username into config and re-resolve Opus."""

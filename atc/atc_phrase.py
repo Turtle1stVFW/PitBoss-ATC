@@ -6710,6 +6710,44 @@ def _norm_match_token(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", (s or "").casefold())
 
 
+def clean_flight_callsign(raw: str | None) -> str:
+    """First callsign bit from a picker label ('WILD 6 · KLSV …' → 'WILD 6')."""
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    return text.split("·", 1)[0].strip()
+
+
+def flight_designator(cs: str) -> tuple[str, str]:
+    """('wild', '6') from 'WILD 6', 'WILD 61', 'WILD 6-1'."""
+    compact = _norm_match_token(cs)
+    m = re.match(r"^([a-z]+)(\d*)$", compact)
+    if not m:
+        return compact, ""
+    return m.group(1), m.group(2)
+
+
+def same_flight_callsign(want: str, have: str) -> bool:
+    """
+    True when `have` is the same flight as `want`.
+
+    Opus flights are 'WILD 6'; CAOC often labels the lead 'WILD 61' / 'WILD 6-1'.
+    """
+    want = clean_flight_callsign(want)
+    have = clean_flight_callsign(have)
+    if not want or not have:
+        return False
+    wn, wd = flight_designator(want)
+    hn, hd = flight_designator(have)
+    if not wn or wn != hn:
+        return False
+    if not wd or not hd or wd == hd:
+        return True
+    # Flight 6 ↔ element 61..69 (one extra ship digit).
+    longer, shorter = (hd, wd) if len(hd) > len(wd) else (wd, hd)
+    return longer.startswith(shorter) and len(longer) - len(shorter) == 1
+
+
 def caoc_air_units(units: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Air tracks suitable for CAOC map / alpha check (skip FARPs, numeric junk names)."""
     out: list[dict[str, Any]] = []
@@ -7078,14 +7116,19 @@ def match_caoc_unit_for_flight(
     mode3 = (opus.mode3 if opus else None) or None
     pilot = (config.get("opus_user_name") or "").strip()
     pilot_n = _norm_match_token(pilot)
-    cs = (opus.radio_callsign if opus else None) or callsign or ""
+    raw_cs = (opus.radio_callsign if opus else None) or callsign or ""
+    label_cs = clean_flight_callsign(str(config.get("opus_flight_label") or ""))
+    cs = clean_flight_callsign(raw_cs) or label_cs
+    cs_name, cs_num = flight_designator(cs)
     cs_tokens = [
         _norm_match_token(t)
         for t in re.split(r"[\s\-/|_]+", cs)
         if _norm_match_token(t) and _norm_match_token(t) not in {"the", "flight"}
     ]
-    # Drop lone seat digits for matching
-    cs_tokens = [t for t in cs_tokens if not t.isdigit()]
+    # Keep the flight number ("6" of WILD 6). Drop only a lone seat digit
+    # when the name+number are already in `cs`.
+    if cs_name and cs_num:
+        cs_tokens = [t for t in cs_tokens if not t.isdigit() or t == cs_num]
 
     def _unit_pilot_blob(u: dict[str, Any]) -> str:
         for key in ("pilotName", "name"):
@@ -7108,11 +7151,12 @@ def match_caoc_unit_for_flight(
                     score += 100
             except (TypeError, ValueError):
                 pass
-        label = str(u.get("flightLabel") or u.get("unitCallsign") or "")
-        if label and cs and _norm_match_token(label) and _norm_match_token(label) in _norm_match_token(cs):
+        labels = [
+            str(u.get(k) or "")
+            for k in ("flightLabel", "unitCallsign", "groupName")
+        ]
+        if cs and any(same_flight_callsign(cs, lab) for lab in labels if lab):
             score += 80
-        if label and cs_tokens and _norm_match_token(label) in cs_tokens:
-            score += 70
         unit_pilot = _unit_pilot_blob(u)
         if pilot_n and unit_pilot and _norm_match_token(unit_pilot) == pilot_n:
             score += 90
@@ -7126,10 +7170,15 @@ def match_caoc_unit_for_flight(
             for k in ("name", "groupName", "unitName", "flightLabel", "unitCallsign")
         )
         blob_n = _norm_match_token(blob)
-        for tok in cs_tokens:
-            if len(tok) >= 3 and tok in blob_n:
-                score += 40
-                break
+        if cs_name and len(cs_name) >= 3 and cs_name in blob_n:
+            score += 40
+            if cs_num and cs_num in blob_n:
+                score += 20
+        else:
+            for tok in cs_tokens:
+                if len(tok) >= 3 and tok in blob_n:
+                    score += 40
+                    break
         # Tie-breaker only — never the sole reason a track wins.
         if score > 0 and (u.get("pilotName") or u.get("flightLabel") or u.get("squawk")):
             score += 5

@@ -478,6 +478,76 @@ def test_secret_redaction_and_session_tts_cap() -> list[str]:
     return fails
 
 
+def test_wild6_ownship_and_shared_cursor() -> list[str]:
+    fails: list[str] = []
+    if not atc_phrase.same_flight_callsign("WILD 6", "WILD 61"):
+        fails.append("WILD 6 should match CAOC WILD 61")
+    if not atc_phrase.same_flight_callsign("WILD 6 · KLSV DCT", "WILD 6-1"):
+        fails.append("picker label should match WILD 6-1")
+    if atc_phrase.same_flight_callsign("WILD 6", "VIPER 1"):
+        fails.append("WILD 6 must not match VIPER 1")
+    if atc_phrase.clean_flight_callsign("WILD 6 · seat 1") != "WILD 6":
+        fails.append("clean_flight_callsign should take the first bit")
+
+    units = [
+        {
+            "type": "air",
+            "id": "viper",
+            "name": "Viper",
+            "flightLabel": "VIPER 11",
+            "xMeters": 0,
+            "zMeters": 0,
+        },
+        {
+            "type": "air",
+            "id": "wild",
+            "name": "Wild",
+            "flightLabel": "WILD 61",
+            "xMeters": 10,
+            "zMeters": 10,
+        },
+    ]
+    own = atc_phrase.match_caoc_unit_for_flight(
+        units,
+        callsign="WILD 6",
+        config={"opus_flight_label": "WILD 6 · KLSV"},
+    )
+    if not own or str(own.get("id")) != "wild":
+        fails.append(f"ownship should be WILD 61, got {own}")
+
+    host_eng = flow_engine.FlowEngine(
+        config=_host_config(),
+        persist_state=False,
+        mission=copy.deepcopy(MISSION),
+        airports=AIRPORTS,
+    )
+    idx0 = int(host_eng.state.get("index") or 0)
+    server = atc_server.AtcServer(
+        _host_config(), AIRPORTS, lambda: copy.deepcopy(MISSION)
+    )
+    server.host_engine = host_eng
+    hello = server.hello(
+        {
+            "opus_flight_id": 42,
+            "opus_seat": 1,
+            "opus_flight_label": "WILD 6 · KLSV DCT · seat 1",
+            "opus_user_name": "tester",
+            "radio_fresh": False,
+        }
+    )
+    if str(hello.get("callsign") or "") != "WILD 6":
+        fails.append(f"hello callsign should be WILD 6, got {hello.get('callsign')}")
+    sess = server.get_session(hello["session_id"])
+    if sess is None:
+        return fails + ["hello did not create a Wild 6 session"]
+    if sess.engine is not host_eng:
+        fails.append("dedicated host should share the Fly engine with the only client")
+    server.handle_command(sess, "seek_relative", {"delta": 1, "radio_fresh": False})
+    if int(host_eng.state.get("index") or 0) == idx0:
+        fails.append("client Step should move the host Fly cursor")
+    return fails
+
+
 def main() -> int:
     tests = (
         test_session_key,
@@ -490,6 +560,7 @@ def main() -> int:
         test_element_tanker_peel,
         test_client_freq_gate,
         test_secret_redaction_and_session_tts_cap,
+        test_wild6_ownship_and_shared_cursor,
     )
     bad = 0
     for fn in tests:

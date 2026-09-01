@@ -89,7 +89,10 @@ class AtcClient:
         body.update(fields)
         body.update(_radio_payload(self.config))
         path = f"/v1/{command.strip().lower()}"
-        return self._request("POST", path, body)
+        data = self._request("POST", path, body)
+        if isinstance(data, dict):
+            self.last_status = {**self.last_status, **data}
+        return data
 
     def me(self) -> dict[str, Any]:
         data = self._request(
