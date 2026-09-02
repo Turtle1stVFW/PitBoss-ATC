@@ -197,6 +197,7 @@ class FightGroup:
     object: str = ""
     declaration: str = "hostile"
     unit_ids: list[str] = field(default_factory=list)
+    coalition: str = ""
     # Filled by classify
     name: str = "group"
     cross_nm: float = 0.0  # + left / − right of threat axis from fighters
@@ -614,6 +615,56 @@ def roll_enemy_declaration() -> str:
     return random.choice(_ENEMY_DECLARATIONS)
 
 
+def normalize_coalition(raw: Any) -> str:
+    """CAOC / DCS side → red | blue | neutral | ''."""
+    if isinstance(raw, bool):
+        return ""
+    if isinstance(raw, (int, float)):
+        try:
+            return {0: "neutral", 1: "red", 2: "blue", 3: "neutral"}.get(int(raw), "")
+        except (TypeError, ValueError):
+            return ""
+    text = str(raw or "").strip().casefold()
+    if text in ("1", "red", "r", "enm", "enemy"):
+        return "red"
+    if text in ("2", "blue", "b", "friend"):
+        return "blue"
+    if text in (
+        "0",
+        "3",
+        "neutral",
+        "neutrals",
+        "n",
+        "civilian",
+        "civ",
+        "civil",
+    ):
+        return "neutral"
+    if "neutral" in text or "civil" in text:
+        return "neutral"
+    return ""
+
+
+def is_enemy_side(
+    coalition: Any = None,
+    hostile_side: str = "red",
+) -> bool:
+    """True when CAOC tagged this track as the enemy coalition."""
+    side = normalize_coalition(coalition)
+    host = normalize_coalition(hostile_side) or "red"
+    return bool(side) and side == host and side in ("red", "blue")
+
+
+def is_friendly_side(
+    coalition: Any = None,
+    hostile_side: str = "red",
+) -> bool:
+    """True when CAOC tagged this track as the friendly coalition."""
+    side = normalize_coalition(coalition)
+    host = normalize_coalition(hostile_side) or "red"
+    return side in ("red", "blue") and side != host
+
+
 def normalize_declaration(raw: str | None) -> str:
     text = str(raw or "").strip().casefold()
     text = re.sub(r"\s+", " ", text)
@@ -691,8 +742,9 @@ class DeclarationMemory:
 
     First time a group is spoken it is rolled (bogey / spades / bandit / hostile)
     and remembered by CAOC unit id, then bullseye. Later picture / declare /
-    bogey-dope calls reuse that label. The only allowed change is an upgrade
-    to HOSTILE (Bandsaw declare, or the flight lead saying hostile).
+    bogey-dope calls reuse that label. HOSTILE upgrades apply only to the
+    enemy coalition (Bandsaw declare, or the flight lead saying hostile).
+    CAOC neutrals stay bogey / bogey spades; airframe type does not override side.
     """
 
     def __init__(self, rows: list[dict[str, Any]] | None = None) -> None:
@@ -809,22 +861,26 @@ class DeclarationMemory:
         now = time.time()
         self._prune(now)
         idset = _id_set(ids)
-        side = str(coalition or "").lower()
         stored = self.lookup(idset, brg=brg, rng=rng, feet=feet)
+        friend = is_friendly_side(coalition, hostile_side)
+        enemy = is_enemy_side(coalition, hostile_side)
 
-        if side in ("red", "blue") and side != str(hostile_side or "").lower():
+        if friend:
             decl = "friendly"
-        elif stored and stored != "friendly":
+        elif enemy:
+            if stored and stored != "friendly":
+                decl = stored
+            else:
+                decl = roll_enemy_declaration()
+            if upgrade_hostile:
+                decl = "hostile"
+            if stored == "hostile":
+                decl = "hostile"
+        elif stored in ("friendly", "bogey", "bogey spades"):
             decl = stored
-        elif side == str(hostile_side or "").lower():
-            decl = roll_enemy_declaration()
         else:
-            decl = stored or "bogey"
-
-        if upgrade_hostile and decl != "friendly":
-            decl = "hostile"
-        if stored == "hostile":
-            decl = "hostile"
+            # Unknown / neutral. Never keep a leftover hostile or bandit.
+            decl = "bogey spades"
         decl = normalize_declaration(decl)
         self._remember(idset, brg, rng, feet, decl, now)
         return decl
@@ -866,11 +922,21 @@ class DeclarationMemory:
         brg: int | None = None,
         rng: int | None = None,
         feet: int | None = None,
+        coalition: str | None = None,
+        hostile_side: str = "red",
     ) -> str:
-        """Bandsaw / flight-lead upgrade. Never downgrade; never flip a friendly."""
+        """
+        Bandsaw / flight-lead upgrade.
+
+        Never downgrade. Never flip a friendly or a CAOC-neutral track.
+        """
         stored = self.lookup(ids, brg=brg, rng=rng, feet=feet)
         if stored == "friendly":
             return "friendly"
+        if not is_enemy_side(coalition, hostile_side):
+            if stored in ("friendly", "bogey", "bogey spades"):
+                return stored
+            return "bogey spades"
         self._remember(
             _id_set(ids), brg, rng, feet, "hostile", time.time()
         )
@@ -891,18 +957,39 @@ class DeclarationMemory:
         return decl
 
 
-def declaration_for_coalition(coalition: str | None, hostile_side: str) -> str:
+def declaration_for_coalition(
+    coalition: str | None,
+    hostile_side: str,
+) -> str:
     """
     Coalition → spoken declaration (no memory).
 
     Prefer DeclarationMemory.assign so labels stick across picture / declare /
     bogey dope. This remains for one-shot tests.
     """
-    side = str(coalition or "").lower()
-    if not side:
-        return "bogey"
-    if side == hostile_side:
-        return roll_enemy_declaration()
-    if side in ("red", "blue") and side != hostile_side:
+    if is_friendly_side(coalition, hostile_side):
         return "friendly"
+    if is_enemy_side(coalition, hostile_side):
+        return roll_enemy_declaration()
+    if normalize_coalition(coalition) or not str(coalition or "").strip():
+        return "bogey spades"
     return "bogey"
+
+
+def declare_may_upgrade_hostile(
+    group: FightGroup,
+    *,
+    agency: str | None = None,
+    channel: str | None = None,
+    transcript: str | None = None,
+    hostile_side: str = "red",
+) -> bool:
+    """Bandsaw / lead may call HOSTILE only on the enemy coalition."""
+    if normalize_declaration(group.declaration) == "friendly":
+        return False
+    if not (
+        agency_can_upgrade_hostile(agency, channel)
+        or transcript_upgrades_hostile(transcript)
+    ):
+        return False
+    return is_enemy_side(group.coalition, hostile_side)

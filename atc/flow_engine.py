@@ -396,6 +396,26 @@ class FlowEngine:
             self.state["pending_takeoff_offer"] = "rolling"
         self.save_state()
 
+    def _departure_handoff_index(self) -> int | None:
+        return next(
+            (
+                i
+                for i, step in enumerate(self.steps)
+                if str(step.get("template") or "") == "departure_handoff"
+            ),
+            None,
+        )
+
+    def _remember_manual_cursor(self, idx: int) -> None:
+        """Arrows / seek past Blackjack handoff must not be yanked back."""
+        handoff_i = self._departure_handoff_index()
+        if handoff_i is None:
+            return
+        if idx > handoff_i:
+            self.state["manual_cursor"] = True
+        else:
+            self.state.pop("manual_cursor", None)
+
     def _park_pending_departure_handoff(self) -> None:
         """
         After Departure radar / climb, stay on the Blackjack handoff.
@@ -403,7 +423,10 @@ class FlowEngine:
         Skipping the unused climb-to-cruise step must not walk the cursor onto
         Control → Approach. A leftover recovery cursor plus a filed TORYE
         (outbound local hop) made Watch hand to Approach instead of Blackjack.
+        An explicit seek past the handoff (Fly arrows) is left alone.
         """
+        if self.state.get("manual_cursor"):
+            return
         last_id = str(self.state.get("last_step_id") or "").strip()
         last_tmpl = str(self.state.get("last_tx_template") or "").strip().lower()
         played_tmpl = last_tmpl
@@ -413,14 +436,7 @@ class FlowEngine:
                 break
         if played_tmpl not in ("radar_contact", "climb_cruise"):
             return
-        handoff_i = next(
-            (
-                i
-                for i, step in enumerate(self.steps)
-                if str(step.get("template") or "") == "departure_handoff"
-            ),
-            None,
-        )
+        handoff_i = self._departure_handoff_index()
         if handoff_i is None:
             return
         idx = int(self.state.get("index") or 0)
@@ -510,10 +526,14 @@ class FlowEngine:
         prev = int(self.state.get("index") or 0)
         idx = max(0, min(int(index), len(steps)))  # len(steps) == past end
         self.state["index"] = idx
+        # Mark before prepare_takeoff_cursor so Watch-park cannot snap a
+        # forward skip back onto departure_handoff.
+        self._remember_manual_cursor(idx)
         if idx < len(steps):
             if idx < prev:
                 # Moving earlier — do not bounce forward over skipped approach steps.
                 self.state["index"] = self._retreat_past_skippable(idx)
+                self._remember_manual_cursor(int(self.state.get("index") or 0))
             else:
                 self.prepare_takeoff_cursor()
         self._clear_landing_progress_if_before_clear_land(
@@ -1391,6 +1411,7 @@ class FlowEngine:
             )
         self.state["index"] = 0
         self.state["last_step_id"] = None
+        self.state.pop("manual_cursor", None)
         try:
             import agencies as agencies_mod
 
@@ -1435,6 +1456,7 @@ class FlowEngine:
         )
         self.state["index"] = 0
         self.state["last_step_id"] = None
+        self.state.pop("manual_cursor", None)
         try:
             import agencies as agencies_mod
 

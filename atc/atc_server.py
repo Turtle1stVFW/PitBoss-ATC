@@ -44,6 +44,7 @@ _SHARED_FLOW_KEYS = (
     "last_tx_at",
     "last_tx_channel",
     "last_tx_template",
+    "manual_cursor",
     "active_takeoff_mode",
     "pending_takeoff_offer",
     "takeoff_offer_rolled",

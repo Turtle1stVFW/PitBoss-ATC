@@ -4250,6 +4250,24 @@ def extras() -> int:
         else:
             print("departure radar — stay on Blackjack handoff, not Approach")
 
+        parked_i = int(dep_eng.state.get("index") or 0)
+        dep_eng.sync_readback_for_cursor = lambda: None
+        seeked = dep_eng.seek(parked_i + 1)
+        after_seek = dep_eng.current_step() or {}
+        if (
+            not seeked.get("seeked")
+            or str(after_seek.get("template") or "") == "departure_handoff"
+            or int(dep_eng.state.get("index") or 0) <= parked_i
+        ):
+            print(
+                f"  FAIL manual seek past departure handoff snapped back to "
+                f"{after_seek.get('id')!r} / {after_seek.get('template')!r} "
+                f"index={dep_eng.state.get('index')}"
+            )
+            bad += 1
+        else:
+            print("departure radar — manual seek past Blackjack handoff stays put")
+
         rb_climb = voice_intent.evaluate(
             "Nellis Departure, Fleece 1, climb and maintain flight level two four zero",
             channel="departure",
