@@ -31,6 +31,10 @@ tools/overlays/*
 # FAA SUA cache used by tools/import_nttr_agencies.py
 tools/_nttr_sua.geojson
 
+# Optional Crew Chief recorded lines (extract locally; do not commit)
+atc/crew_chief/sounds/**
+!atc/crew_chief/sounds/README.md
+
 # Scratch downloads / plate probes (never commit)
 atc/_tmp*
 atc/**/_tmp*

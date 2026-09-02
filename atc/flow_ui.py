@@ -207,6 +207,7 @@ class MissionPlanner(tk.Tk):
         self._sync_atc_runtime()
         self._schedule_freq_gate_poll()
         self._schedule_position_poll()
+        self._schedule_crew_chief_poll()
         self._schedule_airports_poll()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -627,6 +628,16 @@ class MissionPlanner(tk.Tk):
             if hasattr(self, "_fly_position_lbl"):
                 self._fly_position_lbl.configure(fg=C_MUTED)
 
+    def _on_crew_chief_changed(self) -> None:
+        self.config_data["crew_chief_enabled"] = bool(self.var_crew_chief_enabled.get())
+        voice = str(self.var_crew_chief_voice.get() or "tts").strip().lower() or "tts"
+        if voice not in {"tts", "pack"}:
+            voice = "tts"
+        self.config_data["crew_chief_voice"] = voice
+        save_json(CONFIG_PATH, self.config_data)
+        self._refresh_vcc_status()
+        self._apply_voice()
+
     def _install_dcs_radio_export(self) -> None:
         """Copy ATC-RadioExport.lua and patch Export.lua in each DCS profile."""
         results = install_dcs_radio_export.install_all()
@@ -635,8 +646,9 @@ class MissionPlanner(tk.Tk):
         if ok:
             messagebox.showinfo(
                 "DCS radio export",
-                "Installed for in-jet frequency gate.\n\n"
+                "Installed for in-jet frequency gate and Virtual Crew Chief.\n\n"
                 f"{report}\n\n"
+                "Writes radios.json and aircraft.json under ATC-ExternalAudio. "
                 "Restart DCS if it is already running. The SRS Export.lua line is left alone.",
             )
         else:
@@ -1058,6 +1070,156 @@ class MissionPlanner(tk.Tk):
         except Exception:  # noqa: BLE001
             pass
         self.after(2000, self._schedule_position_poll)
+
+    def _schedule_crew_chief_poll(self) -> None:
+        try:
+            self._crew_chief_tick()
+        except Exception:  # noqa: BLE001
+            pass
+        delay = 1000
+        try:
+            import crew_chief as crew_chief_mod
+
+            if crew_chief_mod.should_poll(self.config_data, getattr(self.engine, "state", None)):
+                delay = 200
+        except Exception:
+            delay = 1000
+        self.after(delay, self._schedule_crew_chief_poll)
+
+    def _crew_chief_tick(self) -> None:
+        if not bool(self.config_data.get("crew_chief_enabled")):
+            if hasattr(self, "fly_vcc"):
+                self.fly_vcc.set("VCC off")
+            return
+        import crew_chief as crew_chief_mod
+        import crew_chief_export as crew_chief_export_mod
+
+        engine = self._live_engine()
+        snap = crew_chief_export_mod.read_aircraft()
+        if crew_chief_mod.should_poll(self.config_data, engine.state):
+            result = crew_chief_mod.tick_engine(engine, snap, play=True)
+            events = result.get("events") or []
+            if events and hasattr(self, "_voice_log"):
+                for ev in events:
+                    line = str(ev.get("line_id") or ev.get("detail") or "")
+                    if line:
+                        self._voice_log(f"VCC  {line}")
+        self._refresh_vcc_status(snap)
+
+    def _refresh_vcc_status(self, snap: Any = None) -> None:
+        if not hasattr(self, "fly_vcc"):
+            return
+        try:
+            import crew_chief as crew_chief_mod
+
+            text = crew_chief_mod.fly_status_line(
+                self.config_data, getattr(self._live_engine(), "state", None), snap
+            )
+        except Exception:
+            text = "VCC"
+        self.fly_vcc.set(text)
+        if hasattr(self, "_fly_vcc_lbl"):
+            connected = "ICS connected" in text and "silent" not in text
+            self._fly_vcc_lbl.configure(fg=C_GREEN if connected else C_AMBER if "ICS" in text else C_MUTED)
+        self._sync_vcc_connect_button(text)
+        try:
+            import crew_chief as crew_chief_mod
+
+            view = crew_chief_mod.checklist_helper(
+                self.config_data, getattr(self._live_engine(), "state", None), snap
+            )
+            fp = crew_chief_mod.checklist_fingerprint(view)
+        except Exception:
+            fp = ""
+            view = None
+        if fp != getattr(self, "_vcc_helper_fp", None):
+            self._vcc_helper_fp = fp
+            self._refresh_voice_prompts()
+
+    def _sync_vcc_connect_button(self, status: str) -> None:
+        btn = getattr(self, "_fly_vcc_connect", None)
+        if btn is None:
+            return
+        show = (
+            bool(self.config_data.get("crew_chief_enabled"))
+            and "ICS disconnected" in (status or "")
+        )
+        try:
+            if show:
+                btn.pack(anchor="w", padx=14, pady=(0, 8))
+            else:
+                btn.pack_forget()
+        except tk.TclError:
+            pass
+
+    def _vcc_ics_up(self) -> bool:
+        try:
+            import crew_chief as crew_chief_mod
+
+            return bool(
+                crew_chief_mod.enabled(self.config_data)
+                and crew_chief_mod.ics_connected(getattr(self._live_engine(), "state", None))
+            )
+        except Exception:
+            return False
+
+    def _show_vcc_helper(self, view: dict[str, Any]) -> None:
+        """Put the crew-chief checklist in the ATC voice-cue slot."""
+        self._paint_fly_vcc_checklist(view)
+        for widget in (
+            getattr(self, "fly_say_frame", None),
+            getattr(self, "fly_readback_frame", None),
+            getattr(self, "_fly_will_say_box", None),
+            getattr(self, "_fly_jump_nav", None),
+        ):
+            if widget is None:
+                continue
+            try:
+                widget.pack_forget()
+            except tk.TclError:
+                pass
+        try:
+            self.fly_vcc_frame.pack_forget()
+        except tk.TclError:
+            pass
+        self.fly_vcc_frame.pack(fill=tk.X, padx=20, pady=(0, 8), before=self.fly_hint)
+        self.after_idle(self._fly_update_scrollregion)
+
+    def _hide_vcc_helper(self) -> None:
+        try:
+            self.fly_vcc_frame.pack_forget()
+        except tk.TclError:
+            pass
+        box = getattr(self, "_fly_will_say_box", None)
+        if box is not None:
+            try:
+                if not box.winfo_ismapped():
+                    box.pack(fill=tk.X, padx=20, pady=(0, 8), before=self.fly_hint)
+            except tk.TclError:
+                pass
+        nav = getattr(self, "_fly_jump_nav", None)
+        foot = getattr(self, "_fly_foot", None)
+        if nav is not None:
+            try:
+                if not nav.winfo_ismapped():
+                    if foot is not None:
+                        nav.pack(fill=tk.X, pady=(0, 10), before=foot)
+                    else:
+                        nav.pack(fill=tk.X, pady=(0, 10))
+            except tk.TclError:
+                pass
+
+    def _vcc_command(self, intent: str, stage_id: str = "") -> None:
+        import crew_chief as crew_chief_mod
+
+        engine = self._live_engine()
+        result = crew_chief_mod.execute(
+            engine, crew_chief_mod.VoiceMatch(intent, stage_id)
+        )
+        if result.get("text") or result.get("detail"):
+            self._voice_log(f"VCC  {result.get('text') or result.get('detail')}")
+        self._vcc_helper_fp = ""
+        self._refresh_vcc_status()
 
     def _position_tracker(self) -> runway_position.PositionTracker:
         tracker = getattr(self, "_pos_tracker", None)
@@ -2370,10 +2532,15 @@ class MissionPlanner(tk.Tk):
                 context=self._voice_context,
             )
         warnings = self._voice.start(self.config_data)
-        if not self.config_data.get("voice_enabled"):
+        if self.config_data.get("voice_enabled"):
+            if warnings:
+                self._set_voice_status("; ".join(warnings))
+        elif self.config_data.get("crew_chief_enabled"):
+            self._set_voice_status(
+                "; ".join(warnings) if warnings else "Crew chief ICS listening"
+            )
+        else:
             self._set_voice_status("Voice control off")
-        elif warnings:
-            self._set_voice_status("; ".join(warnings))
         self._refresh_voice_prompts()
 
     def _selected_mic_index(self) -> int:
@@ -2411,7 +2578,10 @@ class MissionPlanner(tk.Tk):
 
         def work() -> None:
             try:
-                if self._atc_role() == "client" and self._atc_client is not None:
+                if match.intent == "crew_chief" or str(match.kind or "") == "crew_chief":
+                    engine = self._live_engine()
+                    result = voice_engine.execute_intent(match, engine)
+                elif self._atc_role() == "client" and self._atc_client is not None:
                     result = self._atc_client.post_intent(match)
                 else:
                     engine = self._live_engine()
@@ -2438,6 +2608,11 @@ class MissionPlanner(tk.Tk):
                         action="voice",
                         channel=str(result.get("channel") or ""),
                     )
+                elif action == "crew_chief":
+                    self._voice_log(
+                        f"VCC  {result.get('text') or detail or 'crew chief'}"
+                    )
+                    self._refresh_vcc_status()
                 elif action in ("hint",):
                     self._voice_log(f"DCS  {detail or result.get('text') or 'tanker radio'}")
                 elif action in ("transmit", "queued"):
@@ -2759,6 +2934,52 @@ class MissionPlanner(tk.Tk):
     def _clear_voice_ptt_key(self) -> None:
         self.config_data["voice_ptt_key"] = ""
         self.var_voice_ptt_key.set("(none)")
+        self._apply_voice()
+
+    def _learn_crew_chief_ptt(self) -> None:
+        previous = self.var_crew_chief_ptt.get()
+        self.var_crew_chief_ptt.set("Press intercom PTT…")
+
+        def done(binding: dict[str, Any]) -> None:
+            def apply() -> None:
+                normalized = joystick.normalize_binding(binding)
+                self.config_data["crew_chief_ptt"] = [normalized] if normalized else []
+                self.var_crew_chief_ptt.set(joystick.describe_binding(normalized))
+                save_json(CONFIG_PATH, self.config_data)
+                self._apply_voice()
+
+            self._ui_call(apply)
+
+        def cancel() -> None:
+            if self.var_crew_chief_ptt.get().startswith("Press intercom"):
+                self._joystick.learn_next_press(None)
+                self.var_crew_chief_ptt.set(previous)
+
+        self._joystick.learn_next_press(done)
+        self.after(10000, cancel)
+
+    def _clear_crew_chief_ptt(self) -> None:
+        self.config_data["crew_chief_ptt"] = []
+        self.var_crew_chief_ptt.set("(none)")
+        save_json(CONFIG_PATH, self.config_data)
+        self._apply_voice()
+
+    def _capture_crew_chief_ptt_key(self) -> None:
+        def apply(combo: str) -> None:
+            self.config_data["crew_chief_ptt_key"] = combo
+            self.var_crew_chief_ptt_key.set(combo)
+            save_json(CONFIG_PATH, self.config_data)
+            self.after(250, self._apply_voice)
+
+        self._capture_key(
+            "Hold this key to talk to the crew chief. Do not use your SRS radio PTT.",
+            apply,
+        )
+
+    def _clear_crew_chief_ptt_key(self) -> None:
+        self.config_data["crew_chief_ptt_key"] = ""
+        self.var_crew_chief_ptt_key.set("(none)")
+        save_json(CONFIG_PATH, self.config_data)
         self._apply_voice()
 
     def _build(self) -> None:
@@ -7024,7 +7245,24 @@ class MissionPlanner(tk.Tk):
             wraplength=420,
             justify=tk.LEFT,
         )
-        self._fly_boom_lbl.pack(fill=tk.X, padx=14, pady=(0, 10))
+        self._fly_boom_lbl.pack(fill=tk.X, padx=14, pady=(0, 2))
+        self.fly_vcc = tk.StringVar(value="VCC off")
+        self._fly_vcc_lbl = tk.Label(
+            freq_left,
+            textvariable=self.fly_vcc,
+            bg="#0a0e14",
+            fg=C_MUTED,
+            font=("Segoe UI", 10),
+            anchor="w",
+            wraplength=420,
+            justify=tk.LEFT,
+        )
+        self._fly_vcc_lbl.pack(fill=tk.X, padx=14, pady=(0, 2))
+        self._fly_vcc_connect = ttk.Button(
+            freq_left,
+            text="Hey Chief",
+            command=lambda: self._vcc_command("connect"),
+        )
 
         tk.Label(
             freq_right,
@@ -7151,6 +7389,52 @@ class MissionPlanner(tk.Tk):
         self.fly_say_body = tk.Frame(self.fly_say_frame, bg="#0a0e14")
         self.fly_say_body.pack(fill=tk.X, padx=14, pady=(0, 10))
 
+        # Crew chief checklist — same slot as VOICE CUES while ICS is up.
+        self.fly_vcc_title = tk.StringVar(value="CREW CHIEF")
+        self.fly_vcc_subtitle = tk.StringVar(
+            value="Local intercom — hold ICS PTT. Does not key SRS."
+        )
+        self.fly_vcc_frame = tk.Frame(
+            card, bg="#0a0e14", highlightbackground=C_GREEN, highlightthickness=2
+        )
+        tk.Label(
+            self.fly_vcc_frame,
+            textvariable=self.fly_vcc_title,
+            bg="#0a0e14",
+            fg=C_GREEN,
+            font=("Segoe UI Semibold", 12),
+        ).pack(anchor="w", padx=16, pady=(12, 2))
+        tk.Label(
+            self.fly_vcc_frame,
+            textvariable=self.fly_vcc_subtitle,
+            bg="#0a0e14",
+            fg=C_MUTED,
+            font=("Segoe UI", 10),
+            anchor="w",
+            wraplength=920,
+            justify=tk.LEFT,
+        ).pack(anchor="w", padx=16, pady=(0, 6))
+        vcc_btns = tk.Frame(self.fly_vcc_frame, bg="#0a0e14")
+        vcc_btns.pack(fill=tk.X, padx=16, pady=(0, 6))
+        ttk.Button(
+            vcc_btns, text="Cleared off", command=lambda: self._vcc_command("cleared_off")
+        ).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(
+            vcc_btns, text="Skip", command=lambda: self._vcc_command("skip")
+        ).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(
+            vcc_btns, text="Next", command=lambda: self._vcc_command("next")
+        ).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(
+            vcc_btns, text="Standby", command=lambda: self._vcc_command("stop_listen")
+        ).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(
+            vcc_btns, text="Reset VCC", command=lambda: self._vcc_command("reset")
+        ).pack(side=tk.LEFT)
+        self.fly_vcc_body = tk.Frame(self.fly_vcc_frame, bg="#0a0e14")
+        self.fly_vcc_body.pack(fill=tk.X, padx=14, pady=(0, 10))
+        self._vcc_helper_fp = ""
+
         # What ATC will transmit on the next Play / advance
         self._fly_will_say_box = tk.Frame(
             card, bg=C_CARD, highlightbackground=C_BORDER, highlightthickness=1
@@ -7261,6 +7545,7 @@ class MissionPlanner(tk.Tk):
         ).pack(fill=tk.X, padx=20, pady=(0, 14))
 
         nav = tk.Frame(shell, bg=C_PANEL, highlightbackground=C_BORDER, highlightthickness=1)
+        self._fly_jump_nav = nav
         nav.pack(fill=tk.X, pady=(0, 10))
         inner = tk.Frame(nav, bg=C_PANEL)
         inner.pack(fill=tk.X, padx=12, pady=10)
@@ -7293,6 +7578,7 @@ class MissionPlanner(tk.Tk):
         self._jump_index_by_label: dict[str, int] = {}
 
         foot = tk.Frame(shell, bg=C_BG)
+        self._fly_foot = foot
         foot.pack(fill=tk.X, pady=(0, 6))
         ttk.Checkbutton(
             foot,
@@ -8131,6 +8417,20 @@ class MissionPlanner(tk.Tk):
         if not hasattr(self, "fly_say_frame"):
             return
 
+        if self._vcc_ics_up():
+            try:
+                import crew_chief as crew_chief_mod
+
+                view = crew_chief_mod.checklist_helper(
+                    self.config_data, getattr(self._live_engine(), "state", None)
+                )
+                self._vcc_helper_fp = crew_chief_mod.checklist_fingerprint(view)
+                self._show_vcc_helper(view)
+            except Exception:
+                self._hide_vcc_helper()
+            return
+
+        self._hide_vcc_helper()
         context = self._voice_context()
         awaiting = bool(context.get("awaiting_readback"))
         items = context.get("readback_items") if isinstance(context.get("readback_items"), list) else []
@@ -8291,6 +8591,192 @@ class MissionPlanner(tk.Tk):
             _section("ALSO AVAILABLE", must=False)
             for row in optional:
                 _cue(row, must=False)
+
+    def _paint_fly_vcc_checklist(self, view: dict[str, Any]) -> None:
+        """Crew-chief kneeboard: OpenKneeboard script + waiting ticks."""
+        body = getattr(self, "fly_vcc_body", None)
+        if body is None:
+            return
+        for child in body.winfo_children():
+            child.destroy()
+        gate = str(view.get("gate") or "")
+        active = str(view.get("active") or "")
+        waiting = [str(x) for x in (view.get("waiting") or []) if x]
+        now_say = str(view.get("now_say") or "")
+        now_alt = str(view.get("now_alt") or "")
+        if gate == "airborne":
+            self.fly_vcc_title.set("CREW CHIEF  ·  airborne — silent")
+        elif gate and gate not in {"off"}:
+            self.fly_vcc_title.set(f"CREW CHIEF  ·  hold ICS PTT  ·  {gate}")
+        else:
+            self.fly_vcc_title.set("CREW CHIEF  ·  hold ICS PTT")
+        self.fly_vcc_subtitle.set(
+            "Local intercom — not SRS. Same lines as the Virtual Crew Chief kneeboard."
+        )
+
+        current = next(
+            (
+                row
+                for row in (view.get("script") or [])
+                if isinstance(row, dict) and row.get("current")
+            ),
+            None,
+        )
+        if now_say or active:
+            tk.Label(
+                body,
+                text="SAY",
+                bg="#0a0e14",
+                fg=C_AMBER,
+                font=("Segoe UI Semibold", 11),
+                anchor="w",
+            ).pack(fill=tk.X, pady=(4, 2))
+            tk.Label(
+                body,
+                text=now_say or active,
+                bg="#0a0e14",
+                fg=C_AMBER,
+                font=("Consolas", 18, "bold"),
+                anchor="w",
+                wraplength=900,
+                justify=tk.LEFT,
+            ).pack(fill=tk.X)
+            if now_alt:
+                tk.Label(
+                    body,
+                    text=f"or  {now_alt}",
+                    bg="#0a0e14",
+                    fg=C_MUTED,
+                    font=("Segoe UI", 11),
+                    anchor="w",
+                    wraplength=900,
+                    justify=tk.LEFT,
+                ).pack(fill=tk.X)
+            if current:
+                intent = str(current.get("intent") or "jump")
+                stage = str(current.get("stage") or "")
+                ttk.Button(
+                    body,
+                    text="Say this",
+                    command=lambda i=intent, s=stage: self._vcc_command(i, s),
+                ).pack(anchor="w", pady=(4, 6))
+            if waiting:
+                tk.Label(
+                    body,
+                    text="waiting  " + "  ·  ".join(waiting),
+                    bg="#0a0e14",
+                    fg=C_GREEN,
+                    font=("Segoe UI", 12),
+                    anchor="w",
+                    wraplength=900,
+                    justify=tk.LEFT,
+                ).pack(fill=tk.X, pady=(0, 6))
+
+        chips: list[str] = []
+        for row in view.get("stages") or []:
+            if not isinstance(row, dict):
+                continue
+            if row.get("optional"):
+                continue
+            status = str(row.get("status") or "idle")
+            label = str(row.get("label") or row.get("id") or "")
+            if status == "done":
+                chips.append(f"✓ {label}")
+            elif status == "skipped":
+                chips.append(f"skip {label}")
+            elif status == "active":
+                chips.append(f"● {label}")
+            else:
+                chips.append(f"· {label}")
+        if chips:
+            tk.Label(
+                body,
+                text="   ".join(chips),
+                bg="#0a0e14",
+                fg=C_TEXT,
+                font=("Segoe UI", 11),
+                anchor="w",
+                wraplength=900,
+                justify=tk.LEFT,
+            ).pack(fill=tk.X, pady=(4, 6))
+
+        script = [
+            row for row in (view.get("script") or []) if isinstance(row, dict) and row.get("say")
+        ]
+        if script:
+            tk.Label(
+                body,
+                text="STARTUP SCRIPT  ·  ICS PTT",
+                bg="#0a0e14",
+                fg=C_MUTED,
+                font=("Segoe UI Semibold", 11),
+                anchor="w",
+            ).pack(fill=tk.X, pady=(8, 2))
+            for row in script:
+                status = str(row.get("status") or "idle")
+                say = str(row.get("say") or "")
+                if status == "done":
+                    mark, fg = "✓", C_MUTED
+                elif status == "skipped":
+                    mark, fg = "skip", C_MUTED
+                elif row.get("current") or status == "active":
+                    mark, fg = "●", C_AMBER
+                else:
+                    mark, fg = "·", C_TEXT
+                extra = "  (optional)" if row.get("optional") else ""
+                line = tk.Frame(body, bg="#0a0e14")
+                line.pack(fill=tk.X, pady=(0, 1))
+                tk.Label(
+                    line,
+                    text=f"{mark}  {say}{extra}",
+                    bg="#0a0e14",
+                    fg=fg,
+                    font=("Segoe UI", 10),
+                    anchor="w",
+                    wraplength=820,
+                    justify=tk.LEFT,
+                ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+                if status in {"idle", "active", "skipped", "done"} and not row.get("optional"):
+                    intent = str(row.get("intent") or "jump")
+                    stage = str(row.get("stage") or "")
+                    ttk.Button(
+                        line,
+                        text="go",
+                        width=4,
+                        command=lambda i=intent, s=stage: self._vcc_command(i, s),
+                    ).pack(side=tk.RIGHT)
+
+        extras = [
+            row
+            for row in (view.get("stages") or [])
+            if isinstance(row, dict) and row.get("optional")
+        ]
+        if extras:
+            tk.Label(
+                body,
+                text="ALSO",
+                bg="#0a0e14",
+                fg=C_MUTED,
+                font=("Segoe UI Semibold", 11),
+                anchor="w",
+            ).pack(fill=tk.X, pady=(8, 2))
+            for row in extras:
+                sid = str(row.get("id") or "")
+                say = str(row.get("say") or sid)
+                ttk.Button(
+                    body,
+                    text=say,
+                    command=lambda s=sid: self._vcc_command("jump", s),
+                ).pack(anchor="w", pady=(0, 2))
+
+        tk.Label(
+            body,
+            text="Hey Chief  ·  Standby / Disregard  ·  You're cleared off",
+            bg="#0a0e14",
+            fg=C_MUTED,
+            font=("Segoe UI", 10),
+            anchor="w",
+        ).pack(fill=tk.X, pady=(8, 0))
 
     def _fly_live_step(self) -> dict[str, Any] | None:
         """Current Fly step, preferring the live Plan copy (voice_phrases included)."""
@@ -10052,6 +10538,126 @@ class MissionPlanner(tk.Tk):
             font=("Segoe UI", 8),
         ).pack(side=tk.LEFT)
 
+        # --- Virtual Crew Chief (F-16, local intercom) ---
+        vcc = tk.Frame(panel, bg=C_PANEL, highlightbackground=C_BORDER, highlightthickness=1)
+        vcc.pack(fill=tk.X, padx=14, pady=(0, 8))
+        vcc_inner = tk.Frame(vcc, bg=C_PANEL)
+        vcc_inner.pack(fill=tk.X, padx=12, pady=10)
+        ttk.Label(
+            vcc_inner, text="Virtual Crew Chief (F-16)", style="Header.TLabel"
+        ).pack(anchor="w")
+        tk.Label(
+            vcc_inner,
+            text=(
+                "Optional local intercom — never goes out on squadron SRS. "
+                "Needs the DCS radio export (Install below) so aileron / elevator "
+                "reads work in multiplayer. Silent unless listening and on the ground. "
+                "Same lines as the OpenKneeboard Virtual Crew Chief checklist: "
+                "Hey Chief to start, Standby / Disregard to stop, "
+                "Disconnected / Connected for trim, You're cleared off when done. "
+                "Use the intercom PTT below — not your SRS radio PTT, or the "
+                "squadron will hear you. Default speech is TTS; point a sound "
+                "pack at atc/crew_chief/sounds if you extracted mission OGG files."
+            ),
+            bg=C_PANEL,
+            fg=C_MUTED,
+            font=("Segoe UI", 8),
+            wraplength=880,
+            justify="left",
+        ).pack(anchor="w", pady=(2, 8))
+        self.var_crew_chief_enabled = tk.BooleanVar(
+            value=bool(self.config_data.get("crew_chief_enabled"))
+        )
+        self.var_crew_chief_voice = tk.StringVar(
+            value=str(self.config_data.get("crew_chief_voice") or "tts").strip().lower()
+            or "tts"
+        )
+        ttk.Checkbutton(
+            vcc_inner,
+            text="Enable Virtual Crew Chief",
+            variable=self.var_crew_chief_enabled,
+            command=self._on_crew_chief_changed,
+        ).pack(anchor="w")
+        voice_row = tk.Frame(vcc_inner, bg=C_PANEL)
+        voice_row.pack(anchor="w", pady=(6, 0))
+        ttk.Radiobutton(
+            voice_row,
+            text="TTS (default)",
+            variable=self.var_crew_chief_voice,
+            value="tts",
+            style="Panel.TRadiobutton",
+            command=self._on_crew_chief_changed,
+        ).pack(side=tk.LEFT, padx=(0, 12))
+        ttk.Radiobutton(
+            voice_row,
+            text="Sound pack",
+            variable=self.var_crew_chief_voice,
+            value="pack",
+            style="Panel.TRadiobutton",
+            command=self._on_crew_chief_changed,
+        ).pack(side=tk.LEFT)
+        self.var_crew_chief_ptt = tk.StringVar(value="(none)")
+        self.var_crew_chief_ptt_key = tk.StringVar(value="(none)")
+        ics_row = tk.Frame(vcc_inner, bg=C_PANEL)
+        ics_row.pack(anchor="w", pady=(8, 0))
+        tk.Label(
+            ics_row,
+            text="Intercom PTT",
+            bg=C_PANEL,
+            fg=C_LABEL,
+            width=16,
+            anchor="w",
+        ).pack(side=tk.LEFT)
+        tk.Label(
+            ics_row,
+            textvariable=self.var_crew_chief_ptt,
+            bg=C_CARD,
+            fg=C_TEXT,
+            font=("Segoe UI", 9),
+            width=28,
+            anchor="w",
+            padx=6,
+        ).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(ics_row, text="Learn…", command=self._learn_crew_chief_ptt).pack(
+            side=tk.LEFT
+        )
+        ttk.Button(ics_row, text="Clear", command=self._clear_crew_chief_ptt).pack(
+            side=tk.LEFT, padx=4
+        )
+        ics_key_row = tk.Frame(vcc_inner, bg=C_PANEL)
+        ics_key_row.pack(anchor="w", pady=(6, 0))
+        tk.Label(
+            ics_key_row,
+            text="or ICS key",
+            bg=C_PANEL,
+            fg=C_LABEL,
+            width=16,
+            anchor="w",
+        ).pack(side=tk.LEFT)
+        tk.Label(
+            ics_key_row,
+            textvariable=self.var_crew_chief_ptt_key,
+            bg=C_CARD,
+            fg=C_TEXT,
+            font=("Segoe UI", 9),
+            width=28,
+            anchor="w",
+            padx=6,
+        ).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(
+            ics_key_row, text="Capture…", command=self._capture_crew_chief_ptt_key
+        ).pack(side=tk.LEFT)
+        ttk.Button(
+            ics_key_row, text="Clear", command=self._clear_crew_chief_ptt_key
+        ).pack(side=tk.LEFT, padx=4)
+        tk.Label(
+            vcc_inner,
+            text="Must be a spare HOTAS / mouse button or key — not the SRS radio PTT.",
+            bg=C_PANEL,
+            fg=C_MUTED,
+            font=("Segoe UI", 8),
+        ).pack(anchor="w", pady=(4, 0))
+
         # --- Automatic clearances from live position ---
         ac = tk.Frame(panel, bg=C_PANEL, highlightbackground=C_BORDER, highlightthickness=1)
         ac.pack(fill=tk.X, padx=14, pady=(0, 8))
@@ -11153,6 +11759,20 @@ class MissionPlanner(tk.Tk):
                 mode = "off"
             self.var_tanker_chat_llm.set(mode)
             self.var_tanker_chat_llm_key.set(str(c.get("tanker_chat_llm_key") or ""))
+        if hasattr(self, "var_crew_chief_enabled"):
+            self.var_crew_chief_enabled.set(bool(c.get("crew_chief_enabled")))
+            voice = str(c.get("crew_chief_voice") or "tts").strip().lower() or "tts"
+            if voice not in {"tts", "pack"}:
+                voice = "tts"
+            self.var_crew_chief_voice.set(voice)
+            ics = [joystick.normalize_binding(b) for b in (c.get("crew_chief_ptt") or [])]
+            ics = [b for b in ics if b]
+            if hasattr(self, "var_crew_chief_ptt"):
+                self.var_crew_chief_ptt.set(
+                    ", ".join(joystick.describe_binding(b) for b in ics) if ics else "(none)"
+                )
+                ics_key = hotkeys.normalize_hotkey(c.get("crew_chief_ptt_key"))
+                self.var_crew_chief_ptt_key.set(ics_key or "(none)")
         if hasattr(self, "var_auto_clearance"):
             self.var_auto_clearance.set(bool(c.get("auto_clearance_enabled")))
             self.var_auto_takeoff.set(bool(c.get("auto_takeoff_clearance", True)))
@@ -11307,6 +11927,14 @@ class MissionPlanner(tk.Tk):
             self.config_data["tanker_chat_llm_key"] = (
                 self.var_tanker_chat_llm_key.get().strip()
             )
+        if hasattr(self, "var_crew_chief_enabled"):
+            self.config_data["crew_chief_enabled"] = bool(
+                self.var_crew_chief_enabled.get()
+            )
+            voice = str(self.var_crew_chief_voice.get() or "tts").strip().lower() or "tts"
+            if voice not in {"tts", "pack"}:
+                voice = "tts"
+            self.config_data["crew_chief_voice"] = voice
         if hasattr(self, "var_voice_enabled"):
             self.config_data["voice_enabled"] = bool(self.var_voice_enabled.get())
             self.config_data["voice_model"] = (

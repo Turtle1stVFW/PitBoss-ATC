@@ -119,7 +119,22 @@ every tuned radio and marks the keyed one `TX`.
 **In the jet:** Setup → Controls → **Install DCS radio export…** (or
 `Install-DCS-Radio-Export.cmd`). That copies the Lua script and patches
 `Export.lua` automatically — leave the SRS line alone. Writes
-`Saved Games\DCS\ATC-ExternalAudio\radios.json` for the gate to read.
+`Saved Games\DCS\ATC-ExternalAudio\radios.json` for the gate to read, and
+`aircraft.json` for Virtual Crew Chief (ownship surfaces / F-16 args).
+
+### Virtual Crew Chief (optional, F-16)
+
+Setup → Controls → **Enable Virtual Crew Chief**. Local intercom only — it
+never transmits on squadron SRS. Bind a spare **Intercom PTT** (HOTAS button
+or key) that SRS does not use; holding your radio PTT still keys the
+squadron. Silent unless you are on the ground and say **connected** (or
+press Connect ICS on Fly). While the intercom is up, Fly swaps the ATC
+voice-cue card for a crew-chief checklist (now / waiting / jump) so you
+do not scroll. Stages are skippable and can run in any order
+(`ready trim`, `skip bit`, `next`, `standby`, `disconnected`).
+Re-run the radio export install after updating so DCS gets the aircraft
+snapshot. TTS is the default; `py -3 crew_chief_extract.py --miz …` copies
+optional mission `Sounds/CC` files into `atc/crew_chief/sounds/`.
 
 **External AWACS (testing):** enable **External AWACS radio source** on Setup →
 Controls. Fly shows an EAM radio strip — mirror your SRS AWACS overlay freqs, or

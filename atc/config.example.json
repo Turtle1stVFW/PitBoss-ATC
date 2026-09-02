@@ -47,7 +47,8 @@
     "blackjack": "Microsoft Zira Desktop",
     "bandsaw": "Microsoft Zira Desktop",
     "ops": "Microsoft Zira Desktop",
-    "other": "Microsoft Zira Desktop"
+    "other": "Microsoft Zira Desktop",
+    "crew_chief": "Microsoft Zira Desktop"
   },
   "tts_volume": 0.8,
   "tts_speed": 4,
@@ -87,5 +88,9 @@
   "voice_ptt": [],
   "voice_ptt_key": "",
   "tanker_chat_llm": "off",
-  "tanker_chat_llm_key": ""
+  "tanker_chat_llm_key": "",
+  "crew_chief_enabled": false,
+  "crew_chief_voice": "tts",
+  "crew_chief_ptt": [],
+  "crew_chief_ptt_key": ""
 }

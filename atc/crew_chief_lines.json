@@ -1,0 +1,146 @@
+{
+  "loud_and_clear": {
+    "text": "Loud and clear, sir.",
+    "files": ["1LoudAndClearSir.ogg"]
+  },
+  "copy": {
+    "text": "Copy.",
+    "files": ["4Copy.ogg"]
+  },
+  "yes_sir": {
+    "text": "Yes sir.",
+    "files": ["YesSir/YesSir1.ogg", "YesSir/YesSir2.ogg", "YesSir/YesSir3.ogg", "Ack/YesSir1.ogg"]
+  },
+  "standby": {
+    "text": "Copy, standby.",
+    "files": ["Standby/1CopyStandby.ogg", "Standby/2CopyStandby.ogg", "Standby/3CopyStandby.ogg", "Standby/4CopyStandby.ogg", "Standby/5CopyStandby.ogg"]
+  },
+  "clear_for_start": {
+    "text": "Clear for start.",
+    "files": ["2ClearForStart2.ogg"]
+  },
+  "good_start": {
+    "text": "Good start.",
+    "files": ["3GoodStart.ogg"]
+  },
+  "epu_runup": {
+    "text": "Clear for EPU run-up.",
+    "files": ["5EPURunUp.ogg", "RunUp/ClearForRunUp.ogg", "RunUp/ClearForRunUp3.ogg"]
+  },
+  "no_flow": {
+    "text": "No flow.",
+    "files": ["6NoFlow.ogg"]
+  },
+  "ready_sec": {
+    "text": "Ready for SEC.",
+    "files": ["7ReadySEC.ogg", "ClearForSEC1.ogg", "ClearForSEC2.ogg"]
+  },
+  "nozzle_closed": {
+    "text": "Nozzle closed.",
+    "files": ["8NozzleClosed.ogg"]
+  },
+  "nozzle_open": {
+    "text": "Nozzle open.",
+    "files": ["9NozzleOpen.ogg"]
+  },
+  "speedbrakes_open": {
+    "text": "Speedbrakes open.",
+    "files": ["10SpeedBreaksOpen.ogg"]
+  },
+  "speedbrakes_closed": {
+    "text": "Speedbrakes closed.",
+    "files": ["11SpeedBreaksClosed.ogg", "SpeedBrakesClear.ogg"]
+  },
+  "cleared_for_bit": {
+    "text": "Cleared for BIT.",
+    "files": ["12ClearedForBit.ogg"]
+  },
+  "ready_trim": {
+    "text": "Ready trim.",
+    "files": ["13ReadyTrim.ogg"]
+  },
+  "flight_controls_clear": {
+    "text": "Flight controls still clear.",
+    "files": ["16FlightControlsStillClear.ogg", "FlightControlsClear.ogg"]
+  },
+  "nose_up": {
+    "text": "Nose up.",
+    "files": ["Mvmts/NoseUp.ogg"]
+  },
+  "nose_down": {
+    "text": "Nose down.",
+    "files": ["Mvmts/NoseDown.ogg"]
+  },
+  "roll_left": {
+    "text": "Roll left.",
+    "files": ["Mvmts/RollLeft.ogg"]
+  },
+  "roll_right": {
+    "text": "Roll right.",
+    "files": ["Mvmts/RollRight.ogg"]
+  },
+  "yaw_left": {
+    "text": "Yaw left.",
+    "files": ["Mvmts/YawLeft.ogg"]
+  },
+  "yaw_right": {
+    "text": "Yaw right.",
+    "files": ["Mvmts/YawRight.ogg"]
+  },
+  "kick": {
+    "text": "Kick.",
+    "files": ["Mvmts/Kick.ogg"]
+  },
+  "movement": {
+    "text": "Movement.",
+    "files": ["Mvmts/Movement.ogg"]
+  },
+  "no_movement": {
+    "text": "No movement.",
+    "files": ["Mvmts/NoMvmt.ogg"]
+  },
+  "aar_door": {
+    "text": "AAR door.",
+    "files": ["AARDoor.ogg"]
+  },
+  "door_open": {
+    "text": "Door open.",
+    "files": ["DoorOpen.ogg"]
+  },
+  "door_closed": {
+    "text": "Door closed.",
+    "files": ["DoorClosed.ogg"]
+  },
+  "ready_left_brake": {
+    "text": "Ready left brake.",
+    "files": ["18aReadyLeftBrake.ogg"]
+  },
+  "ready_right_brake": {
+    "text": "Ready right brake.",
+    "files": ["19ReadyRightBrake.ogg"]
+  },
+  "safe_flight": {
+    "text": "Have a safe flight.",
+    "files": ["CO/HaveASafeFlight.ogg", "CO/HaveASafeFlight2.ogg", "CO/HaveASafeFlight3a.ogg"]
+  },
+  "see_you": {
+    "text": "See you out front.",
+    "files": ["CO/SeeYouOutFront.ogg"]
+  },
+  "skipped": {
+    "text": "Copy, skipping.",
+    "files": ["Standby/1CopyStandby.ogg"]
+  },
+  "next_hint": {
+    "text": "Whenever you're ready.",
+    "files": ["Ack/YesSir2.ogg"]
+  },
+  "soft_prereq": {
+    "text": "You usually do engine start first, but we can do this now.",
+    "files": []
+  },
+  "airborne": {
+    "text": "",
+    "files": []
+  }
+}

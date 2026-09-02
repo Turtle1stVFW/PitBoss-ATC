@@ -32,13 +32,22 @@ While you are in a unit, DCS writes:
 
 `Saved Games\DCS*\ATC-ExternalAudio\radios.json`
 
+and a small ownship snapshot for Virtual Crew Chief:
+
+`Saved Games\DCS*\ATC-ExternalAudio\aircraft.json`
+
+(control surfaces, named F-16 cockpit args, on-ground). That file is what
+makes aileron / elevator checks work in multiplayer — not mission-editor
+triggers.
+
 ## Performance
 
 This is **not** a heavy export like Tacview / full SRS:
 
 - Almost every frame: one timer check, then return
 - About **1 Hz** in the cockpit: read a small cached list of radio device ids
-- Disk write only when frequency/unit **changes**
+- About **5 Hz** ownship snapshot; disk write on change or at least once a second
+- Disk write for radios only when frequency/unit **changes**
 - Menus / no unit: keepalive write at most every 5 s
 
 Re-run **Install DCS radio export…** after updating the script so Saved Games gets the new file.

@@ -1,0 +1,466 @@
+{
+  "unit": "F-16C_50",
+  "timeout_s": 8.0,
+  "stages": [
+    {
+      "id": "radio",
+      "label": "radio check",
+      "aliases": ["radio", "radio check", "how hear"],
+      "say": "Hey Chief. How do you hear me?",
+      "prereq": [],
+      "ticks": []
+    },
+    {
+      "id": "start",
+      "label": "engine start",
+      "aliases": ["start", "engine start", "starting", "start 2"],
+      "say": "Clear for start 2?",
+      "say_alt": "Ready for start 2?",
+      "prereq": [],
+      "open_line": "clear_for_start",
+      "ticks": [
+        {"id": "ci", "label": "C&I UFC", "args": [{"id": 542, "lo": 0.8, "hi": 1.0}], "line": "copy"},
+        {"id": "flcs", "label": "FLCS test", "args": [{"id": 585, "lo": 0.9, "hi": 1.0}], "line": "copy"},
+        {"id": "mpwr", "label": "main power", "args": [{"id": 510, "lo": 0.8, "hi": 1.0}], "line": "copy"},
+        {"id": "idle", "label": "good start", "args": [{"id": 95, "lo": 0.34, "hi": 0.49}], "line": "good_start"}
+      ]
+    },
+    {
+      "id": "epu",
+      "label": "EPU / hyd flow",
+      "aliases": ["epu", "flow", "hyd", "runup", "run up", "epu pin"],
+      "say": "EPU off. You are cleared to remove the EPU pin.",
+      "say_alt": "You are cleared to pull the EPU pin.",
+      "prereq": ["start"],
+      "open_line": "epu_runup",
+      "ticks": [
+        {
+          "id": "flow",
+          "label": "hyd flow",
+          "say": "EPU Checks Good. Cleared to check for flow",
+          "args": [{"id": 95, "lo": 0.35, "hi": 0.75}],
+          "line": "no_flow"
+        }
+      ]
+    },
+    {
+      "id": "sec",
+      "label": "SEC / speedbrakes",
+      "aliases": ["sec", "secondary", "nozzle", "speedbrake", "speedbrakes"],
+      "say": "Ready for SEC Check?",
+      "say_alt": "Clear for SEC?",
+      "prereq": ["start"],
+      "open_line": "ready_sec",
+      "ticks": [
+        {
+          "id": "noz_closed",
+          "label": "nozzle closed",
+          "args": [{"id": 94, "lo": 0.0, "hi": 0.09}, {"id": 449, "lo": 0.9, "hi": 1.0}],
+          "line": "nozzle_closed"
+        },
+        {
+          "id": "noz_open",
+          "label": "nozzle open",
+          "args": [{"id": 449, "lo": 0.0, "hi": 0.1}],
+          "line": "nozzle_open"
+        },
+        {
+          "id": "sb_open",
+          "label": "speedbrakes open",
+          "args": [{"id": 363, "lo": 0.9, "hi": 1.0}],
+          "mech": [{"name": "speedbrakes", "lo": 0.7, "hi": 1.0}],
+          "line": "speedbrakes_open"
+        },
+        {
+          "id": "sb_closed",
+          "label": "speedbrakes closed",
+          "args": [{"id": 363, "lo": -1.0, "hi": -0.8}],
+          "mech": [{"name": "speedbrakes", "lo": -0.05, "hi": 0.15}],
+          "line": "speedbrakes_closed"
+        }
+      ]
+    },
+    {
+      "id": "bit",
+      "label": "BIT",
+      "aliases": ["bit", "built in test"],
+      "say": "Cleared for bit?",
+      "say_alt": "Ready for bit check?",
+      "prereq": [],
+      "open_line": "cleared_for_bit",
+      "ticks": []
+    },
+    {
+      "id": "trim",
+      "label": "trim",
+      "aliases": ["trim", "trim check"],
+      "say": "Bit Passed. Ready for trim check?",
+      "say_alt": "Cleared for trim check?",
+      "prereq": [],
+      "open_line": "ready_trim",
+      "ticks": [
+        {
+          "id": "disc",
+          "label": "Disconnected",
+          "say": "Disconnected",
+          "args": [{"id": 564, "lo": 0.0, "hi": 0.1}],
+          "line": "copy"
+        },
+        {
+          "id": "connected",
+          "label": "OK Connected",
+          "say": "Connected",
+          "args": [{"id": 564, "lo": 0.9, "hi": 1.0}],
+          "line": "copy"
+        },
+        {"id": "nu", "label": "nose up", "args": [{"id": 563, "lo": 0.15, "hi": 1.0}], "line": "nose_up"},
+        {"id": "nd", "label": "nose down", "args": [{"id": 563, "lo": -1.0, "hi": -0.15}], "line": "nose_down"},
+        {"id": "rl", "label": "roll left", "args": [{"id": 561, "lo": 0.15, "hi": 1.0}], "line": "roll_left"},
+        {"id": "rr", "label": "roll right", "args": [{"id": 561, "lo": -1.0, "hi": -0.15}], "line": "roll_right"},
+        {"id": "yl", "label": "yaw left", "args": [{"id": 565, "lo": -1.0, "hi": -0.3}], "line": "yaw_left"},
+        {"id": "yr", "label": "yaw right", "args": [{"id": 565, "lo": 0.3, "hi": 1.0}], "line": "yaw_right"}
+      ]
+    },
+    {
+      "id": "big",
+      "label": "flight controls",
+      "aliases": ["big", "big movements", "flight controls", "stick"],
+      "say": "Cleared for big movements?",
+      "say_alt": "Ready for big movements?",
+      "prereq": [],
+      "open_line": "flight_controls_clear",
+      "timeout_s": 8.0,
+      "ticks": [
+        {
+          "id": "nu",
+          "label": "nose up",
+          "args": [{"id": 736, "lo": 0.8, "hi": 1.0}],
+          "mech": [{"name": "elevator", "lo": 0.35, "hi": 1.0}],
+          "line": "nose_up"
+        },
+        {
+          "id": "nd",
+          "label": "nose down",
+          "args": [{"id": 736, "lo": -1.0, "hi": -0.8}],
+          "mech": [{"name": "elevator", "lo": -1.0, "hi": -0.35}],
+          "line": "nose_down"
+        },
+        {
+          "id": "kick",
+          "label": "kick",
+          "args": [{"id": 425, "lo": 0.8, "hi": 1.0}],
+          "mech": [{"name": "rudder", "lo": 0.7, "hi": 1.0}, {"name": "rudder", "lo": -1.0, "hi": -0.7}],
+          "line": "kick"
+        },
+        {
+          "id": "rl",
+          "label": "roll left",
+          "args": [{"id": 737, "lo": -1.0, "hi": -0.8}],
+          "mech": [{"name": "aileron", "lo": -1.0, "hi": -0.35}],
+          "line": "roll_left"
+        },
+        {
+          "id": "rr",
+          "label": "roll right",
+          "args": [{"id": 737, "lo": 0.8, "hi": 1.0}],
+          "mech": [{"name": "aileron", "lo": 0.35, "hi": 1.0}],
+          "line": "roll_right"
+        },
+        {
+          "id": "yl",
+          "label": "yaw left",
+          "args": [{"id": 780, "lo": -1.0, "hi": -0.2}],
+          "mech": [{"name": "rudder", "lo": -1.0, "hi": -0.25}],
+          "line": "yaw_left"
+        },
+        {
+          "id": "yr",
+          "label": "yaw right",
+          "args": [{"id": 780, "lo": 0.2, "hi": 1.0}],
+          "mech": [{"name": "rudder", "lo": 0.25, "hi": 1.0}],
+          "line": "yaw_right"
+        }
+      ]
+    },
+    {
+      "id": "dbu",
+      "label": "DBU",
+      "aliases": ["dbu", "digital backup"],
+      "say": "DBU. Still Clear?",
+      "say_alt": "Flight Controls still Clear?",
+      "prereq": [],
+      "open_line": "copy",
+      "timeout_s": 8.0,
+      "ticks": [
+        {"id": "switch", "label": "DBU on", "args": [{"id": 566, "lo": 0.7, "hi": 1.0}], "line": "copy"},
+        {
+          "id": "nu",
+          "label": "nose up",
+          "args": [{"id": 736, "lo": 0.8, "hi": 1.0}],
+          "mech": [{"name": "elevator", "lo": 0.35, "hi": 1.0}],
+          "line": "nose_up"
+        },
+        {
+          "id": "nd",
+          "label": "nose down",
+          "args": [{"id": 736, "lo": -1.0, "hi": -0.8}],
+          "mech": [{"name": "elevator", "lo": -1.0, "hi": -0.35}],
+          "line": "nose_down"
+        },
+        {
+          "id": "kick",
+          "label": "kick",
+          "args": [{"id": 425, "lo": 0.8, "hi": 1.0}],
+          "mech": [{"name": "rudder", "lo": 0.7, "hi": 1.0}, {"name": "rudder", "lo": -1.0, "hi": -0.7}],
+          "line": "kick"
+        },
+        {
+          "id": "rl",
+          "label": "roll left",
+          "args": [{"id": 737, "lo": -1.0, "hi": -0.8}],
+          "mech": [{"name": "aileron", "lo": -1.0, "hi": -0.35}],
+          "line": "roll_left"
+        },
+        {
+          "id": "rr",
+          "label": "roll right",
+          "args": [{"id": 737, "lo": 0.8, "hi": 1.0}],
+          "mech": [{"name": "aileron", "lo": 0.35, "hi": 1.0}],
+          "line": "roll_right"
+        },
+        {
+          "id": "yl",
+          "label": "yaw left",
+          "args": [{"id": 780, "lo": -1.0, "hi": -0.2}],
+          "mech": [{"name": "rudder", "lo": -1.0, "hi": -0.25}],
+          "line": "yaw_left"
+        },
+        {
+          "id": "yr",
+          "label": "yaw right",
+          "args": [{"id": 780, "lo": 0.2, "hi": 1.0}],
+          "mech": [{"name": "rudder", "lo": 0.25, "hi": 1.0}],
+          "line": "yaw_right"
+        }
+      ]
+    },
+    {
+      "id": "aar",
+      "label": "AAR door",
+      "aliases": ["aar", "air refuel", "refuel door", "slipway"],
+      "say": "Ready AAR door",
+      "optional": true,
+      "prereq": [],
+      "open_line": "aar_door",
+      "ticks": [
+        {"id": "open", "label": "door open", "args": [{"id": 555, "lo": 0.8, "hi": 1.0}], "line": "door_open"},
+        {"id": "closed", "label": "door closed", "args": [{"id": 555, "lo": 0.0, "hi": 0.25}], "line": "door_closed"}
+      ]
+    },
+    {
+      "id": "brakes",
+      "label": "brakes",
+      "aliases": ["brake", "brakes", "left brake", "right brake"],
+      "say": "Ready on the left brake when you're ready.",
+      "say_alt": "Ready on left brake",
+      "prereq": [],
+      "open_line": "ready_left_brake",
+      "timeout_s": 8.0,
+      "ticks": [
+        {
+          "id": "left",
+          "label": "left brake",
+          "say": "Ready on the left brake when you're ready.",
+          "args": [{"id": 781, "lo": 0.2, "hi": 1.0}],
+          "mech": [{"name": "wheelbrakes", "lo": 0.2, "hi": 1.0}],
+          "line": "copy"
+        },
+        {
+          "id": "right",
+          "label": "right brake",
+          "say": "Ready on the right brake when you're ready.",
+          "args": [{"id": 782, "lo": 0.2, "hi": 1.0}],
+          "mech": [{"name": "wheelbrakes", "lo": 0.2, "hi": 1.0}],
+          "line": "copy"
+        },
+        {
+          "id": "ch1",
+          "label": "Channel 1",
+          "say": "Channel 1",
+          "args": [{"id": 356, "lo": 0.8, "hi": 1.0}],
+          "line": "copy"
+        },
+        {
+          "id": "ch2",
+          "label": "Channel 2",
+          "say": "Channel 2",
+          "args": [{"id": 356, "lo": 0.0, "hi": 0.2}],
+          "line": "copy"
+        }
+      ]
+    }
+  ],
+  "script": [
+    {
+      "id": "listen",
+      "say": "Hey Chief",
+      "say_alt": "Chief",
+      "kind": "connect",
+      "intent": "connect"
+    },
+    {
+      "id": "how_hear",
+      "say": "Hey Chief. How do you hear me?",
+      "stage": "radio",
+      "intent": "radio_check"
+    },
+    {
+      "id": "start2",
+      "say": "Clear for start 2?",
+      "say_alt": "Ready for start 2?",
+      "stage": "start",
+      "intent": "start"
+    },
+    {
+      "id": "epu_pin",
+      "say": "EPU off. You are cleared to remove the EPU pin.",
+      "say_alt": "You are cleared to pull the EPU pin.",
+      "stage": "epu",
+      "intent": "pull_pin"
+    },
+    {
+      "id": "epu_flow",
+      "say": "EPU Checks Good. Cleared to check for flow",
+      "say_alt": "You're cleared to check for flow",
+      "stage": "epu",
+      "tick": "flow",
+      "intent": "check_flow"
+    },
+    {
+      "id": "ready_sec",
+      "say": "Ready for SEC Check?",
+      "say_alt": "Clear for SEC?",
+      "stage": "sec",
+      "intent": "ready_sec"
+    },
+    {
+      "id": "runup",
+      "say": "Clear to run up?",
+      "say_alt": "Clear for run up?",
+      "stage": "epu",
+      "intent": "runup",
+      "optional": true
+    },
+    {
+      "id": "sec_good",
+      "say": "SEC Check Good. Back to PRI",
+      "say_alt": "SEC Check good",
+      "stage": "sec",
+      "intent": "sec_good"
+    },
+    {
+      "id": "fc_clear",
+      "say": "Flight Controls Clear?",
+      "say_alt": "Speedbrakes and flight controls clear?",
+      "stage": "sec",
+      "intent": "fc_clear"
+    },
+    {
+      "id": "bit",
+      "say": "Cleared for bit?",
+      "say_alt": "Ready for bit check?",
+      "stage": "bit",
+      "intent": "ready_bit"
+    },
+    {
+      "id": "trim",
+      "say": "Bit Passed. Ready for trim check?",
+      "say_alt": "Cleared for trim check?",
+      "stage": "trim",
+      "intent": "ready_trim"
+    },
+    {
+      "id": "trim_disc",
+      "say": "Disconnected",
+      "say_alt": "Check No Movement",
+      "stage": "trim",
+      "tick": "disc",
+      "intent": "trim_disc"
+    },
+    {
+      "id": "trim_conn",
+      "say": "Connected",
+      "say_alt": "OK Connected",
+      "stage": "trim",
+      "tick": "connected",
+      "intent": "trim_conn"
+    },
+    {
+      "id": "big",
+      "say": "Cleared for big movements?",
+      "say_alt": "Ready for big movements?",
+      "stage": "big",
+      "intent": "ready_big"
+    },
+    {
+      "id": "dbu",
+      "say": "DBU. Still Clear?",
+      "say_alt": "Flight Controls still Clear?",
+      "stage": "dbu",
+      "intent": "dbu"
+    },
+    {
+      "id": "left_brake",
+      "say": "Ready on the left brake when you're ready.",
+      "say_alt": "Ready on left brake",
+      "stage": "brakes",
+      "tick": "left",
+      "intent": "left_brake"
+    },
+    {
+      "id": "ch1",
+      "say": "Channel 1",
+      "stage": "brakes",
+      "tick": "ch1",
+      "intent": "channel_1"
+    },
+    {
+      "id": "ch2",
+      "say": "Channel 2",
+      "stage": "brakes",
+      "tick": "ch2",
+      "intent": "channel_2"
+    },
+    {
+      "id": "right_brake",
+      "say": "Ready on the right brake when you're ready.",
+      "say_alt": "Ready on right brake",
+      "stage": "brakes",
+      "tick": "right",
+      "intent": "right_brake"
+    },
+    {
+      "id": "ch1b",
+      "say": "Channel 1",
+      "stage": "brakes",
+      "tick": "ch1",
+      "intent": "channel_1",
+      "optional": true
+    },
+    {
+      "id": "ch2b",
+      "say": "Channel 2",
+      "stage": "brakes",
+      "tick": "ch2",
+      "intent": "channel_2",
+      "optional": true
+    },
+    {
+      "id": "cleared_off",
+      "say": "Alright Chief. Everything looks good up here, you're cleared off",
+      "say_alt": "You're cleared off",
+      "kind": "cleared_off",
+      "intent": "cleared_off"
+    }
+  ]
+}

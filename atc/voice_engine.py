@@ -205,7 +205,10 @@ class VoiceController:
         self._transcriber: Transcriber | None = None
         self._ptt_bindings: list[dict[str, Any]] = []
         self._ptt_key = ""
+        self._ics_bindings: list[dict[str, Any]] = []
+        self._ics_key = ""
         self._held = 0
+        self._ics_held = 0
         self._lock = threading.Lock()
         self.last_error = ""
         self._config: dict[str, Any] = {}
@@ -216,7 +219,9 @@ class VoiceController:
         """(Re)configure and start listening. Returns warnings."""
         self.stop()
         warnings: list[str] = []
-        if not config.get("voice_enabled"):
+        want_atc = bool(config.get("voice_enabled"))
+        want_vcc = bool(config.get("crew_chief_enabled"))
+        if not want_atc and not want_vcc:
             return warnings
         self._config = dict(config)
         if np is None:
@@ -239,22 +244,49 @@ class VoiceController:
         self.on_status(f"Mic: {device_name}")
 
         self._ptt_key = hotkeys.normalize_hotkey(config.get("voice_ptt_key"))
-        bindings, ptt_note = resolve_ptt(config, have_key=bool(self._ptt_key))
-        if ptt_note:
-            warnings.append(ptt_note)
+        self._ics_key = hotkeys.normalize_hotkey(config.get("crew_chief_ptt_key"))
+        bindings: list[dict[str, Any]] = []
+        if want_atc:
+            bindings, ptt_note = resolve_ptt(config, have_key=bool(self._ptt_key))
+            if ptt_note:
+                warnings.append(ptt_note)
         self._ptt_bindings = bindings
+        ics_bindings, ics_note = resolve_ics_ptt(
+            config, have_key=bool(self._ics_key)
+        )
+        if ics_note and want_vcc:
+            warnings.append(ics_note)
+        if not want_vcc:
+            ics_bindings = []
+            self._ics_key = ""
+        self._ics_bindings = ics_bindings
+        clash = ics_overlaps_radio_ptt(
+            ics_bindings, self._ics_key, bindings, self._ptt_key
+        )
+        if clash:
+            warnings.append(clash)
+
         for i, binding in enumerate(bindings):
             warning = self._watcher.set_binding(
                 f"ptt{i}", binding, on_press=self._on_ptt_down, on_release=self._on_ptt_up
             )
             if warning:
                 warnings.append(f"PTT: {warning}")
-        if bindings:
+        for i, binding in enumerate(ics_bindings):
+            warning = self._watcher.set_binding(
+                f"ics{i}",
+                binding,
+                on_press=self._on_ics_ptt_down,
+                on_release=self._on_ics_ptt_up,
+            )
+            if warning:
+                warnings.append(f"ICS PTT: {warning}")
+        if bindings or ics_bindings:
             self._watcher.start()
 
         # A key works as well as a button — polled, so it gives a release edge
         # and survives DCS having focus.
-        if self._ptt_key:
+        if want_atc and self._ptt_key:
             warning = self._keys.set_binding(
                 "ptt", self._ptt_key, on_press=self._on_ptt_down, on_release=self._on_ptt_up
             )
@@ -263,9 +295,25 @@ class VoiceController:
                 self._ptt_key = ""
             else:
                 self._keys.start()
+        if want_vcc and self._ics_key:
+            warning = self._keys.set_binding(
+                "ics",
+                self._ics_key,
+                on_press=self._on_ics_ptt_down,
+                on_release=self._on_ics_ptt_up,
+            )
+            if warning:
+                warnings.append(f"ICS key: {warning}")
+                self._ics_key = ""
+            else:
+                self._keys.start()
 
-        if not bindings and not self._ptt_key:
+        if want_atc and not bindings and not self._ptt_key:
             warnings.append("No PTT bound — voice control will not trigger.")
+        if want_vcc and not ics_bindings and not self._ics_key:
+            warnings.append(
+                "No intercom PTT bound — pick a button or key SRS does not transmit on."
+            )
 
         self._transcriber = Transcriber(
             model_size=str(config.get("voice_model") or DEFAULT_MODEL),
@@ -306,6 +354,9 @@ class VoiceController:
             self._transcriber.unload()
             self._transcriber = None
         self._held = 0
+        self._ics_held = 0
+        self._ics_bindings = []
+        self._ics_key = ""
 
     @property
     def running(self) -> bool:
@@ -338,10 +389,35 @@ class VoiceController:
             return
         audio = self._recorder.end_utterance()
         threading.Thread(
-            target=self._process, args=(audio,), name="atc-voice-stt", daemon=True
+            target=self._process,
+            args=(audio, "atc"),
+            name="atc-voice-stt",
+            daemon=True,
         ).start()
 
-    def _process(self, audio: np.ndarray) -> None:
+    def _on_ics_ptt_down(self) -> None:
+        with self._lock:
+            self._ics_held += 1
+            first = self._ics_held == 1
+        if first and self._recorder:
+            self._recorder.begin_utterance()
+            self.on_status("ICS listening…")
+
+    def _on_ics_ptt_up(self) -> None:
+        with self._lock:
+            self._ics_held = max(0, self._ics_held - 1)
+            last = self._ics_held == 0
+        if not last or not self._recorder:
+            return
+        audio = self._recorder.end_utterance()
+        threading.Thread(
+            target=self._process,
+            args=(audio, "ics"),
+            name="atc-ics-stt",
+            daemon=True,
+        ).start()
+
+    def _process(self, audio: np.ndarray, channel: str = "atc") -> None:
         seconds = audio.size / float(mic_capture.SAMPLE_RATE)
         if seconds < MIN_UTTERANCE_S:
             self.on_status("Listening (too short)")
@@ -367,6 +443,41 @@ class VoiceController:
         if not text:
             self.on_status(f"Heard nothing ({seconds:.1f}s)")
             self.on_transcript(voice_intent.Evaluation(reason="nothing heard"))
+            return
+
+        if channel == "ics":
+            try:
+                import crew_chief as crew_chief_mod
+
+                vcc = crew_chief_mod.match_voice(text) if crew_chief_mod.enabled(self._config) else None
+            except Exception:
+                vcc = None
+            if vcc is None:
+                evaluation = voice_intent.Evaluation(
+                    transcript=text,
+                    normalized=text,
+                    reason="intercom — not a crew-chief call",
+                )
+                self.on_status(f"ICS · {text}")
+                self.on_transcript(evaluation)
+                return
+            vcc_match = voice_intent.Match(
+                intent="crew_chief",
+                kind="crew_chief",
+                template="",
+                confidence=vcc.confidence,
+                slots={"vcc_intent": vcc.intent, "stage_id": vcc.stage_id},
+                transcript=text,
+                normalized=text,
+            )
+            evaluation = voice_intent.Evaluation(
+                transcript=text,
+                normalized=text,
+                match=vcc_match,
+            )
+            self.on_status(f"VCC · {text}")
+            self.on_transcript(evaluation)
+            self.on_intent(vcc_match)
             return
 
         evaluation = voice_intent.evaluate(
@@ -510,6 +621,65 @@ def resolve_ptt(
     return [], "No SRS PTT binding found — set a button or a key on the Controls tab."
 
 
+def resolve_ics_ptt(
+    config: dict[str, Any], *, have_key: bool = False
+) -> tuple[list[dict[str, Any]], str]:
+    """
+    Crew-chief intercom PTT only. Never falls back to SRS transmit buttons —
+    sharing that button would key the radio while you talk to the chief.
+    """
+    raw = config.get("crew_chief_ptt")
+    bindings: list[dict[str, Any]] = []
+    if isinstance(raw, list):
+        for entry in raw:
+            binding = joystick.normalize_binding(entry)
+            if binding:
+                bindings.append(binding)
+    elif raw:
+        binding = joystick.normalize_binding(raw)
+        if binding:
+            bindings.append(binding)
+    if bindings:
+        return bindings, ""
+    if have_key:
+        return [], ""
+    return [], "No intercom PTT bound — Learn a spare button or key (not SRS PTT)."
+
+
+def _binding_key(binding: dict[str, Any] | None) -> tuple[Any, ...]:
+    norm = joystick.normalize_binding(binding)
+    if not norm:
+        return ()
+    if joystick.is_mouse_binding(norm):
+        return ("mouse", int(norm["button"]))
+    return ("joy", str(norm.get("device") or ""), int(norm.get("id") or -1), int(norm["button"]))
+
+
+def ics_overlaps_radio_ptt(
+    ics_bindings: list[dict[str, Any]],
+    ics_key: str,
+    radio_bindings: list[dict[str, Any]],
+    radio_key: str,
+) -> str:
+    """Warn if ICS PTT is the same control SRS / ATC voice already uses."""
+    radio_keys = {_binding_key(b) for b in radio_bindings if _binding_key(b)}
+    for binding in ics_bindings:
+        key = _binding_key(binding)
+        if key and key in radio_keys:
+            return (
+                "Intercom PTT matches the radio PTT — talking to the crew chief "
+                "will also key SRS. Pick a different button."
+            )
+    ics_k = hotkeys.normalize_hotkey(ics_key)
+    radio_k = hotkeys.normalize_hotkey(radio_key)
+    if ics_k and radio_k and ics_k == radio_k:
+        return (
+            "Intercom key matches the radio PTT key — talking to the crew chief "
+            "will also key SRS. Pick a different key."
+        )
+    return ""
+
+
 # ---- intent execution ----------------------------------------------------
 
 
@@ -523,6 +693,16 @@ def execute_intent(
     it can be exercised from tests and the CLI.
     """
     intent = match.intent
+    if intent == "crew_chief" or str(match.kind or "") == "crew_chief":
+        import crew_chief as crew_chief_mod
+
+        slots = match.slots or {}
+        vcc = crew_chief_mod.VoiceMatch(
+            str(slots.get("vcc_intent") or "connect"),
+            str(slots.get("stage_id") or ""),
+            match.transcript,
+        )
+        return crew_chief_mod.execute(engine, vcc)
     if intent == "say_again":
         text = str((engine.state or {}).get("last_tx_text") or "").strip()
         last = (engine.state or {}).get("last_step_id")
