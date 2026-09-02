@@ -1734,6 +1734,35 @@ def approach_plan_is_valid(
     return True
 
 
+def _iaf_is_initial(
+    instrument: dict[str, Any] | None, iaf_entry: dict[str, Any] | None
+) -> bool:
+    """True when this fix is the first published IAF on the plate."""
+    if not isinstance(instrument, dict) or not isinstance(iaf_entry, dict):
+        return False
+    iafs = [i for i in (instrument.get("iaf") or []) if isinstance(i, dict)]
+    if not iafs:
+        return False
+    want = str(iaf_entry.get("id") or "").strip().upper()
+    first = str(iafs[0].get("id") or "").strip().upper()
+    return bool(want) and want == first
+
+
+def _instrument_iaf_preference(
+    inst: dict[str, Any],
+    iaf_entry: dict[str, Any],
+    *,
+    side: str,
+) -> tuple[int, int, int]:
+    """Lower is better: landing side, plate that starts at this fix, then ILS."""
+    er = normalize_runway(inst.get("runway")) or str(inst.get("runway") or "")
+    side_mismatch = 0 if (not side or _runway_side(er) == side) else 1
+    initial_mismatch = 0 if _iaf_is_initial(inst, iaf_entry) else 1
+    proc = str(inst.get("procedure") or "").strip().upper()
+    ils_mismatch = 0 if proc == "ILS" else 1
+    return (side_mismatch, initial_mismatch, ils_mismatch)
+
+
 def find_instrument_by_iaf(
     catalog: dict[str, Any] | None,
     token: str | None,
@@ -1743,7 +1772,9 @@ def find_instrument_by_iaf(
     """
     Procedure that actually publishes this IAF, preferring the runway in use.
 
-    Returns (instrument, iaf_entry) or None.
+    When a fix sits on two plates (KRYSS is an intermediate on ILS Z and the
+    start of ILS X), pick the plate that *starts* there. Returns
+    (instrument, iaf_entry) or None.
     """
     if not catalog or not token:
         return None
@@ -1756,11 +1787,7 @@ def find_instrument_by_iaf(
             hits.append((inst, iaf_entry))
     if not hits:
         return None
-    if side:
-        for inst, iaf_entry in hits:
-            er = normalize_runway(inst.get("runway")) or str(inst.get("runway") or "")
-            if _runway_side(er) == side:
-                return inst, iaf_entry
+    hits.sort(key=lambda pair: _instrument_iaf_preference(pair[0], pair[1], side=side))
     return hits[0]
 
 
@@ -1804,9 +1831,10 @@ def _iaf_is_range_gate(iaf_entry: dict[str, Any] | None) -> bool:
     """
     Outer recovery IAF for Blackjack / Approach (not an intermediate plate fix).
 
-    SHEET / KRYSS / HULPU sit on the ILS inside the ARCOE/DUDBE gate altitudes.
-    Position picks must not clear a jet direct those and down to 5–8k when Approach
-    will still expect the HI ILS via ARCOE at or above 15k.
+    SHEET / HULPU (and KRYSS on ILS Z) sit inside the ARCOE/DUDBE gate altitudes.
+    Position picks must not clear a jet direct those and down to 5–8k when nothing
+    was filed — Approach still expects the HI ILS via ARCOE at or above 15k.
+    A *filed* KRYSS (no ARCOE) is different: that is the ILS X IAF at 8800.
     """
     if not isinstance(iaf_entry, dict):
         return False
@@ -1959,6 +1987,9 @@ def match_recovery_from_route(
     A fix can be both — ARCOE is a published VFR recovery *and* the IAF for the
     HI-ILS Z / HI-TACAN Z RWY 21L. Both sides are returned so the caller can use
     whichever the weather calls for.
+
+    Within a token list, a range-gate IAF (ARCOE / DUDBE) beats an intermediate
+    (KRYSS on ILS Z). Filed KRYSS with no ARCOE still wins and maps to ILS X.
     """
     if not catalog or not route:
         return None
@@ -1972,17 +2003,11 @@ def match_recovery_from_route(
     if not tail and not everything:
         return None
 
-    seen: set[str] = set()
-    # Walk from arrival backward so the fix closest to the field wins.
-    for tok in list(reversed(tail)) + list(reversed(everything)):
-        key = str(tok).upper()
-        if key in seen:
-            continue
-        seen.add(key)
+    def _hit_for(tok: str) -> dict[str, Any] | None:
         vfr = find_vfr_recovery(catalog, tok)
         inst_hit = find_instrument_by_iaf(catalog, tok)
         if not vfr and not inst_hit:
-            continue
+            return None
         hit: dict[str, Any] = {
             "kind": "vfr" if vfr else "iaf",
             "id": str((vfr or inst_hit[1]).get("id") or ""),
@@ -1999,7 +2024,30 @@ def match_recovery_from_route(
         if vfr:
             hit["vfr_id"] = str(vfr.get("id") or "")
         return hit
-    return None
+
+    def _scan(tokens: list[str]) -> dict[str, Any] | None:
+        fallback: dict[str, Any] | None = None
+        seen: set[str] = set()
+        # Walk from arrival backward so the fix closest to the field wins,
+        # but keep looking for a published outer IAF in this same list.
+        for tok in reversed(tokens):
+            key = str(tok).upper()
+            if key in seen:
+                continue
+            seen.add(key)
+            hit = _hit_for(tok)
+            if not hit:
+                continue
+            iaf_entry = hit.get("iaf_entry")
+            if isinstance(iaf_entry, dict) and _iaf_is_range_gate(iaf_entry):
+                return hit
+            if fallback is None:
+                fallback = hit
+                if not hit.get("iaf_id"):
+                    return hit
+        return fallback
+
+    return _scan(tail) or _scan(everything)
 
 
 def _int_or(default: int, *candidates: Any) -> int:
@@ -7155,8 +7203,9 @@ def match_caoc_unit_for_flight(
     air = caoc_air_units(units)
     if not air:
         return None
+    map_own = ownship_from_map_enabled(config)
     for u in air:
-        if str(u.get("id") or "") == MAP_OWNSHIP_ID:
+        if map_own and str(u.get("id") or "") == MAP_OWNSHIP_ID:
             return u
 
     fid = opus.flight_id if opus else configured_opus_flight_id(config)
@@ -7178,11 +7227,16 @@ def match_caoc_unit_for_flight(
 
     scored: list[tuple[int, dict[str, Any]]] = []
     for u in air:
+        if str(u.get("id") or "") == MAP_OWNSHIP_ID and not map_own:
+            continue
         score = 0
-        if fid is not None and u.get("opusFlightId") is not None:
+        ufid = u.get("opusFlightId")
+        if fid is not None and ufid not in (None, ""):
             try:
-                if int(u["opusFlightId"]) == int(fid):
-                    score += 100
+                if int(ufid) != int(fid):
+                    # Tagged as another Opus flight — never steal their track.
+                    continue
+                score += 100
             except (TypeError, ValueError):
                 pass
         labels = [

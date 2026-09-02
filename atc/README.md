@@ -31,9 +31,13 @@ Default role is still **Solo** — one PC, same as today. To run ATC for several
 4. Off-LAN (flying PC on `10.x`, DCS server on `192.168.50.x`) is expected. Do not join the server LAN. On the **DCS server’s router**, forward/route **TCP 8766** to `192.168.50.20`, the same way SRS 5002 already is. Then point the client at that reachable address (often the SRS host, not the server’s private 192.168.50.20).
 5. Host **Traffic** tab shows who is connected, which frequency is talking, and the per-channel queue.
 
+**Zone and distance auto-fire** (EOR 2/2, beyond 18 NM, …) is scored on the Client — that PC has the CAOC picture of your jet. The Host still transmits. Only **your Opus flight** counts in the zone (not Viper if you are Fleece). Turn on **Watch live position** on the Host or the flying Client; the dedicated-server box often cannot see you the same way.
+
+**Tanker boom chat** is written on the flying Client (Ollama on that PC still counts) and transmitted only by the Host, so the two copies cannot talk over each other.
+
 **Same Opus flight = one timeline.** Every Client that picks the same Opus flight shares the Host C2 cursor. Dash-1 checking in with Ground (or Play Next) moves dash-3’s Fly tab too. Picture / declare from number 3 work on that shared C2 step — say *Fleece 1* or *Fleece 1-3*. A different Opus flight stays on its own cursor.
 
-**Tanker is a side trip per element.** Seats 1–2 are the lead element, 3–4 the second. Whoever requests tanker (voice or Fly) parks **their element** on Texaco; the other element stays with Blackjack / Bandsaw. Dash-3/4 peeling off does not walk the flight off the CAP. When they check back in or retune C2, they rejoin the flight’s current step. Both elements can tank if both request. Each talking jet still needs the Client app on their PC.
+**Tanker is a side trip per element.** Seats 1–2 are the lead element, 3–4 the second. Whoever requests tanker (voice or Fly) parks **their element** on Texaco; the other element stays with Blackjack / Bandsaw. Dash-3/4 peeling off does not walk the flight off the CAP. Fly **NEXT TX FREQUENCY** on the Client is the tanker Blackjack just assigned, not another published track. When they check back in or retune C2, they rejoin the flight’s current step. Both elements can tank if both request. Each talking jet still needs the Client app on their PC.
 
 Ground talks to one jet at a time. Tower / Blackjack can talk at the same time as Ground. Pilots never transmit ATC from their own ExternalAudio.
 
@@ -340,7 +344,7 @@ Calls it understands:
 | "Joshua, checking in" | Optional R-2508 agency (built into Nellis Default). No picture/declare unless you check **C2 services** on that step |
 | "Joshua, checking out / switch Blackjack" | Leave Joshua → contact Blackjack |
 | "Blackjack, request Joshua" | Push to Joshua (optional; you can also self-tune) |
-| "Blackjack / Bandsaw, request tanker" | Track (e.g. *track A R two tree one Victor*) + braw with altitude to the Opus **KC-135 boom** — never KC-130 or KC-135MPRS. Ends with *Frequency change approved.* AAR is a **side trip**: the cursor jumps to Tanker, then when you retune **Blackjack or Bandsaw** (or check back in) it returns to that agency — not the next timeline step. |
+| "Blackjack / Bandsaw, request tanker" | Track (e.g. *track A R two tree one Victor*) + braw with altitude to the Opus **KC-135 boom** — never KC-130 or KC-135MPRS. Ends with *Frequency change approved.* Fly **NEXT TX FREQUENCY** is that tanker's UHF (not another published track). AAR is a **side trip**: the cursor jumps to Tanker, then when you retune **Blackjack or Bandsaw** (or check back in) it returns to that agency — not the next timeline step. |
 | "Say TACAN" / "say tanker frequency" / "say tanker bullseye" | On-request C2: TACAN, UHF, live bullseye |
 | "Texaco, request rejoin" / "request reform" | Cleared rejoin left, sometimes left observation (tanker does not say *identified*) |
 | Boom / reform small talk | After rejoin, say **how's it going** / **small talk** (or Fly **Texaco starts chat**) to start boom chat — it does not auto-fire. The **first** line is a time-of-day hello (*Good morning, sir*) — later bits are A/B polls, open questions, and riffs. Answer in a word, say anything, or just listen. With Ollama/Gemini/OpenAI on, freeform replies get a **live riff** (not locked to the two buttons). Texaco keeps chatting with short breaks until you **stop talking** / **talk later** / **standing by**, or leave the tanker. LLM falls back to the library if slow. The boom operator is always a woman. |
@@ -386,8 +390,8 @@ VFR: cleared … recovery; instrument: *cross Dudbe at or above 16000, cleared I
 Zulu runway 21L* (one procedure only — ILS **or** LOC, not both). Assignment order:
 
 1. Your spoken / Fly override  
-2. A recovery or IAF named near the **end of the Opus filed route** (e.g. `… STRYK KLSV`)  
-3. METAR: VMC → runway-side VFR default (ARCOE/TORYE/STRYK on 21, MINTT on 03); IFR → instrument + IAF  
+2. A recovery or IAF named near the **end of the Opus filed route** (e.g. `… STRYK KLSV`). Filed **KRYSS** with no ARCOE is **ILS X** (KRYSS at 8800), not ILS Zulu via ARCOE at 15k. ARCOE still in the route keeps ILS Z.  
+3. METAR: VMC → runway-side VFR default (ARCOE/TORYE/STRYK on 21, MINTT on 03); IFR → instrument + IAF (nothing filed → ILS Z / ARCOE on 21)  
 
 Per NellisAFBI 11-250 §4.13.5 the four VFR recoveries are **STRYK, TORYE, ARCOE,
 MINTT** — TORYE and ARCOE are separate initial fixes (Elgin pick-up is TORYE).

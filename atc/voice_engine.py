@@ -1642,7 +1642,9 @@ def execute_tanker_action(
             boom_only=False,
         )
         if tanker:
-            tanker_mod.remember_tanker(engine.state, tanker)
+            tanker_mod.remember_tanker(
+                engine.state, tanker, config=getattr(engine, "config", None), opus=opus
+            )
         text = ""
         schedule_break = False
         if action == "tanker_chat_stop":
@@ -1721,7 +1723,9 @@ def execute_tanker_action(
         boom_only=boom_only,
     )
     if tanker:
-        tanker_mod.remember_tanker(engine.state, tanker)
+        tanker_mod.remember_tanker(
+            engine.state, tanker, config=engine.config, opus=opus
+        )
         if hasattr(engine, "save_state"):
             engine.save_state()
 
@@ -1808,8 +1812,31 @@ def execute_tanker_action(
     return _transmit(engine, ap, text, "tanker", freq_mhz=freq)
 
 
+def speak_tanker_line(engine: Any, text: str) -> dict[str, Any]:
+    """TX a boom-chat line the Client already wrote (Ollama on the flying PC)."""
+    import tanker as tanker_mod
+    import tanker_chat as tanker_chat_mod
+
+    spoken = " ".join(str(text or "").split()).strip()
+    if not spoken:
+        return {"action": "none", "detail": "empty tanker line"}
+    ap = engine.airport()
+    freq = tanker_mod.tanker_target_mhz(engine.state)
+    tanker_chat_mod.append_history(engine.state, "boom", spoken)
+    tanker_chat_mod.arm_tx_guard(engine.state, spoken)
+    if hasattr(engine, "save_state"):
+        engine.save_state()
+    result = _transmit(engine, ap, spoken, "tanker", freq_mhz=freq)
+    if hasattr(engine, "save_state"):
+        engine.save_state()
+    return tanker_chat_mod.attach_continuation_deferred(
+        result if isinstance(result, dict) else {"action": "transmit", "text": spoken},
+        engine.state,
+    )
+
+
 def resolve_tanker_chat(
-    engine: Any, *, force: bool = False, continue_session: bool = False
+    engine: Any, *, force: bool = False, continue_session: bool = False, transmit: bool = True
 ) -> dict[str, Any]:
     """
     Texaco starts (or continues) boom small talk.
@@ -1882,7 +1909,9 @@ def resolve_tanker_chat(
         boom_only=False,
     )
     if tanker:
-        tanker_mod.remember_tanker(engine.state, tanker)
+        tanker_mod.remember_tanker(
+            engine.state, tanker, config=getattr(engine, "config", None), opus=opus
+        )
     gate: dict[str, Any] | None = None
     if not force and not continuing:
         dist = None
@@ -1926,6 +1955,19 @@ def resolve_tanker_chat(
             freq = None
     if hasattr(engine, "save_state"):
         engine.save_state()
+    if not transmit:
+        tanker_chat_mod.arm_tx_guard(engine.state, text)
+        if hasattr(engine, "save_state"):
+            engine.save_state()
+        result = {
+            "action": "transmit",
+            "text": text,
+            "channel": "tanker",
+            "detail": "client-generated, host will TX",
+        }
+        if gate is not None:
+            result["boom"] = gate
+        return tanker_chat_mod.attach_continuation_deferred(result, engine.state)
     result = _transmit(engine, ap, text, "tanker", freq_mhz=freq)
     tanker_chat_mod.arm_tx_guard(engine.state, text)
     if hasattr(engine, "save_state"):

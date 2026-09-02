@@ -26,6 +26,7 @@ import atc_net  # noqa: E402
 import atc_phrase  # noqa: E402
 import channel_tx  # noqa: E402
 import flow_engine  # noqa: E402
+import runway_position  # noqa: E402
 import srs_radio  # noqa: E402
 import tanker  # noqa: E402
 import voice_engine  # noqa: E402
@@ -104,6 +105,19 @@ class PilotSession:
         step = st.get("step") if isinstance(st.get("step"), dict) else {}
         channel = str((step or {}).get("channel") or "")
         qinfo = (queues or {}).get(channel or "other") or {}
+        step_freq = None
+        step_mod = ""
+        try:
+            step_freq, step_mod, _tx = atc_phrase.step_radio(
+                self.engine.airport(),
+                channel,
+                step,
+                state=flow_state,
+                config=self.engine.config,
+            )
+        except Exception:
+            step_freq = None
+            step_mod = ""
         return {
             "session_id": self.session_id,
             "flow_key": self.flow_key,
@@ -122,10 +136,15 @@ class PilotSession:
             "label": st.get("label"),
             "channel": channel,
             "step": step,
+            "step_freq_mhz": step_freq,
+            "step_mod": step_mod,
             "on_tanker": bool(flow_state.get("tanker_overlay")),
             "flow_state": flow_state,
             "awaiting_readback": bool(flow_state.get("awaiting_readback")),
             "last_tx_text": str(flow_state.get("last_tx_text") or ""),
+            "auto_clearance_enabled": bool(
+                (self.engine.config or {}).get("auto_clearance_enabled")
+            ),
             "queue": qinfo,
             "last_result": self.last_result,
         }
@@ -221,7 +240,12 @@ class AtcServer:
         sess.touch()
         sess.apply_radios(body, inject=False)
         self._align_element_overlay(sess)
-        return {"ok": True, "session_id": key, **sess.public_status(self.hub.snapshot())}
+        return {"ok": True, "session_id": key, **self._host_status(sess)}
+
+    def _host_status(self, sess: PilotSession) -> dict[str, Any]:
+        status = sess.public_status(self.hub.snapshot())
+        status["auto_clearance_enabled"] = bool(self.config.get("auto_clearance_enabled"))
+        return status
 
     def _flow_alive(self, flow: str) -> bool:
         now = time.time()
@@ -431,7 +455,7 @@ class AtcServer:
 
         result = self.run_action(sess, work, body)
         result["ok"] = result.get("action") != "blocked"
-        return result
+        return _attach_fly_status(result, self._host_status(sess))
 
     def handle_command(
         self, sess: PilotSession, command: str, body: dict[str, Any]
@@ -449,7 +473,13 @@ class AtcServer:
                 sid = str(body.get("step_id") or body.get("id") or "")
                 if not sid:
                     raise RuntimeError("play needs step_id")
+                if body.get("auto"):
+                    blocked = auto_play_block_reason(engine, sid, self.config)
+                    if blocked:
+                        return {"action": "blocked", "detail": blocked}
                 return engine.play_id(sid)
+            if cmd == "tanker_chat":
+                return run_tanker_chat_command(engine, body)
             if cmd == "seek":
                 return engine.seek(int(body.get("index") or 0))
             if cmd == "seek_relative":
@@ -459,17 +489,14 @@ class AtcServer:
             raise RuntimeError(f"unknown command: {cmd}")
 
         result = self.run_action(sess, work, body)
-        result["ok"] = True
-        status = sess.public_status(self.hub.snapshot())
-        for key, value in status.items():
-            result.setdefault(key, value)
-        return result
+        result["ok"] = result.get("action") != "blocked"
+        return _attach_fly_status(result, self._host_status(sess))
 
     def heartbeat(self, sess: PilotSession, body: dict[str, Any]) -> dict[str, Any]:
         sess.touch()
         sess.apply_radios(body, inject=False)
         self._follow_tanker_tune(sess)
-        return {"ok": True, **sess.public_status(self.hub.snapshot())}
+        return {"ok": True, **self._host_status(sess)}
 
     def traffic(self) -> dict[str, Any]:
         queues = self.hub.snapshot()
@@ -482,8 +509,112 @@ class AtcServer:
             "role": "host",
             "port": self.port,
             "queues": queues,
-            "sessions": [s.public_status(queues) for s in live],
+            "sessions": [
+                {
+                    **s.public_status(queues),
+                    "auto_clearance_enabled": bool(self.config.get("auto_clearance_enabled")),
+                }
+                for s in live
+            ],
         }
+
+
+def auto_play_block_reason(
+    engine: flow_engine.FlowEngine,
+    step_id: str,
+    config: dict[str, Any] | None = None,
+) -> str:
+    """
+    Why a client Watch auto-play must not transmit.
+
+    Clients evaluate CAOC on the flying PC (where the jets actually are) and
+    POST play with auto=True. The host still owns TX, so refuse a second
+    copy of the same step.
+    """
+    _ = config
+    want = str(step_id or "").strip()
+    if not want:
+        return "play needs step_id"
+    cur: dict[str, Any] = {}
+    try:
+        cur = engine.current_step() or {}
+    except Exception:
+        cur = {}
+    tmpl = str(cur.get("template") or "")
+    more_land = False
+    if tmpl == "clear_land":
+        try:
+            more_land = atc_phrase.should_hold_for_landing_clearances(
+                engine.state, step=cur, mission=getattr(engine, "mission", None)
+            )
+        except Exception:
+            more_land = False
+    if runway_position.skip_auto_tx_already_played(
+        fire_id=want,
+        current_step_id=str(cur.get("id") or cur.get("template") or ""),
+        last_step_id=str((engine.state or {}).get("last_step_id") or ""),
+        template=tmpl,
+        hold_for_landing=more_land,
+    ):
+        return "already played"
+    return ""
+
+
+def run_tanker_chat_command(
+    engine: flow_engine.FlowEngine, body: dict[str, Any]
+) -> dict[str, Any]:
+    """
+    Host TX for boom chat. Client may send a locally generated line (Ollama
+    on the flying PC); otherwise the host writes the next bit itself.
+    """
+    import tanker_chat as tanker_chat_mod
+    import voice_engine as voice_engine_mod
+
+    continuing = bool(body.get("continue"))
+    auto = bool(body.get("auto", True))
+    text = str(body.get("text") or "").strip()
+    if (
+        auto
+        and continuing
+        and tanker_chat_mod.is_session_active(engine.state)
+        and not tanker_chat_mod.continuation_due(engine.state)
+    ):
+        return {"action": "none", "detail": "tanker chat not due"}
+    if text:
+        if body.get("await_pilot"):
+            tanker_chat_mod.hold_for_pilot(engine.state, text)
+        else:
+            tanker_chat_mod.schedule_next_question(engine.state, llm=True)
+        return voice_engine_mod.speak_tanker_line(engine, text)
+    return voice_engine_mod.resolve_tanker_chat(
+        engine, continue_session=continuing, force=not continuing and not auto
+    )
+
+
+def _attach_fly_status(
+    result: dict[str, Any], status: dict[str, Any]
+) -> dict[str, Any]:
+    """
+    Keep TX radio/text on the result, and add the Fly cursor the Client paints.
+
+    Request tanker transmits on Blackjack; NEXT TX FREQUENCY is the parked
+    tanker UHF. Do not let the C2 TX freq overwrite that.
+    """
+    out = dict(result or {})
+    for key, value in (status or {}).items():
+        if key in ("freq", "channel", "text", "action", "ok") and key in out:
+            continue
+        out.setdefault(key, value)
+    out["flow_state"] = status.get("flow_state")
+    out["step_freq_mhz"] = status.get("step_freq_mhz")
+    out["step_mod"] = status.get("step_mod")
+    out["on_tanker"] = status.get("on_tanker")
+    out["index"] = status.get("index")
+    out["step_number"] = status.get("step_number")
+    out["label"] = status.get("label")
+    out["step"] = status.get("step")
+    out["status_channel"] = status.get("channel")
+    return out
 
 
 def _shared_flow_state(state: dict[str, Any] | None) -> dict[str, Any]:
@@ -662,7 +793,7 @@ def _make_handler(server: AtcServer) -> type[BaseHTTPRequestHandler]:
                     sess = self._session({})
                     if sess is None:
                         return
-                    self._send(200, {"ok": True, **sess.public_status(server.hub.snapshot())})
+                    self._send(200, {"ok": True, **server._host_status(sess)})
                     return
                 self._send(404, {"ok": False, "error": f"unknown {path}"})
             except Exception as exc:  # noqa: BLE001

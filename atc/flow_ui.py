@@ -1077,6 +1077,25 @@ class MissionPlanner(tk.Tk):
             bag[session_id] = tracker
         return tracker
 
+    def _clients_share_live_engine(self) -> bool:
+        """True when a live Client session is parked on this Host Fly engine."""
+        if self._atc_role() != "host":
+            return False
+        server = getattr(self, "_atc_server", None)
+        engine = getattr(self, "engine", None)
+        if server is None or engine is None:
+            return False
+        now = time.time()
+        try:
+            for sess in list(server.sessions.values()):
+                if now - sess.last_seen > atc_net.SESSION_TTL_S:
+                    continue
+                if sess.engine is engine:
+                    return True
+        except Exception:
+            return False
+        return False
+
     def _watch_off_position_line(self) -> str:
         """When Watch is off, still say why the current distance gate would fire."""
         base = "Automatic clearances off — turn on in Setup"
@@ -1109,7 +1128,9 @@ class MissionPlanner(tk.Tk):
             if not getattr(self, "_pos_busy", False):
                 self._pos_busy = True
                 threading.Thread(
-                    target=lambda: self._position_work(allow_fire=False),
+                    target=lambda: self._position_work(
+                        allow_fire=self._client_should_auto_play()
+                    ),
                     daemon=True,
                 ).start()
             self._kick_tanker_boom_watch()
@@ -1120,7 +1141,10 @@ class MissionPlanner(tk.Tk):
                 self._fly_position_lbl.configure(fg=C_MUTED)
             self._kick_tanker_boom_watch()
             return
-        if not getattr(self, "_pos_busy", False):
+        # When a Client owns this same timeline, score and TX from that
+        # session's identity — not Host Fly's (often empty) Opus pick.
+        host_live_fire = not self._clients_share_live_engine()
+        if not getattr(self, "_pos_busy", False) and host_live_fire:
             self._pos_busy = True
             threading.Thread(target=self._position_work, daemon=True).start()
         if (
@@ -1130,6 +1154,7 @@ class MissionPlanner(tk.Tk):
         ):
             self._host_pos_busy = True
             threading.Thread(target=self._host_position_work, daemon=True).start()
+        self._kick_tanker_boom_watch()
 
     def _atc_role(self) -> str:
         return atc_net.role_of(self.config_data)
@@ -1296,10 +1321,7 @@ class MissionPlanner(tk.Tk):
                 return
             if tanker_chat_mod.is_awaiting_react(engine.state):
                 if tanker_chat_mod.continuation_due(engine.state):
-                    result = voice_engine.resolve_tanker_chat(
-                        engine, continue_session=True
-                    )
-                    self._ui_call(lambda: self._finish_boom_tx(engine, result))
+                    self._fire_tanker_continue(engine)
                     return
                 delay = tanker_chat_mod.continuation_delay_s(engine.state)
                 extra = (
@@ -1312,10 +1334,7 @@ class MissionPlanner(tk.Tk):
                 return
             if tanker_chat_mod.is_session_active(engine.state):
                 if tanker_chat_mod.continuation_due(engine.state):
-                    result = voice_engine.resolve_tanker_chat(
-                        engine, continue_session=True
-                    )
-                    self._ui_call(lambda: self._finish_boom_tx(engine, result))
+                    self._fire_tanker_continue(engine)
                     return
                 delay = tanker_chat_mod.continuation_delay_s(engine.state)
                 extra = (
@@ -1354,7 +1373,11 @@ class MissionPlanner(tk.Tk):
         if not reason:
             reason = str((result or {}).get("detail") or "")
         note = tanker_chat_mod.llm_note(engine.state)
-        fired = bool(result and result.get("action") == "transmit" and result.get("text"))
+        fired = bool(
+            result
+            and result.get("text")
+            and result.get("action") in ("transmit", "queued")
+        )
         line = self._boom_caption(engine, reason if not fired else "say anything")
         self._set_boom_status(line, fire=fired)
         if fired:
@@ -1371,6 +1394,138 @@ class MissionPlanner(tk.Tk):
         again = result.get("deferred") if isinstance(result, dict) else None
         if isinstance(again, dict) and again.get("kind") == "tanker_chat_continue":
             self._schedule_tanker_chat(again)
+
+    def _tanker_chat_inflight(self) -> bool:
+        try:
+            until = float(getattr(self, "_tanker_chat_inflight_until", 0) or 0)
+        except (TypeError, ValueError):
+            return False
+        return time.time() < until
+
+    def _mark_tanker_chat_inflight(self, seconds: float = 4.0) -> None:
+        self._tanker_chat_inflight_until = time.time() + max(1.0, float(seconds))
+
+    def _fire_tanker_continue(self, engine: Any) -> None:
+        """One continuation TX — Client asks the Host; Host/solo speak locally."""
+        if self._atc_role() == "client":
+            result = self._client_request_tanker_chat(continue_session=True)
+            if result is None:
+                return
+            self._ui_call(lambda r=result, e=engine: self._finish_boom_tx(e, r))
+            return
+        if self._atc_role() == "host" and getattr(self, "_atc_server", None) is not None:
+            try:
+                if self._atc_server.unique_flow_sessions():
+                    return
+            except Exception:
+                pass
+        result = voice_engine.resolve_tanker_chat(engine, continue_session=True)
+        self._ui_call(lambda r=result, e=engine: self._finish_boom_tx(e, r))
+
+    def _client_request_tanker_chat(
+        self, *, continue_session: bool
+    ) -> dict[str, Any] | None:
+        """
+        Ask the Host to TX the next boom bit. Generate on this PC when Ollama
+        is configured here so the dedicated-server box is not required to run it.
+        """
+        client = getattr(self, "_atc_client", None)
+        if client is None:
+            return None
+        if self._tanker_chat_inflight():
+            return None
+        self._mark_tanker_chat_inflight()
+        engine = self._live_engine()
+        payload: dict[str, Any] = {"continue": continue_session, "auto": True}
+        try:
+            import tanker_chat as tanker_chat_mod
+
+            if tanker_chat_mod.resolve_llm_provider(engine.config) is not None:
+                generated = voice_engine.resolve_tanker_chat(
+                    engine, continue_session=continue_session, transmit=False
+                )
+                text = str((generated or {}).get("text") or "").strip()
+                if not text:
+                    self._tanker_chat_inflight_until = 0.0
+                    return generated
+                payload["text"] = text
+                delay = tanker_chat_mod.continuation_delay_s(engine.state)
+                payload["await_pilot"] = bool(
+                    tanker_chat_mod.is_awaiting_react(engine.state) and delay is None
+                )
+        except Exception as exc:  # noqa: BLE001
+            self._tanker_chat_inflight_until = 0.0
+            err = str(exc)
+            self._ui_call(lambda e=err: self._voice_log(f"BOOM  generate failed: {e}"))
+            return None
+        try:
+            result = client.action("tanker_chat", **payload)
+        except Exception as exc:  # noqa: BLE001
+            self._tanker_chat_inflight_until = 0.0
+            err = str(exc)
+            self._ui_call(
+                lambda e=err: self._note_no_tx(e, action="auto", channel="tanker")
+            )
+            return None
+        if not isinstance(result, dict):
+            return {"action": "queued", "text": payload.get("text") or ""}
+        if result.get("action") in ("none", "blocked"):
+            self._tanker_chat_inflight_until = 0.0
+        return result
+
+    def _host_auto_clearance_on(self) -> bool | None:
+        """Host Watch from the last heartbeat, or None if this host is older."""
+        client = getattr(self, "_atc_client", None)
+        if client is None:
+            return None
+        st = client.last_status or {}
+        if "auto_clearance_enabled" not in st:
+            return None
+        return bool(st.get("auto_clearance_enabled"))
+
+    def _client_should_auto_play(self) -> bool:
+        """
+        Client Watch, or the host's Watch when the flying PC left it off.
+
+        The dedicated-server host often has Watch on while the client UI only
+        shows 2/2. Either switch is enough to ask the host to TX.
+        """
+        if bool(self.config_data.get("auto_clearance_enabled")):
+            return True
+        host = self._host_auto_clearance_on()
+        return bool(host) if host is not None else False
+
+    def _client_request_auto_play(
+        self,
+        step_id: str,
+        step: dict[str, Any],
+        tracker: runway_position.PositionTracker,
+    ) -> str:
+        """Ask the host to play a Watch step. Returns step_id on TX, else ''."""
+        client = getattr(self, "_atc_client", None)
+        if client is None:
+            return ""
+        sid = str(step_id or step.get("id") or "").strip()
+        if not sid:
+            return ""
+        try:
+            result = client.action("play", step_id=sid, auto=True)
+        except Exception as exc:  # noqa: BLE001
+            err = str(exc)
+            self._ui_call(
+                lambda e=err, st=step: self._note_no_tx(e, action="auto", step=st)
+            )
+            return ""
+        if not isinstance(result, dict):
+            return sid
+        if result.get("action") == "blocked":
+            detail = str(result.get("detail") or "").strip().lower()
+            if "already played" in detail:
+                latch = tracker.pending_latch or f"fire:{sid}"
+                tracker.fire_once(latch)
+                tracker.pending_latch = ""
+            return ""
+        return sid
 
     def _host_position_work(self) -> None:
         try:
@@ -1404,6 +1559,8 @@ class MissionPlanner(tk.Tk):
         if tracker is None:
             tracker = self._position_tracker()
         try:
+            if bind_live and self._atc_role() == "client":
+                self._sync_client_flow_cursor()
             if engine is None:
                 engine = self._live_engine() if bind_live else flow_engine.FlowEngine()
             step = engine.current_step() or {}
@@ -1498,6 +1655,12 @@ class MissionPlanner(tk.Tk):
             )
             if not allow_fire:
                 fire = ""
+            elif (
+                fire
+                and bind_live
+                and self._atc_role() == "client"
+            ):
+                fire = self._client_request_auto_play(fire, step, tracker)
         except Exception as exc:  # noqa: BLE001
             err = str(exc)
             if bind_live:
@@ -1718,7 +1881,14 @@ class MissionPlanner(tk.Tk):
                     tag = " · ".join(bits) + " · "
             except Exception:
                 tag = ""
-            self.fly_position.set(f"{tag}{prefix}: {summary}")
+            line = f"{tag}{prefix}: {summary}"
+            if (
+                self._atc_role() == "client"
+                and not fire
+                and not self._client_should_auto_play()
+            ):
+                line = f"{line}  ·  Watch off — turn on in Setup"
+            self.fly_position.set(line)
             if hasattr(self, "_fly_position_lbl"):
                 if fire:
                     color = C_GREEN
@@ -1737,6 +1907,15 @@ class MissionPlanner(tk.Tk):
             return
         if tracker is None:
             tracker = self._position_tracker()
+        if bind_live and self._atc_role() == "client":
+            latch = tracker.pending_latch or f"fire:{fire}:{status.runway or 'field'}"
+            tracker.fire_once(latch)
+            tracker.pending_latch = ""
+            spoken = label or fire
+            self._voice_log(f"AUTO  {spoken} — {summary}")
+            self._on_trigger_received(f"AUTO {spoken} (position)")
+            self._refresh_client_fly()
+            return
         live_engine = engine
         if bind_live:
             try:
@@ -2570,7 +2749,7 @@ class MissionPlanner(tk.Tk):
         except (TypeError, ValueError):
             delay_s = 12.0
         # Continuations are already a deliberate pause — allow shorter floors.
-        floor_ms = 2500 if kind == "tanker_chat_continue" else 4000
+        floor_ms = 8000 if kind == "tanker_chat_continue" else 4000
         delay_ms = max(floor_ms, int(delay_s * 1000))
         continue_session = kind == "tanker_chat_continue"
 
@@ -2584,9 +2763,16 @@ class MissionPlanner(tk.Tk):
 
                     if not tanker_chat_mod.is_session_active(engine.state):
                         return
-                    result = voice_engine.resolve_tanker_chat(
-                        engine, continue_session=continue_session
-                    )
+                    if self._atc_role() == "client":
+                        result = self._client_request_tanker_chat(
+                            continue_session=continue_session
+                        )
+                        if result is None:
+                            return
+                    else:
+                        result = voice_engine.resolve_tanker_chat(
+                            engine, continue_session=continue_session
+                        )
                 except Exception as exc:  # noqa: BLE001
                     err = str(exc)
 
@@ -7363,6 +7549,16 @@ class MissionPlanner(tk.Tk):
             state=getattr(self.engine, "state", None),
             config=self.config_data,
         )
+        if self._atc_role() == "client":
+            client = getattr(self, "_atc_client", None)
+            st = (client.last_status if client is not None else None) or {}
+            host_mhz = atc_phrase._parse_mhz(st.get("step_freq_mhz"))
+            host_ch = str(st.get("status_channel") or st.get("channel") or "").strip().lower()
+            if host_mhz is not None and (not host_ch or host_ch == channel):
+                freq = host_mhz
+                host_mod = str(st.get("step_mod") or "").strip()
+                if host_mod:
+                    mod = host_mod
         # UHF/VFR style: always three decimals for glanceable kneeboard read
         freq_disp = f"{float(freq):.3f}"
         ch_label = channel.upper()
@@ -8758,6 +8954,10 @@ class MissionPlanner(tk.Tk):
             if isinstance(st.get("step"), dict)
             else None,
             bool(st.get("awaiting_readback")),
+            st.get("step_freq_mhz"),
+            (st.get("flow_state") or {}).get("tanker_freq_mhz")
+            if isinstance(st.get("flow_state"), dict)
+            else None,
         )
         if cue_key != getattr(self, "_client_fly_cue_key", None):
             self._client_fly_cue_key = cue_key
@@ -10021,7 +10221,9 @@ class MissionPlanner(tk.Tk):
                 "Gemini / OpenAI on, you can freestyle past the A/B buttons and Texaco "
                 "riffs live on what you said for a few turns, then rotates. Ollama needs "
                 "a pulled model (e.g. ollama pull llama3.2) — Fly shows when it falls "
-                "back to the library. Fly Texaco starts chat only on tanker frequency."
+                "back to the library. On a Client, this PC writes the line (so Ollama "
+                "here still counts) and the Host transmits — only the Host talks on SRS. "
+                "Fly Texaco starts chat only on tanker frequency."
             ),
             bg=C_PANEL,
             fg=C_MUTED,
@@ -10086,15 +10288,17 @@ class MissionPlanner(tk.Tk):
         tk.Label(
             ac_inner,
             text=(
-                "Must be on for anything to auto-fire. Watches the Opus CAOC radar feed "
-                "and fires when the flight is where it needs to be — monitor tower at the "
-                "assigned EOR, takeoff when lined up, range exit at 40 NM from Nellis or "
-                "inside the approach circle, contact tower at 12 NM. Overhead / TAC "
-                "landing clearance is gear-down / Play (not the 2 NM field gate). The Fly tab line "
-                "shows the live wait (NM remaining, in-zone count, or why the feed "
-                "cannot see you). Distance gates work far from the field; EOR / lineup "
-                "only fire in those drawn boxes. Each fires once per sortie and re-arms "
-                "on Reset."
+                "Must be on for anything to auto-fire. On a Client, this PC evaluates "
+                "the Opus CAOC feed (2/2 in zone, beyond 18 NM, …) and asks the Host to "
+                "transmit — the dedicated-server box often cannot see your jet. "
+                "Watch on either this PC or the Host is enough. Fires when the flight is "
+                "where it needs to be — monitor tower at the assigned EOR, takeoff when "
+                "lined up, range exit at 40 NM from Nellis or inside the approach circle, "
+                "contact tower at 12 NM. Overhead / TAC landing clearance is gear-down / "
+                "Play (not the 2 NM field gate). The Fly tab line shows the live wait "
+                "(NM remaining, in-zone count, or why the feed cannot see you). Distance "
+                "gates work far from the field; EOR / lineup only fire in those drawn "
+                "boxes. Each fires once per sortie and re-arms on Reset."
             ),
             bg=C_PANEL,
             fg=C_MUTED,

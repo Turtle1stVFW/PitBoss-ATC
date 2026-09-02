@@ -451,6 +451,19 @@ def _pick_break_s(*, llm: bool = False) -> float:
     return random.uniform(_BREAK_MIN_S, _BREAK_MAX_S)
 
 
+def hold_for_pilot(state: dict[str, Any] | None, opener: str = "") -> None:
+    """Keep the live bit open — Texaco waits instead of auto-continuing."""
+    if not isinstance(state, dict):
+        return
+    row = _row(state) or {}
+    _keep_react_open(
+        state,
+        opener=str(opener or row.get("opener") or ""),
+        turns=int(row.get("turns") or 0),
+        llm=True,
+    )
+
+
 def schedule_next_question(
     state: dict[str, Any],
     *,

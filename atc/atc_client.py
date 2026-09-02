@@ -86,7 +86,30 @@ class AtcClient:
             "summarised": match.summarised,
         }
         body.update(_radio_payload(self.config))
-        return self._request("POST", "/v1/intent", body)
+        data = self._request("POST", "/v1/intent", body)
+        if isinstance(data, dict):
+            fly = {
+                key: data[key]
+                for key in (
+                    "flow_state",
+                    "index",
+                    "step_number",
+                    "label",
+                    "step",
+                    "on_tanker",
+                    "step_freq_mhz",
+                    "step_mod",
+                    "awaiting_readback",
+                    "last_tx_text",
+                    "total",
+                    "at_end",
+                )
+                if key in data
+            }
+            if data.get("status_channel"):
+                fly["channel"] = data["status_channel"]
+            self.last_status = {**self.last_status, **data, **fly}
+        return data
 
     def action(self, command: str, **fields: Any) -> dict[str, Any]:
         self._ensure_session()

@@ -429,11 +429,11 @@ def extras() -> int:
         print(f"approach IFR clearance — {clear_ifr}")
 
     # Each IAF belongs to its own plate (CIFP): DUDBE = HI-TACAN Y 21L,
-    # ARCOE = ILS Z / HI-TACAN Z 21L, LUCIL = TACAN 03R.
+    # ARCOE = ILS Z / HI-TACAN Z 21L, KRYSS = ILS X (not ILS Z at ARCOE/15k).
     for iaf_name, want_inst, want_alt in (
         ("DUDBE", "HI_TACAN_Y_21L", 15000),
         ("ARCOE", "ILS_Z_21L", 15000),
-        ("KRYSS", "ILS_Z_21L", 8800),
+        ("KRYSS", "ILS_X_21L", 8800),
         ("ZAPVO", "LOC_Y_21L", 7000),
         ("HULPU", "HI_TACAN_Y_21L", 5500),
         ("LUCIL", "TACAN_03R", 10300),
@@ -527,6 +527,51 @@ def extras() -> int:
             f"approach filed ARCOE (IMC) — {plan_arcoe_ifr.get('instrument_id')} "
             f"IAF {plan_arcoe_ifr.get('iaf')} source={plan_arcoe_ifr.get('source')}"
         )
+
+    # Filed KRYSS with no ARCOE is ILS X at 8800 — not ILS Zulu via ARCOE/15k.
+    class _KryssFP:
+        fp_route_string = "KLSV DREAM COYOT KRYSS KLSV"
+        fp_altitude = "FL240"
+
+    plan_kryss_ifr = atc_phrase.assign_approach_plan(
+        nellis, ifr, state={}, force=True, opus=_KryssFP()
+    )
+    if plan_kryss_ifr.get("pattern") != "instrument":
+        print(f"  FAIL filed KRYSS in IMC stays instrument: {plan_kryss_ifr}")
+        bad += 1
+    elif (
+        plan_kryss_ifr.get("iaf") != "KRYSS"
+        or plan_kryss_ifr.get("instrument_id") != "ILS_X_21L"
+        or plan_kryss_ifr.get("source") != "route"
+    ):
+        print(f"  FAIL filed KRYSS should be ILS X: {plan_kryss_ifr}")
+        bad += 1
+    elif int(plan_kryss_ifr.get("descend_ft") or 0) != 8800:
+        print(f"  FAIL filed KRYSS crossing should be 8800: {plan_kryss_ifr}")
+        bad += 1
+    elif "x-ray" not in str(plan_kryss_ifr.get("instrument_say") or "").lower():
+        print(f"  FAIL filed KRYSS should say ILS X-ray: {plan_kryss_ifr}")
+        bad += 1
+    else:
+        print(
+            f"approach filed KRYSS (IMC) — {plan_kryss_ifr.get('instrument_id')} "
+            f"IAF {plan_kryss_ifr.get('iaf')} desc {plan_kryss_ifr.get('descend_ft')}"
+        )
+
+    # ARCOE still in the tail keeps HI ILS Z even if KRYSS is the last fix.
+    class _ArcoeKryssFP:
+        fp_route_string = "KLSV DREAM COYOT ARCOE KRYSS KLSV"
+        fp_altitude = "FL240"
+
+    plan_both = atc_phrase.assign_approach_plan(
+        nellis, ifr, state={}, force=True, opus=_ArcoeKryssFP()
+    )
+    if plan_both.get("iaf") != "ARCOE" or plan_both.get("instrument_id") != "ILS_Z_21L":
+        print(f"  FAIL ARCOE+KRYSS should stay ILS Z / ARCOE: {plan_both}")
+        bad += 1
+    elif int(plan_both.get("descend_ft") or 0) != 15000:
+        print(f"  FAIL ARCOE+KRYSS crossing should stay 15000: {plan_both}")
+        bad += 1
 
     # Same fix filed in VMC gives the VFR recovery, not an instrument approach.
     plan_arcoe_vmc = atc_phrase.assign_approach_plan(
