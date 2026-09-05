@@ -9,7 +9,9 @@ a new clearance. A match is then executed against the flow engine.
 
 Whisper runs on CPU int8 on purpose: base.en costs ~350 ms for a typical radio
 call and leaves the GPU entirely to DCS. The model is loaded once at startup so
-no transmission pays the load cost.
+no transmission pays the load cost. Ollama (NLU / boom chat) is pinned to CPU
+the same way — a GPU load during a call has frozen the display and shut the PC
+down.
 """
 
 from __future__ import annotations

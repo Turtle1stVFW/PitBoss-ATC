@@ -2564,6 +2564,32 @@ class MissionPlanner(tk.Tk):
         elif warnings:
             self._set_voice_status("; ".join(warnings))
         self._refresh_voice_prompts()
+        self._release_ollama_gpu()
+
+    def _release_ollama_gpu(self) -> None:
+        """Kick Ollama off the GPU so a radio call cannot steal VRAM from DCS."""
+        mode = str(self.config_data.get("tanker_chat_llm") or "").strip().lower()
+        if mode not in {"ollama", "local"}:
+            return
+        cfg = dict(self.config_data)
+
+        def work() -> None:
+            try:
+                import tanker_chat as tanker_chat_mod
+
+                n = tanker_chat_mod.release_ollama_gpu(cfg)
+            except Exception:
+                return
+            if n:
+
+                def note() -> None:
+                    self._voice_log(
+                        f"Ollama: unloaded {n} GPU model(s) so DCS keeps the card"
+                    )
+
+                self._ui_call(note)
+
+        threading.Thread(target=work, daemon=True, name="atc-ollama-cpu").start()
 
     def _selected_mic_index(self) -> int:
         label = self.var_voice_mic.get().strip()
@@ -10221,9 +10247,11 @@ class MissionPlanner(tk.Tk):
                 "Gemini / OpenAI on, you can freestyle past the A/B buttons and Texaco "
                 "riffs live on what you said for a few turns, then rotates. Ollama needs "
                 "a pulled model (e.g. ollama pull llama3.2) — Fly shows when it falls "
-                "back to the library. On a Client, this PC writes the line (so Ollama "
-                "here still counts) and the Host transmits — only the Host talks on SRS. "
-                "Fly Texaco starts chat only on tanker frequency."
+                "back to the library. Ollama is pinned to the CPU (same rule as Whisper) "
+                "so a radio call cannot load a model onto the GPU DCS is using. On a "
+                "Client, this PC writes the line (so Ollama here still counts) and the "
+                "Host transmits — only the Host talks on SRS. Fly Texaco starts chat "
+                "only on tanker frequency."
             ),
             bg=C_PANEL,
             fg=C_MUTED,
@@ -10541,7 +10569,8 @@ class MissionPlanner(tk.Tk):
                 "so \u201cTwo, go button five\u201d and general chatter never move the timeline. "
                 "Messy radio uses the same Ollama/Gemini/OpenAI setting as boom chat: if the "
                 "keyword matcher misses, the model may pick an allowed call for this freq "
-                "(taxi, picture, \u2026). It never writes a new clearance. Needs boom-chat LLM on."
+                "(taxi, picture, \u2026). It never writes a new clearance. Needs boom-chat LLM "
+                "on. Ollama stays on the CPU so that fallback cannot freeze the GPU."
             ),
             bg=C_PANEL,
             fg=C_MUTED,

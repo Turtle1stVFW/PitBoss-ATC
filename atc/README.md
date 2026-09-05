@@ -244,7 +244,8 @@ shipped Nellis `tower` area is a 5 NM circle, surface to 5000 ft.
 
 Hold your normal SRS PTT, make the call, and ATC answers. Speech recognition runs
 locally with `faster-whisper` on the CPU — roughly 350 ms for a typical radio call with
-`base.en`, and it leaves the GPU entirely to DCS. Nothing is sent anywhere.
+`base.en`. Ollama (messy-radio NLU and boom chat) is also pinned to the CPU so a
+radio call cannot load a model onto the GPU DCS is using. Nothing is sent anywhere.
 
 One-time install (everything else in the app works without it):
 
@@ -361,7 +362,7 @@ Calls it understands:
 | "Gear down full stop" / "going around" / "clear of the runway" | Fires the matching step |
 | "Say again" | Replays the last transmission |
 
-Voice **Understand messy radio (LLM)** (Setup → Controls) uses the same Ollama/Gemini/OpenAI setting as boom chat. The keyword grammar still wins; the model only maps a missed, addressed call onto an allowed intent. It never writes a new clearance.
+Voice **Understand messy radio (LLM)** (Setup → Controls) uses the same Ollama/Gemini/OpenAI setting as boom chat. The keyword grammar still wins; the model only maps a missed, addressed call onto an allowed intent. It never writes a new clearance. Local Ollama runs with `num_gpu=0` (override `tanker_chat_ollama_num_gpu` only when DCS is not using the card).
 
 The mission timeline uses three **mission phases** (separate from the radio agency):
 

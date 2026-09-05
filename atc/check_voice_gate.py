@@ -3848,6 +3848,7 @@ def extras() -> int:
         if (
             "/api/chat" not in str(captured.get("url") or "")
             or int(opts.get("num_predict") or 0) < 40
+            or int(opts.get("num_gpu") if opts.get("num_gpu") is not None else -1) != 0
             or not node_nat
             or str(node_nat.get("source") or "") != "ollama"
             or "sun is low" not in str(node_nat.get("opener") or "").lower()
@@ -3858,7 +3859,57 @@ def extras() -> int:
             )
             bad += 1
         else:
-            print("tanker chat Ollama native — /api/chat with short num_predict")
+            print("tanker chat Ollama native — /api/chat CPU-only (num_gpu=0)")
+
+        if (
+            tanker_chat_mod.ollama_num_gpu({}) != 0
+            or tanker_chat_mod.ollama_num_gpu({"tanker_chat_ollama_num_gpu": 2}) != 2
+            or tanker_chat_mod.ollama_num_gpu({"tanker_chat_ollama_num_gpu": "nope"})
+            != 0
+        ):
+            print("  FAIL ollama_num_gpu default/override")
+            bad += 1
+        else:
+            print("tanker chat Ollama — default CPU pin, override honored")
+
+        unload_hits: list[tuple[str, dict]] = []
+
+        def _fake_ps(url, timeout=0.8):
+            if "/api/ps" not in str(url):
+                raise AssertionError(f"unexpected GET {url}")
+            return {
+                "models": [
+                    {"name": "llama3.2:latest", "size_vram": 2_000_000_000},
+                    {"name": "cpu-resident", "size_vram": 0},
+                ]
+            }
+
+        def _unload_http(url, payload, headers, timeout=6.5):
+            unload_hits.append((str(url), dict(payload)))
+            return {}
+
+        real_get = tanker_chat_mod._http_get_json
+        real_http2 = tanker_chat_mod._http_json
+        tanker_chat_mod._http_get_json = _fake_ps  # type: ignore[assignment]
+        tanker_chat_mod._http_json = _unload_http  # type: ignore[assignment]
+        tanker_chat_mod._OLLAMA_GPU_RELEASED = False
+        try:
+            unloaded = tanker_chat_mod.release_ollama_gpu({"tanker_chat_llm": "ollama"})
+        finally:
+            tanker_chat_mod._http_get_json = real_get  # type: ignore[assignment]
+            tanker_chat_mod._http_json = real_http2  # type: ignore[assignment]
+            tanker_chat_mod._OLLAMA_GPU_RELEASED = False
+        if (
+            unloaded != 1
+            or len(unload_hits) != 1
+            or "/api/generate" not in unload_hits[0][0]
+            or unload_hits[0][1].get("keep_alive") != 0
+            or unload_hits[0][1].get("model") != "llama3.2:latest"
+        ):
+            print(f"  FAIL release_ollama_gpu: n={unloaded} hits={unload_hits}")
+            bad += 1
+        else:
+            print("tanker chat Ollama — unloads VRAM-resident models")
 
         scripted = (
             "Sir, I think it's the angle of the Viper's nose cone, plus the "
