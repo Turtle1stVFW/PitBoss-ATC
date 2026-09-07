@@ -1,0 +1,3 @@
+# Core UI is Python 3.10+ stdlib + tkinter.
+# Voice control (Setup-Pilot installs this):
+-r requirements-voice.txt

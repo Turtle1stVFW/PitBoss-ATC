@@ -45,6 +45,7 @@ import srs_radio  # noqa: E402
 import voice_actions  # noqa: E402
 import voice_engine  # noqa: E402
 import voice_intent  # noqa: E402
+import setup_welcome  # noqa: E402
 
 CONFIG_PATH = HERE / "config.json"
 AIRPORTS_PATH = HERE / "airports.json"
@@ -133,7 +134,7 @@ def slug_id(label: str) -> str:
 class MissionPlanner(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("455 Mission Flow Planner")
+        self.title("455 Mission Flow Planner  ·  testing")
         self.geometry("1240x820")
         self.minsize(1020, 700)
         self.configure(bg=C_BG)
@@ -209,6 +210,7 @@ class MissionPlanner(tk.Tk):
         self._schedule_position_poll()
         self._schedule_airports_poll()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.after(400, self._maybe_first_run)
 
     def _style(self) -> None:
         style = ttk.Style(self)
@@ -3038,6 +3040,9 @@ class MissionPlanner(tk.Tk):
         name_entry = ttk.Entry(top, textvariable=self.mission_name_var, width=22)
         name_entry.pack(side=tk.LEFT, padx=(16, 8))
         ttk.Button(top, text="Help", command=self._show_help_tab).pack(side=tk.RIGHT)
+        ttk.Button(top, text="First-run setup…", command=self._show_first_run).pack(
+            side=tk.RIGHT, padx=(0, 8)
+        )
         self._ensure_identity_vars()
         # Same title row as Help — click the flight chip to choose / refresh / clear.
         self._build_opus_identity_bar(top, key="header").pack(
@@ -6687,6 +6692,7 @@ class MissionPlanner(tk.Tk):
             "• assigned approach / recovery\n"
             "• requested runway (back to winds)\n"
             "• takeoff rolling offer state\n"
+            "• OPS start / WORDS timer\n"
             "• cached Opus flight + METAR\n\n"
             "The timeline cursor returns to step 1.",
         ):
@@ -9252,6 +9258,11 @@ class MissionPlanner(tk.Tk):
         ttk.Label(hdr, text="How-to & Help", style="Header.TLabel").pack(side=tk.LEFT)
         ttk.Button(
             hdr,
+            text="First-run setup…",
+            command=self._show_first_run,
+        ).pack(side=tk.RIGHT, padx=(0, 8))
+        ttk.Button(
+            hdr,
             text="Open Google Cloud Console",
             command=lambda: webbrowser.open("https://console.cloud.google.com/"),
         ).pack(side=tk.RIGHT)
@@ -9316,6 +9327,13 @@ class MissionPlanner(tk.Tk):
         self.help_topics.selection_set(0)
         self._on_help_topic()
 
+    def _maybe_first_run(self) -> None:
+        if setup_welcome.should_show(self.config_data):
+            setup_welcome.show(self)
+
+    def _show_first_run(self) -> None:
+        setup_welcome.show(self, force=True)
+
     def _on_help_topic(self) -> None:
         sel = self.help_topics.curselection()
         if not sel:
@@ -9334,9 +9352,30 @@ class MissionPlanner(tk.Tk):
         secrets = str(HERE / "secrets")
         return [
             (
+                "New pilot (testing)",
+                [
+                    ("heading", "What you need from the Host"),
+                    ("bullet", "• ATC address — same hostname you already use for SRS (not 127.0.0.1)."),
+                    ("bullet", "• Shared token — a short string. Never a Google JSON file."),
+                    ("bullet", "• ATC port 8766 (not SRS 5002)."),
+                    ("heading", "On this PC"),
+                    ("bullet", "• Python 3.10+ from python.org with PATH and tcl/tk."),
+                    ("bullet", "• Double-click atc\\Setup-Pilot.cmd once (voice packages + DCS radio export)."),
+                    ("bullet", "• First-run window: Opus username, Client, address + token, Test connection, Save."),
+                    ("bullet", "• Title bar: pick your Opus flight / seat."),
+                    ("bullet", "• Restart DCS once after the radio-export install."),
+                    ("bullet", "• Fly: hold your normal SRS PTT and talk. The card lists what you can say."),
+                    ("heading", "Do not"),
+                    ("bullet", "• Do not pick Host on a flying PC."),
+                    ("bullet", "• Do not copy atc\\secrets\\ or someone else's config.json."),
+                    ("muted", "Re-open this sheet anytime: Help → First-run setup…  Written walkthrough: PILOT-SETUP.md"),
+                ],
+            ),
+            (
                 "Getting started",
                 [
                     ("heading", "Typical first flight"),
+                    ("bullet", "0. New testers: use the First-run setup window (or Help topic “New pilot”)."),
                     ("bullet", "1. Setup → Identity & TTS — set your Opus username (e.g. Turtle)."),
                     ("bullet", "2. Title bar — type your CAOC name and click the green flight chip to pick the Opus flight. That saves immediately (no Setup Save needed)."),
                     ("bullet", "3. Setup → Airport & radios — confirm SRS host and freqs (or Pull from Opus)."),
@@ -11620,6 +11659,10 @@ class MissionPlanner(tk.Tk):
             except ValueError:
                 self.config_data["atc_port"] = atc_net.DEFAULT_ATC_PORT
             self.config_data["atc_token"] = self.var_atc_token.get().strip()
+            if str(self.config_data.get("opus_user_name") or "").strip() or (
+                hasattr(self, "var_user") and self.var_user.get().strip()
+            ):
+                self.config_data["setup_complete"] = True
             if role == "host" and not self.config_data["atc_token"]:
                 self.config_data["atc_token"] = self._new_atc_token()
                 self.var_atc_token.set(self.config_data["atc_token"])

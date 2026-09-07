@@ -3510,6 +3510,7 @@ _SORTIE_STATE_CACHE_KEYS = (
     "range_exit_approved",
     "control_checked_in",
     "control_channel",
+    "ops_sortie",
 )
 
 
@@ -3541,8 +3542,8 @@ def clear_flight_session_cache(
     Drop sticky flight-session cache so the next sortie starts clean.
 
     Clears unrestricted climb, shared initial climb, approach assignment,
-    pilot runway request, and takeoff-offer stickiness. Optionally re-picks
-    runway from winds and refreshes Opus/METAR lookups.
+    pilot runway request, takeoff-offer stickiness, and the OPS start timer.
+    Optionally re-picks runway from winds and refreshes Opus/METAR lookups.
     """
     if invalidate_lookups:
         invalidate_flight_lookups()
@@ -3550,6 +3551,12 @@ def clear_flight_session_cache(
         config["runway_override"] = ""
     clear_sticky_climb(mission)
     set_requested_runway(None, mission=mission, state=state)
+    try:
+        import ops as ops_mod
+
+        ops_mod.invalidate_words_cache()
+    except Exception:
+        pass
     if isinstance(state, dict):
         for key in _SORTIE_STATE_CACHE_KEYS:
             state.pop(key, None)

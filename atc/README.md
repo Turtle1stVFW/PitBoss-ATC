@@ -1,7 +1,12 @@
 # 455 Mission Flow Planner
 
+**Sharing / first PC:** testers start with [PILOT-SETUP.md](../PILOT-SETUP.md) and
+`Setup-Pilot.cmd`. Host operators use [HOST-SETUP.md](../HOST-SETUP.md). This
+file is the long reference (voice grammar, zones, Google TTS).
+
 ## Open the app
 Double-click either:
+- `Setup-Pilot.cmd` (first time: deps + DCS radio export + launch)
 - `Open-ATC-Setup.cmd`
 - `Open-Flight-Flow.cmd`
 - `Start-ATC-Host.cmd` (same UI; use this on the dedicated-server Host)

@@ -4911,8 +4911,86 @@ def extras() -> int:
     elif "alpha" not in ops_mod.speak_words_id("AA01").casefold():
         print(f"  FAIL spoken WORDS: {ops_mod.speak_words_id('AA01')}")
         bad += 1
+    elif "juliet" not in ops_mod.speak_words_id("JP02").casefold():
+        print(f"  FAIL spoken WORDS JP02: {ops_mod.speak_words_id('JP02')}")
+        bad += 1
     else:
         print(f"ATO WORDS — AA/AB, {ops_mod.speak_words_id('AA01')}")
+
+    opus_row = {
+        "id": 3,
+        "identifier": "JP02",
+        "ato_letters": "JP",
+        "revision": 2,
+        "body_text": (
+            "WX\nNTTR WEATHER.\nNO SIGNIFICANT WEATHER.\n\n"
+            "RANGE\n61B IS HOT FOR SCHEDULED VUL.\n\n"
+            "TWC\nTHREAT WARNING CONDITION WHITE."
+        ),
+    }
+    live = ops_mod.bulletin_from_payload(
+        opus_row,
+        when=datetime(2026, 9, 7, tzinfo=timezone.utc),
+        source="opus",
+    )
+    if live.id != "JP02" or live.update != 2 or live.ato_day != "JP" or live.source != "opus":
+        print(f"  FAIL Opus WORDS map: {live}")
+        bad += 1
+    elif "NTTR WEATHER" not in " ".join(live.items) or "61B" not in live.range_status:
+        print(f"  FAIL Opus WORDS body: items={live.items} range={live.range_status!r}")
+        bad += 1
+    else:
+        print("Opus WORDS payload — JP02 from identifier + body_text")
+
+    fake_payload = {"current": opus_row}
+
+    def _fake_words_get(url: str, _ua: str) -> dict:
+        if "/opus/words" not in url:
+            raise AssertionError(url)
+        return fake_payload
+
+    ops_mod._WORDS_CACHE.update({"key": "", "exp": 0.0, "current": None})
+    orig_get = atc_phrase.http_get_json
+    atc_phrase.http_get_json = _fake_words_get  # type: ignore[assignment]
+    try:
+        fetched = ops_mod.current_words(
+            {
+                "ops_words_provider": "opus",
+                "opus_backend_url": "https://example.test/backend",
+                "opus_theater_id": 1,
+            },
+            when=datetime(2026, 9, 7, tzinfo=timezone.utc),
+        )
+    finally:
+        atc_phrase.http_get_json = orig_get
+        ops_mod._WORDS_CACHE.update({"key": "", "exp": 0.0, "current": None})
+    spoken_live = ops_mod.build_words_reply("FLEECE 1", live)
+    spoken_low = spoken_live.casefold()
+    if fetched.id != "JP02" or fetched.source != "opus":
+        print(f"  FAIL live WORDS fetch: {fetched}")
+        bad += 1
+    elif "juliet papa" not in spoken_low or "current" not in spoken_low:
+        print(f"  FAIL OPS WORDS id phrase: {spoken_live}")
+        bad += 1
+    elif any(bit in spoken_low for bit in ("nttr weather", "61b", "threat warning")):
+        print(f"  FAIL OPS must not read bulletin body: {spoken_live}")
+        bad += 1
+    else:
+        print(f"Opus WORDS fetch — {fetched.id} {fetched.source}; radio {spoken_live}")
+
+    fallback = ops_mod.current_words(
+        {
+            "ops_words_provider": "opus",
+            "ops_words_id": "AA01",
+            "ops_words_items": ["NTTR hot. Recoveries as published."],
+        },
+        when=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    if fallback.id != "AA01" or fallback.source != "mock":
+        print(f"  FAIL WORDS fallback without backend: {fallback}")
+        bad += 1
+    else:
+        print("Opus WORDS fallback — mock when backend unset")
 
     if abs(ops_mod.decimal_hours(1 * 3600 + 42 * 60) - 1.7) > 0.05:
         print(f"  FAIL 1h42m should be 1.7: {ops_mod.decimal_hours(6120)}")
@@ -4947,6 +5025,23 @@ def extras() -> int:
             bad += 1
         else:
             print(f"OPS timer — start {first.start_hhmm} total {end.total_hours}")
+        atc_phrase.clear_flight_session_cache(state=st, reset_runway=False, invalidate_lookups=False)
+        if ops_mod.sortie_from_state(st) is not None:
+            print("  FAIL Reset must clear OPS start timer")
+            bad += 1
+        else:
+            fresh = ops_mod.build_words_reply(
+                "FLEECE 1",
+                ops_mod.WordsBulletin(id="AA01", ato_day="AA", update=1),
+                start=True,
+                when=t0,
+                already_started=bool(ops_mod.sortie_from_state(st) and ops_mod.sortie_from_state(st).start_utc),
+            )
+            if "start approved" not in fresh.casefold():
+                print(f"  FAIL Reset WORDS must start-approve again: {fresh}")
+                bad += 1
+            else:
+                print("OPS reset — start timer cleared, Start approved again")
 
     if agencies.resolve(
         tuned_channel="ops",
@@ -4994,6 +5089,7 @@ def extras() -> int:
             self.config = {
                 "dry_run": True,
                 "freq_gate_enabled": False,
+                "ops_words_provider": "mock",
                 "ops_words_id": "AA01",
             }
             self.mission = {"steps": []}

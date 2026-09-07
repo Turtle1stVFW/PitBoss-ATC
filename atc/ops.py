@@ -1,12 +1,12 @@
 """
 Squadron OPS — preflight WORDS / start approval and postflight codes.
 
-Separate from field ATC. WORDS and sortie logs are built so an Opus/CAOC
-provider can be dropped in later without rewriting the radio logic.
+Separate from field ATC. Live WORDS come from Opus (`GET /opus/words`);
+radio replies stay on WordsBulletin so the voice path does not change.
 
-INTEGRATION POINTS (not implemented):
-  * OpusWordsProvider.current_words  — live WORDS from CAOC
-  * log_sortie                       — persist start / codes / time to CAOC
+INTEGRATION POINTS:
+  * OpusWordsProvider.current_words  — live current WORDS from Opus/CAOC
+  * log_sortie                       — persist start / codes / time to CAOC (not implemented)
 """
 
 from __future__ import annotations
@@ -17,12 +17,58 @@ from pathlib import Path
 from typing import Any, Protocol
 import json
 import re
+import time
+import urllib.parse
 
 import atc_phrase
 
 HERE = Path(__file__).resolve().parent
 WORDS_PATH = HERE / "ops_words.json"
 SORTIE_STATE_KEY = "ops_sortie"
+_WORDS_CACHE: dict[str, Any] = {"key": "", "exp": 0.0, "current": None}
+_WORDS_CACHE_S = 30.0
+
+
+def invalidate_words_cache() -> None:
+    """Drop the live Opus WORDS snapshot (Reset / new sortie)."""
+    _WORDS_CACHE["key"] = ""
+    _WORDS_CACHE["exp"] = 0.0
+    _WORDS_CACHE["current"] = None
+
+# CAOC body_text section titles → WordsBulletin fields. Other sections stay items.
+_BODY_SECTION_FIELDS = {
+    "wx": "weather",
+    "weather": "weather",
+    "range": "range_status",
+    "twc": "threat",
+    "threat": "threat",
+    "timing": "timing",
+    "package": "package",
+    "freq": "frequencies",
+    "freqs": "frequencies",
+    "frequency": "frequencies",
+    "frequencies": "frequencies",
+}
+_BODY_SECTION_HEADERS = {
+    "wx",
+    "weather",
+    "range",
+    "wcs",
+    "twc",
+    "tanker",
+    "airfield",
+    "restriction",
+    "other",
+    "threat",
+    "timing",
+    "package",
+    "freq",
+    "freqs",
+    "frequency",
+    "frequencies",
+    "aar",
+    "comms",
+}
 
 # Shared across seats on the same Opus flight (timer + codes).
 SHARED_STATE_KEYS: tuple[str, ...] = (SORTIE_STATE_KEY,)
@@ -128,7 +174,7 @@ class WordsProvider(Protocol):
 
 
 class MockWordsProvider:
-    """Configurable / file-backed WORDS. Default until CAOC is wired."""
+    """File-backed WORDS. Used when provider is mock, or Opus has no current bulletin."""
 
     def current_words(
         self,
@@ -167,12 +213,7 @@ class MockWordsProvider:
 
 
 class OpusWordsProvider:
-    """
-    INTEGRATION POINT: OPUS/CAOC WORDS retrieval.
-
-    Not implemented. current_words() falls back to the mock file so radio
-    logic does not need a rewrite when this is filled in.
-    """
+    """Live current WORDS from Opus (`GET /opus/words`)."""
 
     def current_words(
         self,
@@ -181,17 +222,18 @@ class OpusWordsProvider:
         config: dict[str, Any] | None = None,
         opus: Any = None,
     ) -> WordsBulletin:
-        # TODO: GET CAOC WORDS for this ATO day / package. Use `opus` + config
-        # (opus_backend_url) when the endpoint exists. Do not invent WORDS.
-        del opus
-        return MockWordsProvider().current_words(when=when, config=config, opus=None)
+        row = fetch_opus_words(config, opus=opus)
+        if row is None:
+            # Offline / no current bulletin — do not invent a live ID.
+            return MockWordsProvider().current_words(when=when, config=config, opus=None)
+        return bulletin_from_payload(row, when=when, source="opus")
 
 
 def words_provider(config: dict[str, Any] | None = None) -> WordsProvider:
-    kind = str((config or {}).get("ops_words_provider") or "mock").strip().lower()
-    if kind in ("opus", "caoc"):
-        return OpusWordsProvider()
-    return MockWordsProvider()
+    kind = str((config or {}).get("ops_words_provider") or "opus").strip().lower()
+    if kind in ("mock", "file"):
+        return MockWordsProvider()
+    return OpusWordsProvider()
 
 
 def ato_day_letters(day: date) -> str:
@@ -222,6 +264,143 @@ def speak_words_id(raw: str) -> str:
     return " ".join(bits)
 
 
+def _words_update_number(row: dict[str, Any]) -> int:
+    raw = row.get("revision")
+    if raw in (None, ""):
+        raw = row.get("update")
+    try:
+        return max(1, int(raw or 1))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _words_identifier(row: dict[str, Any], *, update: int, when: datetime) -> str:
+    ident = str(row.get("identifier") or "").strip().upper()
+    raw_id = str(row.get("id") or "").strip().upper()
+    # Opus uses numeric `id` as a row key; `identifier` is the ATO WORDS code.
+    if ident:
+        token = ident
+    elif raw_id and not raw_id.isdigit():
+        token = raw_id
+    else:
+        token = ""
+    return token if len(token) >= 3 else words_id_for(when.date(), update)
+
+
+def _is_words_section_header(line: str) -> str | None:
+    token = str(line or "").strip()
+    if not token or " " in token or "." in token:
+        return None
+    key = token.casefold()
+    if key in _BODY_SECTION_HEADERS:
+        return key
+    if token.isupper() and token.isalpha() and 2 <= len(token) <= 16:
+        return key
+    return None
+
+
+def parse_words_body_text(text: str) -> dict[str, Any]:
+    """Split CAOC `body_text` sections into items plus named bulletin fields."""
+    items: list[str] = []
+    fields: dict[str, str] = {}
+    current_key = ""
+    buf: list[str] = []
+
+    def flush() -> None:
+        nonlocal buf
+        body = re.sub(r"\s+", " ", " ".join(x.strip() for x in buf if x.strip())).strip()
+        buf = []
+        if not body:
+            return
+        items.append(body)
+        field = _BODY_SECTION_FIELDS.get(current_key)
+        if field and field not in fields:
+            fields[field] = body
+
+    for raw_line in str(text or "").replace("\r\n", "\n").split("\n"):
+        header = _is_words_section_header(raw_line)
+        if header is not None:
+            flush()
+            current_key = header
+            continue
+        buf.append(raw_line)
+    flush()
+    return {"items": items, **fields}
+
+
+def _extract_opus_current_row(data: Any) -> dict[str, Any] | None:
+    """Pick the CURRENT bulletin. Returns None rather than inventing WORDS."""
+    if isinstance(data, dict):
+        cur = data.get("current")
+        if isinstance(cur, dict) and (
+            cur.get("identifier") or cur.get("body_text") or cur.get("items")
+        ):
+            return cur
+        if data.get("identifier") or data.get("body_text") or data.get("items"):
+            return data
+        return None
+    if isinstance(data, list):
+        for row in data:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("status") or "").upper() == "CURRENT":
+                return row
+    return None
+
+
+def _theater_id(config: dict[str, Any] | None, opus: Any = None) -> int:
+    if opus is not None and getattr(opus, "theater_id", None) is not None:
+        try:
+            return int(opus.theater_id)
+        except (TypeError, ValueError):
+            pass
+    try:
+        return int((config or {}).get("opus_theater_id") or 1)
+    except (TypeError, ValueError):
+        return 1
+
+
+def fetch_opus_words(
+    config: dict[str, Any] | None,
+    *,
+    opus: Any = None,
+    max_age_s: float = _WORDS_CACHE_S,
+) -> dict[str, Any] | None:
+    """
+    Current WORDS row from Opus `GET /opus/words`.
+
+    Returns the `current` object, or None when the backend is unset / empty.
+    Last good snapshot is reused if the request fails.
+    """
+    cfg = config or {}
+    backend = str(cfg.get("opus_backend_url") or "").rstrip("/")
+    if not backend:
+        return None
+    tid = _theater_id(cfg, opus)
+    key = f"{backend}|{tid}"
+    now = time.time()
+    cached = _WORDS_CACHE.get("current")
+    if (
+        _WORDS_CACHE.get("key") == key
+        and isinstance(cached, dict)
+        and float(_WORDS_CACHE.get("exp") or 0) > now
+    ):
+        return dict(cached)
+    ua = str(cfg.get("user_agent") or "DCS-ATC-Phrase/1.0")
+    qs = urllib.parse.urlencode({"theater_id": tid})
+    try:
+        data = atc_phrase.http_get_json(f"{backend}/opus/words?{qs}", ua)
+    except Exception:
+        return dict(cached) if isinstance(cached, dict) else None
+    row = _extract_opus_current_row(data)
+    if row is None:
+        return dict(cached) if isinstance(cached, dict) else None
+    _WORDS_CACHE["key"] = key
+    _WORDS_CACHE["exp"] = now + max_age_s
+    _WORDS_CACHE["current"] = dict(row)
+    return dict(row)
+
+
 def bulletin_from_payload(
     data: dict[str, Any] | None,
     *,
@@ -229,21 +408,22 @@ def bulletin_from_payload(
     source: str = "mock",
 ) -> WordsBulletin:
     row = data if isinstance(data, dict) else {}
-    update = 1
-    try:
-        update = max(1, int(row.get("update") or 1))
-    except (TypeError, ValueError):
-        update = 1
-    ato = ato_day_letters(when.date())
-    raw_id = str(row.get("id") or "").strip().upper()
-    wid = raw_id if len(raw_id) >= 3 else words_id_for(when.date(), update)
+    parsed = parse_words_body_text(str(row.get("body_text") or "")) if row.get("body_text") else {}
+    update = _words_update_number(row)
+    ato = str(row.get("ato_letters") or row.get("ato_day") or "").strip().upper()
+    if len(ato) != 2 or not ato.isalpha():
+        ato = ato_day_letters(when.date())
+    wid = _words_identifier(row, update=update, when=when)
     items_raw = row.get("items")
     items: list[str] = []
     if isinstance(items_raw, str) and items_raw.strip():
         items = [items_raw.strip()]
     elif isinstance(items_raw, list):
         items = [str(x).strip() for x in items_raw if str(x).strip()]
+    elif parsed.get("items"):
+        items = [str(x).strip() for x in parsed.get("items") or [] if str(x).strip()]
     extras = []
+    named: dict[str, str] = {}
     for key in (
         "weather",
         "range_status",
@@ -252,7 +432,8 @@ def bulletin_from_payload(
         "package",
         "frequencies",
     ):
-        val = str(row.get(key) or "").strip()
+        val = str(row.get(key) or parsed.get(key) or "").strip()
+        named[key] = val
         if val and val not in items:
             extras.append(val)
     return WordsBulletin(
@@ -260,12 +441,12 @@ def bulletin_from_payload(
         ato_day=ato,
         update=update,
         items=tuple(items + extras),
-        weather=str(row.get("weather") or ""),
-        range_status=str(row.get("range_status") or ""),
-        timing=str(row.get("timing") or ""),
-        threat=str(row.get("threat") or ""),
-        package=str(row.get("package") or ""),
-        frequencies=str(row.get("frequencies") or ""),
+        weather=named["weather"],
+        range_status=named["range_status"],
+        timing=named["timing"],
+        threat=named["threat"],
+        package=named["package"],
+        frequencies=named["frequencies"],
         source=source,
         raw=dict(row),
     )
@@ -537,10 +718,9 @@ def build_words_reply(
 ) -> str:
     cs = atc_phrase.speak_callsign(callsign)
     agency = spoken_ops_name(airport, opus=opus, config=config)
+    # Radio only passes the current WORDS id (AA01 / Juliet Papa Zero-Two).
+    # Bulletin body stays on the object for logs; it is too long and sectioned for OPS.
     bits = [f"{cs}, {agency}, WORDS {words.spoken_id()} current"]
-    for item in words.items:
-        if item and item.casefold() not in bits[-1].casefold():
-            bits.append(item.rstrip("."))
     if start and when is not None:
         bits.append(speak_time_now(when).rstrip(".").replace("time now ", "Time now ", 1))
     if start and not already_started:

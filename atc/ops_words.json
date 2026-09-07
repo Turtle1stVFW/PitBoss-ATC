@@ -1,5 +1,5 @@
 {
-  "_comment": "Mock WORDS bulletin. Replace via ops_words_provider=opus when CAOC is wired.",
+  "_comment": "Fallback WORDS bulletin when Opus is unreachable. Live current WORDS come from GET /opus/words.",
   "update": 1,
   "items": [
     "NTTR hot. Recoveries as published."
