@@ -103,6 +103,24 @@ CASES = [
     ("Texaco, Fleece 1, stop talking", "tanker", "flight", True, "tanker_chat_stop"),
     ("Blackjack, Fleece 1, push Bandsaw", "blackjack", "flight", True, "request_bandsaw"),
     ("Blackjack, Fleece 1, request ANSA", "blackjack", "flight", True, "request_bandsaw"),
+    # Knight Ops — preflight WORDS / start, postflight codes. Not C2.
+    ("Knight Ops, Fleece 1, request current WORDS", "ops", "departure", True, "ops_request_words"),
+    ("Wool Ops, Fleece 1, request current WORDS", "ops", "departure", True, "ops_request_words"),
+    ("Toro Ops, Fleece 1, request current WORDS", "ops", "departure", True, "ops_request_words"),
+    ("Ops, Fleece 1, request current words", "ops", "departure", True, "ops_request_words"),
+    ("Night Ops, Fleece 1, request current WORDS", "ops", "departure", True, "ops_request_words"),
+    ("Fleece 1, request current WORDS", "ops", "departure", True, "ops_request_words"),
+    ("Request current WORDS", "ops", "departure", True, "ops_request_words"),
+    ("Knight Ops, Fleece 1, request start", "ops", "departure", True, "ops_request_start"),
+    ("Knight Ops, Fleece 1, ready to start", "ops", "departure", True, "ops_request_start"),
+    ("Knight Ops, Fleece 1, checking in", "ops", "departure", True, "ops_check_in"),
+    ("Knight Ops, Fleece 1, with you", "ops", "departure", True, "ops_check_in"),
+    ("Knight Ops, Fleece 1, request current WORDS", "delivery", "departure", True, "ops_request_words"),
+    ("Knight Ops, Fleece 1, Fleece 1-1 Code 1, Fleece 1-2 Code 2", "ops", "approach", True, "ops_status"),
+    ("Knight Ops, Fleece 1, code 1", "ops", "approach", True, "ops_status"),
+    ("Knight Ops, Fleece 1, request picture", "ops", "flight", False, None),
+    ("Ops check", "ops", "departure", False, None),
+    ("Two, ops check", "ops", "departure", False, None),
     ("Blackjack, Fleece 1, off station, range complete", "blackjack", "flight", True, "range_exit"),
     ("Blackjack, Fleece 1, range exit", "blackjack", "flight", True, "range_exit"),
     ("Blackjack, Fleece 1, say again", "blackjack", "flight", True, "say_again"),
@@ -1282,6 +1300,8 @@ def extras() -> int:
         ("approach", "approach", "cleared_approach"),
         ("departure", "departure", "radar_contact"),
         ("tower", "approach", "right_break"),
+        ("ops", "departure", "clearance"),
+        ("tanker", "flight", "bj_check_in"),
     ):
         prompts = voice_intent.suggestions(
             phase=mission_phase, channel=channel, expected=expected,
@@ -1317,6 +1337,19 @@ def extras() -> int:
                 bad += 1
             if any("gear" in s or "full stop" in s for s in sayings):
                 print(f"  FAIL tower check-in must not tip gear down: {prompts}")
+                bad += 1
+        if channel == "ops":
+            sayings = [s.lower() for s, _d, r, *_ in prompts if r == "advance"]
+            if "request current words" not in sayings:
+                print(f"  FAIL OPS cues must tip request current WORDS: {prompts}")
+                bad += 1
+            if any("request clearance" in s or "request taxi" in s for s, *_ in prompts):
+                print(f"  FAIL OPS cues must not tip Delivery/Ground: {prompts}")
+                bad += 1
+        if channel == "tanker":
+            sayings = [s.lower() for s, _d, r, *_ in prompts if r == "advance"]
+            if "request rejoin" not in sayings:
+                print(f"  FAIL tanker cues must tip request rejoin: {prompts}")
                 bad += 1
         agency = voice_intent.agency_spoken(channel, "Nellis")
         for say, _does, _role, *_ in prompts:
@@ -2848,9 +2881,23 @@ def extras() -> int:
             {"template": "right_break"},
             state=st_si,
         )
-        if trig_brk_si is None or abs(float(trig_brk_si.within_nm or 0) - 12.0) > 0.01:
+        if trig_brk_si is not None and trig_brk_si.within_nm is not None:
             print(
-                f"  FAIL straight-in tower check-in should be 12 NM: {trig_brk_si}"
+                f"  FAIL straight-in tower check-in should have no NM gate: {trig_brk_si}"
+            )
+            bad += 1
+            gates_ok = False
+        st_ils = {
+            "approach_plan": {"pattern": "instrument", "runway": "21L"},
+            "active_recovery": "instrument",
+        }
+        trig_brk_ils = rp.resolve_step_trigger(
+            {"template": "right_break"},
+            state=st_ils,
+        )
+        if trig_brk_ils is not None and trig_brk_ils.within_nm is not None:
+            print(
+                f"  FAIL ILS tower check-in should have no NM gate: {trig_brk_ils}"
             )
             bad += 1
             gates_ok = False
@@ -2872,7 +2919,7 @@ def extras() -> int:
             gates_ok = False
         if gates_ok:
             print(
-                f"tower distance gates — contact/check-in 12 NM, "
+                f"tower distance gates — contact 12 NM, check-in voice, "
                 f"straight-in land 6 NM (sample {d_near:.2f} NM offset)"
             )
 
@@ -3423,7 +3470,7 @@ def extras() -> int:
 
         session_only = voice_intent.evaluate(
             "Where do you see that?",
-            channel="blackjack",
+            channel="tanker",
             phase="flight",
             callsign=CALLSIGN,
             runways=RUNWAYS,
@@ -3431,23 +3478,43 @@ def extras() -> int:
         )
         no_session = voice_intent.evaluate(
             "Where do you see that?",
+            channel="tanker",
+            phase="flight",
+            callsign=CALLSIGN,
+            runways=RUNWAYS,
+        )
+        leaked_ops = voice_intent.evaluate(
+            "Ops, Fleece 1, request current WORDS",
+            channel="ops",
+            phase="departure",
+            callsign=CALLSIGN,
+            runways=RUNWAYS,
+            tanker_chat_session=True,
+        )
+        leaked_c2 = voice_intent.evaluate(
+            "Where do you see that?",
             channel="blackjack",
             phase="flight",
             callsign=CALLSIGN,
             runways=RUNWAYS,
+            tanker_chat_session=True,
         )
         if (
             not session_only.fired
             or session_only.match.intent != "tanker_chat_reply"
             or no_session.fired
+            or not leaked_ops.fired
+            or leaked_ops.match.intent != "ops_request_words"
+            or leaked_c2.fired
         ):
             print(
                 f"  FAIL tanker chat session-only reply: "
-                f"session={session_only.describe()} none={no_session.describe()}"
+                f"session={session_only.describe()} none={no_session.describe()} "
+                f"ops={leaked_ops.describe()} c2={leaked_c2.describe()}"
             )
             bad += 1
         else:
-            print("tanker chat session — freeform reply without A/B or freeform flag")
+            print("tanker chat session — freeform on tanker freq only; not OPS / C2")
 
         ram = tanker_chat_mod._fill("Ram two, altitude and airspeed.")
         if ram.lower().startswith("ram") or not tanker_chat_mod.looks_like_official_tanker(
@@ -4733,6 +4800,42 @@ def extras() -> int:
     else:
         print(f"blackjack picture redirect — {pic_txt}")
 
+    tanker_step = {
+        "id": "tanker_opt",
+        "channel": "tanker",
+        "template": "radio_check",
+        "c2": False,
+    }
+    bj_step = {
+        "id": "bj",
+        "channel": "blackjack",
+        "template": "bj_check_in",
+    }
+    if not voice_intent.step_offers_c2(tanker_step, channel="bandsaw"):
+        print("  FAIL Bandsaw tune must offer C2 even on tanker cursor")
+        bad += 1
+    if voice_intent.step_offers_c2(tanker_step, channel="tanker"):
+        print("  FAIL tanker step must not offer C2 on tanker freq")
+        bad += 1
+    pic_on_tanker = voice_intent.evaluate(
+        "Bandsaw, Fleece 1, request picture",
+        channel="bandsaw",
+        phase="flight",
+        expected="radio_check",
+        callsign=CALLSIGN,
+        steps=[bj_step, tanker_step],
+        current_step_id="tanker_opt",
+        tuned_channel="bandsaw",
+        cursor_channel="tanker",
+    )
+    if not pic_on_tanker.fired or pic_on_tanker.match.intent != "request_picture":
+        print(
+            f"  FAIL Bandsaw picture must fire off tanker cursor: {pic_on_tanker.describe()}"
+        )
+        bad += 1
+    else:
+        print("bandsaw picture — fires while cursor is on optional tanker")
+
     bj_far = agencies.blackjack_exit_handoff(nellis, 37.4, -114.5, "approach")
     if bj_far == "approach":
         print(f"  FAIL far-out BJ exit must not skip Control: {bj_far}")
@@ -4792,6 +4895,229 @@ def extras() -> int:
         bad += 1
     else:
         print(f"tanker depart goodbye — {bye}")
+
+    import ops as ops_mod
+    from datetime import date, datetime, timezone
+
+    if ops_mod.ato_day_letters(date(2026, 1, 1)) != "AA":
+        print(f"  FAIL ATO AA is January 1: {ops_mod.ato_day_letters(date(2026, 1, 1))}")
+        bad += 1
+    elif ops_mod.ato_day_letters(date(2026, 1, 2)) != "AB":
+        print(f"  FAIL ATO AB is January 2: {ops_mod.ato_day_letters(date(2026, 1, 2))}")
+        bad += 1
+    elif ops_mod.words_id_for(date(2026, 1, 1), 1) != "AA01":
+        print(f"  FAIL WORDS AA01: {ops_mod.words_id_for(date(2026, 1, 1), 1)}")
+        bad += 1
+    elif "alpha" not in ops_mod.speak_words_id("AA01").casefold():
+        print(f"  FAIL spoken WORDS: {ops_mod.speak_words_id('AA01')}")
+        bad += 1
+    else:
+        print(f"ATO WORDS — AA/AB, {ops_mod.speak_words_id('AA01')}")
+
+    if abs(ops_mod.decimal_hours(1 * 3600 + 42 * 60) - 1.7) > 0.05:
+        print(f"  FAIL 1h42m should be 1.7: {ops_mod.decimal_hours(6120)}")
+        bad += 1
+    else:
+        print("OPS decimal hours — 1h42m ~= 1.7")
+
+    codes = ops_mod.parse_aircraft_codes(
+        "Knight Ops, Snake 5. Snake 5-1 Code 1, Snake 5-2 Code 1, "
+        "Snake 5-3 Code 2, Snake 5-4 Code 1.",
+        flight_callsign="Snake 5",
+    )
+    got_codes = [(c.seat, c.code) for c in codes]
+    if got_codes != [(1, 1), (2, 1), (3, 2), (4, 1)]:
+        print(f"  FAIL OPS code parse: {got_codes}")
+        bad += 1
+    else:
+        print("OPS code parse — 1/1/2/1")
+
+    st: dict = {}
+    t0 = datetime(2026, 1, 1, 21, 25, tzinfo=timezone.utc)
+    t1 = datetime(2026, 1, 1, 23, 7, tzinfo=timezone.utc)
+    first = ops_mod.approve_start(st, callsign="FLEECE 1", when=t0)
+    second = ops_mod.approve_start(st, callsign="FLEECE 1", when=t1)
+    if first.start_utc != second.start_utc or first.start_hhmm != "2125":
+        print(f"  FAIL second start must keep first timer: {first} / {second}")
+        bad += 1
+    else:
+        end = ops_mod.record_status(st, codes, callsign="FLEECE 1", when=t1)
+        if end.total_hours != 1.7:
+            print(f"  FAIL total time 1.7 from 21:25–23:07: {end.total_hours}")
+            bad += 1
+        else:
+            print(f"OPS timer — start {first.start_hhmm} total {end.total_hours}")
+
+    if agencies.resolve(
+        tuned_channel="ops",
+        cursor_channel="delivery",
+        mission_phase="departure",
+    ) != "ops":
+        print("  FAIL backup radio on OPS must score as OPS during departure")
+        bad += 1
+    else:
+        print("OPS backup radio — default agency on the ramp")
+
+    wool = atc_phrase.resolve_ops_callsign(nellis, squadron_name="8th FS Wool")
+    knight = atc_phrase.resolve_ops_callsign(nellis, squadron_name="561st FS")
+    toro = atc_phrase.resolve_ops_callsign(nellis, squadron_name="469th FS")
+    none = atc_phrase.resolve_ops_callsign(nellis)
+    if wool != "Wool Ops" or knight != "Knight Ops" or toro != "Toro Ops":
+        print(f"  FAIL squadron OPS names: wool={wool} knight={knight} toro={toro}")
+        bad += 1
+    elif none != "Ops":
+        print(f"  FAIL unknown squadron must be Ops, not Nellis: {none}")
+        bad += 1
+    else:
+        print("OPS squadron names — Wool / Knight / Toro")
+
+    zulu = ops_mod.speak_time_now(t0)
+    if "zulu" not in zulu.casefold():
+        print(f"  FAIL OPS time must say Zulu: {zulu}")
+        bad += 1
+    else:
+        print(f"OPS time now — {zulu}")
+
+    nttr_win = atc_phrase.apply_windows_radio_pronunciations("NTTR hot")
+    if "nitter" not in nttr_win.casefold():
+        print(f"  FAIL NTTR should speak Nih-tter: {nttr_win}")
+        bad += 1
+    else:
+        print("NTTR pronunciation — nitter")
+
+    if voice_intent.step_offers_c2(None, channel="ops"):
+        print("  FAIL OPS must not offer picture / dope / declare")
+        bad += 1
+
+    class _OpsEng:
+        def __init__(self) -> None:
+            self.config = {
+                "dry_run": True,
+                "freq_gate_enabled": False,
+                "ops_words_id": "AA01",
+            }
+            self.mission = {"steps": []}
+            self.steps = []
+            self.state = {"index": 0}
+            self.airports = atc_phrase.load_json(atc_phrase.AIRPORTS_PATH)
+
+        def airport(self) -> dict:
+            return self.airports["nellis"]
+
+        def current_step(self) -> dict | None:
+            return None
+
+        def save_state(self) -> None:
+            return None
+
+    words_ev = voice_intent.evaluate(
+        "Knight Ops, Fleece 1, request current WORDS",
+        channel="ops",
+        phase="departure",
+        callsign=CALLSIGN,
+    )
+    if not words_ev.fired or words_ev.match.intent != "ops_request_words":
+        print(f"  FAIL WORDS intent: {words_ev.describe()}")
+        bad += 1
+    else:
+        orig_opus = atc_phrase.resolve_opus_and_metar
+        atc_phrase.resolve_opus_and_metar = lambda *_a, **_k: (
+            atc_phrase.synthetic_flight_context("FLEECE 1"),
+            atc_phrase.Weather(210, 8, 29.92, "KLSV 010000Z 21008KT 10SM FEW100 20/05 A2992"),
+        )
+        import voice_engine as _ve
+
+        try:
+            played = _ve.execute_intent(words_ev.match, _OpsEng())
+        finally:
+            atc_phrase.resolve_opus_and_metar = orig_opus
+        body = str(played.get("text") or "")
+        low = body.casefold()
+        if played.get("channel") != "ops":
+            print(f"  FAIL WORDS TX channel: {played}")
+            bad += 1
+        elif "words" not in low or "start approved" not in low:
+            print(f"  FAIL WORDS+start phrase: {body}")
+            bad += 1
+        elif "alpha alpha" not in low:
+            print(f"  FAIL spoken WORDS id: {body}")
+            bad += 1
+        elif "zulu" not in low:
+            print(f"  FAIL WORDS time must say Zulu: {body}")
+            bad += 1
+        elif "nellis ops" in low:
+            print(f"  FAIL OPS must not say Nellis Ops: {body}")
+            bad += 1
+        elif not low.rstrip(".").endswith("start approved"):
+            print(f"  FAIL initial OPS must end with Start approved: {body}")
+            bad += 1
+        else:
+            print(f"OPS WORDS + start — {body}")
+
+    ops_tips = voice_intent.suggestions(
+        phase="departure",
+        channel="ops",
+        expected="clearance",
+        callsign=CALLSIGN,
+        airport_name="Nellis",
+        steps=[
+            {
+                "id": "del_clearance",
+                "channel": "delivery",
+                "phase": "departure",
+                "template": "clearance",
+                "voice_phrases": ["request clearance"],
+            }
+        ],
+        current_step_id="del_clearance",
+        limit=5,
+        advance_limit=2,
+        optional_limit=3,
+    )
+    ops_says = [str(s).casefold() for s, _d, r, *_ in ops_tips]
+    if not any("request current words" in s for s in ops_says):
+        print(f"  FAIL OPS Fly tips missing WORDS: {ops_tips}")
+        bad += 1
+    elif any("request clearance" in s or "runway" in s for s in ops_says):
+        print(f"  FAIL OPS Fly tips must not show Delivery/runway: {ops_tips}")
+        bad += 1
+    else:
+        print(f"OPS Fly tips — {ops_says}")
+
+    leaked = voice_intent.suggestions(
+        phase="departure",
+        channel="ops",
+        expected="clearance",
+        callsign=CALLSIGN,
+        tanker_chat_session=True,
+        tanker_chat_choices=[{"id": "a", "say": "how's it going"}],
+        limit=5,
+        advance_limit=2,
+        optional_limit=3,
+    )
+    leaked_says = " ".join(str(s).casefold() for s, *_ in leaked)
+    if any(bit in leaked_says for bit in ("how's it going", "hows it going", "request rejoin", "talk later", "say anything")):
+        print(f"  FAIL OPS Fly tips must not show tanker cues: {leaked}")
+        bad += 1
+    else:
+        print("OPS Fly tips — no tanker leak after WORDS")
+
+    cue_ops = voice_intent.cue_channel(
+        mission_phase="departure",
+        cursor_channel="delivery",
+        tuned_channel="ops",
+    )
+    cue_after = voice_intent.cue_channel(
+        mission_phase="departure",
+        cursor_channel="delivery",
+        tuned_channel=None,
+        last_tx_channel="ops",
+    )
+    if cue_ops != "ops" or cue_after != "ops":
+        print(f"  FAIL OPS cue channel: tuned={cue_ops!r} after={cue_after!r}")
+        bad += 1
+    else:
+        print("OPS cue channel — tune and last TX stay on Ops")
 
     return bad
 
@@ -5068,6 +5394,15 @@ def custom_agency_behavior() -> int:
         bad += 1
     if not voice_intent.step_offers_c2(live_bs, channel="bandsaw"):
         print("  FAIL Bandsaw must still offer C2")
+        bad += 1
+    tanker_opt = {
+        "id": "aar",
+        "channel": "tanker",
+        "template": "radio_check",
+        "c2": False,
+    }
+    if not voice_intent.step_offers_c2(tanker_opt, channel="bandsaw"):
+        print("  FAIL live Bandsaw C2 must ignore tanker c2:false")
         bad += 1
 
     dope = voice_intent.evaluate(

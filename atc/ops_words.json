@@ -1,0 +1,13 @@
+{
+  "_comment": "Mock WORDS bulletin. Replace via ops_words_provider=opus when CAOC is wired.",
+  "update": 1,
+  "items": [
+    "NTTR hot. Recoveries as published."
+  ],
+  "weather": "",
+  "range_status": "NTTR hot",
+  "timing": "",
+  "threat": "",
+  "package": "",
+  "frequencies": ""
+}

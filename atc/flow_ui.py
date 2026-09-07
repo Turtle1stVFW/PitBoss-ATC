@@ -995,9 +995,23 @@ class MissionPlanner(tk.Tk):
                     live = srs_radio.channel_for_tuned_freq(
                         airport, self.config_data
                     ) or ch
-                    spoken = agencies_mod.spoken_name(
-                        live, str((airport or {}).get("name") or "")
-                    )
+                    if live == "ops":
+                        try:
+                            opus_live, _wx = atc_phrase.resolve_opus_and_metar(
+                                self.config_data,
+                                str((airport or {}).get("icao") or ""),
+                            )
+                        except Exception:
+                            opus_live = None
+                        spoken = atc_phrase.resolve_ops_callsign(
+                            airport,
+                            opus=opus_live,
+                            config=self.config_data,
+                        ) or "Ops"
+                    else:
+                        spoken = agencies_mod.spoken_name(
+                            live, str((airport or {}).get("name") or "")
+                        )
                     next_line = f"YOU CAN SAY  ·  follows {spoken}"
             except Exception:
                 pass
@@ -2480,6 +2494,37 @@ class MissionPlanner(tk.Tk):
                 # Keep the mission phase from the cursor; only the agency changes.
         return context
 
+    def _client_status_is_ours(self, st: dict[str, Any] | None) -> bool:
+        """Reject Host status that belongs to another session / Opus flight."""
+        if not isinstance(st, dict) or not st:
+            return False
+        client = getattr(self, "_atc_client", None)
+        if client is None:
+            return False
+        sid = str(st.get("session_id") or "").strip()
+        mine = str(getattr(client, "session_id", "") or "").strip()
+        if sid and mine and sid != mine:
+            return False
+        got_fid = st.get("opus_flight_id")
+        want_fid = self.config_data.get("opus_flight_id")
+        if got_fid not in (None, "") and want_fid not in (None, ""):
+            try:
+                if int(got_fid) != int(want_fid):
+                    return False
+            except (TypeError, ValueError):
+                if str(got_fid) != str(want_fid):
+                    return False
+        got_seat = st.get("opus_seat")
+        want_seat = self.config_data.get("opus_seat")
+        if got_seat not in (None, "") and want_seat not in (None, ""):
+            try:
+                if int(got_seat) != int(want_seat):
+                    return False
+            except (TypeError, ValueError):
+                if str(got_seat) != str(want_seat):
+                    return False
+        return True
+
     def _sync_client_flow_cursor(self) -> None:
         """Copy the Host's shared flight cursor onto this Client's local engine."""
         if self._atc_role() != "client":
@@ -2488,6 +2533,8 @@ class MissionPlanner(tk.Tk):
         if client is None:
             return
         st = client.last_status or {}
+        if not self._client_status_is_ours(st):
+            return
         fs = st.get("flow_state")
         if not isinstance(fs, dict):
             if st.get("index") is None:
@@ -7578,13 +7625,28 @@ class MissionPlanner(tk.Tk):
         if self._atc_role() == "client":
             client = getattr(self, "_atc_client", None)
             st = (client.last_status if client is not None else None) or {}
+            if not self._client_status_is_ours(st):
+                st = {}
             host_mhz = atc_phrase._parse_mhz(st.get("step_freq_mhz"))
             host_ch = str(st.get("status_channel") or st.get("channel") or "").strip().lower()
-            if host_mhz is not None and (not host_ch or host_ch == channel):
+            on_tanker = bool(st.get("on_tanker"))
+            try:
+                import tanker as tanker_mod
+
+                on_tanker = on_tanker or tanker_mod.tanker_overlay_active(
+                    getattr(self.engine, "state", None)
+                )
+            except Exception:
+                pass
+            if host_mhz is not None and (
+                on_tanker or not host_ch or host_ch == channel
+            ):
                 freq = host_mhz
                 host_mod = str(st.get("step_mod") or "").strip()
                 if host_mod:
                     mod = host_mod
+                if on_tanker:
+                    channel = "tanker"
         # UHF/VFR style: always three decimals for glanceable kneeboard read
         freq_disp = f"{float(freq):.3f}"
         ch_label = channel.upper()
@@ -7684,8 +7746,10 @@ class MissionPlanner(tk.Tk):
         "tanker_bullseye": "Say bullseye",
         "tanker_dcs_precontact": "DCS: Ready pre-contact",
         "tanker_dcs_abort": "DCS: Abort / disconnect",
-        "tanker_chat_start": "Texaco starts chat",
-        "tanker_chat_stop": "Stop chat",
+        "tanker_chat_start": "How's it going",
+        "tanker_chat_stop": "Talk later",
+        "ops_request_words": "Request current WORDS",
+        "ops_request_start": "Request start",
         "clear_runway_request": "Reset runway to winds",
     }
 
@@ -7812,10 +7876,15 @@ class MissionPlanner(tk.Tk):
             import tanker as tanker_mod
 
             eng_st = getattr(self.engine, "state", None)
-            if tanker_mod.tanker_overlay_active(eng_st) and tanker_mod.is_tanker_step(
-                step if isinstance(step, dict) else None
-            ):
-                return "tanker"
+            if tanker_mod.tanker_overlay_active(eng_st):
+                last = str((eng_st or {}).get("last_tx_channel") or "").strip().lower()
+                if last != "ops":
+                    return "tanker"
+            if self._atc_role() == "client":
+                client = getattr(self, "_atc_client", None)
+                host_st = (client.last_status if client is not None else None) or {}
+                if self._client_status_is_ours(host_st) and host_st.get("on_tanker"):
+                    return "tanker"
         except Exception:
             pass
         return str(step.get("channel") or step.get("phase") or "other").strip().lower() or "other"
@@ -8020,6 +8089,32 @@ class MissionPlanner(tk.Tk):
 
             threading.Thread(target=tk_work, daemon=True).start()
             return
+        if result.get("execute_ops_action"):
+            action = str(result.get("execute_ops_action") or "")
+
+            def ops_work() -> None:
+                try:
+                    if self._atc_role() == "client" and self._atc_client is not None:
+                        played = self._atc_client.post_intent(
+                            voice_intent.Match(
+                                intent=action,
+                                kind="request",
+                                template="",
+                                confidence=1.0,
+                                slots={"channel": "ops"},
+                            )
+                        )
+                    else:
+                        played = voice_engine.execute_ops_action(
+                            self.engine, action
+                        )
+                    self._ui_call(lambda p=played: self._on_ops_request_done(p))
+                except Exception as exc:  # noqa: BLE001
+                    err = str(exc)
+                    self._ui_call(lambda m=err: messagebox.showerror("OPS", m))
+
+            threading.Thread(target=ops_work, daemon=True).start()
+            return
         if result.get("execute_option_full_stop"):
             def fs_work() -> None:
                 try:
@@ -8177,6 +8272,23 @@ class MissionPlanner(tk.Tk):
         )
         self.fly_log.see(tk.END)
         self._consume_position_fire_clears()
+        self._refresh_fly_status()
+
+    def _on_ops_request_done(self, played: dict[str, Any] | None) -> None:
+        played = played or {}
+        if played.get("action") == "blocked":
+            self._note_no_tx(
+                str(played.get("detail") or "Blocked"),
+                action="ops",
+                channel=str(played.get("channel") or "ops"),
+            )
+            self._refresh_fly_status()
+            return
+        freq = played.get("freq") or ""
+        label = played.get("text") or played.get("label") or "OPS"
+        ch = str(played.get("channel") or "ops").upper()
+        self.fly_log.insert(tk.END, f"TX  {label}  ·  {freq}  ·  {ch}\n")
+        self.fly_log.see(tk.END)
         self._refresh_fly_status()
 
     def _on_tanker_request_done(self, played: dict[str, Any] | None) -> None:
@@ -8383,7 +8495,9 @@ class MissionPlanner(tk.Tk):
             mission_phase=str(context.get("phase") or ""),
             cursor_channel=str(context.get("cursor_channel") or ""),
             tuned_channel=str(context.get("tuned_channel") or "") or None,
+            last_tx_channel=str(context.get("last_tx_channel") or ""),
         ) or str(context.get("channel") or "")
+        on_tanker_cues = cue_ch == "tanker"
         lines = voice_intent.suggestions(
             phase=str(context.get("phase") or ""),
             channel=cue_ch,
@@ -8398,10 +8512,12 @@ class MissionPlanner(tk.Tk):
             steps=context.get("steps") if isinstance(context.get("steps"), list) else None,
             current_step_id=str(context.get("current_step_id") or ""),
             tanker_chat_choices=context.get("tanker_chat_choices")
-            if isinstance(context.get("tanker_chat_choices"), list)
+            if on_tanker_cues and isinstance(context.get("tanker_chat_choices"), list)
             else None,
-            tanker_chat_session=bool(context.get("tanker_chat_session")),
-            tanker_chat_last_spoke=str(context.get("tanker_chat_last_spoke") or ""),
+            tanker_chat_session=on_tanker_cues and bool(context.get("tanker_chat_session")),
+            tanker_chat_last_spoke=str(context.get("tanker_chat_last_spoke") or "")
+            if on_tanker_cues
+            else "",
         )
         if not lines:
             self.fly_say_frame.pack_forget()
@@ -8411,6 +8527,10 @@ class MissionPlanner(tk.Tk):
             return
 
         agency = voice_intent.agency_spoken(cue_ch, str(airport.get("name") or "")) if cue_ch else ""
+        if cue_ch == "ops":
+            # Address is always "Ops" — Knight/Wool/Toro is who answers, not
+            # what the pilot has to say (Whisper often drops "Knight").
+            agency = "Ops"
         callsign = str(context.get("callsign") or "").strip()
         self._paint_fly_voice_cues(lines, agency=agency, callsign=callsign)
         voice_on = bool(self.config_data.get("voice_enabled"))
@@ -8424,14 +8544,16 @@ class MissionPlanner(tk.Tk):
         else:
             base = "VOICE CUES  ·  enable Voice in Setup → Controls to speak these"
         self.fly_say_title.set(f"{base}  ·  {where}" if where else base)
-        if context.get("tanker_chat_session"):
+        if on_tanker_cues and context.get("tanker_chat_session"):
             self.fly_say_subtitle.set(
                 "Boom chat — talk back in your own words, no agency needed. "
                 "Official tanker calls still work."
             )
         else:
             self.fly_say_subtitle.set(
-                "You must address the agency for a call to be recognized — except readbacks."
+                "Address as “Ops” — Knight / Wool / Toro is optional."
+                if cue_ch == "ops"
+                else "You must address the agency for a call to be recognized — except readbacks."
             )
         # Above EXPECTED RESPONSE — pilot call first, then ATC reply.
         try:
@@ -8592,6 +8714,19 @@ class MissionPlanner(tk.Tk):
         self.engine.mission = self.mission
         self._consume_position_fire_clears()
         st = self.engine.status()
+        if self._atc_role() == "client":
+            client = getattr(self, "_atc_client", None)
+            host_st = (client.last_status if client is not None else None) or {}
+            if (
+                self._client_status_is_ours(host_st)
+                and host_st.get("on_tanker")
+                and isinstance(host_st.get("step"), dict)
+            ):
+                st = dict(st)
+                st["step"] = host_st["step"]
+                if host_st.get("label"):
+                    st["label"] = host_st["label"]
+                st["channel"] = host_st.get("channel") or "tanker"
         mission = st.get("mission") or self.mission.get("name") or "Mission"
         self.fly_mission.set(str(mission))
 
@@ -8640,7 +8775,21 @@ class MissionPlanner(tk.Tk):
                 try:
                     import agencies as agencies_mod
 
-                    with_name = agencies_mod.spoken_name(live_ch, ap_name) or label
+                    if live_ch == "ops":
+                        try:
+                            opus_live, _wx = atc_phrase.resolve_opus_and_metar(
+                                self.config_data,
+                                str((self.engine.airport() or {}).get("icao") or ""),
+                            )
+                        except Exception:
+                            opus_live = None
+                        with_name = atc_phrase.resolve_ops_callsign(
+                            self.engine.airport(),
+                            opus=opus_live,
+                            config=self.config_data,
+                        ) or "Ops"
+                    else:
+                        with_name = agencies_mod.spoken_name(live_ch, ap_name) or label
                 except Exception:
                     with_name = label
                 self.fly_step_num.set("YOU ARE WITH")
@@ -10322,7 +10471,8 @@ class MissionPlanner(tk.Tk):
                 "Watch on either this PC or the Host is enough. Fires when the flight is "
                 "where it needs to be — monitor tower at the assigned EOR, takeoff when "
                 "lined up, range exit at 40 NM from Nellis or inside the approach circle, "
-                "contact tower at 12 NM. Overhead / TAC landing clearance is gear-down / "
+                "contact tower at 12 NM. Tower check-in waits for “with you” / “initial” "
+                "(or Play). Overhead / TAC landing clearance is gear-down / "
                 "Play (not the 2 NM field gate). The Fly tab line shows the live wait "
                 "(NM remaining, in-zone count, or why the feed cannot see you). Distance "
                 "gates work far from the field; EOR / lineup only fire in those drawn "

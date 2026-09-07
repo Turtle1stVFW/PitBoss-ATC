@@ -1399,23 +1399,13 @@ def resolve_step_trigger(
 
     if tmpl == "right_break":
         # Closed traffic go-around: still at the field — do not auto
-        # "continue straight-in" on the 12 NM gate.
+        # "continue" on a leftover NM gate.
         if atc_phrase.closed_traffic_go_around_pending(state):
             return None
-        # OHB / TAC: break approval when you check in (no NM gate unless set).
-        # Straight-in / instrument: same 12 NM window as contact-tower handoff;
-        # landing clearance remains 6 NM on clear_land.
-        rec = atc_phrase.resolve_active_recovery(step, mission, state=state)
-        if rec not in ("straight_in", "instrument"):
-            return base
-        nm = CONTACT_TOWER_WITHIN_NM
-        if base and base.within_nm is not None:
-            nm = float(base.within_nm)
-        elif raw.get("within_nm") is not None:
-            parsed = _trigger_float(raw.get("within_nm"))
-            if parsed is not None:
-                nm = parsed
-        return _from_raw_or_base(within_nm=nm)
+        # All recoveries: wait for "with you" / "initial" (or Play).
+        # Contact-tower handoff stays on the 12 NM gate; landing clearance
+        # remains 6 NM on clear_land after they check in.
+        return base
 
     if tmpl == "climb_cruise":
         nm = CRUISE_CLIMB_BEYOND_NM

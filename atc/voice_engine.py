@@ -635,6 +635,21 @@ def execute_intent(
         )
 
     if intent in (
+        "ops_request_words",
+        "ops_request_start",
+        "ops_status",
+        "ops_check_in",
+    ):
+        return execute_ops_action(
+            engine,
+            intent,
+            match=match,
+            airport=airport,
+            callsign=callsign,
+            opus=opus,
+        )
+
+    if intent in (
         "request_approach",
         "request_hold",
         "cancel_hold",
@@ -849,8 +864,9 @@ def execute_intent(
             if rwy:
                 result["runway"] = rwy
             return result
-        # Bandsaw check-in: talk to them, but stay on the Bandsaw step until
-        # checkout — picture / declare / dope happen in that window.
+        # Bandsaw check-in: reply on Bandsaw. Do not seek the shared flight
+        # cursor — other seats and the Host Fly stay where the package is.
+        # Picture / dope / declare follow the live Bandsaw radio instead.
         if intent == "bandsaw_check_in" or match.template == "bandsaw_check_in":
             import tanker as tanker_mod
             import tanker_chat as tanker_chat_mod
@@ -1566,6 +1582,128 @@ def _transmit(
     }
 
 
+def execute_ops_action(
+    engine: Any,
+    action: str,
+    *,
+    match: voice_intent.Match | None = None,
+    airport: dict[str, Any] | None = None,
+    callsign: str = "",
+    opus: Any = None,
+) -> dict[str, Any]:
+    """WORDS / start approval / postflight codes. Does not move the flight cursor."""
+    import ops as ops_mod
+
+    ap = airport if isinstance(airport, dict) else engine.airport()
+    if not callsign:
+        if opus is None:
+            opus, _wx = atc_phrase.resolve_opus_and_metar(
+                engine.config, ap.get("icao") if isinstance(ap, dict) else ""
+            )
+        if not opus:
+            opus = atc_phrase.synthetic_flight_context(
+                atc_phrase.callsign_override(engine.config) or "CALLSIGN"
+            )
+        callsign = opus.radio_callsign
+
+    config = getattr(engine, "config", None)
+    state = getattr(engine, "state", None)
+    if not isinstance(state, dict):
+        state = {}
+        try:
+            engine.state = state
+        except Exception:
+            pass
+    when = ops_mod.resolve_ops_clock(config)
+    words = ops_mod.current_words(config, opus=opus, when=when)
+    transcript = ""
+    if match is not None:
+        transcript = str(match.transcript or match.normalized or "")
+
+    if action == "ops_check_in":
+        text = ops_mod.build_ops_check_in(
+            callsign, ap, opus=opus, config=config
+        )
+        return _transmit(engine, ap, text, "ops")
+
+    existing = ops_mod.sortie_from_state(state)
+    already = bool(existing and existing.start_utc)
+
+    if action == "ops_request_words":
+        if not already:
+            ops_mod.approve_start(
+                state,
+                config=config,
+                opus=opus,
+                callsign=callsign,
+                words=words,
+                when=when,
+            )
+        elif words and existing and not existing.words_id:
+            existing.words_id = words.id
+            ops_mod.write_sortie(state, existing)
+        text = ops_mod.build_words_reply(
+            callsign,
+            words,
+            airport=ap,
+            start=True,
+            when=when,
+            already_started=already,
+            opus=opus,
+            config=config,
+        )
+        if hasattr(engine, "save_state"):
+            engine.save_state()
+        return _transmit(engine, ap, text, "ops")
+
+    if action == "ops_request_start":
+        if not already:
+            ops_mod.approve_start(
+                state,
+                config=config,
+                opus=opus,
+                callsign=callsign,
+                words=words,
+                when=when,
+            )
+        text = ops_mod.build_start_reply(
+            callsign,
+            airport=ap,
+            words=words,
+            when=when,
+            already_started=already,
+            opus=opus,
+            config=config,
+        )
+        if hasattr(engine, "save_state"):
+            engine.save_state()
+        return _transmit(engine, ap, text, "ops")
+
+    if action == "ops_status":
+        codes = ops_mod.parse_aircraft_codes(transcript, flight_callsign=callsign)
+        sortie = ops_mod.record_status(
+            state,
+            codes,
+            config=config,
+            opus=opus,
+            callsign=callsign,
+            when=when,
+        )
+        text = ops_mod.build_status_reply(
+            callsign,
+            sortie,
+            airport=ap,
+            when=when,
+            opus=opus,
+            config=config,
+        )
+        if hasattr(engine, "save_state"):
+            engine.save_state()
+        return _transmit(engine, ap, text, "ops")
+
+    return {"action": "none", "detail": f"unknown OPS action {action}"}
+
+
 def execute_tanker_action(
     engine: Any,
     action: str,
@@ -1596,7 +1734,12 @@ def execute_tanker_action(
         if match is not None:
             channel = _resolve_tx_channel(engine, ap, match) or channel
         else:
-            tuned = srs_radio.channel_for_tuned_freq(ap, engine.config)
+            remote = getattr(engine, "remote_radios", None)
+            tuned = srs_radio.channel_for_tuned_freq(
+                ap,
+                engine.config,
+                state=remote if isinstance(remote, srs_radio.RadioState) else None,
+            )
             if tuned:
                 channel = tuned
         if channel not in (
@@ -1641,7 +1784,7 @@ def execute_tanker_action(
             state=engine.state,
             name=named or None,
             own_ll=own_ll,
-            boom_only=False,
+            boom_only=True,
         )
         if tanker:
             tanker_mod.remember_tanker(
@@ -1908,7 +2051,7 @@ def resolve_tanker_chat(
         opus=opus,
         state=engine.state,
         own_ll=own_ll,
-        boom_only=False,
+        boom_only=True,
     )
     if tanker:
         tanker_mod.remember_tanker(
@@ -2203,7 +2346,14 @@ def _resolve_tx_channel(
         "tanker_bullseye",
     ):
         return "tanker"
-    tuned = srs_radio.channel_for_tuned_freq(airport, engine.config)
+    if intent.startswith("ops_"):
+        return "ops"
+    remote = getattr(engine, "remote_radios", None)
+    tuned = srs_radio.channel_for_tuned_freq(
+        airport,
+        engine.config,
+        state=remote if isinstance(remote, srs_radio.RadioState) else None,
+    )
     if tuned:
         return tuned
     return _current_channel(engine) or "tower"

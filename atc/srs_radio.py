@@ -740,7 +740,9 @@ def seed_eam_from_airport(airport: dict[str, Any]) -> list[float]:
     import atc_phrase
 
     freqs: list[float] = []
-    for ch in atc_phrase.CHANNELS:
+    # Backup / first EAM radio is OPS (preflight), then the rest of the strip.
+    order = ["ops"] + [c for c in atc_phrase.CHANNELS if c != "ops"]
+    for ch in order:
         try:
             mhz, _mod, _name = atc_phrase.channel_radio(airport, ch)
         except Exception:  # noqa: BLE001

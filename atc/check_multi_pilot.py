@@ -23,6 +23,8 @@ import channel_tx
 import flow_engine
 import srs_radio
 import tanker
+import voice_engine
+import voice_intent
 
 AIRPORTS = atc_phrase.load_json(atc_phrase.AIRPORTS_PATH)
 MISSION = atc_phrase.load_json(HERE / "flows" / "nellis_default.json")
@@ -445,6 +447,143 @@ def test_tanker_fly_freq_matches_pick() -> list[str]:
             float(fs["tanker_freq_mhz"]) - 319.8
         ) > 0.01:
             fails.append(f"flow_state tanker_freq_mhz {fs.get('tanker_freq_mhz')}")
+        # Client Fly used to skip host UHF when the shared cursor was still
+        # Blackjack / Bandsaw — then catalog[0] (Texaco 1 / 322.3) won.
+        local_ch = "blackjack"
+        host_ch = str(attached.get("status_channel") or "").strip().lower()
+        host_mhz = attached.get("step_freq_mhz")
+        on_tanker = bool(attached.get("on_tanker"))
+        use_host = host_mhz is not None and (
+            on_tanker or not host_ch or host_ch == local_ch
+        )
+        if not on_tanker:
+            fails.append("request tanker should mark on_tanker for the Client Fly page")
+        elif not use_host or abs(float(host_mhz) - 319.8) > 0.01:
+            fails.append(
+                "client Fly must keep Texaco 2 319.8 when local cursor is still C2"
+            )
+    finally:
+        tanker.fetch_opus_tankers = orig
+        tanker._TANKER_CACHE["exp"] = 0.0
+    return fails
+
+
+def test_cross_flight_status_isolation() -> list[str]:
+    """One flight's tanker / radios / identity must not stick on the Host engine."""
+    fails: list[str] = []
+    rows = [
+        {
+            "id": 2,
+            "callsign": "TEXACO 2",
+            "track": "AR-625H/L",
+            "aircraft": "KC-135",
+            "freq_mhz": 319.8,
+            "boom": True,
+        }
+    ]
+    orig = tanker.fetch_opus_tankers
+    tanker.fetch_opus_tankers = lambda *a, **k: list(rows)
+    tanker._TANKER_CACHE["exp"] = 0.0
+    try:
+        cfg = _host_config()
+        cfg["opus_flight_id"] = 101
+        host_eng = flow_engine.FlowEngine(
+            config=cfg,
+            persist_state=False,
+            mission=copy.deepcopy(MISSION),
+            airports=AIRPORTS,
+        )
+        host_eng.config["callsign_override"] = "HOST BOX"
+        server = atc_server.AtcServer(
+            cfg, AIRPORTS, lambda: copy.deepcopy(MISSION), transmit_fn=lambda _j: 0
+        )
+        server.host_engine = host_eng
+        fleece = server.hello(
+            {
+                "callsign_override": "Fleece 1",
+                "opus_flight_id": 101,
+                "opus_seat": 1,
+                "radio_fresh": False,
+            }
+        )
+        viper = server.hello(
+            {
+                "callsign_override": "Viper 3",
+                "opus_flight_id": 202,
+                "opus_seat": 1,
+                "radio_fresh": False,
+            }
+        )
+        sf = server.get_session(fleece["session_id"])
+        sv = server.get_session(viper["session_id"])
+        if sf is None or sv is None:
+            return fails + ["hello did not create both flights"]
+        if sf.engine is not host_eng:
+            fails.append("Fleece should share the Host Fly engine")
+        if sv.engine is host_eng:
+            fails.append("Viper must not share Fleece/Host engine")
+        idx_v = int(sv.engine.state.get("index") or 0)
+        idx_f = int(sf.engine.state.get("index") or 0)
+
+        def peel(engine: flow_engine.FlowEngine) -> dict:
+            tanker.remember_tanker(engine.state, dict(rows[0]), config=engine.config)
+            tanker.enter_tanker_overlay(engine)
+            return {"action": "ok", "channel": "blackjack", "freq": 251.0}
+
+        server.run_action(
+            sf,
+            peel,
+            {
+                "tuned_freqs_mhz": [251.25],
+                "radio_fresh": True,
+                "selected_mhz": 251.25,
+            },
+        )
+        if tanker.tanker_overlay_active(sv.local_state):
+            fails.append("Viper local_state inherited Fleece tanker overlay")
+        pv = sv.public_status()
+        if pv.get("on_tanker"):
+            fails.append("Viper Fly status marked on_tanker after Fleece peel")
+        if int(sv.engine.state.get("index") or 0) != idx_v:
+            fails.append("Viper cursor moved when Fleece went tanker")
+        if int(sf.engine.state.get("index") or 0) != idx_f:
+            fails.append("Fleece shared C2 cursor stayed parked on tanker")
+        if getattr(host_eng, "remote_radios", None) is not None:
+            fails.append("Fleece radios stuck on the Host engine after the action")
+        if str(host_eng.config.get("callsign_override") or "") != "HOST BOX":
+            fails.append(
+                f"Host identity became {host_eng.config.get('callsign_override')!r}"
+            )
+        if str(sv.engine.config.get("callsign_override") or "") == "Fleece 1":
+            fails.append("Viper engine stamped with Fleece identity")
+
+        pf = sf.public_status()
+        attached = atc_server._attach_fly_status({"action": "ok"}, pf)
+        if attached.get("session_id") != sf.session_id:
+            fails.append("attached Fly status missing Fleece session_id")
+        if attached.get("opus_flight_id") in (202, "202"):
+            fails.append("Fleece status carried Viper's flight id")
+        if pv.get("session_id") == pf.get("session_id"):
+            fails.append("two flights shared a status session_id")
+
+        match = voice_intent.Match(
+            intent="bandsaw_check_in",
+            kind="step",
+            template="bandsaw_check_in",
+            confidence=1.0,
+            slots={"channel": "bandsaw"},
+            transcript="Bandsaw, Fleece 1, checking in",
+            normalized="bandsaw fleece 1 checking in",
+        )
+
+        def checkin(engine: flow_engine.FlowEngine) -> dict:
+            return voice_engine.execute_intent(match, engine)
+
+        server.run_action(sf, checkin, {"radio_fresh": False})
+        if int(sf.engine.state.get("index") or 0) != idx_f:
+            fails.append("Bandsaw check-in must not move the shared flight cursor")
+        if int(sv.engine.state.get("index") or 0) != idx_v:
+            fails.append("Viper cursor moved on Fleece Bandsaw check-in")
     finally:
         tanker.fetch_opus_tankers = orig
         tanker._TANKER_CACHE["exp"] = 0.0
@@ -846,6 +985,7 @@ def main() -> int:
         test_flight_shared_cursor,
         test_element_tanker_peel,
         test_tanker_fly_freq_matches_pick,
+        test_cross_flight_status_isolation,
         test_client_freq_gate,
         test_secret_redaction_and_session_tts_cap,
         test_client_auto_play_from_watch,

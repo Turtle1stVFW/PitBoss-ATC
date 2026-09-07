@@ -13,7 +13,8 @@ import json
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -35,6 +36,13 @@ import voice_intent  # noqa: E402
 MAX_BODY = 256_000
 
 # Cursor the whole flight should see. Tanker AAR lives on PilotSession.local_state.
+_IDENTITY_CONFIG_KEYS = (
+    "opus_user_name",
+    "opus_flight_id",
+    "opus_seat",
+    "opus_flight_label",
+    "callsign_override",
+)
 _SHARED_FLOW_KEYS = (
     "index",
     "last_step_id",
@@ -48,6 +56,7 @@ _SHARED_FLOW_KEYS = (
     "active_takeoff_mode",
     "pending_takeoff_offer",
     "takeoff_offer_rolled",
+    "ops_sortie",
 )
 
 
@@ -263,7 +272,8 @@ class AtcServer:
             return engine
         shared = self._maybe_host_engine(flow, identity)
         if shared is not None:
-            _apply_identity_to_config(shared.config, identity)
+            # Do not stamp this seat onto the shared Host engine — identity
+            # and radios bind only for the duration of that seat's action.
             self.engines[flow] = shared
             return shared
         engine = _new_session_engine(
@@ -404,26 +414,23 @@ class AtcServer:
         shared_index = int(sess.engine.state.get("index") or 0)
         on_aar = tanker.tanker_overlay_active(sess.local_state)
         with lock:
-            _apply_identity_to_config(sess.engine.config, sess.identity)
-            sess.engine.config["_tts_session_id"] = sess.session_id
-            if body:
-                sess.apply_radios(body, inject=True)
-            tanker.apply_seat_state(sess.engine.state, sess.local_state)
-            if tanker.tanker_overlay_active(sess.engine.state):
-                tanker.park_tanker_index(sess.engine)
-            sess.engine.defer_tx = True
-            sess.engine.pending_tx = None
-            try:
-                result = fn(sess.engine) or {}
-                job = sess.engine.take_pending_tx()
-            finally:
-                sess.engine.defer_tx = False
-                sess.local_state = tanker.snapshot_seat_state(sess.engine.state)
-                tanker.strip_seat_state(sess.engine.state)
-                # AAR parks on the tanker step only for this element. Do not
-                # write that (or leave_tanker seeking C2) onto the flight cursor.
-                if on_aar or tanker.tanker_overlay_active(sess.local_state):
-                    sess.engine.state["index"] = shared_index
+            with _session_engine_binding(sess, body=body, inject_radios=True):
+                tanker.apply_seat_state(sess.engine.state, sess.local_state)
+                if tanker.tanker_overlay_active(sess.engine.state):
+                    tanker.park_tanker_index(sess.engine)
+                sess.engine.defer_tx = True
+                sess.engine.pending_tx = None
+                try:
+                    result = fn(sess.engine) or {}
+                    job = sess.engine.take_pending_tx()
+                finally:
+                    sess.engine.defer_tx = False
+                    sess.local_state = tanker.snapshot_seat_state(sess.engine.state)
+                    tanker.strip_seat_state(sess.engine.state)
+                    # AAR parks on the tanker step only for this element. Do not
+                    # write that (or leave_tanker seeking C2) onto the flight cursor.
+                    if on_aar or tanker.tanker_overlay_active(sess.local_state):
+                        sess.engine.state["index"] = shared_index
         self._sync_element_overlay(sess)
         if not isinstance(result, dict):
             result = {"detail": result}
@@ -615,6 +622,10 @@ def _attach_fly_status(
     out["label"] = status.get("label")
     out["step"] = status.get("step")
     out["status_channel"] = status.get("channel")
+    out["session_id"] = status.get("session_id")
+    out["flow_key"] = status.get("flow_key")
+    out["opus_flight_id"] = status.get("opus_flight_id")
+    out["opus_seat"] = status.get("opus_seat")
     return out
 
 
@@ -633,21 +644,22 @@ def _status_view(sess: PilotSession) -> tuple[dict[str, Any], dict[str, Any]]:
     lock = getattr(engine, "mutex", None)
 
     def _compute() -> tuple[dict[str, Any], dict[str, Any]]:
-        fs = _shared_flow_state(engine.state)
-        fs.update(dict(sess.local_state))
-        if not tanker.tanker_overlay_active(sess.local_state):
-            return engine.status(), fs
-        saved = int(engine.state.get("index") or 0)
-        tanker.apply_seat_state(engine.state, sess.local_state)
-        tanker.park_tanker_index(engine)
-        try:
-            st = engine.status()
+        with _session_engine_binding(sess):
             fs = _shared_flow_state(engine.state)
-            fs.update(tanker.snapshot_seat_state(engine.state))
-            return st, fs
-        finally:
-            tanker.strip_seat_state(engine.state)
-            engine.state["index"] = saved
+            fs.update(dict(sess.local_state))
+            if not tanker.tanker_overlay_active(sess.local_state):
+                return engine.status(), fs
+            saved = int(engine.state.get("index") or 0)
+            tanker.apply_seat_state(engine.state, sess.local_state)
+            tanker.park_tanker_index(engine)
+            try:
+                st = engine.status()
+                fs = _shared_flow_state(engine.state)
+                fs.update(tanker.snapshot_seat_state(engine.state))
+                return st, fs
+            finally:
+                tanker.strip_seat_state(engine.state)
+                engine.state["index"] = saved
 
     if lock is not None:
         with lock:
@@ -688,6 +700,49 @@ def _apply_identity_to_config(config: dict[str, Any], identity: dict[str, Any]) 
     config["opus_seat"] = identity.get("opus_seat")
     config["opus_flight_label"] = identity.get("opus_flight_label") or ""
     config["callsign_override"] = identity.get("callsign_override") or ""
+
+
+@contextmanager
+def _session_engine_binding(
+    sess: PilotSession,
+    *,
+    body: dict[str, Any] | None = None,
+    inject_radios: bool = False,
+) -> Iterator[None]:
+    """
+    Bind this seat's identity and radios for one host action / status view.
+
+    The shared FlowEngine may be the Host Fly timeline or another seat on the
+    same Opus flight. Never leave this jet's callsign or SRS stack on it.
+    """
+    engine = sess.engine
+    cfg = engine.config if isinstance(getattr(engine, "config", None), dict) else {}
+    saved_radios = getattr(engine, "remote_radios", None)
+    saved_ident = {key: cfg.get(key) for key in _IDENTITY_CONFIG_KEYS}
+    saved_tts = cfg.get("_tts_session_id")
+    try:
+        _apply_identity_to_config(cfg, sess.identity)
+        cfg["_tts_session_id"] = sess.session_id
+        if body is not None:
+            sess.apply_radios(body, inject=inject_radios)
+        elif inject_radios:
+            engine.set_remote_radios(
+                sess.tuned_freqs_mhz,
+                fresh=sess.radio_fresh,
+                selected_mhz=sess.selected_mhz,
+            )
+        yield
+    finally:
+        engine.remote_radios = saved_radios
+        for key, value in saved_ident.items():
+            if value is None:
+                cfg.pop(key, None)
+            else:
+                cfg[key] = value
+        if saved_tts is None:
+            cfg.pop("_tts_session_id", None)
+        else:
+            cfg["_tts_session_id"] = saved_tts
 
 
 def _new_session_engine(

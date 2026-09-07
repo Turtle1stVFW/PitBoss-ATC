@@ -352,7 +352,21 @@ OPUS_FREQ_NAME_MAP: dict[str, tuple[str, ...]] = {
         "los angeles center",
         "center",
     ),
-    "ops": ("squadron ops", "ops"),
+    "ops": (
+        "ops",
+        "operations",
+        "knight ops",
+        "wool ops",
+        "toro ops",
+        "squadron ops",
+        "base ops",
+        "night ops",
+        "nite ops",
+        "nine ops",
+        "nights ops",
+        "can ops",
+        "and ops",
+    ),
 }
 
 
@@ -3057,21 +3071,30 @@ def resolve_parking(
     if override:
         return override
     default = str(airport.get("parking") or "parking").strip() or "parking"
+    for _score, rule in _squadron_rule_hits(airport, squadron_name, opus):
+        parking = str(rule.get("parking") or "").strip()
+        if parking:
+            return parking
+    return default
+
+
+def _squadron_rule_hits(
+    airport: dict[str, Any] | None,
+    squadron_name: str | None = None,
+    opus: OpusFlightContext | None = None,
+) -> list[tuple[int, dict[str, Any]]]:
+    """Longest-token squadron matches from airport.parking_by_squadron."""
     sq = (
         str(squadron_name or "").strip()
         or (str(opus.squadron_name).strip() if opus and opus.squadron_name else "")
     )
-    rules = airport.get("parking_by_squadron")
+    rules = (airport or {}).get("parking_by_squadron")
     if not sq or not isinstance(rules, list):
-        return default
+        return []
     hay = sq.casefold()
-    # Prefer longer / more specific match tokens first.
-    scored: list[tuple[int, str]] = []
+    scored: list[tuple[int, dict[str, Any]]] = []
     for rule in rules:
         if not isinstance(rule, dict):
-            continue
-        parking = str(rule.get("parking") or "").strip()
-        if not parking:
             continue
         raw_match = rule.get("match")
         tokens: list[str] = []
@@ -3081,14 +3104,44 @@ def resolve_parking(
             tokens = [str(t) for t in raw_match if str(t).strip()]
         for tok in tokens:
             t = tok.strip().casefold()
-            if not t:
-                continue
-            if t in hay:
-                scored.append((len(t), parking))
-    if not scored:
-        return default
+            if t and t in hay:
+                scored.append((len(t), rule))
     scored.sort(key=lambda x: x[0], reverse=True)
-    return scored[0][1]
+    return scored
+
+
+def _ops_name_from_parking(parking: str) -> str:
+    """Knight Ramp / WOOL Ramp → Knight Ops / Wool Ops."""
+    bits = [b for b in re.split(r"\s+", str(parking or "").strip()) if b]
+    if len(bits) >= 2 and bits[-1].casefold() == "ramp":
+        return f"{bits[0].title()} Ops"
+    return ""
+
+
+def resolve_ops_callsign(
+    airport: dict[str, Any] | None = None,
+    *,
+    opus: OpusFlightContext | None = None,
+    squadron_name: str | None = None,
+    config: dict[str, Any] | None = None,
+) -> str:
+    """
+    Squadron OPS radio name (Wool Ops, Knight Ops, Toro Ops).
+
+    Same parking_by_squadron match list as taxi-in. Setup `ops_override` wins.
+    Unknown squadron → 'Ops' (never Nellis Ops).
+    """
+    override = str((config or {}).get("ops_override") or "").strip()
+    if override:
+        return override if override.casefold().endswith("ops") else f"{override} Ops"
+    for _score, rule in _squadron_rule_hits(airport, squadron_name, opus):
+        named = str(rule.get("ops") or "").strip()
+        if named:
+            return named
+        inferred = _ops_name_from_parking(str(rule.get("parking") or ""))
+        if inferred:
+            return inferred
+    return "Ops"
 
 
 def speak_local_preset(airport: dict[str, Any], channel: str) -> str | None:
@@ -3914,10 +3967,15 @@ PILOT_REQUESTS_BY_CHANNEL: dict[str, list[tuple[str, str]]] = {
         ("tanker_freq", "Say frequency"),
         ("tanker_bullseye", "Say bullseye"),
     ],
-    "ops": [],
+    "ops": [
+        ("ops_request_words", "Request current WORDS"),
+        ("ops_request_start", "Request start"),
+    ],
     "other": [],
     "tanker": [
         ("tanker_check_in", "Request rejoin"),
+        ("tanker_chat_start", "How's it going"),
+        ("tanker_chat_stop", "Talk later"),
         ("tanker_dcs_precontact", "DCS: Ready pre-contact"),
         ("tanker_dcs_abort", "DCS: Abort / disconnect"),
     ],
@@ -4091,8 +4149,9 @@ def should_skip_approach_step(
     Whether the flow cursor should skip an approach step.
 
     Straight-in / instrument used to skip Tower check-in (no break to approve).
-    They still need that call — continue straight-in / roger continue — inside
-    ~12 NM; cleared-to-land stays gated at 6 NM. So nothing is skipped here.
+    They still need that call — continue straight-in / roger continue — after
+    the pilot checks in ("with you"); cleared-to-land stays gated at 6 NM.
+    So nothing is skipped here.
     """
     return False
 
@@ -4244,7 +4303,7 @@ def pilot_requests_for_channel(
     try:
         import tanker_chat as tanker_chat_mod
 
-        show_boom = ch == "tanker" or tanker_chat_mod.fly_controls_visible(state)
+        show_boom = ch == "tanker"
         if show_boom:
             seen = {k for k, _ in out}
             for k, lab in tanker_chat_mod.fly_request_rows(state):
@@ -4497,6 +4556,19 @@ def apply_pilot_request(
             "pending_offer": pending_takeoff_offer(state),
             "ack_kind": "",
             "execute_tanker_action": key,
+        }
+    if key in (
+        "ops_request_words",
+        "ops_request_start",
+        "ops_status",
+        "ops_check_in",
+    ):
+        return {
+            "key": key,
+            "takeoff_mode": resolve_active_takeoff_mode(mission, state),
+            "pending_offer": pending_takeoff_offer(state),
+            "ack_kind": "",
+            "execute_ops_action": key,
         }
     if key == "clear_runway_request":
         rwy: str | None = None
@@ -9253,6 +9325,8 @@ _RADIO_PHRASE_PRONUNCIATION: tuple[tuple[str, str], ...] = (
 _WINDOWS_WORD_PRONUNCIATION: dict[str, str] = {
     "wind": "wihnd",
     "winds": "wihnds",
+    # NTTR = "Nih-tter", not letter-by-letter.
+    "nttr": "nitter",
 }
 
 # Google Chirp / Neural2: keep the real spelling and force noun IPA via the
@@ -9260,6 +9334,7 @@ _WINDOWS_WORD_PRONUNCIATION: dict[str, str] = {
 _GOOGLE_WORD_IPA: dict[str, str] = {
     "wind": "wɪnd",
     "winds": "wɪndz",
+    "nttr": "nɪtɚ",
 }
 
 
@@ -9365,7 +9440,8 @@ def google_custom_pronunciations(text: str) -> dict[str, Any] | None:
     if not text:
         return None
     found: dict[str, str] = {}
-    for m in re.finditer(r"\b(winds?)\b", str(text), flags=re.IGNORECASE):
+    keys = "|".join(re.escape(k) for k in sorted(_GOOGLE_WORD_IPA, key=len, reverse=True))
+    for m in re.finditer(rf"\b({keys})\b", str(text), flags=re.IGNORECASE):
         phrase = m.group(1)
         ipa = _GOOGLE_WORD_IPA.get(phrase.casefold())
         if ipa:
@@ -10897,7 +10973,45 @@ def build_template_text(
             from_channel=channel or "control_east",
         )
     if template == "ops_check_in":
-        return f"{cs}, Ops, go ahead."
+        try:
+            import ops as ops_mod
+
+            return ops_mod.build_ops_check_in(
+                callsign, airport, opus=opus, config=config
+            )
+        except Exception:
+            return f"{cs}, Ops, go ahead."
+    if template in ("ops_words", "ops_start"):
+        try:
+            import ops as ops_mod
+
+            clock = ops_mod.resolve_ops_clock(config)
+            words = ops_mod.current_words(config, opus=opus, when=clock)
+            already = False
+            if isinstance(state, dict):
+                existing = ops_mod.sortie_from_state(state)
+                already = bool(existing and existing.start_utc)
+                if not already:
+                    ops_mod.approve_start(
+                        state,
+                        config=config,
+                        opus=opus,
+                        callsign=callsign,
+                        words=words,
+                        when=clock,
+                    )
+            return ops_mod.build_words_reply(
+                callsign,
+                words,
+                airport=airport,
+                start=True,
+                when=clock,
+                already_started=already,
+                opus=opus,
+                config=config,
+            )
+        except Exception:
+            return f"{cs}, Ops, go ahead."
     if template in ("center_radar", "center_check_in"):
         return build_center_check_in(callsign)
     if template == "center_handoff":

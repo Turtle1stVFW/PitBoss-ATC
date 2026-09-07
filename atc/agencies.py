@@ -38,7 +38,7 @@ AIRBORNE: frozenset[str] = frozenset(
 )
 DEFAULT_FLOW_NAME = "nellis_default.json"
 
-# kind: field | natcf | control | c2 | tanker | center | gci
+# kind: field | natcf | control | c2 | tanker | center | gci | ops
 _CORE: dict[str, dict[str, Any]] = {
     "delivery": {
         "kind": "field",
@@ -113,10 +113,10 @@ _CORE: dict[str, dict[str, Any]] = {
         "services": ("aar",),
     },
     "ops": {
-        "kind": "c2",
-        "spoken": "{ap} Ops",
-        "handoff": "blackjack",
-        "services": ("ops",),
+        "kind": "ops",
+        "spoken": "Ops",
+        "handoff": "delivery",
+        "services": ("words", "start", "status"),
     },
     "other": {
         "kind": "center",
@@ -170,6 +170,9 @@ def get(channel: str) -> Agency | None:
 
 
 def spoken_name(channel: str, airport_name: str = "") -> str:
+    ch = (channel or "").strip().lower()
+    if ch == "ops":
+        return "Ops"
     row = get(channel)
     if row is None:
         return (channel or "").replace("_", " ").title()
@@ -801,6 +804,9 @@ def resolve(
         return remapped
     if addr:
         return addr
+    # Preflight backup radio: OPS answers on the ramp before Delivery.
+    if tun == "ops":
+        return "ops"
     # Field sequence: tips stay on the cursor even if they jumped the radio.
     if phase in ("", "departure") and cursor in FIELD:
         return cursor
