@@ -27,7 +27,7 @@ Patched `DCS-SR-ExternalAudio` that can transmit to a **remote** SRS host (`--ip
    - `atc\Open-ATC-Setup.cmd` or `atc\Open-Flight-Flow.cmd`
    - Dedicated-server Host: `atc\Start-ATC-Host.cmd` (same app). Setup → Squadron → **Host** → Save.
 
-5. Optional Google Neural2 voices: see [atc/README.md](atc/README.md). Put your service-account JSON in `atc\secrets\` (gitignored).
+5. Optional Google Neural2 voices: see [docs/ATC.md](docs/ATC.md). Put your service-account JSON in `atc\secrets\` (gitignored).
 
 ## Layout
 
@@ -37,11 +37,12 @@ Patched `DCS-SR-ExternalAudio` that can transmit to a **remote** SRS host (`--ip
 | `runtimes\win-x64\` | Native Speech / gRPC libs |
 | `atc\` | Flow planner, phrase board, Stream Deck scripts |
 | `atc\Install-DCS-Radio-Export.cmd` | Auto-install DCS Export hook for the freq gate (installer-safe) |
+| `docs\` | Maintainer architecture / flow overview ([docs/README.md](docs/README.md)) |
 | `patches\` | Source files + rebuild instructions for the `--ip` patch |
 
 ## Rebuild ExternalAudio
 
-See [patches/README.md](patches/README.md). Upstream project: [ciribob/DCS-SimpleRadioStandalone](https://github.com/ciribob/DCS-SimpleRadioStandalone) (GPL-3.0).
+See [docs/PATCHES.md](docs/PATCHES.md). Upstream project: [ciribob/DCS-SimpleRadioStandalone](https://github.com/ciribob/DCS-SimpleRadioStandalone) (GPL-3.0).
 
 ## Manual transmit example
 
