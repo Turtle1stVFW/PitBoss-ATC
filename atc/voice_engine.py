@@ -821,6 +821,13 @@ def execute_intent(
         return {"action": "none", "detail": "go-around not available"}
 
     if match.kind == "step":
+        if (
+            intent in ("ready_clearance", "ready_to_copy")
+            or match.template in ("clearance", "clearance_amendment")
+        ) and str(engine.state.get("last_tx_template") or "") == "clearance_amendment":
+            engine.state["clearance_amendment_copied"] = True
+            if hasattr(engine, "save_state"):
+                engine.save_state()
         # Cleared for the option → full stop / clear of runway: no second land clear.
         if atc_phrase.awaiting_option_on_the_go(engine.state) and (
             intent in ("request_landing", "clear_of_runway")
@@ -1040,9 +1047,13 @@ def execute_intent(
                     }
             played = _play_step(engine, match)
             if played.get("action") != "none":
+                if isinstance(getattr(engine, "state", None), dict):
+                    engine.state["blackjack_checked_in"] = True
                 return played
             if hasattr(engine, "_seek_template"):
                 engine._seek_template("bj_check_in")
+            if isinstance(getattr(engine, "state", None), dict):
+                engine.state["blackjack_checked_in"] = True
             text = atc_phrase.build_blackjack_continue(callsign)
             return _transmit(engine, airport, text, "blackjack")
         if intent == "range_exit" or match.template == "bj_range_exit":
@@ -1213,6 +1224,11 @@ def _acknowledge(engine: Any, match: voice_intent.Match) -> dict[str, Any]:
     and Fly stops asking for it.
     """
     confirm = str(engine.state.get("awaiting_confirm_template") or "")
+    last = str(engine.state.get("last_tx_template") or "")
+    if last == "clearance_amendment":
+        engine.state["clearance_amendment_copied"] = True
+        if not confirm:
+            confirm = "clearance"
     engine.clear_readback()
     if confirm:
         index = int(engine.state.get("index") or 0)
@@ -1667,7 +1683,7 @@ def execute_ops_action(
         )
         if hasattr(engine, "save_state"):
             engine.save_state()
-        return _transmit(engine, ap, text, "ops")
+        return _transmit(engine, ap, text, "ops", template="ops_words")
 
     if action == "ops_request_start":
         if not already:
@@ -1690,7 +1706,7 @@ def execute_ops_action(
         )
         if hasattr(engine, "save_state"):
             engine.save_state()
-        return _transmit(engine, ap, text, "ops")
+        return _transmit(engine, ap, text, "ops", template="ops_start")
 
     if action == "ops_status":
         codes = ops_mod.parse_aircraft_codes(transcript, flight_callsign=callsign)

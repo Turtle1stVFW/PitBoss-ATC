@@ -1474,7 +1474,11 @@ class MissionPlanner(tk.Tk):
                 payload["text"] = text
                 delay = tanker_chat_mod.continuation_delay_s(engine.state)
                 payload["await_pilot"] = bool(
-                    tanker_chat_mod.is_awaiting_react(engine.state) and delay is None
+                    (
+                        tanker_chat_mod.is_awaiting_react(engine.state)
+                        and delay is None
+                    )
+                    or tanker_chat_mod.invites_reply(text)
                 )
         except Exception as exc:  # noqa: BLE001
             self._tanker_chat_inflight_until = 0.0
@@ -2552,6 +2556,20 @@ class MissionPlanner(tk.Tk):
         context["last_tx_text"] = str(state.get("last_tx_text") or "")
         context["last_tx_channel"] = str(state.get("last_tx_channel") or "")
         context["last_tx_template"] = str(state.get("last_tx_template") or "")
+        context["blackjack_checked_in"] = bool(state.get("blackjack_checked_in"))
+        try:
+            import agencies as agencies_mod
+
+            context["pending_contact"] = agencies_mod.pending_contact(state)
+        except Exception:
+            context["pending_contact"] = str(state.get("pending_contact") or "")
+        try:
+            import ops as ops_mod
+
+            sortie = ops_mod.sortie_from_state(state)
+            context["ops_start_done"] = bool(sortie and sortie.start_utc)
+        except Exception:
+            context["ops_start_done"] = False
         try:
             import tanker_chat as tanker_chat_mod
 
@@ -2654,9 +2672,44 @@ class MissionPlanner(tk.Tk):
         try:
             import tanker as tanker_mod
 
+            # Boom chat is this seat's. Host omits the keys when the bit ended
+            # — drop leftovers so Fly does not keep "talk later".
+            for key in tanker_mod.CHAT_STATE_KEYS:
+                if key not in fs:
+                    state.pop(key, None)
             tanker_mod.reconcile_aar_overlay(self.engine)
         except Exception:
             pass
+
+    def _apply_remote_chat_state(self, flow_state: dict[str, Any] | None) -> None:
+        """Copy this seat's boom-chat keys from a Host result onto the Fly engine."""
+        state = getattr(self.engine, "state", None)
+        if not isinstance(state, dict) or not isinstance(flow_state, dict):
+            return
+        try:
+            import tanker as tanker_mod
+
+            keys = tanker_mod.CHAT_STATE_KEYS
+        except Exception:
+            keys = ("tanker_chat",)
+        for key in keys:
+            if key in flow_state:
+                state[key] = flow_state[key]
+            else:
+                state.pop(key, None)
+
+    def _refresh_tanker_chat_cues(self) -> None:
+        """Swap how's-it-going / talk-later after voice or a Host chat result."""
+        if hasattr(self, "_sync_fly_pilot_request_ui"):
+            try:
+                self._sync_fly_pilot_request_ui()
+            except Exception:
+                pass
+        if hasattr(self, "fly_say_frame"):
+            try:
+                self._refresh_voice_prompts()
+            except Exception:
+                pass
 
     def _snap_voice_confidence(self, value: float | None = None) -> float:
         """Clamp to the slider range and snap to 5% steps (0.40, 0.45, … 0.95)."""
@@ -2829,6 +2882,13 @@ class MissionPlanner(tk.Tk):
                     self._refresh_fly_status()
                 else:
                     self._refresh_client_fly()
+                # Voice posts tanker chat to the Host. Buttons write the same
+                # keys locally — copy the Host result so Fly cues swap too.
+                if str(match.intent or "").startswith("tanker_chat"):
+                    fs = result.get("flow_state") if isinstance(result, dict) else None
+                    if isinstance(fs, dict):
+                        self._apply_remote_chat_state(fs)
+                    self._refresh_tanker_chat_cues()
                 deferred = result.get("deferred")
                 if isinstance(deferred, dict) and deferred.get("kind") == "unrestricted_climb":
                     self._schedule_unrestricted_climb_resolve(deferred)
@@ -7023,6 +7083,7 @@ class MissionPlanner(tk.Tk):
                         mission=self.mission,
                         state=self.engine.state,
                         config=self.config_data,
+                        commit=False,
                     )
                     spoken_footer = atc_phrase.spoken_radio_footer(phrase, voice=voice)
                     fp = ""
@@ -7109,6 +7170,7 @@ class MissionPlanner(tk.Tk):
                     mission=self.mission,
                     state=self.engine.state,
                     config=self.config_data,
+                    commit=False,
                 )
                 voice, _ = atc_phrase.voice_for_step(self.config_data, channel, step)
                 freq, mod, _ = atc_phrase.step_radio(ap, channel, step)
@@ -7908,6 +7970,7 @@ class MissionPlanner(tk.Tk):
                     mission=self.mission,
                     state=self.engine.state,
                     config=self.config_data,
+                    commit=False,
                 )
                 text = (phrase or "").strip() or "(empty phrase)"
             except Exception as exc:  # noqa: BLE001
@@ -8170,8 +8233,17 @@ class MissionPlanner(tk.Tk):
             return
 
         awaiting_option = atc_phrase.awaiting_option_on_the_go(self.engine.state)
+        chatting = False
+        try:
+            import tanker_chat as tanker_chat_mod
+
+            chatting = tanker_chat_mod.is_session_active(self.engine.state)
+        except Exception:
+            chatting = False
         for key, lab in reqs:
             short = self._FLY_REQUEST_BTN_LABELS.get(key, lab)
+            if key.startswith("tanker_chat"):
+                short = lab
             if key == "request_landing" and awaiting_option:
                 short = "Full stop"
             accent = False
@@ -8184,10 +8256,9 @@ class MissionPlanner(tk.Tk):
             if key == "request_go_around" and awaiting_option:
                 accent = True
             if key == "tanker_chat_start":
-                accent = True
+                accent = not chatting
             if key == "tanker_chat_stop":
-                accent = False
-                short = "Stop chat"
+                accent = chatting
             ttk.Button(
                 self._fly_req_btns,
                 text=short,
@@ -8520,7 +8591,11 @@ class MissionPlanner(tk.Tk):
         ch = str(played.get("channel") or "tanker").upper()
         self.fly_log.insert(tk.END, f"TX  {label}  ·  {freq}  ·  {ch}\n")
         self.fly_log.see(tk.END)
+        fs = played.get("flow_state") if isinstance(played, dict) else None
+        if isinstance(fs, dict):
+            self._apply_remote_chat_state(fs)
         self._refresh_fly_status()
+        self._refresh_tanker_chat_cues()
         deferred = played.get("deferred")
         if isinstance(deferred, dict) and deferred.get("kind") in (
             "tanker_chat",
@@ -8709,6 +8784,8 @@ class MissionPlanner(tk.Tk):
             cursor_channel=str(context.get("cursor_channel") or ""),
             tuned_channel=str(context.get("tuned_channel") or "") or None,
             last_tx_channel=str(context.get("last_tx_channel") or ""),
+            pending_contact=str(context.get("pending_contact") or ""),
+            ops_start_done=bool(context.get("ops_start_done")),
         ) or str(context.get("channel") or "")
         cue_ch = self._prefer_map_agency(
             cue_ch, tuned=str(context.get("tuned_channel") or "")
@@ -8734,6 +8811,11 @@ class MissionPlanner(tk.Tk):
             tanker_chat_last_spoke=str(context.get("tanker_chat_last_spoke") or "")
             if on_tanker_cues
             else "",
+            pending_contact=str(context.get("pending_contact") or ""),
+            ops_start_done=bool(context.get("ops_start_done")),
+            last_tx_template=str(context.get("last_tx_template") or ""),
+            last_tx_channel=str(context.get("last_tx_channel") or ""),
+            blackjack_checked_in=bool(context.get("blackjack_checked_in")),
         )
         if not lines:
             self.fly_say_frame.pack_forget()
@@ -8770,6 +8852,14 @@ class MissionPlanner(tk.Tk):
             self.fly_say_subtitle.set(
                 "Boom chat — talk back in your own words, no agency needed. "
                 "Official tanker calls still work."
+            )
+        elif (
+            cue_ch == "ops"
+            and context.get("ops_start_done")
+            and str(context.get("pending_contact") or "").strip().lower() == "delivery"
+        ):
+            self.fly_say_subtitle.set(
+                "Start approved — switch to Clearance Delivery for your IFR clearance."
             )
         else:
             self.fly_say_subtitle.set(
@@ -8909,12 +8999,16 @@ class MissionPlanner(tk.Tk):
         # Keep the live Plan mission (Keywords / voice_phrases included). reload()
         # re-reads the flow file and would drop unsaved step edits.
         if getattr(self, "_refreshing_fly_status", False):
+            self._fly_status_refresh_again = True
             return
         self._refreshing_fly_status = True
         try:
             self._refresh_fly_status_body()
         finally:
             self._refreshing_fly_status = False
+        if getattr(self, "_fly_status_refresh_again", False):
+            self._fly_status_refresh_again = False
+            self._refresh_fly_status()
 
     def _refresh_fly_status_body(self) -> None:
         self._sync_client_flow_cursor()
@@ -9036,6 +9130,7 @@ class MissionPlanner(tk.Tk):
                     ).strip().lower()
                 hero_ch = self._prefer_map_agency(hero_ch, tuned=live_ch)
                 ap_name = str((self.engine.airport() or {}).get("name") or "")
+                display_step = None
                 try:
                     import agencies as agencies_mod
 
@@ -9054,8 +9149,27 @@ class MissionPlanner(tk.Tk):
                         ) or "Ops"
                     else:
                         with_name = agencies_mod.fly_label(hero_ch, ap_name) or label
+                    display_step = agencies_mod.display_step_for_agency(
+                        list(getattr(self.engine, "steps", None) or []),
+                        hero_ch,
+                        cursor_index=int(st.get("index") or 0),
+                        last_tx_template=str(
+                            (getattr(self.engine, "state", None) or {}).get(
+                                "last_tx_template"
+                            )
+                            or ""
+                        ),
+                    )
                 except Exception:
                     with_name = label
+                if isinstance(display_step, dict):
+                    step = display_step
+                    d_phase = str(display_step.get("phase") or "").strip().upper()
+                    d_label = str(
+                        display_step.get("label") or display_step.get("id") or ""
+                    ).strip()
+                    if d_label:
+                        with_name = f"{d_phase} · {d_label}" if d_phase else d_label
                 self.fly_step_num.set("SWITCH TO" if switch_to else "YOU ARE WITH")
                 self.fly_step_name.set(with_name)
             else:
@@ -9083,9 +9197,9 @@ class MissionPlanner(tk.Tk):
             else:
                 ch, freq, mod, tx = self._fly_upcoming_radio(step)
                 display_ch = ch
-                # NEXT TX FREQUENCY is the upcoming step, not the radio you are
-                # tuned to (that is YOU ARE ON / YOU ARE WITH). Overwriting with
-                # live Ground after a Tower handoff left the hero on GND.
+                # Sandbox Flight: hero is the agency on the radio (Bandsaw
+                # while Blackjack still holds). Field sequence still uses the
+                # upcoming step so a Tower handoff does not snap to Ground.
                 self.fly_freq.set(freq)
                 self.fly_mod.set(mod)
                 self.fly_channel.set(display_ch)
@@ -9151,7 +9265,18 @@ class MissionPlanner(tk.Tk):
                 self._fly_channel_lbl.configure(fg=color)
             if hasattr(self, "_fly_step_name_lbl"):
                 self._fly_step_name_lbl.configure(fg=C_TEXT)
-            self._queue_fly_phrase_preview(step)
+            last_ch = str(
+                (getattr(self.engine, "state", None) or {}).get("last_tx_channel") or ""
+            ).strip().lower()
+            last_txt = str(
+                (getattr(self.engine, "state", None) or {}).get("last_tx_text") or ""
+            ).strip()
+            present_ch = str((step or {}).get("channel") or "").strip().lower()
+            if last_txt and last_ch and last_ch == present_ch:
+                self._fly_phrase_req_id = getattr(self, "_fly_phrase_req_id", 0) + 1
+                self.fly_say.set(last_txt)
+            else:
+                self._queue_fly_phrase_preview(step)
         ch_now = "" if st.get("at_end") else self._fly_request_radio_channel(st)
         self._sync_fly_recovery_ui(ch_now)
         self._sync_fly_pilot_request_ui(ch_now)
@@ -9397,15 +9522,17 @@ class MissionPlanner(tk.Tk):
                 f"CLIENT  {client.callsign or st.get('callsign') or ''}  ·  "
                 f"{st.get('label') or 'connected'}{wait}"
             )
-        if st.get("label"):
-            self.fly_step_name.set(str(st.get("label") or "…"))
-        if st.get("step_number") is not None:
-            self.fly_step_num.set(f"{st.get('step_number')} / {st.get('total') or '?'}")
-        if st.get("channel"):
-            self.fly_channel.set(str(st.get("channel") or "").upper())
-        if st.get("last_tx_text") and hasattr(self, "fly_say"):
-            self.fly_say.set(str(st["last_tx_text"]))
+        # Host cursor is the shared flight step. The Fly card follows the
+        # radio you are on (Bandsaw while Blackjack still holds).
         self._sync_client_flow_cursor()
+        try:
+            tuned = srs_radio.channel_for_tuned_freq(
+                self.engine.airport(), self.config_data
+            ) or ""
+        except Exception:
+            tuned = ""
+        fs = st.get("flow_state") if isinstance(st.get("flow_state"), dict) else {}
+        chat = fs.get("tanker_chat") if isinstance(fs.get("tanker_chat"), dict) else {}
         cue_key = (
             st.get("index"),
             st.get("step_number"),
@@ -9414,16 +9541,21 @@ class MissionPlanner(tk.Tk):
             else None,
             bool(st.get("awaiting_readback")),
             st.get("step_freq_mhz"),
-            (st.get("flow_state") or {}).get("tanker_freq_mhz")
-            if isinstance(st.get("flow_state"), dict)
-            else None,
+            fs.get("tanker_freq_mhz"),
+            fs.get("last_tx_template"),
+            str(tuned),
+            bool(chat.get("session")),
+            str(chat.get("awaiting") or ""),
+            tuple(
+                str(c.get("id") or "")
+                for c in (chat.get("choices") or [])
+                if isinstance(c, dict)
+            ),
         )
         if cue_key != getattr(self, "_client_fly_cue_key", None):
             self._client_fly_cue_key = cue_key
             if hasattr(self, "fly_say_frame"):
                 self._refresh_fly_status()
-            if st.get("last_tx_text") and hasattr(self, "fly_say"):
-                self.fly_say.set(str(st["last_tx_text"]))
 
     def _build_traffic(self) -> None:
         f = self.tab_traffic

@@ -61,8 +61,11 @@ _CHAT_STATE_KEYS = (
     "tanker_chat_llm_note",
     "tanker_chat_guard_until",
     "tanker_chat_last_spoke",
+    "tanker_chat_last_canned",
+    "tanker_chat_said",
 )
 
+CHAT_STATE_KEYS = _CHAT_STATE_KEYS
 SEAT_STATE_KEYS = _TANKER_STATE_KEYS + _CHAT_STATE_KEYS
 
 # Copied to the other ship in the element (1-2 or 3-4). Not boom chat.

@@ -56,6 +56,9 @@ _SHARED_FLOW_KEYS = (
     "pending_contact",
     "control_checked_in",
     "control_channel",
+    "blackjack_checked_in",
+    "clearance_amendment_copied",
+    "amended_altitude_ft",
     "approach_plan",
     "manual_cursor",
     "active_takeoff_mode",
@@ -594,7 +597,7 @@ def run_tanker_chat_command(
     ):
         return {"action": "none", "detail": "tanker chat not due"}
     if text:
-        if body.get("await_pilot"):
+        if body.get("await_pilot") or tanker_chat_mod.invites_reply(text):
             tanker_chat_mod.hold_for_pilot(engine.state, text)
         else:
             tanker_chat_mod.schedule_next_question(engine.state, llm=True)
@@ -640,6 +643,7 @@ def _shared_flow_state(state: dict[str, Any] | None) -> dict[str, Any]:
     out = {key: state[key] for key in _SHARED_FLOW_KEYS if key in state}
     out.setdefault("index", int(state.get("index") or 0))
     out.setdefault("awaiting_readback", False)
+    out.setdefault("blackjack_checked_in", False)
     return out
 
 

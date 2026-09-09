@@ -155,6 +155,9 @@ HANDOFF_PENDING_BY_TEMPLATE: dict[str, str] = {
     "departure_handoff": "blackjack",
     "bandsaw_check_out": "blackjack",
     "joshua_check_out": "blackjack",
+    # OPS start / WORDS+start → Clearance Delivery (sandbox, not a flow step).
+    "ops_words": "delivery",
+    "ops_start": "delivery",
 }
 
 
@@ -212,6 +215,75 @@ def is_default_sandbox(config: dict[str, Any] | None) -> bool:
     """True when the Host is on Nellis Default (agency sandbox, not a custom Plan)."""
     raw = str((config or {}).get("flow_file") or "").strip() or DEFAULT_FLOW_NAME
     return Path(raw).name.lower() == DEFAULT_FLOW_NAME
+
+
+# After these, Fly should show the next call on that agency (checkout / handoff).
+_AGENCY_FOLLOW_ON = frozenset(
+    {
+        "bandsaw_check_out",
+        "joshua_check_out",
+        "control_handoff",
+    }
+)
+
+
+def _agency_step_channels(channel: str) -> frozenset[str]:
+    ch = str(channel or "").strip().lower()
+    if ch in CONTROL:
+        return CONTROL
+    return frozenset({ch}) if ch else frozenset()
+
+
+def display_step_for_agency(
+    steps: list[dict[str, Any]] | None,
+    channel: str,
+    *,
+    cursor_index: int = 0,
+    last_tx_template: str = "",
+) -> dict[str, Any] | None:
+    """
+    Timeline step Fly should show when the radio is on this agency.
+
+    Blackjack check-in holds the shared cursor so optional Bandsaw does not
+    steal it. Tune to Bandsaw → Bandsaw check-in, not the Blackjack hold.
+    """
+    want = _agency_step_channels(channel)
+    if not want:
+        return None
+    matches: list[tuple[int, dict[str, Any]]] = []
+    for i, step in enumerate(steps or []):
+        if not isinstance(step, dict):
+            continue
+        if step.get("enabled", True) is False:
+            continue
+        ch = str(step.get("channel") or "").strip().lower()
+        if ch in want:
+            matches.append((i, step))
+    if not matches:
+        return None
+    try:
+        cur = int(cursor_index or 0)
+    except (TypeError, ValueError):
+        cur = 0
+    pick = matches[0][1]
+    for i, step in matches:
+        if i >= cur:
+            pick = step
+            break
+    last = str(last_tx_template or "").strip().lower()
+    if not last:
+        return pick
+    for i, step in matches:
+        tmpl = str(step.get("template") or "").strip().lower()
+        if tmpl != last:
+            continue
+        later = [m for m in matches if m[0] > i]
+        if later and str(later[0][1].get("template") or "").strip().lower() in (
+            _AGENCY_FOLLOW_ON
+        ):
+            return later[0][1]
+        return step
+    return pick
 
 
 # Control areas inferred from a filed route + Opus reserved airspace.
@@ -729,6 +801,9 @@ def reset_contact(state: dict[str, Any] | None) -> None:
     state["last_agency"] = "delivery"
     state.pop("control_checked_in", None)
     state.pop("control_channel", None)
+    state.pop("blackjack_checked_in", None)
+    state.pop("clearance_amendment_copied", None)
+    state.pop("amended_altitude_ft", None)
     state.pop("pending_contact", None)
 
 

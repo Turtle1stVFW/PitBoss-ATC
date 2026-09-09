@@ -134,6 +134,19 @@ _RADIO_DIGIT_GLUE_SUFFIX = frozenset(
         "knots",
         "thousand",
         "hundred",
+        "zulu",
+        "current",
+    }
+)
+# Names that stick to a following digit run (bullseye / Local N) — not callsigns.
+_RADIO_DIGIT_GLUE_LEAD = frozenset(
+    {
+        "elvis",
+        "desert",
+        "local",
+        "bullseye",
+        "braa",
+        "brad",
     }
 )
 # Conversational range/clock tails after a digit run (alpha: "… fife twenty five").
@@ -2674,6 +2687,13 @@ def _with_nellis_control(state: dict[str, Any] | None) -> bool:
         return True
     if last_tx in ("control_east", "control_west"):
         return True
+    # "Contact Nellis Control" is still outstanding — Blackjack sent them
+    # there, nobody has spoken on NATCF yet, so Approach is not next.
+    if str(st.get("pending_contact") or "").strip().lower() in (
+        "control_east",
+        "control_west",
+    ):
+        return False
     return bool(st.get("control_checked_in"))
 
 
@@ -3205,6 +3225,93 @@ def resolve_departure_cross(
     return _flip_runway_side(rwy) or ""
 
 
+_LUAW_TEMPLATES = frozenset({"lineup", "line_up_and_wait"})
+
+
+def spoken_departure_cross(
+    taxi: dict[str, str] | None,
+    *,
+    template: str,
+    state: dict[str, Any] | None = None,
+    airport: dict[str, Any] | None = None,
+    runway: str = "",
+    config: dict[str, Any] | None = None,
+) -> str:
+    """
+    Parallel crossing for this Tower call.
+
+    LUAW from the west EOR to 21L includes the 21R cross. Once they are in
+    position (or LUAW already cleared the cross), takeoff must not say it again.
+    """
+    cross = str((taxi or {}).get("departure_cross") or "").strip()
+    if not cross:
+        return ""
+    tmpl = str(template or "").strip().lower()
+    last = ""
+    issued = ""
+    if isinstance(state, dict):
+        last = str(state.get("last_tx_template") or "").strip().lower()
+        issued = str(state.get("departure_cross_issued") or "").strip()
+    if tmpl in _TAKEOFF_CLEARANCE_TEMPLATES:
+        if last in _LUAW_TEMPLATES:
+            note_departure_cross_issued(state, cross)
+            return ""
+        if normalize_runway(issued) == normalize_runway(cross):
+            return ""
+        assigned = normalize_runway(runway) or str(runway or "").strip().upper()
+        if assigned and airport is not None:
+            try:
+                ll = ownship_latlon(config, state=state) or _ownship_ll_from_state(
+                    state
+                )
+            except Exception:
+                ll = None
+            if ll:
+                try:
+                    import runway_position as rp
+
+                    x_m, z_m = caoc_ll_to_xz(float(ll[0]), float(ll[1]))
+                    if rp.occupied_runway_of_pair(airport, assigned, x_m, z_m) == assigned:
+                        return ""
+                except Exception:
+                    pass
+    return cross
+
+
+def note_departure_cross_issued(
+    state: dict[str, Any] | None, cross: str
+) -> None:
+    if not isinstance(state, dict):
+        return
+    n = normalize_runway(cross) or str(cross or "").strip().upper()
+    if n:
+        state["departure_cross_issued"] = n
+
+
+def departure_cross_phrase(
+    taxi: dict[str, str] | None,
+    *,
+    template: str,
+    state: dict[str, Any] | None = None,
+    airport: dict[str, Any] | None = None,
+    runway: str = "",
+    config: dict[str, Any] | None = None,
+) -> str:
+    """'cross runway …, ' for this call, or empty. Stamps the issued strip."""
+    cross = spoken_departure_cross(
+        taxi,
+        template=template,
+        state=state,
+        airport=airport,
+        runway=runway,
+        config=config,
+    )
+    if not cross:
+        return ""
+    note_departure_cross_issued(state, cross)
+    return f"cross runway {speak_runway(cross)}, "
+
+
 def landing_runway_now(
     airport: dict[str, Any] | None,
     assigned: str,
@@ -3380,6 +3487,270 @@ def random_initial_climb_feet(fixed: int | None = None) -> int:
     return random.randint(12, 17) * 1000
 
 
+# Nellis MSA 11,300. CD will not clear below the first legal VFR / IFR stop.
+NELLIS_MSA_FT = 11300
+CLEARANCE_MIN_VFR_FT = 11500
+CLEARANCE_MIN_IFR_FT = 12000
+
+
+def clearance_flight_rules(
+    opus: OpusFlightContext | None,
+    airport: dict[str, Any] | None = None,
+) -> str:
+    """
+    'vfr' or 'ifr' for a Delivery clearance.
+
+    Flex / visual DP and an explicit VFR remark are VFR. Everything else
+    with a filed plan is IFR (instrument SID or as-filed).
+    """
+    remarks = str((opus.fp_remarks if opus else None) or "").upper()
+    if re.search(r"(^|[^A-Z])VFR([^A-Z]|$)", remarks):
+        return "vfr"
+    if re.search(r"(^|[^A-Z])IFR([^A-Z]|$)", remarks):
+        return "ifr"
+    dep = match_departure(airport, opus.fp_route_string if opus else None)
+    if dep.is_visual:
+        return "vfr"
+    return "ifr"
+
+
+def clearance_min_altitude_ft(rules: str) -> int:
+    """Lowest assigned / filed altitude Delivery will accept (MSA stop)."""
+    return CLEARANCE_MIN_VFR_FT if str(rules or "").strip().lower() == "vfr" else CLEARANCE_MIN_IFR_FT
+
+
+def _catalog_altitude_ft(value: Any) -> int | None:
+    n = _parse_climb_ft(value)
+    if n is None:
+        try:
+            n = int(value)
+        except (TypeError, ValueError):
+            return None
+    if 5000 <= n <= 45000:
+        return n
+    return None
+
+
+def _fix_altitude_map(raw: Any) -> dict[str, int]:
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, int] = {}
+    for key, val in raw.items():
+        n = _catalog_altitude_ft(val)
+        if n is None:
+            continue
+        tok = _normalize_dep_token(str(key))
+        if tok:
+            out[tok] = n
+    return out
+
+
+def _matched_departure_entry(
+    catalog: dict[str, Any] | None,
+    dep: DepartureMatch,
+) -> dict[str, Any] | None:
+    if not catalog:
+        return None
+    want = str(dep.instrument_id or dep.visual_id or "").strip()
+    if not want:
+        return None
+    for group in ("instrument", "visual"):
+        for entry in catalog.get(group) or []:
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get("id") or "").strip() == want:
+                return entry
+    return None
+
+
+def _route_fix_altitude(
+    airport: dict[str, Any] | None,
+    route: str | None,
+    dep: DepartureMatch,
+    mapping: dict[str, int],
+) -> int:
+    """Highest mapped altitude that appears on the route or matched transition."""
+    if not mapping:
+        return 0
+    dep_icao = str((airport or {}).get("icao") or "").strip().upper() or None
+    tokens = _enroute_tokens(route, dep_icao=dep_icao)
+    hits = [mapping[tok] for tok in tokens if tok in mapping]
+    if hits:
+        return max(hits)
+    if dep.transition_id:
+        key = _normalize_dep_token(dep.transition_id)
+        if key in mapping:
+            return mapping[key]
+    return 0
+
+
+@dataclass
+class DepartureAltitudePlan:
+    """How NATCF would treat this plan — MSA hard, SID crossings IFR-only."""
+
+    rules: str
+    msa_ft: int
+    crossing_ft: int
+    usual_ft: int
+    typical_ft: int
+    required_ft: int
+    assigned_ft: int
+    visual: bool
+    instrument: bool
+
+
+def departure_altitude_plan(
+    airport: dict[str, Any] | None,
+    opus: OpusFlightContext | None,
+    *,
+    rules: str | None = None,
+) -> DepartureAltitudePlan:
+    """
+    Virtual NATCF altitude judgment for this filed route.
+
+    Hard gates: MSA, and published crossings only on an instrument SID
+    (climb via). Flex / visual DPs use a typical band — Flex west often
+    stays in the low teens; Flex north usually 15–17k, sometimes 19k
+    toward JUNNO. Filing above MSA on Flex is left alone.
+    """
+    rules_s = rules or clearance_flight_rules(opus, airport)
+    msa = clearance_min_altitude_ft(rules_s)
+    catalog = load_departure_catalog(airport or {}) or {}
+    route = opus.fp_route_string if opus else None
+    dep = match_departure(airport or {}, route)
+    entry = _matched_departure_entry(catalog, dep) or {}
+    visual = bool(dep.is_visual)
+    instrument = bool(dep.instrument_say)
+    crossing = _route_fix_altitude(
+        airport, route, dep, _fix_altitude_map(entry.get("crossing_ft"))
+    )
+    if not crossing and instrument:
+        cmap = _fix_altitude_map(entry.get("crossing_ft"))
+        if cmap:
+            crossing = max(cmap.values())
+    usual = _route_fix_altitude(
+        airport, route, dep, _fix_altitude_map(entry.get("usual_ft"))
+    )
+    typical = _catalog_altitude_ft(entry.get("typical_ft"))
+    if typical is None:
+        typical = _catalog_altitude_ft(entry.get("cruise_ft"))
+    if typical is None:
+        typical = _catalog_altitude_ft(catalog.get("default_typical_ft"))
+    if typical is None:
+        typical = _catalog_altitude_ft(catalog.get("default_cruise_ft"))
+    if typical is None:
+        typical = 15000
+    required = msa
+    if instrument and crossing:
+        required = max(msa, crossing)
+    assigned = max(int(typical), msa, usual, crossing if instrument else 0)
+    return DepartureAltitudePlan(
+        rules=rules_s,
+        msa_ft=msa,
+        crossing_ft=int(crossing or 0),
+        usual_ft=int(usual or 0),
+        typical_ft=int(typical),
+        required_ft=int(required),
+        assigned_ft=int(assigned),
+        visual=visual,
+        instrument=instrument,
+    )
+
+
+def departure_published_cruise_ft(
+    airport: dict[str, Any] | None,
+    opus: OpusFlightContext | None,
+) -> int:
+    """Typical cruise CD would assign for this departure (not a hard plate)."""
+    return departure_altitude_plan(airport, opus).assigned_ft
+
+
+def departure_crossing_ft(
+    airport: dict[str, Any] | None,
+    opus: OpusFlightContext | None,
+) -> int:
+    """Published IFR SID crossing on this route, else 0."""
+    return departure_altitude_plan(airport, opus).crossing_ft
+
+
+def clearance_required_altitude_ft(
+    airport: dict[str, Any] | None,
+    opus: OpusFlightContext | None,
+    *,
+    rules: str | None = None,
+) -> int:
+    """Lowest cruise CD will accept — MSA, plus IFR SID crossings only."""
+    return departure_altitude_plan(airport, opus, rules=rules).required_ft
+
+
+def clearance_assigned_cruise_ft(
+    airport: dict[str, Any] | None,
+    opus: OpusFlightContext | None,
+    *,
+    rules: str | None = None,
+) -> int:
+    """Cruise CD assigns when the filed altitude is missing or below the hard gate."""
+    return departure_altitude_plan(airport, opus, rules=rules).assigned_ft
+
+
+def clearance_msa_amendment(
+    airport: dict[str, Any] | None,
+    opus: OpusFlightContext | None,
+) -> tuple[bool, int, str]:
+    """
+    Whether Delivery must amend the filed altitude.
+
+    Amend when there is no altitude, it is below MSA, or an instrument SID
+    is filed below a published crossing (MINTT 17k / JUNNO 19k). Flex and
+    other visual DPs are not held to those crossings — a legal Flex-west
+    13,000 stays 13,000.
+
+    Returns (needed, amend_to_ft, rules). No flight plan → no amendment
+    (CD already says nothing is on file).
+    """
+    if not opus or not opus.has_filed_plan:
+        return False, 0, "ifr"
+    plan = departure_altitude_plan(airport, opus)
+    filed = filed_altitude_feet(opus.fp_altitude)
+    if filed is None or filed < plan.required_ft:
+        return True, plan.assigned_ft, plan.rules
+    return False, plan.assigned_ft, plan.rules
+
+
+def effective_clearance_template(
+    template: str,
+    airport: dict[str, Any] | None = None,
+    opus: OpusFlightContext | None = None,
+    state: dict[str, Any] | None = None,
+) -> str:
+    """Remap clearance → amendment until the pilot is ready to copy."""
+    tmpl = str(template or "").strip()
+    if tmpl != "clearance":
+        return tmpl
+    if isinstance(state, dict) and state.get("clearance_amendment_copied"):
+        return "clearance"
+    needed, _floor, _rules = clearance_msa_amendment(airport, opus)
+    if needed:
+        return "clearance_amendment"
+    return "clearance"
+
+
+def build_clearance_amendment(
+    airport: dict[str, Any],
+    callsign: str,
+    *,
+    channel: str | None = None,
+) -> str:
+    """CD: amendment on file — wait for ready-to-copy before the clearance."""
+    name = airport["name"]
+    agency = clearance_spoken_agency(airport, channel=channel or "delivery")
+    cs = speak_callsign(callsign)
+    return (
+        f"{cs}, {name} {agency}, I have an amendment to your flight plan, "
+        f"advise ready to copy."
+    )
+
+
 def filed_altitude_feet(fp_altitude: str | None) -> int | None:
     """
     Opus filed altitude → feet.
@@ -3403,6 +3774,26 @@ def filed_altitude_feet(fp_altitude: str | None) -> int | None:
     return None
 
 
+def effective_filed_altitude_ft(
+    opus: OpusFlightContext | None = None,
+    state: dict[str, Any] | None = None,
+) -> int | None:
+    """
+    Cruise altitude in use: CD amendment first, then Opus, then state.
+
+    After Delivery amends a too-low / missing filed altitude, Opus still
+    shows the old number — Departure must climb to the assigned cruise.
+    """
+    opus_filed = filed_altitude_feet(opus.fp_altitude if opus else None)
+    state_filed = _parse_climb_ft((state or {}).get("filed_altitude_ft"))
+    amended = _parse_climb_ft((state or {}).get("amended_altitude_ft"))
+    if isinstance(state, dict) and (
+        state.get("clearance_amendment_copied") or amended is not None
+    ):
+        return amended or state_filed or opus_filed
+    return opus_filed or state_filed
+
+
 def cruise_climb_target_ft(
     opus: OpusFlightContext | None = None,
     *,
@@ -3414,9 +3805,7 @@ def cruise_climb_target_ft(
 
     None → skip the cruise-amendment step (already at cruise, or no FP).
     """
-    filed = filed_altitude_feet(opus.fp_altitude if opus else None)
-    if filed is None:
-        filed = _parse_climb_ft((state or {}).get("filed_altitude_ft"))
+    filed = effective_filed_altitude_ft(opus, state)
     if filed is None:
         return None
     interim = resolve_shared_climb_ft(step=None, mission=mission, state=state)
@@ -3480,9 +3869,7 @@ def should_skip_cruise_climb_step(
     if str((step or {}).get("template") or "") != "climb_cruise":
         return False
     assigned = _parse_climb_ft((state or {}).get("departure_assigned_ft"))
-    filed = filed_altitude_feet(opus.fp_altitude if opus else None)
-    if filed is None:
-        filed = _parse_climb_ft((state or {}).get("filed_altitude_ft"))
+    filed = effective_filed_altitude_ft(opus, state)
     if assigned is not None and filed is not None and assigned >= filed:
         return True
     return cruise_climb_target_ft(opus, mission=mission, state=state) is None
@@ -3494,7 +3881,7 @@ def unrestricted_climb_ceiling_ft(opus: OpusFlightContext | None) -> int | None:
 
     Returns None when there is no filed altitude to clear to.
     """
-    return filed_altitude_feet(opus.fp_altitude if opus else None)
+    return effective_filed_altitude_ft(opus)
 
 
 def speak_unrestricted_ceiling(
@@ -4361,7 +4748,12 @@ def should_skip_control_step(
     if not step or str(step.get("template") or "") != "control_check_in":
         return False
     st = state if isinstance(state, dict) else {}
-    if st.get("control_checked_in"):
+    pending = str(st.get("pending_contact") or "").strip().lower()
+    checked_in = bool(st.get("control_checked_in")) and pending not in (
+        "control_east",
+        "control_west",
+    )
+    if checked_in:
         return True
     want = str(st.get("control_channel") or "").strip().lower()
     ch = str(step.get("channel") or "").strip().lower()
@@ -4441,7 +4833,12 @@ def readback_template_for_step(
 ) -> str:
     """Template the READ BACK card should use — what ATC actually said."""
     tmpl = str((step or {}).get("template") or "").strip()
-    return effective_takeoff_template(tmpl, mission, state)
+    tmpl = effective_takeoff_template(tmpl, mission, state)
+    if tmpl == "clearance" and isinstance(state, dict):
+        last = str(state.get("last_tx_template") or "").strip().lower()
+        if last == "clearance_amendment" and not state.get("clearance_amendment_copied"):
+            return "clearance_amendment"
+    return tmpl
 
 
 def requested_runway(
@@ -4536,6 +4933,9 @@ def pilot_requests_for_channel(
         ) and not key.startswith("tanker_chat_choice_") and not (
             isinstance(state, dict) and str(state.get("tanker_callsign") or "").strip()
         ):
+            continue
+        # Start / stop swap with the live session — fly_request_rows owns them.
+        if key in ("tanker_chat_start", "tanker_chat_stop"):
             continue
         out.append((key, lab))
     try:
@@ -8989,6 +9389,7 @@ def squawk_clearance_phrase(
 AWAITING_READBACK_TEMPLATES = frozenset(
     {
         "clearance",
+        "clearance_amendment",
         "taxi",
         "clear_takeoff",
         "lineup",
@@ -9068,6 +9469,16 @@ def build_readback_checklist(
                 "hinge": bool(hinge),
             }
         )
+
+    if tmpl == "clearance_amendment":
+        add(
+            "copy",
+            "Ready",
+            "ready to copy",
+            "ready to copy",
+            hinge=True,
+        )
+        return items
 
     if tmpl == "clearance":
         if not opus or not opus.has_filed_plan:
@@ -9184,7 +9595,9 @@ def build_readback_checklist(
             )
         if tmpl in ("clear_takeoff", "lineup", "line_up_and_wait") and rwy:
             taxi = resolve_taxi_route(airport, rwy, opus=opus)
-            dep_cross = str((taxi or {}).get("departure_cross") or "").strip()
+            dep_cross = spoken_departure_cross(
+                taxi, template=tmpl, state=state, airport=airport, runway=rwy
+            )
             if dep_cross:
                 add(
                     "cross",
@@ -9615,10 +10028,30 @@ def build_clearance_delivery(
         remain = _pick("remain this frequency", "say intentions")
         return f"{cs}, {name} {agency}, {no_fp}, {remain}.", 0
 
-    filed_alt = speak_filed_altitude(opus.fp_altitude if opus else None)
+    needed, assigned, rules = clearance_msa_amendment(airport, opus)
+    msa_min = clearance_min_altitude_ft(rules)
+    amended = _parse_climb_ft((state or {}).get("amended_altitude_ft")) if isinstance(state, dict) else None
+    copied = bool(isinstance(state, dict) and state.get("clearance_amendment_copied"))
+    use_filed = filed_altitude_feet(opus.fp_altitude if opus else None)
+    if copied and needed:
+        use_filed = assigned
+        if amended is not None and amended > assigned:
+            use_filed = amended
+        if isinstance(state, dict):
+            state["amended_altitude_ft"] = int(use_filed)
+            state["filed_altitude_ft"] = int(use_filed)
+    filed_alt = (
+        speak_altitude_value(str(use_filed), prefer_fl_below=1000)
+        if use_filed
+        else speak_filed_altitude(opus.fp_altitude if opus else None)
+    )
     squawk = squawk_clearance_phrase(opus, state=state)
     dep_clause = speak_departure_freq_or_local(airport)
     climb_ft = random_initial_climb_feet(initial_climb_ft)
+    if climb_ft < msa_min:
+        climb_ft = msa_min
+    if copied and needed and use_filed:
+        climb_ft = int(use_filed)
     climb = speak_altitude_value(str(climb_ft), prefer_fl_below=1000)
     minutes = expect_minutes_value(airport)
     natural = speak_minutes_natural(minutes)
@@ -9641,11 +10074,13 @@ def build_clearance_delivery(
 
     has_instrument_sid = bool(dep_match.instrument_say)
     # Vertical: instrument SID → climb via the SID. VFR Flex is not a SID.
+    # After an altitude amendment, keep published climb and expect the cruise.
     if dep_match.is_visual:
         parts.append("climb as published")
         if filed_alt:
             parts.append(f"expect {filed_alt} {natural} minutes after departure")
-        climb_ft = 0
+        if not (copied and needed):
+            climb_ft = 0
     elif has_instrument_sid:
         direct_alt = (
             f"climb and maintain {climb}, expect {filed_alt} {natural} minutes after departure"
@@ -9653,7 +10088,11 @@ def build_clearance_delivery(
             else f"climb and maintain {climb}"
         )
         sid_climb = "climb via the SID"
-        if initial_climb_ft is not None:
+        if copied and needed:
+            parts.append(sid_climb)
+            if filed_alt:
+                parts.append(f"expect {filed_alt} {natural} minutes after departure")
+        elif initial_climb_ft is not None:
             # Rebuild/Hear: keep published-SID climb (don't re-roll to direct)
             parts.append(sid_climb)
         else:
@@ -10959,8 +11398,19 @@ def build_template_text(
     mission: dict[str, Any] | None = None,
     config: dict[str, Any] | None = None,
     state: dict[str, Any] | None = None,
+    commit: bool = True,
 ) -> str:
+    """
+    Speech for one template.
+
+    commit=False renders without recording that the call went out on the radio.
+    Fly / Plan previews build the *upcoming* phrase against live state; marking
+    a check-in there let Watch skip the step the pilot never heard.
+    """
     template = effective_takeoff_template(template, mission=mission, state=state)
+    template = effective_clearance_template(
+        template, airport=airport, opus=opus, state=state
+    )
     name = airport["name"]
     cs = speak_callsign(callsign)
     rwy = speak_runway(runway)
@@ -10989,6 +11439,10 @@ def build_template_text(
         # Refresh where the jet is so the recovery/plate can be picked from it.
         ownship_latlon(config, callsign=callsign, opus=opus, state=state)
 
+    if template == "clearance_amendment":
+        return build_clearance_amendment(
+            airport, callsign, channel=channel or "delivery"
+        )
     if template == "clearance":
         text, used_climb = build_clearance_delivery(
             airport,
@@ -11088,8 +11542,14 @@ def build_template_text(
         reply = ""
         if isinstance(state, dict):
             reply = str(state.get("rolling_offer_reply") or "").strip().casefold()
-        cross = str(taxi.get("departure_cross") or "").strip()
-        cross_bit = f"cross runway {speak_runway(cross)}, " if cross else ""
+        cross_bit = departure_cross_phrase(
+            taxi,
+            template=template,
+            state=state,
+            airport=airport,
+            runway=runway,
+            config=config,
+        )
         if reply == "deny":
             return (
                 f"No worries, {cs}, {name} Tower, {cross_bit}runway {rwy}, "
@@ -11105,14 +11565,20 @@ def build_template_text(
     if template == "clear_takeoff":
         # Switch to departure in the takeoff clearance (change freq before roll).
         # Unrestricted (when approved) leads: climb unrestricted up to FL…, winds…
-        # From the west EOR to 21L: cross 21R in the same call.
+        # From the west EOR to 21L: cross 21R here only if LUAW did not.
         unres = unrestricted_climb_prefix(state, opus)
         reply = ""
         if isinstance(state, dict):
             reply = str(state.get("rolling_offer_reply") or "").strip().casefold()
         dep = takeoff_departure_switch()
-        dep_cross = str(taxi.get("departure_cross") or "").strip()
-        cross_bit = f"cross runway {speak_runway(dep_cross)}, " if dep_cross else ""
+        cross_bit = departure_cross_phrase(
+            taxi,
+            template=template,
+            state=state,
+            airport=airport,
+            runway=runway,
+            config=config,
+        )
         if reply == "accept":
             return with_freq_handoff_closer(
                 f"{cs}, {name} Tower, thanks, {cross_bit}{wind}, runway {rwy}, "
@@ -11135,8 +11601,14 @@ def build_template_text(
         if isinstance(state, dict):
             reply = str(state.get("rolling_offer_reply") or "").strip().casefold()
         dep = takeoff_departure_switch()
-        dep_cross = str(taxi.get("departure_cross") or "").strip()
-        cross_bit = f"cross runway {speak_runway(dep_cross)}, " if dep_cross else ""
+        cross_bit = departure_cross_phrase(
+            taxi,
+            template=template,
+            state=state,
+            airport=airport,
+            runway=runway,
+            config=config,
+        )
         if reply == "accept":
             return with_freq_handoff_closer(
                 f"{cs}, {name} Tower, thanks, {cross_bit}{wind}, runway {rwy}, "
@@ -11149,8 +11621,14 @@ def build_template_text(
     if template == "clear_takeoff_intersection":
         unres = unrestricted_climb_prefix(state, opus)
         ix = taxi.get("intersection") or ("Delta" if str(runway).upper().startswith("21") else "Bravo")
-        dep_cross = str(taxi.get("departure_cross") or "").strip()
-        cross_bit = f"cross runway {speak_runway(dep_cross)}, " if dep_cross else ""
+        cross_bit = departure_cross_phrase(
+            taxi,
+            template=template,
+            state=state,
+            airport=airport,
+            runway=runway,
+            config=config,
+        )
         return with_freq_handoff_closer(
             f"{cs}, {name} Tower, {unres}{cross_bit}{wind}, runway {rwy} at {ix}, "
             f"cleared for takeoff, {takeoff_departure_switch()}"
@@ -11305,6 +11783,8 @@ def build_template_text(
         return build_vfr_recovery_clearance(airport, callsign, plan=plan)
     if template == "bj_check_in":
         # Check-in: radar contact (CAOC), OPUS airspace (≤2), VUL, altimeter, tactical.
+        if commit and isinstance(state, dict):
+            state["blackjack_checked_in"] = True
         alpha_spoken = None
         if config:
             fix = resolve_alpha_bullseye(config, callsign=callsign, opus=opus)
@@ -11384,7 +11864,7 @@ def build_template_text(
             opus=opus,
             force=False,
         )
-        if isinstance(state, dict) and next_ch:
+        if commit and isinstance(state, dict) and next_ch:
             state["control_channel"] = next_ch
         return build_blackjack_range_exit(
             airport, callsign, handoff_channel=next_ch
@@ -11446,7 +11926,7 @@ def build_template_text(
             opus=opus,
             force=False,
         )
-        if isinstance(state, dict):
+        if commit and isinstance(state, dict):
             state["control_checked_in"] = True
         return build_control_check_in(
             callsign,
@@ -11489,7 +11969,7 @@ def build_template_text(
             clock = ops_mod.resolve_ops_clock(config)
             words = ops_mod.current_words(config, opus=opus, when=clock)
             already = False
-            if isinstance(state, dict):
+            if commit and isinstance(state, dict):
                 existing = ops_mod.sortie_from_state(state)
                 already = bool(existing and existing.start_utc)
                 if not already:
@@ -11556,6 +12036,7 @@ def build_phrase(
 
 TEMPLATE_CHOICES = [
     ("clearance", "Delivery — Clearance"),
+    ("clearance_amendment", "Delivery — Flight-plan amendment"),
     ("clearance_readback", "Delivery — Readback correct"),
     ("taxi", "Ground — Taxi to EOR"),
     ("monitor_tower", "Ground — Monitor tower"),
@@ -11629,7 +12110,13 @@ def build_flow_step_phrase(
     mission: dict[str, Any] | None = None,
     state: dict[str, Any] | None = None,
     config: dict[str, Any] | None = None,
+    commit: bool = True,
 ) -> tuple[str, str, float, str]:
+    """
+    Speech + radio for one flow step.
+
+    commit=False for previews — render the words without recording the call.
+    """
     if custom_text and custom_text.strip():
         # Placeholders for custom TTS; clearance fields filled from Opus when available
         cs = speak_callsign(callsign)
@@ -11698,10 +12185,11 @@ def build_flow_step_phrase(
             mission=mission,
             config=config,
             state=state,
+            commit=commit,
         )
         # Sticky shared climb: Delivery clearance ↔ Center radar.
         # Radar contact may amend to filed cruise — do not rewrite Delivery's interim.
-        if climb_out:
+        if climb_out and commit:
             if tmpl == "radar_contact":
                 if isinstance(state, dict):
                     state["departure_assigned_ft"] = int(climb_out[0])
@@ -12440,17 +12928,13 @@ def _iter_glued_runs(clause: str) -> list[tuple[str, list[str]]]:
                 continue
         if _is_radio_digit_token(words[i]):
             run, j = _collect_digit_run(words, i)
-            # Pull a preceding bullseye/fix name into the run so Chirp does not
-            # list-pause between "elvis" and "three zero fife…".
+            # Pull a preceding bullseye / Local label into the run so Chirp does
+            # not list-pause between "elvis" and "three zero fife…". Do not glue
+            # callsigns or "now" — that made "Fleece one" / "time now two…" weird.
             if pieces and pieces[-1][0] == "word":
                 prev = pieces[-1][1][0]
                 prev_l = prev.casefold()
-                if (
-                    prev_l not in _RADIO_DIGIT_GLUE_PREFIX
-                    and prev_l not in _RADIO_DIGIT_TOKENS
-                    and prev_l not in {"a", "an", "the", "and", "or", "to", "of"}
-                    and len(prev_l) <= 16
-                ):
+                if prev_l in _RADIO_DIGIT_GLUE_LEAD or prev_l in _RADIO_DIGIT_GLUE_PREFIX:
                     run = [prev] + run
                     pieces.pop()
             pieces.append(("run" if len(run) >= 2 else "word", run))
@@ -12497,19 +12981,21 @@ def prepare_radio_tts_chirp_text(text: str, voice: str | None = None) -> str:
     """
     Continuous plain text for Chirp 3: HD.
 
-    Chirp stacks its own breaths on SSML <break>/<s>, so we keep real commas /
-    periods as characters and glue digit runs with NBSP — closer to Neural flow.
+    Chirp stacks its own breaths on SSML <break>/<s>, so we avoid hard sentence
+    periods mid-call (commas only) and glue digit runs with NBSP.
     """
     segments = _radio_tts_segments(text, voice=voice)
     if not segments:
         return ""
     out: list[str] = []
-    for clause, pause in segments:
+    for idx, (clause, pause) in enumerate(segments):
         out.append(_glue_digit_runs_plain(clause))
+        is_last = idx == len(segments) - 1
         if pause == "comma":
             out.append(",")
         elif pause == "period":
-            out.append(".")
+            # Mid-call: soft comma. Final clause: keep a single end stop.
+            out.append("." if is_last else ",")
     s = " ".join(out)
     s = re.sub(r"\s+,", ",", s)
     s = re.sub(r"\s+\.", ".", s)

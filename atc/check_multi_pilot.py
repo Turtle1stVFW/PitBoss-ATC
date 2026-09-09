@@ -851,6 +851,64 @@ def test_client_tanker_chat_gap() -> list[str]:
     return fails
 
 
+def test_voice_tanker_chat_updates_flow_state() -> list[str]:
+    """Voice start/stop must land on the seat flow_state Fly paints from."""
+    fails: list[str] = []
+    spoken: list[str] = []
+
+    def tx(job: dict) -> int:
+        spoken.append(str(job.get("text") or ""))
+        return 0
+
+    server = atc_server.AtcServer(
+        _host_config(), AIRPORTS, lambda: copy.deepcopy(MISSION), transmit_fn=tx
+    )
+    hello = server.hello(
+        {
+            "opus_flight_id": 11,
+            "opus_seat": 1,
+            "callsign_override": "WILD 6",
+            "radio_fresh": False,
+        }
+    )
+    sess = server.get_session(hello["session_id"])
+    if sess is None:
+        return ["hello did not create a session"]
+    sess.local_state = {
+        "tanker_overlay": True,
+        "tanker_callsign": "TEXACO 1",
+        "tanker_freq_mhz": 317.5,
+    }
+    started = server.handle_intent(
+        sess,
+        {
+            "intent": "tanker_chat_start",
+            "kind": "request",
+            "transcript": "how's it going",
+            "normalized": "how's it going",
+            "radio_fresh": False,
+        },
+    )
+    fs = started.get("flow_state") if isinstance(started.get("flow_state"), dict) else {}
+    row = fs.get("tanker_chat") if isinstance(fs.get("tanker_chat"), dict) else {}
+    if not row.get("session"):
+        fails.append(f"voice start should set tanker_chat.session on flow_state, got {fs}")
+    stopped = server.handle_intent(
+        sess,
+        {
+            "intent": "tanker_chat_stop",
+            "kind": "request",
+            "transcript": "talk later",
+            "normalized": "talk later",
+            "radio_fresh": False,
+        },
+    )
+    fs2 = stopped.get("flow_state") if isinstance(stopped.get("flow_state"), dict) else {}
+    if fs2.get("tanker_chat"):
+        fails.append(f"voice stop should clear tanker_chat on flow_state, got {fs2}")
+    return fails
+
+
 def test_wild6_ownship_and_shared_cursor() -> list[str]:
     fails: list[str] = []
     if not atc_phrase.same_flight_callsign("WILD 6", "WILD 61"):
@@ -990,6 +1048,7 @@ def main() -> int:
         test_secret_redaction_and_session_tts_cap,
         test_client_auto_play_from_watch,
         test_client_tanker_chat_gap,
+        test_voice_tanker_chat_updates_flow_state,
         test_wild6_ownship_and_shared_cursor,
     )
     bad = 0

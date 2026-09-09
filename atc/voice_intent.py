@@ -131,6 +131,8 @@ def cue_channel(
     cursor_channel: str,
     tuned_channel: str | None,
     last_tx_channel: str = "",
+    pending_contact: str = "",
+    ops_start_done: bool = False,
 ) -> str:
     """
     Agency the Fly tip should address — who you are calling next.
@@ -142,13 +144,19 @@ def cue_channel(
     cursor = (cursor_channel or "").strip().lower()
     tuned = (tuned_channel or "").strip().lower()
     last_tx = (last_tx_channel or "").strip().lower()
+    pending = (pending_contact or "").strip().lower()
     phase = normalize_mission_phase(mission_phase, channel=cursor)
+    # After OPS start approved, tip Delivery once they leave OPS (or radio is
+    # unknown). While still tuned to OPS, tips stay OPS but add "change to
+    # Delivery" in suggestions().
+    handoff_delivery = ops_start_done and pending == "delivery"
     # OPS / tanker are sandbox radios — tips follow the tune, not Delivery
     # or a leftover tanker overlay / boom-chat session.
     if tuned in ("ops", "tanker"):
         return tuned
-    # After an OPS call, keep OPS tips when SRS is stale (no live tune).
     if last_tx == "ops" and not tuned:
+        if handoff_delivery:
+            return "delivery"
         return "ops"
     if phase == "flight":
         return resolve_context_channel(
@@ -1242,6 +1250,24 @@ INTENTS: tuple[Intent, ...] = (
         example="request clearance",
         does="IFR clearance",
         veto=("readback", "squawk", "as filed"),
+    ),
+    Intent(
+        "ready_to_copy",
+        (
+            (
+                "ready to copy",
+                "ready copy",
+                "go ahead",
+                "ready to copy amendment",
+            ),
+        ),
+        kind="step",
+        template="clearance",
+        channels=("delivery",),
+        phases=("departure",),
+        example="ready to copy",
+        does="copy the flight-plan amendment",
+        veto=("request clearance", "ifr clearance"),
     ),
     # After ATC issues a clearance the pilot reads the key items back — no
     # agency opener required while awaiting_readback is set.
@@ -3737,6 +3763,39 @@ _DEPARTURE_CHECKIN_SKIP_IDS = frozenset(
     {"request_winds", "request_altimeter", "inbound_recovery"}
 )
 
+# Blackjack already answered the flight — do not keep tipping "checking in".
+_BJ_ON_FREQ_TEMPLATES = frozenset(
+    {"bj_check_in", "bj_continue", "bj_alpha_check", "bj_range_entry"}
+)
+_BJ_AWAY_CHANNELS = frozenset(
+    {
+        "bandsaw",
+        "tanker",
+        "joshua",
+        "control_east",
+        "control_west",
+        "center",
+        "approach",
+    }
+)
+
+
+def hide_blackjack_checkin_cue(
+    *,
+    blackjack_checked_in: bool = False,
+    last_tx_template: str = "",
+    last_tx_channel: str = "",
+) -> bool:
+    """True once the flight is on Blackjack and does not need to check in again."""
+    last_tmpl = str(last_tx_template or "").strip().lower()
+    last_ch = str(last_tx_channel or "").strip().lower()
+    if last_tmpl in _BJ_ON_FREQ_TEMPLATES:
+        return True
+    if not blackjack_checked_in:
+        return False
+    # Back from Bandsaw / tanker / NATCF — "checking in" is continue.
+    return last_ch not in _BJ_AWAY_CHANNELS
+
 
 def suggestions(
     *,
@@ -3755,6 +3814,11 @@ def suggestions(
     tanker_chat_choices: list[dict[str, Any]] | None = None,
     tanker_chat_session: bool = False,
     tanker_chat_last_spoke: str = "",
+    pending_contact: str = "",
+    ops_start_done: bool = False,
+    last_tx_template: str = "",
+    last_tx_channel: str = "",
+    blackjack_checked_in: bool = False,
 ) -> list[tuple[str, str, str, bool]]:
     """
     Fly kneeboard cues: (payload, what it does, role, agency_required).
@@ -3779,6 +3843,24 @@ def suggestions(
     phase_l = normalize_mission_phase(phase, channel=channel_l)
     expected_l = (expected or "").strip().lower()
     current_id = str(current_step_id or "").strip()
+    pending_l = (pending_contact or "").strip().lower()
+    # After OPS start approved, kneeboard leads with "change to Delivery" while
+    # still on OPS UHF (UI cue only — not a voice intent).
+    cue_ops_to_delivery = (
+        channel_l == "ops"
+        and ops_start_done
+        and pending_l == "delivery"
+        and not awaiting_readback
+    )
+    if cue_ops_to_delivery:
+        out.append(
+            (
+                "change to Delivery",
+                "tune Clearance Delivery — request clearance next",
+                "advance",
+                False,
+            )
+        )
     current_step = step_by_id(steps, current_id)
     authored = step_is_authored(current_step)
     if authored:
@@ -3873,6 +3955,11 @@ def suggestions(
         # Custom/file steps: only the author's cue advances — not "with you".
         if authored and intent.kind == "step":
             continue
+        # Live boom chat tips "talk later"; idle tips "how's it going" — not both.
+        if intent.id == "tanker_chat_start" and tanker_chat_session:
+            continue
+        if intent.id == "tanker_chat_stop":
+            continue
         if intent.id in _C2_INTENT_IDS and not step_offers_c2(
             current_step, channel=channel_l
         ):
@@ -3943,9 +4030,17 @@ def suggestions(
             continue
         if expected_l in _APPROACH_TOWER_HANDOFF_TEMPLATES and intent.id == "inbound_recovery":
             continue
+        if expected_l == "clearance_amendment" and intent.id == "ready_clearance":
+            continue
         # Range checkout ends Flight → Approach; tip it on the range-exit step
-        # (and allow check-in "continue" while still working the range).
+        # (and allow check-in "continue" after they leave Blackjack).
         if intent.id == "range_exit" and expected_l != "bj_range_exit":
+            continue
+        if intent.id == "range_entry" and hide_blackjack_checkin_cue(
+            blackjack_checked_in=blackjack_checked_in,
+            last_tx_template=last_tx_template,
+            last_tx_channel=last_tx_channel,
+        ):
             continue
         # Bandsaw: check-in does not advance; tip checkout while still on check-in.
         if intent.id == "bandsaw_check_in" and expected_l in (
@@ -4002,6 +4097,8 @@ def suggestions(
             "center_radar",
         ):
             rank = 0
+        elif intent.id == "ready_to_copy" and expected_l == "clearance_amendment":
+            rank = 0
         elif intent.id == "range_entry" and expected_l == "bj_range_exit":
             # Back from Bandsaw / still on the range — tip check-in (continue).
             rank = 0
@@ -4056,9 +4153,12 @@ def suggestions(
             "ops_request_start",
         ):
             rank = 0
-        elif channel_l == "tanker" and intent.id in (
-            "tanker_check_in",
-            "tanker_chat_start",
+        elif channel_l == "tanker" and intent.id == "tanker_check_in":
+            rank = 0
+        elif (
+            channel_l == "tanker"
+            and intent.id == "tanker_chat_start"
+            and not tanker_chat_session
         ):
             rank = 0
         elif intent.phases or intent.channels:
@@ -4075,10 +4175,14 @@ def suggestions(
             "ops_request_words",
             "ops_request_start",
         ):
+            # Start already done — Delivery handoff is the advance tip.
+            role = "optional" if cue_ops_to_delivery else "advance"
+        elif channel_l == "tanker" and intent.id == "tanker_check_in":
             role = "advance"
-        elif channel_l == "tanker" and intent.id in (
-            "tanker_check_in",
-            "tanker_chat_start",
+        elif (
+            channel_l == "tanker"
+            and intent.id == "tanker_chat_start"
+            and not tanker_chat_session
         ):
             role = "advance"
         elif intent.kind in ("request", "action"):

@@ -642,6 +642,19 @@ class FlowEngine:
             detail["text"] = str(step.get("text") or step.get("label") or "")
         else:
             template = step.get("template") or "radio_check"
+            spoken = atc_phrase.effective_clearance_template(
+                template, airport=airport, opus=opus, state=self.state
+            )
+            if spoken == "clearance_amendment":
+                needed, assigned, _rules = atc_phrase.clearance_msa_amendment(
+                    airport, opus
+                )
+                if needed and assigned:
+                    self.state["amended_altitude_ft"] = int(assigned)
+                    self.state["filed_altitude_ft"] = int(assigned)
+                template = spoken
+                step = dict(step)
+                step["template"] = spoken
             custom_text = step.get("text")
             text, tx_name, _freq_ignored, _mod_ignored = atc_phrase.build_flow_step_phrase(
                 airport,
@@ -752,6 +765,8 @@ class FlowEngine:
             self.state["awaiting_readback"] = True
             # Clearance → expect the readback-correct step; others just prompt.
             confirm = "clearance_readback" if template == "clearance" else ""
+            if template == "clearance_amendment":
+                confirm = "clearance"
             self.state["awaiting_confirm_template"] = confirm
         elif not items:
             # Non-readback call — don't wipe a pending checklist until confirmed.
@@ -780,6 +795,8 @@ class FlowEngine:
         card until the pilot reads back the instruction.
         """
         if atc_phrase.go_around_readback_open(self.state):
+            return
+        if str(self.state.get("last_tx_template") or "") == "clearance_amendment":
             return
         steps = self.steps
         idx = int(self.state.get("index") or 0)
@@ -872,6 +889,8 @@ class FlowEngine:
 
     def _hold_cursor_after_tx(self, step: dict[str, Any] | None) -> bool:
         """Hold after TX when more per-ship landing clearances remain."""
+        if str(self.state.get("last_tx_template") or "") == "clearance_amendment":
+            return True
         if self._hold_cursor_after_play(step):
             return True
         tmpl = str((step or {}).get("template") or "")
@@ -1132,6 +1151,7 @@ class FlowEngine:
         if seek_range_exit and not self._seek_template("bj_range_exit"):
             pass
         self.state["last_step_id"] = "bj_continue"
+        self.state["blackjack_checked_in"] = True
         self.state["last_tx_text"] = text
         self.state["last_tx_template"] = "bj_continue"
         self.state["last_tx_channel"] = channel
@@ -1313,12 +1333,17 @@ class FlowEngine:
             )
         # READ BACK card is the active step — close it, do not TX the next call.
         if self.state.get("awaiting_readback") and self.state.get("readback_items"):
-            self.clear_readback()
-            return {
-                "acknowledged": True,
-                "label": "Readback noted",
-                "readback_cleared": True,
-            }
+            if str(self.state.get("last_tx_template") or "") == "clearance_amendment":
+                self.state["clearance_amendment_copied"] = True
+                self._clear_readback_state()
+                # Fall through — issue the amended clearance on this Play.
+            else:
+                self.clear_readback()
+                return {
+                    "acknowledged": True,
+                    "label": "Readback noted",
+                    "readback_cleared": True,
+                }
         steps = self.steps
         if not steps:
             raise RuntimeError("No enabled steps")
