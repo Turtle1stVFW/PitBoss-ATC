@@ -987,7 +987,10 @@ class MissionPlanner(tk.Tk):
             if tmpl == "bj_range_exit":
                 handoff = "  →  Nellis Control (leaving the range)"
             elif tmpl == "control_handoff":
-                handoff = "  →  Approach (before the exit fix)"
+                handoff = (
+                    "  →  Approach "
+                    f"(≤{atc_phrase.control_handoff_nm(self.config_data):g} NM)"
+                )
             elif tmpl == "bandsaw_check_out":
                 handoff = "  →  Blackjack"
             elif tmpl == "climb_cruise":
@@ -7944,6 +7947,33 @@ class MissionPlanner(tk.Tk):
         ch_label = channel.upper()
         return ch_label, freq_disp, str(mod or "AM").upper(), str(tx_name or "")
 
+    def _agency_radio(
+        self, channel: str, step: dict[str, Any] | None = None
+    ) -> tuple[float, str, str]:
+        """
+        Radio for the agency Fly is pointing at, live tanker UHF included.
+
+        channel_radio alone reads airports.json, which has no tanker entry, so
+        the hero card fell back to 'other' (251.0) while YOU ARE ON showed the
+        real assigned boom frequency.
+        """
+        ap = self.engine.airport()
+        ch = str(channel or "").strip().lower()
+        # A step from another agency must not lend its freq_mhz override.
+        own = (
+            step
+            if isinstance(step, dict)
+            and str(step.get("channel") or "").strip().lower() == ch
+            else None
+        )
+        return atc_phrase.step_radio(
+            ap,
+            ch,
+            own,
+            state=getattr(self.engine, "state", None),
+            config=self.config_data,
+        )
+
     def _queue_fly_phrase_preview(self, step: dict[str, Any] | None) -> None:
         """Fill EXPECTED RESPONSE with the upcoming radio phrase (async; may re-roll)."""
         req_id = getattr(self, "_fly_phrase_req_id", 0) + 1
@@ -9189,6 +9219,10 @@ class MissionPlanner(tk.Tk):
                 sandbox = agencies_mod.is_default_sandbox(self.config_data)
             except Exception:
                 sandbox = False
+            # Arrows win until the next TX: show the step the pilot parked on,
+            # with its number and radio, not the agency we are nudging them to.
+            if (getattr(self.engine, "state", None) or {}).get("manual_step_view"):
+                sandbox = False
             live_ch = ""
             pending_ch = ""
             hero_ch = ""
@@ -9308,8 +9342,7 @@ class MissionPlanner(tk.Tk):
                 self.fly_step_name.set(label)
             if switch_to and pending_ch:
                 try:
-                    ap = self.engine.airport()
-                    freq, mod, tx_name = atc_phrase.channel_radio(ap, pending_ch)
+                    freq, mod, tx_name = self._agency_radio(pending_ch, step)
                     ch = pending_ch.upper()
                     freq_disp = f"{float(freq):.3f}"
                     tx = str(tx_name or "")
@@ -9329,8 +9362,7 @@ class MissionPlanner(tk.Tk):
                 painted_hero = False
                 if sandbox and hero_ch:
                     try:
-                        ap = self.engine.airport()
-                        freq, mod, tx_name = atc_phrase.channel_radio(ap, hero_ch)
+                        freq, mod, tx_name = self._agency_radio(hero_ch, step)
                         self.fly_freq.set(f"{float(freq):.3f}")
                         self.fly_mod.set(str(mod or "AM").upper())
                         self.fly_channel.set(hero_ch.upper())

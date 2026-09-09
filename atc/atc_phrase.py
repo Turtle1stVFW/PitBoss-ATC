@@ -2671,9 +2671,20 @@ def approach_clearance_auto_ready(
     return True, f"{dist:.1f} NM to {name} — clearance (near fix)"
 
 
-# NATCF → Approach before the VFR exit / IAF, not after they blow through it.
-CONTROL_HANDOFF_BEFORE_FIX_NM = 18.0
+# NATCF hands the recovery to Approach out around 40-45 NM from the field.
+# Not to be confused with the 18 NM on the dep_handoff step, which is where
+# Departure lets go to Blackjack. Every Nellis recovery fix sits inside 37 NM,
+# so gating on the field also keeps the handoff ahead of the exit fix.
+CONTROL_HANDOFF_NM = 42.0
 CONTROL_HANDOFF_GAP_S = 8.0
+
+
+def control_handoff_nm(config: dict[str, Any] | None = None) -> float:
+    try:
+        raw = float((config or {}).get("control_handoff_nm"))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return CONTROL_HANDOFF_NM
+    return raw if raw > 0 else CONTROL_HANDOFF_NM
 
 
 def _with_nellis_control(state: dict[str, Any] | None) -> bool:
@@ -2735,10 +2746,10 @@ def control_handoff_auto_ready(
     True when Nellis Control may auto-hand to Approach.
 
     After NATCF check-in (this sortie is actually with Control): wait a short
-    radio gap, then fire while still inbound to the exit fix — do not wait
-    until they arrive. Already past the fix toward the field also counts
-    (distance to ARCOE grows again on the way to Nellis). Departure radar
-    near TORYE must not steal this call.
+    radio gap, then fire once the jet is inside CONTROL_HANDOFF_NM of the
+    field. Range to the field rather than to the exit fix, so it does not
+    matter which recovery is assigned or whether they have already passed it.
+    Departure radar near TORYE must not steal this call.
     """
     st = state if isinstance(state, dict) else {}
     hold = auto_tx_hold_reason(st)
@@ -2770,22 +2781,27 @@ def control_handoff_auto_ready(
         or plan.get("vfr_recovery")
         or "exit"
     )
-    if fix is None or pos is None:
-        return True, "after Control check-in"
-    dist = _haversine_nm(pos[0], pos[1], fix[0], fix[1])
-    need = CONTROL_HANDOFF_BEFORE_FIX_NM
-    if dist <= need:
-        return True, f"{dist:.1f} NM to {name} — Approach handoff"
+    need = control_handoff_nm(config)
     field = _airport_field_latlon(airport)
+    # Never hand off blind. Without a position this used to fire the moment
+    # the pilot checked in, dumping him on Approach ninety miles out; the
+    # pilot can still advance by hand or ask for Approach.
+    if pos is None:
+        return False, "no position — hand to Approach when radar has you"
     if field is not None:
         field_nm = _haversine_nm(pos[0], pos[1], field[0], field[1])
         if field_nm <= need:
-            return True, f"{field_nm:.1f} NM to field — Approach handoff"
+            return True, f"{field_nm:.1f} NM — Approach handoff"
         return (
             False,
-            f"{dist:.1f} NM to {name}, {field_nm:.1f} NM to field — "
-            f"hand to Approach at ≤ {need:g} NM",
+            f"{field_nm:.1f} NM out — hand to Approach at ≤ {need:g} NM",
         )
+    # No field to measure against; the exit fix is the only gate left.
+    if fix is None:
+        return False, "no field or exit fix — hand to Approach by hand"
+    dist = _haversine_nm(pos[0], pos[1], fix[0], fix[1])
+    if dist <= need:
+        return True, f"{dist:.1f} NM to {name} — Approach handoff"
     return False, f"{dist:.1f} NM to {name} — hand to Approach at ≤ {need:g} NM"
 
 
@@ -8426,19 +8442,15 @@ def ownship_latlon(
     is often unavailable (no mission, no backend), so callers must treat None as
     "decide from the flight plan and weather instead". A miss backs off for
     OWNSHIP_MISS_BACKOFF_S so a dead backend never stalls phrase building.
+
+    The fallback cache expires at OWNSHIP_FIX_MAX_AGE_S. Reporting a position
+    the jet left ten minutes ago is worse than reporting none, and the cache
+    survives in flow_state.json across sorties.
     """
     global _ownship_miss_until
 
     def _cached_ll() -> tuple[float, float] | None:
-        if not isinstance(state, dict):
-            return None
-        raw = state.get("ownship_ll")
-        try:
-            if isinstance(raw, (list, tuple)) and len(raw) >= 2:
-                return (float(raw[0]), float(raw[1]))
-        except (TypeError, ValueError):
-            return None
-        return None
+        return _ownship_ll_from_state(state)
 
     inj = read_ownship_inject(config=config)
     if inj:

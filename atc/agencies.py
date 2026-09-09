@@ -775,6 +775,9 @@ def note_tx(
         return
     ch = (channel or "").strip().lower()
     tmpl = (template or "").strip().lower()
+    # A transmission ends the hand-parked cursor: Fly goes back to showing the
+    # agency it wants you on, and the skip rules apply again.
+    state.pop("manual_step_view", None)
     if ch:
         state["last_agency"] = ch
         if pending_contact(state) == ch:

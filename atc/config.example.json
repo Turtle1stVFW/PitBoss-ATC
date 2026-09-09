@@ -16,6 +16,7 @@
   "divert_categories": ["military", "civil"],
   "altitude_request_min_ft": 1000,
   "altitude_request_max_ft": 45000,
+  "control_handoff_nm": 42,
   "takeoff_offer_chance": 0.35,
   "unrestricted_climb_enabled": true,
   "unrestricted_climb_approve_chance": 0.80,

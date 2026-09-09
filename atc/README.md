@@ -372,7 +372,7 @@ Calls it understands:
 | Boom / reform small talk | After rejoin, say **how's it going** / **small talk** (or Fly **Texaco starts chat**) to start boom chat — it does not auto-fire. The **first** line is a time-of-day hello (*Good morning, sir*) — later bits are A/B polls, open questions, and riffs. Answer in a word, say anything, or just listen. With Ollama/Gemini/OpenAI on, freeform replies get a **live riff** (not locked to the two buttons). Texaco keeps chatting with short breaks until you **stop talking** / **talk later** / **standing by**, or leave the tanker. LLM falls back to the library if slow. The boom operator is always a woman. |
 | DCS tanker radio | **Ready pre-contact** → DCS *cleared contact* (boom). **Abort refueling** to disconnect. Do not use SRS for those. |
 | "Blackjack / Bandsaw, back from the tanker" / "checking in" after AAR | Radar contact, continue — returns to **whichever C2 freq you tuned** (Blackjack or Bandsaw) |
-| "Blackjack, off station / range complete" | Range checkout → **Nellis Control** East (ch 7) or West (ch 8) immediately. NATCF gives proceed-direct, descent, and the recovery clearance; Control hands to Approach **before** the exit fix |
+| "Blackjack, off station / range complete" | Range checkout → **Nellis Control** East (ch 7) or West (ch 8) immediately. NATCF gives proceed-direct, descent, and the recovery clearance, then hands you to Approach around **42 NM** from the field (`control_handoff_nm`) |
 | "Approach, checking in" / "inbound" | Approach assigns recovery from METAR (VMC → VFR recovery + TAC overhead; IFR → instrument + IAF). Prefers RWY 21 |
 | "Request ARCOE / TORYE / STRYK / MINTT / overhead / instrument" | Change the assigned recovery / approach |
 | "Request hold" / "cancel hold" | Spoken hold / continue (simple state) |
@@ -479,6 +479,7 @@ disk, no restart needed. Groom Lake is a position reference only — never a div
 | `divert_categories` | `["military", "civil"]` | Which fields count as a divert. Drop `"civil"` for military-only |
 | `altitude_request_min_ft` | `1000` | Below this an elevator request gets *unable* |
 | `altitude_request_max_ft` | `45000` | Above this an elevator request gets *unable* |
+| `control_handoff_nm` | `42` | Range from the field where NATCF hands the recovery to Approach. Not the same as the **18 NM** on the `dep_handoff` step, which is where Departure lets go to Blackjack |
 
 `check_navaids.py` covers the station math, the point lookup (including the fuzzy
 hits), the divert filter and the agency split — run it after editing `navaids.json`.

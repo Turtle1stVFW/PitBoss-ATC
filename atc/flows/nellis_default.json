@@ -283,7 +283,7 @@
       "enabled": true,
       "text": null,
       "handoff_channel": "approach",
-      "_comment": "Auto-fires while inbound to the IAF / VFR exit (before the fix)."
+      "_comment": "Auto-fires once inside control_handoff_nm of the field (default 42). The 18 NM on dep_handoff is the other end of the flight: Departure letting go to Blackjack."
     },
     {
       "id": "app_checkin",

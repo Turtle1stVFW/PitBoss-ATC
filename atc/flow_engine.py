@@ -309,6 +309,9 @@ class FlowEngine:
         steps = self.steps
         if not steps:
             return
+        if self.state.get("manual_step_view"):
+            # Parked there by an arrow — do not walk off it on the next poll.
+            return
         idx = int(self.state.get("index") or 0)
         if idx < 0:
             idx = 0
@@ -525,23 +528,25 @@ class FlowEngine:
         }
 
     def seek(self, index: int) -> dict[str, Any]:
-        """Move cursor to step index (0-based) without transmitting."""
+        """
+        Move cursor to step index (0-based) without transmitting.
+
+        An arrow press wins over the skip rules: it may park on a step the
+        flow would auto-skip (the Control check-in after checking in, say),
+        and Fly shows that step instead of the agency it is nudging you to.
+        Both hold only until the next transmission clears manual_step_view.
+        """
         steps = self.steps
         if not steps:
             raise RuntimeError("No enabled steps")
-        prev = int(self.state.get("index") or 0)
         idx = max(0, min(int(index), len(steps)))  # len(steps) == past end
         self.state["index"] = idx
+        self.state["manual_step_view"] = True
         # Mark before prepare_takeoff_cursor so Watch-park cannot snap a
         # forward skip back onto departure_handoff.
         self._remember_manual_cursor(idx)
         if idx < len(steps):
-            if idx < prev:
-                # Moving earlier — do not bounce forward over skipped approach steps.
-                self.state["index"] = self._retreat_past_skippable(idx)
-                self._remember_manual_cursor(int(self.state.get("index") or 0))
-            else:
-                self.prepare_takeoff_cursor()
+            self.prepare_takeoff_cursor()
         self._clear_landing_progress_if_before_clear_land(
             int(self.state.get("index") or 0)
         )
@@ -554,11 +559,7 @@ class FlowEngine:
         return st
 
     def seek_relative(self, delta: int) -> dict[str, Any]:
-        idx = int(self.state.get("index") or 0) + int(delta)
-        if int(delta) < 0:
-            # One Back click should land on the previous *playable* step.
-            idx = self._retreat_past_skippable(idx)
-        return self.seek(idx)
+        return self.seek(int(self.state.get("index") or 0) + int(delta))
 
     def seek_number(self, number: int) -> dict[str, Any]:
         """Jump to 1-based step number without transmitting."""

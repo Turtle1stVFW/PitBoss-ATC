@@ -214,6 +214,63 @@ def agency_split() -> int:
     return bad
 
 
+def stale_position() -> int:
+    """
+    An old fix is dropped, not spoken.
+
+    flow_state.json keeps the last position across sorties, so without an age
+    gate a controller happily reports the ramp the jet left half an hour ago.
+    """
+    bad = 0
+    import time
+
+    ramp = [36.236, -115.034]  # parked at Nellis
+    saved = atc_phrase.OWNSHIP_INJECT_PATH.read_bytes() if (
+        atc_phrase.OWNSHIP_INJECT_PATH.is_file()
+    ) else None
+    if saved is not None:
+        atc_phrase.OWNSHIP_INJECT_PATH.unlink()
+    try:
+        fresh = {"ownship_ll": ramp, "ownship_ll_t": time.time()}
+        clause = atc_phrase.agency_position_clause(
+            CONFIG, agency="departure", callsign=CALLSIGN, state=fresh
+        )
+        if "nellis" not in clause.lower():
+            bad = _fail(bad, f"a fresh fix at the ramp should say Nellis: {clause!r}")
+
+        old = {
+            "ownship_ll": ramp,
+            "ownship_ll_t": time.time() - atc_phrase.OWNSHIP_FIX_MAX_AGE_S - 60,
+        }
+        clause = atc_phrase.agency_position_clause(
+            CONFIG, agency="departure", callsign=CALLSIGN, state=old
+        )
+        if clause:
+            bad = _fail(bad, f"a stale fix must not be reported, got {clause!r}")
+        if atc_phrase.ownship_latlon(CONFIG, callsign=CALLSIGN, state=old) is not None:
+            bad = _fail(bad, "ownship_latlon must not serve an expired cached fix")
+
+        # Departure keeps its clearance when the position has to be dropped.
+        text = atc_phrase.build_template_text(
+            AIRPORT,
+            "radar_contact",
+            CALLSIGN,
+            atc_phrase.Weather(210, 5, 29.92, ""),
+            "21R",
+            state=old,
+            config=CONFIG,
+            channel="departure",
+        ).lower()
+        if "radar contact" not in text or "of nellis" in text:
+            bad = _fail(bad, f"stale radar contact should drop the position: {text!r}")
+    finally:
+        if saved is not None:
+            atc_phrase.OWNSHIP_INJECT_PATH.write_bytes(saved)
+    if not bad:
+        print("stale fix — position dropped rather than reported from memory")
+    return bad
+
+
 def altitude_phrases() -> int:
     """Feet / flight levels for ATC, angels for C2, and the approval band."""
     bad = 0
@@ -430,6 +487,7 @@ def main() -> int:
         extraction,
         diverts,
         agency_split,
+        stale_position,
         altitude_phrases,
         vector_phrases,
         check_in_phrases,

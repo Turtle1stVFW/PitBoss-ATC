@@ -4972,6 +4972,68 @@ def extras() -> int:
         else:
             print("departure radar — manual seek past Blackjack handoff stays put")
 
+        # Arrows after the Control handoff: every press must move exactly one
+        # step, including onto the check-ins the flow now marks skippable.
+        # Fly used to pin the header to pending_contact, so cycling looked dead.
+        import agencies as agencies_mod
+
+        cyc_eng = fe.FlowEngine(
+            dry_run=True,
+            persist_state=False,
+            config={
+                "dry_run": True,
+                "freq_gate_enabled": False,
+                "flow_file": "flows/nellis_default.json",
+            },
+            mission=dep_mission,
+            airports=airports,
+        )
+        cyc_eng.sync_readback_for_cursor = lambda: None
+        cyc_steps = cyc_eng.steps
+        app_i = next(
+            i
+            for i, s in enumerate(cyc_steps)
+            if str(s.get("template") or "") == "approach_check_in"
+        )
+        cyc_eng.state.update(
+            {
+                "index": app_i,
+                "control_checked_in": True,
+                "control_channel": "control_east",
+                "pending_contact": "approach",
+                "last_agency": "control_east",
+                "last_tx_template": "control_handoff",
+                "contact_phase": "airborne",
+            }
+        )
+        walk = [int(cyc_eng.seek_relative(-1)["index"]) for _ in range(4)]
+        if walk != [app_i - 1, app_i - 2, app_i - 3, app_i - 4]:
+            print(f"  FAIL Back must step one at a time, got {walk} from {app_i}")
+            bad += 1
+        elif not any(
+            cyc_eng._step_is_skippable(cyc_steps[i]) for i in walk
+        ):
+            print(f"  FAIL Back should have reached a skippable Control step: {walk}")
+            bad += 1
+        elif not cyc_eng.state.get("manual_step_view"):
+            print("  FAIL an arrow press must mark the cursor hand-parked")
+            bad += 1
+        else:
+            parked_i = int(cyc_eng.state.get("index") or 0)
+            if int(cyc_eng.status().get("index") or -1) != parked_i:
+                print("  FAIL a hand-parked cursor must survive the next status poll")
+                bad += 1
+            else:
+                agencies_mod.note_tx(cyc_eng.state, "control_east", "control_check_in")
+                if cyc_eng.state.get("manual_step_view"):
+                    print("  FAIL a transmission must release the hand-parked cursor")
+                    bad += 1
+                else:
+                    print(
+                        "manual cycling — one step per press, lands on skipped "
+                        "steps, released by TX"
+                    )
+
         rb_climb = voice_intent.evaluate(
             "Nellis Departure, Fleece 1, climb and maintain flight level two four zero",
             channel="departure",
@@ -6898,7 +6960,7 @@ def agency_sandbox() -> int:
         },
         gap_s=0,
     )
-    # ~40+ NM north of ARCOE should wait; a point near the fix should fire.
+    # 74 NM out should wait; inside the 42 NM handoff range should fire.
     ready_near, wait_near = atc_phrase.control_handoff_auto_ready(
         airport=nellis,
         state={
@@ -6927,10 +6989,10 @@ def agency_sandbox() -> int:
         gap_s=0,
     )
     if ready_far:
-        print(f"  FAIL Control handoff should wait far from the exit: {wait_far}")
+        print(f"  FAIL Control handoff should wait 74 NM out: {wait_far}")
         bad += 1
     elif not ready_near:
-        print(f"  FAIL Control handoff should fire before the exit fix: {wait_near}")
+        print(f"  FAIL Control handoff should fire inside 42 NM: {wait_near}")
         bad += 1
     elif ready_dep:
         print(
@@ -7001,6 +7063,155 @@ def agency_sandbox() -> int:
     if atc_phrase.should_skip_control_step(ctrl_step, st_pending):
         print("  FAIL cursor must not skip the NATCF check-in while it is pending")
         bad += 1
+    # Missing fix or position used to mean "fire now", which dumped the pilot
+    # on Approach ninety miles out the instant he checked in with Control.
+    st_blind = {
+        "approach_plan": {"iaf": "KRYSS"},  # named, but no coordinates
+        "ownship_ll": [37.7305, -114.6835],  # ~91 NM out
+        "ownship_ll_t": __import__("time").time(),
+        "last_tx_at": 1.0,
+        "control_checked_in": True,
+        "last_agency": "control_east",
+    }
+    ready_nofix, wait_nofix = atc_phrase.control_handoff_auto_ready(
+        airport=nellis, state=st_blind, gap_s=0
+    )
+    st_nopos = {
+        "approach_plan": {"vfr_recovery": "ARCOE", "vfr_recovery_say": "Arcoe"},
+        "last_tx_at": 1.0,
+        "control_checked_in": True,
+        "last_agency": "control_east",
+    }
+    ready_nopos, wait_nopos = atc_phrase.control_handoff_auto_ready(
+        airport=nellis, state=st_nopos, gap_s=0, config={}
+    )
+    ready_nofix_near, _wait_nfn = atc_phrase.control_handoff_auto_ready(
+        airport=nellis,
+        state={**st_blind, "ownship_ll": [36.30, -115.03]},
+        gap_s=0,
+    )
+    if ready_nofix:
+        print(f"  FAIL no exit fix must gate on the field, not fire at 91 NM: {wait_nofix}")
+        bad += 1
+    elif ready_nopos:
+        print(f"  FAIL Control handoff must not fire with no position: {wait_nopos}")
+        bad += 1
+    elif not ready_nofix_near:
+        print("  FAIL no exit fix should still hand off near the field")
+        bad += 1
+    else:
+        print("control handoff gate — no fix / no position waits, field still fires")
+    # NATCF lets go in the 40-45 NM band. The 18 NM further out belongs to the
+    # Departure → Blackjack handoff and must not creep back in here.
+    fld = atc_phrase._airport_field_latlon(nellis)
+    band = []
+    for want_nm in (50.0, 44.0, 41.0, 30.0):
+        # Due north of the field at the requested range.
+        lat = fld[0] + want_nm / 60.0
+        st_band = {
+            "approach_plan": {"vfr_recovery": "ARCOE", "vfr_recovery_say": "Arcoe"},
+            "ownship_ll": [lat, fld[1]],
+            "last_tx_at": 1.0,
+            "control_checked_in": True,
+            "last_agency": "control_east",
+        }
+        rdy, _w = atc_phrase.control_handoff_auto_ready(
+            airport=nellis, state=st_band, gap_s=0
+        )
+        band.append((want_nm, rdy))
+    if [r for _n, r in band] != [False, False, True, True]:
+        print(f"  FAIL Control handoff should open in the 40-45 NM band: {band}")
+        bad += 1
+    elif abs(atc_phrase.control_handoff_nm({}) - 42.0) > 0.01:
+        print("  FAIL default Control handoff range should be 42 NM")
+        bad += 1
+    elif abs(atc_phrase.control_handoff_nm({"control_handoff_nm": 45}) - 45.0) > 0.01:
+        print("  FAIL control_handoff_nm should be configurable")
+        bad += 1
+    else:
+        import json as _json
+        from pathlib import Path as _Path
+
+        _flow = _json.loads(
+            (_Path(__file__).resolve().parent / "flows" / "nellis_default.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        _rows = _flow.get("steps") or (
+            (_flow.get("outbound") or []) + (_flow.get("inbound") or [])
+        )
+        dep_nm = next(
+            (
+                (s.get("trigger") or {}).get("within_nm")
+                for s in _rows
+                if str(s.get("template") or "") == "departure_handoff"
+            ),
+            None,
+        )
+        if dep_nm != 18:
+            print(f"  FAIL Departure → Blackjack should still be 18 NM, got {dep_nm}")
+            bad += 1
+        else:
+            print("handoff ranges — NATCF at 42 NM, Departure → Blackjack at 18 NM")
+    # Fly must tip the call that is due. It used to hide the check-in and show
+    # "contact Approach" while the pilot was still trying to check in.
+    def _advance_cue(expected: str) -> str:
+        for say, _does, kind, _ok in voice_intent.suggestions(
+            channel="control_east",
+            phase="flight",
+            expected=expected,
+            callsign="Fleece 1",
+        ):
+            if kind == "advance":
+                return str(say)
+        return ""
+
+    cue_in = _advance_cue("control_check_in")
+    cue_off = _advance_cue("control_handoff")
+    if "check" not in cue_in.lower():
+        print(f"  FAIL Control check-in step should tip the check-in, got {cue_in!r}")
+        bad += 1
+    elif "approach" not in cue_off.lower():
+        print(f"  FAIL after check-in Fly should tip the handoff, got {cue_off!r}")
+        bad += 1
+    else:
+        print(f"control cues — due={cue_in!r} then {cue_off!r}")
+    for said in (
+        "Nellis Control, Fleece 1, with you",
+        "Nellis Control, Fleece 1, checking in",
+        "NATCF, Fleece 1, with you",
+        "Control, Fleece 1, with you",
+    ):
+        ev_ci = voice_intent.evaluate(
+            said,
+            channel="control_east",
+            phase="flight",
+            callsign="Fleece 1",
+            expected="control_check_in",
+            tuned_channel="control_east",
+        )
+        if (ev_ci.match.intent if ev_ci.match else None) != "control_check_in":
+            print(f"  FAIL {said!r} should check in with Control: {ev_ci.reason}")
+            bad += 1
+    # The Fly hero card reads the live tanker UHF, not the airports.json
+    # 'other' placeholder it falls back to when there is no tanker entry.
+    tkr_step = {"id": "tkr", "channel": "tanker", "template": "radio_check"}
+    tkr_freq, _tm, _tn = atc_phrase.step_radio(
+        nellis,
+        "tanker",
+        tkr_step,
+        state={"tanker_callsign": "TEXACO 1", "tanker_freq_mhz": 295.4},
+        config={},
+    )
+    placeholder, _pm, _pn = atc_phrase.channel_radio(nellis, "tanker")
+    if abs(float(tkr_freq) - 295.4) > 0.0005:
+        print(f"  FAIL tanker step freq should be the assigned UHF, got {tkr_freq}")
+        bad += 1
+    elif abs(float(placeholder) - float(tkr_freq)) < 0.0005:
+        print("  FAIL tanker test is vacuous — placeholder already matches")
+        bad += 1
+    else:
+        print(f"tanker radio — assigned {tkr_freq:.3f}, not the {placeholder:.3f} fallback")
     # Fly / Plan previews render the *upcoming* phrase against live state.
     # Rendering must not claim the check-in went out on the radio.
     wx_ctrl = atc_phrase.Weather(210, 8, 29.92, "")

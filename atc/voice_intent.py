@@ -4423,10 +4423,9 @@ def suggestions(
             "joshua_check_out",
         ):
             continue
-        if intent.id == "control_check_in" and expected_l in (
-            "control_check_in",
-            "control_handoff",
-        ):
+        # Unlike Bandsaw/Joshua, checking in with Nellis Control is required and
+        # does advance — tip it while it is due, and only hide it afterwards.
+        if intent.id == "control_check_in" and expected_l == "control_handoff":
             continue
         if intent.id == "center_check_in" and expected_l in (
             "center_check_in",
@@ -4457,10 +4456,7 @@ def suggestions(
             "joshua_check_out",
         ):
             rank = 0
-        elif intent.id == "control_handoff" and expected_l in (
-            "control_check_in",
-            "control_handoff",
-        ):
+        elif intent.id == "control_handoff" and expected_l == "control_handoff":
             rank = 0
         elif intent.id == "center_check_in" and expected_l in (
             "center_check_in",

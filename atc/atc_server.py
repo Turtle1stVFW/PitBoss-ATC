@@ -64,6 +64,7 @@ SHARED_FLOW_KEYS = (
     "assigned_altitude_ft",
     "approach_plan",
     "manual_cursor",
+    "manual_step_view",
     "active_takeoff_mode",
     "pending_takeoff_offer",
     "takeoff_offer_rolled",
