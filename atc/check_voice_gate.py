@@ -1447,14 +1447,46 @@ def extras() -> int:
     if tip_dep != "tower":
         print(f"  FAIL departure tips must ignore flight freqs, got {tip_dep!r}")
         bad += 1
-    # Next step is Ground taxi — opener is Ground even if still on Delivery.
+    # Still on Delivery — stay there. Taxi waits until they tune Ground.
     cue_gnd = voice_intent.cue_channel(
         mission_phase="departure",
         cursor_channel="ground",
         tuned_channel="delivery",
     )
-    if cue_gnd != "ground":
-        print(f"  FAIL taxi cue must address Ground, not leftover Delivery: {cue_gnd!r}")
+    if cue_gnd != "delivery":
+        print(f"  FAIL still on Delivery — cues must not jump to Ground: {cue_gnd!r}")
+        bad += 1
+    off_freq = voice_intent.suggestions(
+        phase="departure",
+        channel="delivery",
+        expected="taxi",
+        callsign=CALLSIGN,
+        airport_name="Nellis",
+        steps=[
+            {
+                "id": "gnd_taxi",
+                "channel": "ground",
+                "phase": "departure",
+                "template": "taxi",
+                "voice_phrases": ["request taxi"],
+            }
+        ],
+        current_step_id="gnd_taxi",
+        tuned_channel="delivery",
+        next_channel="ground",
+        next_freq_mhz=275.8,
+        limit=5,
+        advance_limit=2,
+        optional_limit=3,
+    )
+    off_says = [str(s).casefold() for s, *_ in off_freq]
+    off_adv = [str(s).casefold() for s, _d, r, *_ in off_freq if r == "advance"]
+    if (
+        not off_adv
+        or "tune ground on 275.800" not in off_adv[0]
+        or any("request taxi" in s for s in off_says)
+    ):
+        print(f"  FAIL off-freq cues must tip tune Ground, not taxi: {off_freq}")
         bad += 1
     cue_flight = voice_intent.cue_channel(
         mission_phase="flight",
@@ -5014,6 +5046,41 @@ def extras() -> int:
         else:
             print("clearance altitude — MSA hard, Flex west typical, SID crossings IFR")
 
+        change = atc_phrase.clearance_amendment_change(nellis, vfr_low)
+        no_change = atc_phrase.clearance_amendment_change(nellis, vfr_ok)
+        amend_rb = atc_phrase.build_readback_checklist(
+            "clearance_amendment", nellis, vfr_low, wx, "21R"
+        )
+        after_rb = atc_phrase.build_readback_checklist(
+            "clearance",
+            nellis,
+            vfr_low,
+            wx,
+            "21R",
+            state={"clearance_amendment_copied": True},
+        )
+        amend_vals = [str(i.get("value") or "") for i in amend_rb]
+        after_expect = [
+            i for i in after_rb if str(i.get("key") or "") == "expect"
+        ]
+        if (
+            not change
+            or change.get("summary") != "10,000 → FL190"
+            or no_change is not None
+            or not any("10,000 → FL190" in v for v in amend_vals)
+            or not any(i.get("highlight") for i in amend_rb if str(i.get("key") or "") == "amend_alt")
+            or not after_expect
+            or not after_expect[0].get("highlight")
+            or "10,000 → FL190" not in str(after_expect[0].get("value") or "")
+        ):
+            print(
+                f"  FAIL amendment cue must show 10,000 -> FL190: "
+                f"change={change} no={no_change} amend_rb={amend_rb} after={after_expect}"
+            )
+            bad += 1
+        else:
+            print("clearance amendment cue — 10,000 -> FL190 highlighted")
+
         alias_sq = atc_phrase._opus_mode3_from_fields({"squawk": "4321"})
         if alias_sq != "4321":
             print(f"  FAIL Opus squawk field should map to Mode 3: {alias_sq!r}")
@@ -5806,8 +5873,8 @@ def extras() -> int:
         for s, _d, r, *_ in after_start_tips
         if r == "advance"
     ]
-    if not after_adv or "change to delivery" not in after_adv[0]:
-        print(f"  FAIL after OPS start tip must lead with change to Delivery: {after_start_tips}")
+    if not after_adv or "tune" not in after_adv[0] or "delivery" not in after_adv[0]:
+        print(f"  FAIL after OPS start tip must lead with tune Delivery: {after_start_tips}")
         bad += 1
     elif any("request clearance" in s for s in after_says):
         print(f"  FAIL still on OPS — do not tip Delivery call yet: {after_start_tips}")

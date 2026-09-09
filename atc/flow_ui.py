@@ -2556,6 +2556,12 @@ class MissionPlanner(tk.Tk):
         context["last_tx_text"] = str(state.get("last_tx_text") or "")
         context["last_tx_channel"] = str(state.get("last_tx_channel") or "")
         context["last_tx_template"] = str(state.get("last_tx_template") or "")
+        if (
+            str(context.get("expected") or "") == "clearance"
+            and str(state.get("last_tx_template") or "") == "clearance_amendment"
+            and not state.get("clearance_amendment_copied")
+        ):
+            context["expected"] = "clearance_amendment"
         context["blackjack_checked_in"] = bool(state.get("blackjack_checked_in"))
         try:
             import agencies as agencies_mod
@@ -8705,12 +8711,13 @@ class MissionPlanner(tk.Tk):
                 width=14,
                 anchor="w",
             ).pack(side=tk.LEFT)
+            hot = hinge or bool(item.get("highlight"))
             tk.Label(
                 row,
                 text=value,
                 bg="#14100a",
-                fg=C_AMBER if hinge else C_MUTED,
-                font=("Consolas", 22, "bold") if hinge else ("Segoe UI", 13),
+                fg=C_AMBER if hot else C_MUTED,
+                font=("Consolas", 22, "bold") if hot else ("Segoe UI", 13),
                 anchor="w",
             ).pack(side=tk.LEFT, padx=(4, 10))
             if spoken and spoken.casefold() != value.casefold():
@@ -8734,6 +8741,19 @@ class MissionPlanner(tk.Tk):
                     anchor="w",
                 ).pack(fill=tk.X, pady=(2, 0))
             _row(item, hinge=True)
+        amended = [i for i in colour if i.get("highlight")]
+        colour = [i for i in colour if not i.get("highlight")]
+        if amended:
+            tk.Label(
+                self.fly_readback_body,
+                text="AMENDED",
+                bg="#14100a",
+                fg=C_AMBER,
+                font=("Segoe UI Semibold", 11),
+                anchor="w",
+            ).pack(fill=tk.X, pady=(8, 0))
+            for item in amended:
+                _row(item, hinge=True)
         if colour:
             tk.Label(
                 self.fly_readback_body,
@@ -8791,6 +8811,26 @@ class MissionPlanner(tk.Tk):
             cue_ch, tuned=str(context.get("tuned_channel") or "")
         )
         on_tanker_cues = cue_ch == "tanker"
+        tuned_now = str(context.get("tuned_channel") or "").strip().lower()
+        cursor_now = str(context.get("cursor_channel") or "").strip().lower()
+        pending_now = str(context.get("pending_contact") or "").strip().lower()
+        dest_ch = (
+            pending_now
+            if pending_now and pending_now != tuned_now
+            else cursor_now
+        )
+        next_mhz = None
+        if dest_ch and dest_ch != (tuned_now or cue_ch):
+            try:
+                next_mhz, _, _ = atc_phrase.step_radio(
+                    airport,
+                    dest_ch,
+                    None,
+                    state=getattr(self.engine, "state", None),
+                    config=self.config_data,
+                )
+            except Exception:
+                next_mhz = None
         lines = voice_intent.suggestions(
             phase=str(context.get("phase") or ""),
             channel=cue_ch,
@@ -8811,11 +8851,14 @@ class MissionPlanner(tk.Tk):
             tanker_chat_last_spoke=str(context.get("tanker_chat_last_spoke") or "")
             if on_tanker_cues
             else "",
-            pending_contact=str(context.get("pending_contact") or ""),
+            pending_contact=pending_now,
             ops_start_done=bool(context.get("ops_start_done")),
             last_tx_template=str(context.get("last_tx_template") or ""),
             last_tx_channel=str(context.get("last_tx_channel") or ""),
             blackjack_checked_in=bool(context.get("blackjack_checked_in")),
+            tuned_channel=tuned_now,
+            next_channel=dest_ch,
+            next_freq_mhz=next_mhz,
         )
         if not lines:
             self.fly_say_frame.pack_forget()
@@ -8836,7 +8879,15 @@ class MissionPlanner(tk.Tk):
             # what the pilot has to say (Whisper often drops "Knight").
             agency = "Ops"
         callsign = str(context.get("callsign") or "").strip()
-        self._paint_fly_voice_cues(lines, agency=agency, callsign=callsign)
+        amendment = None
+        if cue_ch == "delivery" and str(context.get("expected") or "") in (
+            "clearance",
+            "clearance_amendment",
+        ):
+            amendment = self._clearance_amendment_change()
+        self._paint_fly_voice_cues(
+            lines, agency=agency, callsign=callsign, amendment=amendment
+        )
         voice_on = bool(self.config_data.get("voice_enabled"))
         phase = voice_intent.normalize_mission_phase(
             str(context.get("phase") or ""), channel=cue_ch
@@ -8848,7 +8899,12 @@ class MissionPlanner(tk.Tk):
         else:
             base = "VOICE CUES  ·  enable Voice in Setup → Controls to speak these"
         self.fly_say_title.set(f"{base}  ·  {where}" if where else base)
-        if on_tanker_cues and context.get("tanker_chat_session"):
+        if amendment:
+            self.fly_say_subtitle.set(
+                f"Flight-plan amendment — cruise {amendment['summary']}. "
+                "Say the amber line to copy."
+            )
+        elif on_tanker_cues and context.get("tanker_chat_session"):
             self.fly_say_subtitle.set(
                 "Boom chat — talk back in your own words, no agency needed. "
                 "Official tanker calls still work."
@@ -8879,12 +8935,26 @@ class MissionPlanner(tk.Tk):
         self._sync_fly_eam_ui()
         self.after_idle(self._fly_update_scrollregion)
 
+    def _clearance_amendment_change(self) -> dict[str, Any] | None:
+        """Filed vs assigned cruise when Delivery is amending the plan."""
+        try:
+            ap = self.engine.airport()
+            opus, _wx = atc_phrase.resolve_opus_and_metar(
+                self.config_data, str((ap or {}).get("icao") or "")
+            )
+            return atc_phrase.clearance_amendment_change(
+                ap, opus, state=getattr(self.engine, "state", None)
+            )
+        except Exception:
+            return None
+
     def _paint_fly_voice_cues(
         self,
         lines: list[tuple[Any, ...]],
         *,
         agency: str,
         callsign: str,
+        amendment: dict[str, Any] | None = None,
     ) -> None:
         """Complete radio tips: muted agency opener + amber must-say payload."""
         body = self.fly_say_body
@@ -8894,6 +8964,33 @@ class MissionPlanner(tk.Tk):
         opener = ", ".join(prefix_parts)
         advance = [row for row in lines if len(row) >= 3 and row[2] == "advance"]
         optional = [row for row in lines if len(row) >= 3 and row[2] == "optional"]
+        if amendment:
+            banner = tk.Frame(body, bg="#3a2a10")
+            banner.pack(fill=tk.X, pady=(4, 6))
+            tk.Label(
+                banner,
+                text="AMENDMENT",
+                bg="#3a2a10",
+                fg=C_AMBER,
+                font=("Segoe UI Semibold", 10),
+                anchor="w",
+            ).pack(side=tk.LEFT, padx=(10, 10), pady=6)
+            tk.Label(
+                banner,
+                text="altitude",
+                bg="#3a2a10",
+                fg=C_MUTED,
+                font=("Segoe UI", 11),
+                anchor="w",
+            ).pack(side=tk.LEFT, padx=(0, 8), pady=6)
+            tk.Label(
+                banner,
+                text=str(amendment.get("summary") or ""),
+                bg="#3a2a10",
+                fg=C_AMBER,
+                font=("Consolas", 20, "bold"),
+                anchor="w",
+            ).pack(side=tk.LEFT, padx=(0, 10), pady=6)
 
         def _section(title: str, *, must: bool) -> None:
             tk.Label(

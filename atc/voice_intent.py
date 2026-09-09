@@ -125,6 +125,65 @@ def resolve_context_channel(
     ) or cursor
 
 
+_TUNE_SHORT = {
+    "delivery": "Delivery",
+    "ground": "Ground",
+    "tower": "Tower",
+    "departure": "Departure",
+    "approach": "Approach",
+    "blackjack": "Blackjack",
+    "bandsaw": "Bandsaw",
+    "joshua": "Joshua",
+    "control_east": "Nellis Control",
+    "control_west": "Nellis Control",
+    "center": "Center",
+    "ops": "Ops",
+    "tanker": "Tanker",
+}
+
+
+def tune_short_label(channel: str) -> str:
+    ch = (channel or "").strip().lower()
+    return _TUNE_SHORT.get(ch) or ch.replace("_", " ").title() or "radio"
+
+
+def format_tune_cue(
+    channel: str, freq_mhz: float | None = None
+) -> tuple[str, str]:
+    """Kneeboard line: 'tune Ground on 275.800' (UI tip, not a voice intent)."""
+    label = tune_short_label(channel)
+    freq = ""
+    if freq_mhz not in (None, ""):
+        try:
+            import srs_radio
+
+            freq = srs_radio.format_mhz(float(freq_mhz))
+        except (TypeError, ValueError):
+            freq = ""
+        if freq == "—":
+            freq = ""
+    if freq:
+        return (
+            f"tune {label} on {freq}",
+            f"switch to {label} — then the next call",
+        )
+    return (f"tune {label}", f"change frequency to {label}")
+
+
+def should_tip_retune(here: str, dest: str) -> bool:
+    """True when cues should lead with a tune tip instead of the next call."""
+    a = (here or "").strip().lower()
+    b = (dest or "").strip().lower()
+    if not a or not b or a == b:
+        return False
+    if a == "tanker":
+        return False
+    c2 = {"blackjack", "bandsaw", "joshua"}
+    if a in c2 and b in c2:
+        return False
+    return True
+
+
 def cue_channel(
     *,
     mission_phase: str,
@@ -135,11 +194,11 @@ def cue_channel(
     ops_start_done: bool = False,
 ) -> str:
     """
-    Agency the Fly tip should address — who you are calling next.
+    Agency the Fly tip should address — who you are talking to now.
 
-    Departure / Approach follow the next step (Ground taxi is Ground even if
-    the radio is still on Delivery). Flight follows the live tune so Blackjack
-    vs Control vs Joshua matches the radio.
+    When the radio tune is known, stay on that agency. Next-step calls wait
+    until you switch; suggestions() then leads with “tune Ground on 275.800”.
+    Unknown tune follows the cursor so the card is not empty.
     """
     cursor = (cursor_channel or "").strip().lower()
     tuned = (tuned_channel or "").strip().lower()
@@ -147,12 +206,10 @@ def cue_channel(
     pending = (pending_contact or "").strip().lower()
     phase = normalize_mission_phase(mission_phase, channel=cursor)
     # After OPS start approved, tip Delivery once they leave OPS (or radio is
-    # unknown). While still tuned to OPS, tips stay OPS but add "change to
-    # Delivery" in suggestions().
+    # unknown). While still tuned to OPS, tips stay OPS and suggestions()
+    # adds the tune-to-Delivery line.
     handoff_delivery = ops_start_done and pending == "delivery"
-    # OPS / tanker are sandbox radios — tips follow the tune, not Delivery
-    # or a leftover tanker overlay / boom-chat session.
-    if tuned in ("ops", "tanker"):
+    if tuned:
         return tuned
     if last_tx == "ops" and not tuned:
         if handoff_delivery:
@@ -3819,6 +3876,9 @@ def suggestions(
     last_tx_template: str = "",
     last_tx_channel: str = "",
     blackjack_checked_in: bool = False,
+    tuned_channel: str = "",
+    next_channel: str = "",
+    next_freq_mhz: float | None = None,
 ) -> list[tuple[str, str, str, bool]]:
     """
     Fly kneeboard cues: (payload, what it does, role, agency_required).
@@ -3844,23 +3904,27 @@ def suggestions(
     expected_l = (expected or "").strip().lower()
     current_id = str(current_step_id or "").strip()
     pending_l = (pending_contact or "").strip().lower()
-    # After OPS start approved, kneeboard leads with "change to Delivery" while
-    # still on OPS UHF (UI cue only — not a voice intent).
-    cue_ops_to_delivery = (
-        channel_l == "ops"
+    here_l = (tuned_channel or channel_l).strip().lower()
+    dest_l = (next_channel or "").strip().lower()
+    if (
+        pending_l
+        and here_l
+        and pending_l != here_l
+        and (not dest_l or dest_l == here_l or dest_l == pending_l)
+    ):
+        dest_l = pending_l
+    if (
+        not dest_l
+        and channel_l == "ops"
         and ops_start_done
-        and pending_l == "delivery"
-        and not awaiting_readback
-    )
-    if cue_ops_to_delivery:
-        out.append(
-            (
-                "change to Delivery",
-                "tune Clearance Delivery — request clearance next",
-                "advance",
-                False,
-            )
-        )
+        and pending_l
+        and pending_l != here_l
+    ):
+        dest_l = pending_l
+    # Off the next agency's freq — lead with a tune tip, not that agency's call.
+    if should_tip_retune(here_l, dest_l) and not awaiting_readback:
+        say, does = format_tune_cue(dest_l, next_freq_mhz)
+        out.append((say, does, "advance", False))
     current_step = step_by_id(steps, current_id)
     authored = step_is_authored(current_step)
     if authored:
@@ -3921,9 +3985,8 @@ def suggestions(
     current_phrases = step_voice_phrases(steps, current_id)
     current_does = "run this step"
     step_ch = str((current_step or {}).get("channel") or "").strip().lower()
-    hide_cursor_phrases = channel_l in ("ops", "tanker") and step_ch not in (
-        channel_l,
-        "",
+    hide_cursor_phrases = bool(
+        channel_l and step_ch and step_ch not in (channel_l, "")
     )
     if current_id and current_phrases and not awaiting_readback and not hide_cursor_phrases:
         if isinstance(current_step, dict):
@@ -4175,8 +4238,8 @@ def suggestions(
             "ops_request_words",
             "ops_request_start",
         ):
-            # Start already done — Delivery handoff is the advance tip.
-            role = "optional" if cue_ops_to_delivery else "advance"
+            # Start already done — the tune-to-Delivery line is the advance tip.
+            role = "optional" if should_tip_retune(here_l, dest_l) else "advance"
         elif channel_l == "tanker" and intent.id == "tanker_check_in":
             role = "advance"
         elif (

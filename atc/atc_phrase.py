@@ -3717,6 +3717,47 @@ def clearance_msa_amendment(
     return False, plan.assigned_ft, plan.rules
 
 
+def format_altitude_brief(ft: int | None) -> str:
+    """Kneeboard altitude: FL190 / 13,000 / not filed."""
+    if ft is None:
+        return "not filed"
+    try:
+        n = int(ft)
+    except (TypeError, ValueError):
+        return "not filed"
+    if n >= ATC_FL_AT_OR_ABOVE_FT:
+        return f"FL{n // 100}"
+    return f"{n:,}"
+
+
+def clearance_amendment_change(
+    airport: dict[str, Any] | None,
+    opus: OpusFlightContext | None,
+    state: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """
+    Filed vs assigned cruise when Delivery will (or did) amend.
+
+    None when no amendment is needed. `summary` is the kneeboard line
+    (10,000 → FL190). Opus keeps the old filed number after copy.
+    """
+    needed, assigned, _rules = clearance_msa_amendment(airport, opus)
+    if not needed or not assigned:
+        return None
+    filed = filed_altitude_feet(opus.fp_altitude if opus else None)
+    filed_label = format_altitude_brief(filed)
+    assigned_label = format_altitude_brief(assigned)
+    copied = bool(isinstance(state, dict) and state.get("clearance_amendment_copied"))
+    return {
+        "filed_ft": filed,
+        "assigned_ft": int(assigned),
+        "filed_label": filed_label,
+        "assigned_label": assigned_label,
+        "copied": copied,
+        "summary": f"{filed_label} → {assigned_label}",
+    }
+
+
 def effective_clearance_template(
     template: str,
     airport: dict[str, Any] | None = None,
@@ -9478,6 +9519,15 @@ def build_readback_checklist(
             "ready to copy",
             hinge=True,
         )
+        change = clearance_amendment_change(airport, opus, state)
+        if change:
+            add(
+                "amend_alt",
+                "Amend altitude",
+                change["summary"],
+                change["assigned_label"],
+                highlight=True,
+            )
         return items
 
     if tmpl == "clearance":
@@ -9494,6 +9544,7 @@ def build_readback_checklist(
             add("departure", "Via", dep_via, dep_via)
         else:
             add("departure", "Route", "as filed", "as filed")
+        change = clearance_amendment_change(airport, opus, state)
         if climb_ft:
             spoken_climb = speak_altitude_value(str(climb_ft), prefer_fl_below=1000) or str(climb_ft)
             add("climb", "Climb / maintain", f"{climb_ft:,} ft", spoken_climb)
@@ -9503,9 +9554,23 @@ def build_readback_checklist(
             )
             if dep_match.is_visual:
                 add("climb", "Climb", "as published", "climb as published")
-        filed = speak_filed_altitude(opus.fp_altitude if opus else None)
-        if filed:
-            add("expect", "Expect", filed, filed)
+        if change:
+            assigned_say = speak_altitude_value(
+                str(change["assigned_ft"]),
+                prefer_fl_below=1000,
+                clarify_chance=0,
+            ) or change["assigned_label"]
+            add(
+                "expect",
+                "Expect",
+                change["summary"],
+                assigned_say,
+                highlight=True,
+            )
+        else:
+            filed = speak_filed_altitude(opus.fp_altitude if opus else None)
+            if filed:
+                add("expect", "Expect", filed, filed)
         # Departure frequency / Local preset — ATC says this in the clearance.
         dep_block = airport.get("departure") or {}
         try:
