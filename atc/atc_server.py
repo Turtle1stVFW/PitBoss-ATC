@@ -13,7 +13,8 @@ import json
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,7 @@ import atc_net  # noqa: E402
 import atc_phrase  # noqa: E402
 import channel_tx  # noqa: E402
 import flow_engine  # noqa: E402
+import runway_position  # noqa: E402
 import srs_radio  # noqa: E402
 import tanker  # noqa: E402
 import voice_engine  # noqa: E402
@@ -34,6 +36,13 @@ import voice_intent  # noqa: E402
 MAX_BODY = 256_000
 
 # Cursor the whole flight should see. Tanker AAR lives on PilotSession.local_state.
+_IDENTITY_CONFIG_KEYS = (
+    "opus_user_name",
+    "opus_flight_id",
+    "opus_seat",
+    "opus_flight_label",
+    "callsign_override",
+)
 _SHARED_FLOW_KEYS = (
     "index",
     "last_step_id",
@@ -43,9 +52,16 @@ _SHARED_FLOW_KEYS = (
     "last_tx_at",
     "last_tx_channel",
     "last_tx_template",
+    "last_agency",
+    "pending_contact",
+    "control_checked_in",
+    "control_channel",
+    "approach_plan",
+    "manual_cursor",
     "active_takeoff_mode",
     "pending_takeoff_offer",
     "takeoff_offer_rolled",
+    "ops_sortie",
 )
 
 
@@ -104,6 +120,19 @@ class PilotSession:
         step = st.get("step") if isinstance(st.get("step"), dict) else {}
         channel = str((step or {}).get("channel") or "")
         qinfo = (queues or {}).get(channel or "other") or {}
+        step_freq = None
+        step_mod = ""
+        try:
+            step_freq, step_mod, _tx = atc_phrase.step_radio(
+                self.engine.airport(),
+                channel,
+                step,
+                state=flow_state,
+                config=self.engine.config,
+            )
+        except Exception:
+            step_freq = None
+            step_mod = ""
         return {
             "session_id": self.session_id,
             "flow_key": self.flow_key,
@@ -122,10 +151,15 @@ class PilotSession:
             "label": st.get("label"),
             "channel": channel,
             "step": step,
+            "step_freq_mhz": step_freq,
+            "step_mod": step_mod,
             "on_tanker": bool(flow_state.get("tanker_overlay")),
             "flow_state": flow_state,
             "awaiting_readback": bool(flow_state.get("awaiting_readback")),
             "last_tx_text": str(flow_state.get("last_tx_text") or ""),
+            "auto_clearance_enabled": bool(
+                (self.engine.config or {}).get("auto_clearance_enabled")
+            ),
             "queue": qinfo,
             "last_result": self.last_result,
         }
@@ -154,6 +188,7 @@ class AtcServer:
         self.bind_host = "0.0.0.0"
         self.port = int(config.get("atc_port") or atc_net.DEFAULT_ATC_PORT)
         self.firewall_status = ""
+        self.host_engine: flow_engine.FlowEngine | None = None
 
     def start(self, host: str | None = None, port: int | None = None) -> None:
         self.bind_host = host or "0.0.0.0"
@@ -220,7 +255,12 @@ class AtcServer:
         sess.touch()
         sess.apply_radios(body, inject=False)
         self._align_element_overlay(sess)
-        return {"ok": True, "session_id": key, **sess.public_status(self.hub.snapshot())}
+        return {"ok": True, "session_id": key, **self._host_status(sess)}
+
+    def _host_status(self, sess: PilotSession) -> dict[str, Any]:
+        status = sess.public_status(self.hub.snapshot())
+        status["auto_clearance_enabled"] = bool(self.config.get("auto_clearance_enabled"))
+        return status
 
     def _flow_alive(self, flow: str) -> bool:
         now = time.time()
@@ -235,11 +275,52 @@ class AtcServer:
         engine = self.engines.get(flow)
         if engine is not None and self._flow_alive(flow):
             return engine
+        shared = self._maybe_host_engine(flow, identity)
+        if shared is not None:
+            # Do not stamp this seat onto the shared Host engine — identity
+            # and radios bind only for the duration of that seat's action.
+            self.engines[flow] = shared
+            return shared
         engine = _new_session_engine(
             self.config, self.airports, self.mission_provider(), identity
         )
         self.engines[flow] = engine
         return engine
+
+    def _maybe_host_engine(
+        self, flow: str, identity: dict[str, Any]
+    ) -> flow_engine.FlowEngine | None:
+        """
+        Reuse the Host Fly timeline so a client's Step ▶ moves the same cursor.
+
+        Share when the host picked the same Opus flight, or the host has no
+        flight of its own (dedicated box watching that client).
+        """
+        host_eng = self.host_engine
+        if host_eng is None:
+            return None
+        host_fid = atc_phrase.configured_opus_flight_id(self.config)
+        sess_fid = identity.get("opus_flight_id")
+        try:
+            same = (
+                host_fid is not None
+                and sess_fid not in (None, "")
+                and int(host_fid) == int(sess_fid)
+            )
+        except (TypeError, ValueError):
+            same = False
+        if same:
+            return host_eng
+        if host_fid is None:
+            live_flows = {
+                s.flow_key
+                for s in self.sessions.values()
+                if time.time() - s.last_seen <= atc_net.SESSION_TTL_S
+            }
+            live_flows.add(flow)
+            if len(live_flows) <= 1:
+                return host_eng
+        return None
 
     def unique_flow_sessions(self) -> list[PilotSession]:
         """One live session per shared timeline (prefer seat 1) for CAOC auto-clearance."""
@@ -338,26 +419,23 @@ class AtcServer:
         shared_index = int(sess.engine.state.get("index") or 0)
         on_aar = tanker.tanker_overlay_active(sess.local_state)
         with lock:
-            _apply_identity_to_config(sess.engine.config, sess.identity)
-            sess.engine.config["_tts_session_id"] = sess.session_id
-            if body:
-                sess.apply_radios(body, inject=True)
-            tanker.apply_seat_state(sess.engine.state, sess.local_state)
-            if tanker.tanker_overlay_active(sess.engine.state):
-                tanker.park_tanker_index(sess.engine)
-            sess.engine.defer_tx = True
-            sess.engine.pending_tx = None
-            try:
-                result = fn(sess.engine) or {}
-                job = sess.engine.take_pending_tx()
-            finally:
-                sess.engine.defer_tx = False
-                sess.local_state = tanker.snapshot_seat_state(sess.engine.state)
-                tanker.strip_seat_state(sess.engine.state)
-                # AAR parks on the tanker step only for this element. Do not
-                # write that (or leave_tanker seeking C2) onto the flight cursor.
-                if on_aar or tanker.tanker_overlay_active(sess.local_state):
-                    sess.engine.state["index"] = shared_index
+            with _session_engine_binding(sess, body=body, inject_radios=True):
+                tanker.apply_seat_state(sess.engine.state, sess.local_state)
+                if tanker.tanker_overlay_active(sess.engine.state):
+                    tanker.park_tanker_index(sess.engine)
+                sess.engine.defer_tx = True
+                sess.engine.pending_tx = None
+                try:
+                    result = fn(sess.engine) or {}
+                    job = sess.engine.take_pending_tx()
+                finally:
+                    sess.engine.defer_tx = False
+                    sess.local_state = tanker.snapshot_seat_state(sess.engine.state)
+                    tanker.strip_seat_state(sess.engine.state)
+                    # AAR parks on the tanker step only for this element. Do not
+                    # write that (or leave_tanker seeking C2) onto the flight cursor.
+                    if on_aar or tanker.tanker_overlay_active(sess.local_state):
+                        sess.engine.state["index"] = shared_index
         self._sync_element_overlay(sess)
         if not isinstance(result, dict):
             result = {"detail": result}
@@ -390,7 +468,7 @@ class AtcServer:
 
         result = self.run_action(sess, work, body)
         result["ok"] = result.get("action") != "blocked"
-        return result
+        return _attach_fly_status(result, self._host_status(sess))
 
     def handle_command(
         self, sess: PilotSession, command: str, body: dict[str, Any]
@@ -408,7 +486,13 @@ class AtcServer:
                 sid = str(body.get("step_id") or body.get("id") or "")
                 if not sid:
                     raise RuntimeError("play needs step_id")
+                if body.get("auto"):
+                    blocked = auto_play_block_reason(engine, sid, self.config)
+                    if blocked:
+                        return {"action": "blocked", "detail": blocked}
                 return engine.play_id(sid)
+            if cmd == "tanker_chat":
+                return run_tanker_chat_command(engine, body)
             if cmd == "seek":
                 return engine.seek(int(body.get("index") or 0))
             if cmd == "seek_relative":
@@ -418,14 +502,14 @@ class AtcServer:
             raise RuntimeError(f"unknown command: {cmd}")
 
         result = self.run_action(sess, work, body)
-        result["ok"] = True
-        return result
+        result["ok"] = result.get("action") != "blocked"
+        return _attach_fly_status(result, self._host_status(sess))
 
     def heartbeat(self, sess: PilotSession, body: dict[str, Any]) -> dict[str, Any]:
         sess.touch()
         sess.apply_radios(body, inject=False)
         self._follow_tanker_tune(sess)
-        return {"ok": True, **sess.public_status(self.hub.snapshot())}
+        return {"ok": True, **self._host_status(sess)}
 
     def traffic(self) -> dict[str, Any]:
         queues = self.hub.snapshot()
@@ -438,8 +522,116 @@ class AtcServer:
             "role": "host",
             "port": self.port,
             "queues": queues,
-            "sessions": [s.public_status(queues) for s in live],
+            "sessions": [
+                {
+                    **s.public_status(queues),
+                    "auto_clearance_enabled": bool(self.config.get("auto_clearance_enabled")),
+                }
+                for s in live
+            ],
         }
+
+
+def auto_play_block_reason(
+    engine: flow_engine.FlowEngine,
+    step_id: str,
+    config: dict[str, Any] | None = None,
+) -> str:
+    """
+    Why a client Watch auto-play must not transmit.
+
+    Clients evaluate CAOC on the flying PC (where the jets actually are) and
+    POST play with auto=True. The host still owns TX, so refuse a second
+    copy of the same step.
+    """
+    _ = config
+    want = str(step_id or "").strip()
+    if not want:
+        return "play needs step_id"
+    cur: dict[str, Any] = {}
+    try:
+        cur = engine.current_step() or {}
+    except Exception:
+        cur = {}
+    tmpl = str(cur.get("template") or "")
+    more_land = False
+    if tmpl == "clear_land":
+        try:
+            more_land = atc_phrase.should_hold_for_landing_clearances(
+                engine.state, step=cur, mission=getattr(engine, "mission", None)
+            )
+        except Exception:
+            more_land = False
+    if runway_position.skip_auto_tx_already_played(
+        fire_id=want,
+        current_step_id=str(cur.get("id") or cur.get("template") or ""),
+        last_step_id=str((engine.state or {}).get("last_step_id") or ""),
+        template=tmpl,
+        hold_for_landing=more_land,
+    ):
+        return "already played"
+    return ""
+
+
+def run_tanker_chat_command(
+    engine: flow_engine.FlowEngine, body: dict[str, Any]
+) -> dict[str, Any]:
+    """
+    Host TX for boom chat. Client may send a locally generated line (Ollama
+    on the flying PC); otherwise the host writes the next bit itself.
+    """
+    import tanker_chat as tanker_chat_mod
+    import voice_engine as voice_engine_mod
+
+    continuing = bool(body.get("continue"))
+    auto = bool(body.get("auto", True))
+    text = str(body.get("text") or "").strip()
+    if (
+        auto
+        and continuing
+        and tanker_chat_mod.is_session_active(engine.state)
+        and not tanker_chat_mod.continuation_due(engine.state)
+    ):
+        return {"action": "none", "detail": "tanker chat not due"}
+    if text:
+        if body.get("await_pilot"):
+            tanker_chat_mod.hold_for_pilot(engine.state, text)
+        else:
+            tanker_chat_mod.schedule_next_question(engine.state, llm=True)
+        return voice_engine_mod.speak_tanker_line(engine, text)
+    return voice_engine_mod.resolve_tanker_chat(
+        engine, continue_session=continuing, force=not continuing and not auto
+    )
+
+
+def _attach_fly_status(
+    result: dict[str, Any], status: dict[str, Any]
+) -> dict[str, Any]:
+    """
+    Keep TX radio/text on the result, and add the Fly cursor the Client paints.
+
+    Request tanker transmits on Blackjack; NEXT TX FREQUENCY is the parked
+    tanker UHF. Do not let the C2 TX freq overwrite that.
+    """
+    out = dict(result or {})
+    for key, value in (status or {}).items():
+        if key in ("freq", "channel", "text", "action", "ok") and key in out:
+            continue
+        out.setdefault(key, value)
+    out["flow_state"] = status.get("flow_state")
+    out["step_freq_mhz"] = status.get("step_freq_mhz")
+    out["step_mod"] = status.get("step_mod")
+    out["on_tanker"] = status.get("on_tanker")
+    out["index"] = status.get("index")
+    out["step_number"] = status.get("step_number")
+    out["label"] = status.get("label")
+    out["step"] = status.get("step")
+    out["status_channel"] = status.get("channel")
+    out["session_id"] = status.get("session_id")
+    out["flow_key"] = status.get("flow_key")
+    out["opus_flight_id"] = status.get("opus_flight_id")
+    out["opus_seat"] = status.get("opus_seat")
+    return out
 
 
 def _shared_flow_state(state: dict[str, Any] | None) -> dict[str, Any]:
@@ -457,21 +649,22 @@ def _status_view(sess: PilotSession) -> tuple[dict[str, Any], dict[str, Any]]:
     lock = getattr(engine, "mutex", None)
 
     def _compute() -> tuple[dict[str, Any], dict[str, Any]]:
-        fs = _shared_flow_state(engine.state)
-        fs.update(dict(sess.local_state))
-        if not tanker.tanker_overlay_active(sess.local_state):
-            return engine.status(), fs
-        saved = int(engine.state.get("index") or 0)
-        tanker.apply_seat_state(engine.state, sess.local_state)
-        tanker.park_tanker_index(engine)
-        try:
-            st = engine.status()
+        with _session_engine_binding(sess):
             fs = _shared_flow_state(engine.state)
-            fs.update(tanker.snapshot_seat_state(engine.state))
-            return st, fs
-        finally:
-            tanker.strip_seat_state(engine.state)
-            engine.state["index"] = saved
+            fs.update(dict(sess.local_state))
+            if not tanker.tanker_overlay_active(sess.local_state):
+                return engine.status(), fs
+            saved = int(engine.state.get("index") or 0)
+            tanker.apply_seat_state(engine.state, sess.local_state)
+            tanker.park_tanker_index(engine)
+            try:
+                st = engine.status()
+                fs = _shared_flow_state(engine.state)
+                fs.update(tanker.snapshot_seat_state(engine.state))
+                return st, fs
+            finally:
+                tanker.strip_seat_state(engine.state)
+                engine.state["index"] = saved
 
     if lock is not None:
         with lock:
@@ -487,16 +680,21 @@ def _identity_from_hello(body: dict[str, Any], host_config: dict[str, Any]) -> d
         "opus_flight_label": str(body.get("opus_flight_label") or "").strip(),
         "callsign_override": str(body.get("callsign_override") or "").strip(),
     }
-    cfg = dict(host_config)
-    _apply_identity_to_config(cfg, ident)
+    # Do not use the host process Opus cache — that is whoever the host
+    # last resolved, not this client's Wild 6 / Fleece 1.
     callsign = ident["callsign_override"]
     if not callsign:
+        callsign = atc_phrase.clean_flight_callsign(ident["opus_flight_label"])
+    if not callsign:
+        cfg = dict(host_config)
+        _apply_identity_to_config(cfg, ident)
         try:
-            callsign = str(atc_phrase.cached_radio_callsign(cfg) or "")
+            ctx = atc_phrase.resolve_active_opus_flight(cfg)
+            callsign = str(getattr(ctx, "radio_callsign", "") or "")
         except Exception:
             callsign = ""
-        if not callsign:
-            callsign = ident["opus_flight_label"] or ident["opus_user_name"] or "CALLSIGN"
+    if not callsign:
+        callsign = ident["opus_user_name"] or "CALLSIGN"
     ident["callsign"] = callsign
     return ident
 
@@ -507,6 +705,49 @@ def _apply_identity_to_config(config: dict[str, Any], identity: dict[str, Any]) 
     config["opus_seat"] = identity.get("opus_seat")
     config["opus_flight_label"] = identity.get("opus_flight_label") or ""
     config["callsign_override"] = identity.get("callsign_override") or ""
+
+
+@contextmanager
+def _session_engine_binding(
+    sess: PilotSession,
+    *,
+    body: dict[str, Any] | None = None,
+    inject_radios: bool = False,
+) -> Iterator[None]:
+    """
+    Bind this seat's identity and radios for one host action / status view.
+
+    The shared FlowEngine may be the Host Fly timeline or another seat on the
+    same Opus flight. Never leave this jet's callsign or SRS stack on it.
+    """
+    engine = sess.engine
+    cfg = engine.config if isinstance(getattr(engine, "config", None), dict) else {}
+    saved_radios = getattr(engine, "remote_radios", None)
+    saved_ident = {key: cfg.get(key) for key in _IDENTITY_CONFIG_KEYS}
+    saved_tts = cfg.get("_tts_session_id")
+    try:
+        _apply_identity_to_config(cfg, sess.identity)
+        cfg["_tts_session_id"] = sess.session_id
+        if body is not None:
+            sess.apply_radios(body, inject=inject_radios)
+        elif inject_radios:
+            engine.set_remote_radios(
+                sess.tuned_freqs_mhz,
+                fresh=sess.radio_fresh,
+                selected_mhz=sess.selected_mhz,
+            )
+        yield
+    finally:
+        engine.remote_radios = saved_radios
+        for key, value in saved_ident.items():
+            if value is None:
+                cfg.pop(key, None)
+            else:
+                cfg[key] = value
+        if saved_tts is None:
+            cfg.pop("_tts_session_id", None)
+        else:
+            cfg["_tts_session_id"] = saved_tts
 
 
 def _new_session_engine(
@@ -613,7 +854,7 @@ def _make_handler(server: AtcServer) -> type[BaseHTTPRequestHandler]:
                     sess = self._session({})
                     if sess is None:
                         return
-                    self._send(200, {"ok": True, **sess.public_status(server.hub.snapshot())})
+                    self._send(200, {"ok": True, **server._host_status(sess)})
                     return
                 self._send(404, {"ok": False, "error": f"unknown {path}"})
             except Exception as exc:  # noqa: BLE001

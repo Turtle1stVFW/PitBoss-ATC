@@ -30,7 +30,7 @@ MISSION_PHASE_LABELS: dict[str, str] = {
 }
 # Agencies that normally belong in each mission phase (tips + scoring).
 CHANNELS_IN_MISSION_PHASE: dict[str, frozenset[str]] = {
-    "departure": frozenset({"delivery", "ground", "tower", "departure"}),
+    "departure": frozenset({"delivery", "ground", "tower", "departure", "ops"}),
     "flight": frozenset(
         {
             "blackjack",
@@ -45,7 +45,7 @@ CHANNELS_IN_MISSION_PHASE: dict[str, frozenset[str]] = {
             "approach",
         }
     ),
-    "approach": frozenset({"approach", "tower", "ground", "control_east", "control_west"}),
+    "approach": frozenset({"approach", "tower", "ground", "control_east", "control_west", "ops"}),
 }
 # Default mission phase when a step's channel is set (tower/ground appear in two).
 DEFAULT_MISSION_PHASE_FOR_CHANNEL: dict[str, str] = {
@@ -59,7 +59,7 @@ DEFAULT_MISSION_PHASE_FOR_CHANNEL: dict[str, str] = {
     "control_east": "flight",
     "control_west": "flight",
     "center": "flight",
-    "ops": "flight",
+    "ops": "departure",
     "other": "flight",
     "tanker": "flight",
     "approach": "approach",
@@ -130,6 +130,7 @@ def cue_channel(
     mission_phase: str,
     cursor_channel: str,
     tuned_channel: str | None,
+    last_tx_channel: str = "",
 ) -> str:
     """
     Agency the Fly tip should address — who you are calling next.
@@ -140,7 +141,15 @@ def cue_channel(
     """
     cursor = (cursor_channel or "").strip().lower()
     tuned = (tuned_channel or "").strip().lower()
+    last_tx = (last_tx_channel or "").strip().lower()
     phase = normalize_mission_phase(mission_phase, channel=cursor)
+    # OPS / tanker are sandbox radios — tips follow the tune, not Delivery
+    # or a leftover tanker overlay / boom-chat session.
+    if tuned in ("ops", "tanker"):
+        return tuned
+    # After an OPS call, keep OPS tips when SRS is stale (no live tune).
+    if last_tx == "ops" and not tuned:
+        return "ops"
     if phase == "flight":
         return resolve_context_channel(
             mission_phase=phase,
@@ -380,7 +389,22 @@ _AGENCY_TERMS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("control_east", ("sally", "nellis control", "control east", "natcf", "control")),
     ("control_west", ("lee", "control west", "nellis control west")),
     ("center", ("los angeles center", "la center", "center", "centre")),
-    ("ops", ("ops", "operations", "base ops")),
+    ("ops", (
+        "ops",
+        "operations",
+        "knight ops",
+        "wool ops",
+        "toro ops",
+        "squadron ops",
+        "base ops",
+        # Whisper near-misses for "Knight Ops"
+        "night ops",
+        "nite ops",
+        "nine ops",
+        "nights ops",
+        "can ops",
+        "and ops",
+    )),
     ("tanker", ("texaco", "shell", "arco", "esso", "tanker", "boom")),
     ("other", ()),
 )
@@ -1044,6 +1068,85 @@ INTENTS: tuple[Intent, ...] = (
         weight=1.2,
         example="stop talking",
         does="end boom small talk",
+    ),
+    Intent(
+        "ops_request_words",
+        (
+            _ASKING + ("current",),
+            ("words", "word"),
+        ),
+        kind="request",
+        channels=("ops",),
+        phases=("departure", "flight", "approach"),
+        weight=1.3,
+        example="request current WORDS",
+        does="current WORDS + start approval",
+        veto=("ops check",),
+    ),
+    Intent(
+        "ops_request_start",
+        (
+            (
+                "request start",
+                "request start approval",
+                "ready to start",
+                "ready for start",
+                "start approved",
+                "cleared to start",
+            ),
+        ),
+        kind="request",
+        channels=("ops",),
+        phases=("departure", "flight", "approach"),
+        weight=1.25,
+        example="request start",
+        does="OPS start approval",
+        veto=("ops check", "words", "word"),
+    ),
+    Intent(
+        "ops_status",
+        (
+            (
+                "code 1",
+                "code 2",
+                "code 3",
+                "code 4",
+                "code 5",
+                "code one",
+                "code two",
+                "code three",
+                "code four",
+                "code five",
+                "code fife",
+            ),
+        ),
+        kind="request",
+        channels=("ops",),
+        phases=("departure", "flight", "approach"),
+        weight=1.25,
+        example="code 1",
+        does="postflight aircraft codes",
+        veto=("ops check", "words", "start"),
+    ),
+    Intent(
+        "ops_check_in",
+        (
+            (
+                "checking in",
+                "check in",
+                "checkin",
+                "with you",
+                "on frequency",
+            ),
+        ),
+        kind="request",
+        template="ops_check_in",
+        channels=("ops",),
+        phases=("departure", "flight", "approach"),
+        weight=1.15,
+        example="checking in",
+        does="OPS go-ahead",
+        veto=("ops check", "words", "word", "start", "code"),
     ),
     Intent(
         "say_again",
@@ -1971,7 +2074,7 @@ def step_is_authored(step: dict[str, Any] | None) -> bool:
 
 
 # Picture / bogey dope / declare belong on C2 agencies, not Center / transit.
-_C2_AGENCIES = frozenset({"blackjack", "bandsaw", "ops"})
+_C2_AGENCIES = frozenset({"blackjack", "bandsaw"})
 _C2_INTENT_IDS = frozenset(
     {
         "request_picture",
@@ -1984,17 +2087,22 @@ _C2_INTENT_IDS = frozenset(
 
 def step_offers_c2(step: dict[str, Any] | None, *, channel: str = "") -> bool:
     """
-    Whether this step answers picture / bogey dope / declare / alpha check.
+    Whether picture / bogey dope / declare / alpha check are legal here.
 
-    Explicit `c2` on the step wins. Otherwise only Blackjack, Bandsaw, and Ops
-    offer those calls — channel `other` / `joshua` (Center, Joshua transit) does not.
+    The live radio (tune / address) wins during Flight: Bandsaw picture must
+    work even if the cursor is still on Blackjack hold or the optional tanker
+    step (`c2: false`). Explicit `c2` on the step only applies when the scoring
+    channel is not already a C2 agency — Joshua / Center / Other stay silent.
     """
+    scoring = str(channel or "").strip().lower()
+    if scoring in _C2_AGENCIES:
+        return True
     if isinstance(step, dict) and "c2" in step:
         return bool(step.get("c2"))
     ch = ""
     if isinstance(step, dict):
         ch = str(step.get("channel") or "").strip().lower()
-    ch = ch or str(channel or "").strip().lower()
+    ch = ch or scoring
     return ch in _C2_AGENCIES
 
 
@@ -2017,6 +2125,8 @@ def step_holds_after_play(step: dict[str, Any] | None) -> bool:
     if tmpl in ("bj_check_in", "bandsaw_check_in"):
         return True
     if tmpl in ("joshua_check_in", "control_check_in", "center_check_in", "center_radar"):
+        return True
+    if tmpl in ("ops_check_in", "ops_words", "ops_start", "ops_status"):
         return True
     # Tanker is a side trip: Play stays on AAR until they retune C2.
     return str(step.get("channel") or "").strip().lower() == "tanker"
@@ -2865,6 +2975,10 @@ def _score_intents(
             "tower_check_in",
             "tower_initial",
             "inbound_recovery",
+            "ops_check_in",
+            "ops_request_words",
+            "ops_request_start",
+            "ops_status",
         ):
             continue
         if addressed in ("control_east", "control_west") and intent.id in (
@@ -3428,25 +3542,30 @@ def evaluate(
     # Boom small-talk answers (Dunkin / Starbucks / freeform riff reacts) while
     # Texaco is waiting, or a stop phrase while a chat session is still live.
     # Official tanker calls still win. Agency opener is optional.
+    # Tanker-freq only — leftover session state must not steal OPS / Ground.
     if (
-        tanker_chat_choices
-        or tanker_chat_session
-        or tanker_chat_awaiting_react
-        or tanker_chat_freeform
-    ) and not (
-        candidate is not None
-        and candidate.intent
-        in {
-            "tanker_check_in",
-            "tanker_astern",
-            "tanker_contact",
-            "tanker_disconnect",
-            "tanker_depart",
-            "tanker_dcs_precontact",
-            "tanker_dcs_abort",
-            "tanker_chat_stop",
-            "say_again",
-        }
+        (channel or "").strip().lower() == "tanker"
+        and (
+            tanker_chat_choices
+            or tanker_chat_session
+            or tanker_chat_awaiting_react
+            or tanker_chat_freeform
+        )
+        and not (
+            candidate is not None
+            and candidate.intent
+            in {
+                "tanker_check_in",
+                "tanker_astern",
+                "tanker_contact",
+                "tanker_disconnect",
+                "tanker_depart",
+                "tanker_dcs_precontact",
+                "tanker_dcs_abort",
+                "tanker_chat_stop",
+                "say_again",
+            }
+        )
     ):
         try:
             import tanker_chat as tanker_chat_mod
@@ -3542,6 +3661,14 @@ def evaluate(
         "tanker_depart",
     ) and (channel or "").strip().lower() == "tanker":
         address_optional = True
+    # On OPS freq (or after OPS just answered), "Ops" is enough — and a
+    # dropped "Knight" must not leave the call hanging for an opener.
+    if str(candidate.intent or "").startswith("ops_") and (
+        (channel or "").strip().lower() == "ops"
+        or (last_tx_channel or "").strip().lower() == "ops"
+        or tun == "ops"
+    ):
+        address_optional = True
     if (
         candidate.intent == "request_landing"
         and (expected or "").strip().lower() == "clear_land"
@@ -3578,7 +3705,7 @@ _AGENCY_SPOKEN: dict[str, str] = {
     "control_east": "Nellis Control",
     "control_west": "Nellis Control",
     "center": "Los Angeles Center",
-    "ops": "{ap} Ops",
+    "ops": "Ops",
     "tanker": "Tanker",
     "other": "Control",
 }
@@ -3696,7 +3823,12 @@ def suggestions(
                 )
                 )
 
-    if tanker_chat_session and not awaiting_readback and not tanker_chat_choices:
+    if (
+        channel_l == "tanker"
+        and tanker_chat_session
+        and not awaiting_readback
+        and not tanker_chat_choices
+    ):
         out.append(
             ("say anything", "boom small talk — answer Texaco", "advance", False)
         )
@@ -3706,14 +3838,19 @@ def suggestions(
 
     current_phrases = step_voice_phrases(steps, current_id)
     current_does = "run this step"
-    if current_id and current_phrases and not awaiting_readback:
+    step_ch = str((current_step or {}).get("channel") or "").strip().lower()
+    hide_cursor_phrases = channel_l in ("ops", "tanker") and step_ch not in (
+        channel_l,
+        "",
+    )
+    if current_id and current_phrases and not awaiting_readback and not hide_cursor_phrases:
         if isinstance(current_step, dict):
             current_does = str(current_step.get("label") or current_does)
         take = advance_limit if advance_limit is not None else limit
         for phrase in current_phrases[:take]:
             out.append((phrase, current_does, "advance", True))
 
-    if tanker_chat_choices and not awaiting_readback:
+    if channel_l == "tanker" and tanker_chat_choices and not awaiting_readback:
         for choice in tanker_chat_choices:
             say = str(choice.get("say") or "").strip()
             if say:
@@ -3755,6 +3892,11 @@ def suggestions(
             continue
         # Keep Delivery free of Ground/Tower-only asks (taxi, runway, …).
         if intent.channels and channel_l and channel_l not in intent.channels:
+            continue
+        # OPS / tanker kneeboard is only those radios — not runway / winds.
+        if channel_l in ("ops", "tanker") and (
+            not intent.channels or channel_l not in intent.channels
+        ):
             continue
         # Taxi / Ground: no rolling or LUAW prompts.
         if (
@@ -3909,6 +4051,16 @@ def suggestions(
             rank = 0 if intent.id == "request_winds" else 1
         elif expected and intent.template and intent.template == expected:
             rank = 0
+        elif channel_l == "ops" and intent.id in (
+            "ops_request_words",
+            "ops_request_start",
+        ):
+            rank = 0
+        elif channel_l == "tanker" and intent.id in (
+            "tanker_check_in",
+            "tanker_chat_start",
+        ):
+            rank = 0
         elif intent.phases or intent.channels:
             rank = 1
         else:
@@ -3916,8 +4068,19 @@ def suggestions(
 
         # Step / mission phrases that are the expected call → advance.
         # Requests and actions → optional (even when ranked high for visibility).
+        # OPS / tanker have no timeline step — the speakable requests *are* the card.
         if intent.kind == "step" or intent.step_id:
             role = "advance" if rank == 0 else ""
+        elif channel_l == "ops" and intent.id in (
+            "ops_request_words",
+            "ops_request_start",
+        ):
+            role = "advance"
+        elif channel_l == "tanker" and intent.id in (
+            "tanker_check_in",
+            "tanker_chat_start",
+        ):
+            role = "advance"
         elif intent.kind in ("request", "action"):
             role = "optional"
         else:

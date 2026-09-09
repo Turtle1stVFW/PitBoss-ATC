@@ -1,5 +1,11 @@
 # Packaging notes
 
+**Today (testing):** `atc\Setup-Pilot.cmd` is the stand-in installer. It finds
+Python, writes `config.json` from the example, `pip install`s voice packages,
+warms Whisper `base.en`, and runs the DCS radio-export hook. `Pack-Share-Zip.cmd`
+builds a tester zip with secrets stripped. A real bundled-Python / Inno Setup
+installer is the next step — same post-install actions, no python.org click.
+
 ## Voice control dependencies (required by default)
 
 Ship voice capture/recognition with the app — do **not** leave these as optional

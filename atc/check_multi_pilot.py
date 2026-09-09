@@ -23,6 +23,8 @@ import channel_tx
 import flow_engine
 import srs_radio
 import tanker
+import voice_engine
+import voice_intent
 
 AIRPORTS = atc_phrase.load_json(atc_phrase.AIRPORTS_PATH)
 MISSION = atc_phrase.load_json(HERE / "flows" / "nellis_default.json")
@@ -351,6 +353,243 @@ def test_element_tanker_peel() -> list[str]:
     return fails
 
 
+def test_tanker_fly_freq_matches_pick() -> list[str]:
+    """Blackjack can send Texaco 2; Fly must not show Texaco 1's 322.3."""
+    fails: list[str] = []
+    rows = [
+        {
+            "id": 1,
+            "callsign": "TEXACO 1",
+            "track": "ARLNS",
+            "aircraft": "KC-135",
+            "freq_mhz": 322.3,
+            "boom": True,
+        },
+        {
+            "id": 2,
+            "callsign": "TEXACO 2",
+            "track": "AR-625H/L",
+            "aircraft": "KC-135",
+            "freq_mhz": 319.8,
+            "boom": True,
+        },
+    ]
+    orig = tanker.fetch_opus_tankers
+    tanker.fetch_opus_tankers = lambda *a, **k: list(rows)
+    tanker._TANKER_CACHE["exp"] = 0.0
+    try:
+        cfg = _host_config()
+        first = tanker.tanker_freqs_mhz(cfg)
+        if not first or abs(float(first[0]) - 322.3) > 0.01:
+            fails.append(f"catalog should list Texaco 1 first, got {first}")
+        remembered = {
+            "tanker_id": 2,
+            "tanker_callsign": "TEXACO 2",
+            "tanker_track": "AR-625H/L",
+        }
+        live = tanker.effective_tanker_mhz(remembered, cfg)
+        if live is None or abs(float(live) - 319.8) > 0.01:
+            fails.append(f"remembered Texaco 2 should be 319.8, got {live}")
+        state: dict = {}
+        tanker.remember_tanker(state, dict(rows[1]), config=cfg)
+        if state.get("tanker_freq_mhz") is None or abs(
+            float(state["tanker_freq_mhz"]) - 319.8
+        ) > 0.01:
+            fails.append(f"remember_tanker stored {state.get('tanker_freq_mhz')}")
+        missing = {
+            "id": 2,
+            "callsign": "TEXACO 2",
+            "track": "AR-625H/L",
+            "aircraft": "KC-135",
+        }
+        tanker.remember_tanker(state, missing, config=cfg)
+        if state.get("tanker_freq_mhz") is None or abs(
+            float(state["tanker_freq_mhz"]) - 319.8
+        ) > 0.01:
+            fails.append(
+                f"remember_tanker should look up 319.8, got {state.get('tanker_freq_mhz')}"
+            )
+
+        server = atc_server.AtcServer(
+            cfg, AIRPORTS, lambda: copy.deepcopy(MISSION), transmit_fn=lambda _j: 0
+        )
+        hello = server.hello(
+            {
+                "callsign_override": "Fleece 1",
+                "opus_flight_id": 88,
+                "opus_seat": 1,
+                "radio_fresh": False,
+            }
+        )
+        sess = server.get_session(hello["session_id"])
+        if sess is None:
+            return fails + ["hello did not create a tanker-freq session"]
+
+        def peel(engine: flow_engine.FlowEngine) -> dict:
+            tanker.remember_tanker(engine.state, dict(rows[1]), config=engine.config)
+            tanker.enter_tanker_overlay(engine)
+            return {"action": "ok", "channel": "blackjack", "freq": 251.0, "text": "texaco two"}
+
+        result = server.run_action(sess, peel, {"radio_fresh": False})
+        st = sess.public_status()
+        attached = atc_server._attach_fly_status(result, st)
+        mhz = attached.get("step_freq_mhz")
+        if mhz is None or abs(float(mhz) - 319.8) > 0.01:
+            fails.append(f"host Fly freq should be Texaco 2 319.8, got {mhz}")
+        if str(attached.get("status_channel") or "").lower() != "tanker":
+            fails.append(
+                f"status_channel should be tanker, got {attached.get('status_channel')}"
+            )
+        if abs(float(attached.get("freq") or 0) - 251.0) > 0.01:
+            fails.append("TX freq must stay Blackjack, not overwrite Fly tanker UHF")
+        fs = st.get("flow_state") or {}
+        if fs.get("tanker_freq_mhz") is None or abs(
+            float(fs["tanker_freq_mhz"]) - 319.8
+        ) > 0.01:
+            fails.append(f"flow_state tanker_freq_mhz {fs.get('tanker_freq_mhz')}")
+        # Client Fly used to skip host UHF when the shared cursor was still
+        # Blackjack / Bandsaw — then catalog[0] (Texaco 1 / 322.3) won.
+        local_ch = "blackjack"
+        host_ch = str(attached.get("status_channel") or "").strip().lower()
+        host_mhz = attached.get("step_freq_mhz")
+        on_tanker = bool(attached.get("on_tanker"))
+        use_host = host_mhz is not None and (
+            on_tanker or not host_ch or host_ch == local_ch
+        )
+        if not on_tanker:
+            fails.append("request tanker should mark on_tanker for the Client Fly page")
+        elif not use_host or abs(float(host_mhz) - 319.8) > 0.01:
+            fails.append(
+                "client Fly must keep Texaco 2 319.8 when local cursor is still C2"
+            )
+    finally:
+        tanker.fetch_opus_tankers = orig
+        tanker._TANKER_CACHE["exp"] = 0.0
+    return fails
+
+
+def test_cross_flight_status_isolation() -> list[str]:
+    """One flight's tanker / radios / identity must not stick on the Host engine."""
+    fails: list[str] = []
+    rows = [
+        {
+            "id": 2,
+            "callsign": "TEXACO 2",
+            "track": "AR-625H/L",
+            "aircraft": "KC-135",
+            "freq_mhz": 319.8,
+            "boom": True,
+        }
+    ]
+    orig = tanker.fetch_opus_tankers
+    tanker.fetch_opus_tankers = lambda *a, **k: list(rows)
+    tanker._TANKER_CACHE["exp"] = 0.0
+    try:
+        cfg = _host_config()
+        cfg["opus_flight_id"] = 101
+        host_eng = flow_engine.FlowEngine(
+            config=cfg,
+            persist_state=False,
+            mission=copy.deepcopy(MISSION),
+            airports=AIRPORTS,
+        )
+        host_eng.config["callsign_override"] = "HOST BOX"
+        server = atc_server.AtcServer(
+            cfg, AIRPORTS, lambda: copy.deepcopy(MISSION), transmit_fn=lambda _j: 0
+        )
+        server.host_engine = host_eng
+        fleece = server.hello(
+            {
+                "callsign_override": "Fleece 1",
+                "opus_flight_id": 101,
+                "opus_seat": 1,
+                "radio_fresh": False,
+            }
+        )
+        viper = server.hello(
+            {
+                "callsign_override": "Viper 3",
+                "opus_flight_id": 202,
+                "opus_seat": 1,
+                "radio_fresh": False,
+            }
+        )
+        sf = server.get_session(fleece["session_id"])
+        sv = server.get_session(viper["session_id"])
+        if sf is None or sv is None:
+            return fails + ["hello did not create both flights"]
+        if sf.engine is not host_eng:
+            fails.append("Fleece should share the Host Fly engine")
+        if sv.engine is host_eng:
+            fails.append("Viper must not share Fleece/Host engine")
+        idx_v = int(sv.engine.state.get("index") or 0)
+        idx_f = int(sf.engine.state.get("index") or 0)
+
+        def peel(engine: flow_engine.FlowEngine) -> dict:
+            tanker.remember_tanker(engine.state, dict(rows[0]), config=engine.config)
+            tanker.enter_tanker_overlay(engine)
+            return {"action": "ok", "channel": "blackjack", "freq": 251.0}
+
+        server.run_action(
+            sf,
+            peel,
+            {
+                "tuned_freqs_mhz": [251.25],
+                "radio_fresh": True,
+                "selected_mhz": 251.25,
+            },
+        )
+        if tanker.tanker_overlay_active(sv.local_state):
+            fails.append("Viper local_state inherited Fleece tanker overlay")
+        pv = sv.public_status()
+        if pv.get("on_tanker"):
+            fails.append("Viper Fly status marked on_tanker after Fleece peel")
+        if int(sv.engine.state.get("index") or 0) != idx_v:
+            fails.append("Viper cursor moved when Fleece went tanker")
+        if int(sf.engine.state.get("index") or 0) != idx_f:
+            fails.append("Fleece shared C2 cursor stayed parked on tanker")
+        if getattr(host_eng, "remote_radios", None) is not None:
+            fails.append("Fleece radios stuck on the Host engine after the action")
+        if str(host_eng.config.get("callsign_override") or "") != "HOST BOX":
+            fails.append(
+                f"Host identity became {host_eng.config.get('callsign_override')!r}"
+            )
+        if str(sv.engine.config.get("callsign_override") or "") == "Fleece 1":
+            fails.append("Viper engine stamped with Fleece identity")
+
+        pf = sf.public_status()
+        attached = atc_server._attach_fly_status({"action": "ok"}, pf)
+        if attached.get("session_id") != sf.session_id:
+            fails.append("attached Fly status missing Fleece session_id")
+        if attached.get("opus_flight_id") in (202, "202"):
+            fails.append("Fleece status carried Viper's flight id")
+        if pv.get("session_id") == pf.get("session_id"):
+            fails.append("two flights shared a status session_id")
+
+        match = voice_intent.Match(
+            intent="bandsaw_check_in",
+            kind="step",
+            template="bandsaw_check_in",
+            confidence=1.0,
+            slots={"channel": "bandsaw"},
+            transcript="Bandsaw, Fleece 1, checking in",
+            normalized="bandsaw fleece 1 checking in",
+        )
+
+        def checkin(engine: flow_engine.FlowEngine) -> dict:
+            return voice_engine.execute_intent(match, engine)
+
+        server.run_action(sf, checkin, {"radio_fresh": False})
+        if int(sf.engine.state.get("index") or 0) != idx_f:
+            fails.append("Bandsaw check-in must not move the shared flight cursor")
+        if int(sv.engine.state.get("index") or 0) != idx_v:
+            fails.append("Viper cursor moved on Fleece Bandsaw check-in")
+    finally:
+        tanker.fetch_opus_tankers = orig
+        tanker._TANKER_CACHE["exp"] = 0.0
+    return fails
+
+
 def test_connect_error_hints() -> list[str]:
     fails: list[str] = []
     timed = atc_net.describe_connect_failure(
@@ -437,6 +676,21 @@ def test_injected_radio_gate() -> list[str]:
     )
     if allowed2 or result2 != "mismatch":
         fails.append(f"client VHF should miss Ground, got {result2}")
+    eam_cfg = _host_config(freq_gate_eam_enabled=True)
+    srs_radio.apply_config(eam_cfg)
+    client_sel = srs_radio.RadioState(
+        source="client",
+        freqs_mhz=[123.625],
+        selected_mhz=123.625,
+        fresh=True,
+        age_s=0.0,
+    )
+    forced, _mod = srs_radio.maybe_force_eam_tx_freq(
+        eam_cfg, 289.4, "AM", radio=client_sel
+    )
+    if abs(forced - 123.625) > 0.01:
+        fails.append(f"EAM host TX should use client selected 123.625, got {forced}")
+    srs_radio.apply_config(_host_config(freq_gate_eam_enabled=False))
     return fails
 
 
@@ -478,6 +732,248 @@ def test_secret_redaction_and_session_tts_cap() -> list[str]:
     return fails
 
 
+def test_client_auto_play_from_watch() -> list[str]:
+    """Flying-PC Watch asks the host to play; a second auto of the same step is refused."""
+    fails: list[str] = []
+    cfg = _host_config(auto_clearance_enabled=True)
+    spoken: list[str] = []
+
+    def tx(job: dict) -> int:
+        spoken.append(str(job.get("text") or job.get("callsign") or "tx"))
+        return 0
+
+    server = atc_server.AtcServer(
+        cfg, AIRPORTS, lambda: copy.deepcopy(MISSION), transmit_fn=tx
+    )
+    hello = server.hello(
+        {
+            "opus_flight_id": 9,
+            "opus_seat": 1,
+            "opus_flight_label": "WILD 6",
+            "radio_fresh": False,
+        }
+    )
+    if hello.get("auto_clearance_enabled") is not True:
+        fails.append("hello should advertise host Watch on")
+    sess = server.get_session(hello["session_id"])
+    if sess is None:
+        return fails + ["hello did not create a session"]
+    sid = str((sess.engine.current_step() or {}).get("id") or "")
+    if not sid:
+        return fails + ["mission has no current step id"]
+    played = server.handle_command(
+        sess, "play", {"step_id": sid, "auto": True, "radio_fresh": False}
+    )
+    if played.get("action") == "blocked":
+        fails.append(f"first auto play should TX, got {played.get('detail')}")
+    if str(sess.engine.state.get("last_step_id") or "") != sid:
+        fails.append("auto play should stamp last_step_id")
+    again = server.handle_command(
+        sess, "play", {"step_id": sid, "auto": True, "radio_fresh": False}
+    )
+    if again.get("action") != "blocked" or "already played" not in str(
+        again.get("detail") or ""
+    ).lower():
+        fails.append(f"second auto play of {sid} should be already-played, got {again}")
+    hb = server.heartbeat(sess, {"radio_fresh": False})
+    if hb.get("auto_clearance_enabled") is not True:
+        fails.append("heartbeat should keep advertising host Watch")
+    return fails
+
+
+def test_client_tanker_chat_gap() -> list[str]:
+    """Client continue is refused until the break timer; a provided line TXes once."""
+    fails: list[str] = []
+    cfg = _host_config()
+    spoken: list[str] = []
+
+    def tx(job: dict) -> int:
+        spoken.append(str(job.get("text") or ""))
+        return 0
+
+    server = atc_server.AtcServer(
+        cfg, AIRPORTS, lambda: copy.deepcopy(MISSION), transmit_fn=tx
+    )
+    hello = server.hello(
+        {
+            "opus_flight_id": 11,
+            "opus_seat": 1,
+            "callsign_override": "WILD 6",
+            "radio_fresh": False,
+        }
+    )
+    sess = server.get_session(hello["session_id"])
+    if sess is None:
+        return ["hello did not create a session"]
+    sess.local_state = {
+        "tanker_overlay": True,
+        "tanker_chat": {
+            "session": True,
+            "choices": [],
+            "next_at": time.time() + 40,
+        },
+    }
+    early = server.handle_command(
+        sess,
+        "tanker_chat",
+        {"continue": True, "auto": True, "radio_fresh": False},
+    )
+    if early.get("action") != "none":
+        fails.append(f"continue while waiting should be none, got {early}")
+    if spoken:
+        fails.append("host must not TX boom chat during the gap")
+    sess.local_state["tanker_chat"] = {
+        "session": True,
+        "choices": [],
+        "next_at": time.time() - 1,
+    }
+    line = "Coffee holding up okay up there?"
+    played = server.handle_command(
+        sess,
+        "tanker_chat",
+        {
+            "continue": True,
+            "auto": True,
+            "text": line,
+            "radio_fresh": False,
+        },
+    )
+    got = str(played.get("text") or "")
+    if line not in got:
+        fails.append(f"client-generated boom line should TX, got {played}")
+    row = (sess.local_state or {}).get("tanker_chat") or {}
+    try:
+        nxt = float(row.get("next_at") or 0)
+    except (TypeError, ValueError):
+        nxt = 0.0
+    if nxt <= time.time():
+        fails.append("host should arm the next boom-chat gap after TX")
+    return fails
+
+
+def test_wild6_ownship_and_shared_cursor() -> list[str]:
+    fails: list[str] = []
+    if not atc_phrase.same_flight_callsign("WILD 6", "WILD 61"):
+        fails.append("WILD 6 should match CAOC WILD 61")
+    if not atc_phrase.same_flight_callsign("WILD 6 · KLSV DCT", "WILD 6-1"):
+        fails.append("picker label should match WILD 6-1")
+    if atc_phrase.same_flight_callsign("WILD 6", "VIPER 1"):
+        fails.append("WILD 6 must not match VIPER 1")
+    if atc_phrase.clean_flight_callsign("WILD 6 · seat 1") != "WILD 6":
+        fails.append("clean_flight_callsign should take the first bit")
+
+    units = [
+        {
+            "type": "air",
+            "id": "viper",
+            "name": "Viper",
+            "flightLabel": "VIPER 11",
+            "xMeters": 0,
+            "zMeters": 0,
+        },
+        {
+            "type": "air",
+            "id": "wild",
+            "name": "Wild",
+            "flightLabel": "WILD 61",
+            "xMeters": 10,
+            "zMeters": 10,
+        },
+    ]
+    own = atc_phrase.match_caoc_unit_for_flight(
+        units,
+        callsign="WILD 6",
+        config={"opus_flight_label": "WILD 6 · KLSV"},
+    )
+    if not own or str(own.get("id")) != "wild":
+        fails.append(f"ownship should be WILD 61, got {own}")
+
+    by_pilot = atc_phrase.match_caoc_unit_for_flight(
+        [
+            {
+                "type": "air",
+                "id": "wrong-cs",
+                "name": "F-16C_50",
+                "flightLabel": "HOBO 11",
+                "pilotName": "Sterling",
+                "xMeters": 0,
+                "zMeters": 0,
+            },
+            {
+                "type": "air",
+                "id": "other",
+                "name": "Viper",
+                "flightLabel": "VIPER 11",
+                "xMeters": 1,
+                "zMeters": 1,
+            },
+        ],
+        callsign="WILD 6",
+        config={"opus_user_name": "Sterling"},
+    )
+    if not by_pilot or str(by_pilot.get("id")) != "wrong-cs":
+        fails.append(f"pilot-name fallback should find Sterling, got {by_pilot}")
+
+    tagged = atc_phrase.match_caoc_unit_for_flight(
+        [
+            {
+                "type": "air",
+                "id": "viper",
+                "name": "Sterling",
+                "flightLabel": "VIPER 11",
+                "opusFlightId": 99,
+                "xMeters": 0,
+                "zMeters": 0,
+            },
+            {
+                "type": "air",
+                "id": "wild",
+                "name": "Wild",
+                "flightLabel": "WILD 61",
+                "opusFlightId": 42,
+                "xMeters": 10,
+                "zMeters": 10,
+            },
+        ],
+        callsign="WILD 6",
+        config={"opus_flight_id": 42, "opus_user_name": "Sterling"},
+    )
+    if not tagged or str(tagged.get("id")) != "wild":
+        fails.append(f"opusFlightId must beat another flight's pilot name, got {tagged}")
+
+    host_eng = flow_engine.FlowEngine(
+        config=_host_config(),
+        persist_state=False,
+        mission=copy.deepcopy(MISSION),
+        airports=AIRPORTS,
+    )
+    idx0 = int(host_eng.state.get("index") or 0)
+    server = atc_server.AtcServer(
+        _host_config(), AIRPORTS, lambda: copy.deepcopy(MISSION)
+    )
+    server.host_engine = host_eng
+    hello = server.hello(
+        {
+            "opus_flight_id": 42,
+            "opus_seat": 1,
+            "opus_flight_label": "WILD 6 · KLSV DCT · seat 1",
+            "opus_user_name": "tester",
+            "radio_fresh": False,
+        }
+    )
+    if str(hello.get("callsign") or "") != "WILD 6":
+        fails.append(f"hello callsign should be WILD 6, got {hello.get('callsign')}")
+    sess = server.get_session(hello["session_id"])
+    if sess is None:
+        return fails + ["hello did not create a Wild 6 session"]
+    if sess.engine is not host_eng:
+        fails.append("dedicated host should share the Fly engine with the only client")
+    server.handle_command(sess, "seek_relative", {"delta": 1, "radio_fresh": False})
+    if int(host_eng.state.get("index") or 0) == idx0:
+        fails.append("client Step should move the host Fly cursor")
+    return fails
+
+
 def main() -> int:
     tests = (
         test_session_key,
@@ -488,8 +984,13 @@ def main() -> int:
         test_session_isolation,
         test_flight_shared_cursor,
         test_element_tanker_peel,
+        test_tanker_fly_freq_matches_pick,
+        test_cross_flight_status_isolation,
         test_client_freq_gate,
         test_secret_redaction_and_session_tts_cap,
+        test_client_auto_play_from_watch,
+        test_client_tanker_chat_gap,
+        test_wild6_ownship_and_shared_cursor,
     )
     bad = 0
     for fn in tests:

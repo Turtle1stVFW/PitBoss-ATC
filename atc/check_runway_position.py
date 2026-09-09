@@ -78,6 +78,57 @@ def main() -> int:
     else:
         print(f"ok   21L parallel offset east of 21R ({ils.tx - rev.tx:.0f} m)")
 
+    # Far-end of 21L, assigned 21R (overhead plan, landed the instrument side).
+    ils_end_x = ils.fx
+    ils_end_z = ils.fz
+    occ = rp.occupied_runway_of_pair(AIRPORT, "21R", ils_end_x, ils_end_z)
+    if occ != "21L":
+        print(f"  FAIL 21L far end should occupy 21L, not {occ!r}")
+        bad += 1
+    else:
+        print("ok   occupied strip: 21L far end while assigned 21R")
+    rev_end = rp.occupied_runway_of_pair(AIRPORT, "21R", rev.fx, rev.fz)
+    if rev_end != "21R":
+        print(f"  FAIL 21R far end should occupy 21R, not {rev_end!r}")
+        bad += 1
+
+    cross_status = rp.FlightStatus(
+        runway="21R",
+        ok=True,
+        runway_length_m=rev.length_m,
+        fixes=[
+            rp.UnitFix(
+                unit_id="me",
+                label="Fleece 1",
+                along_m=1200.0,
+                lateral_m=305.0,
+                heading_err_deg=0.0,
+                alt_m=570.0,
+                height_m=5.0,
+                speed_mps=40.0,
+                x_m=ils_end_x,
+                z_m=ils_end_z,
+                own=True,
+                on_runway=False,
+            )
+        ],
+        tuning={"alt_tol": 60.0},
+    )
+    trig_end_21r = rp.StepTrigger(
+        zone="runway_end", settled=False, flight="me", explicit=True
+    )
+    held_left, wait_left = rp.runway_end_held(
+        trig_end_21r, cross_status, config={}, airport=AIRPORT
+    )
+    if not held_left or cross_status.occupied_runway != "21L":
+        print(
+            f"  FAIL 21L rollout must fire exit even when assigned 21R: "
+            f"{held_left} {wait_left} occ={cross_status.occupied_runway!r}"
+        )
+        bad += 1
+    else:
+        print("ok   21L rollout fires exit when the plan still says 21R")
+
     end_status = rp.FlightStatus(
         runway="21L",
         ok=True,
