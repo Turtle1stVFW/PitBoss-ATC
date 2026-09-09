@@ -199,8 +199,19 @@ def default_handoff(channel: str) -> str:
     return row.handoff if row else "blackjack"
 
 
+# Kinds that fix a contact off bullseye. Everyone else is a radar controller
+# and calls it off the nearest ground station.
+BULLSEYE_KINDS: frozenset[str] = frozenset({"c2", "gci", "tanker"})
+
+
 def is_field(channel: str) -> bool:
     return (channel or "").strip().lower() in FIELD
+
+
+def uses_bullseye(channel: str) -> bool:
+    """Blackjack, Bandsaw and the tanker talk bullseye; ATC talks VOR/TACAN."""
+    row = get(channel)
+    return row is not None and row.kind in BULLSEYE_KINDS
 
 
 def is_airborne(channel: str) -> bool:

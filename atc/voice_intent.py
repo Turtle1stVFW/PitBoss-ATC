@@ -515,6 +515,12 @@ def extract_channel(text: str) -> str | None:
             m = re.search(rf"(?<!\w){re.escape(term)}(?!\w)", head)
             if not m:
                 continue
+            # "monitor tower" / "contact tower" is the instruction, not
+            # an address — unless they opened with Nellis Tower.
+            if channel == "tower":
+                prefix = head[: m.start()].rstrip()
+                if prefix.endswith("monitor") or prefix.endswith("contact"):
+                    continue
             if m.start() < best_pos or (
                 m.start() == best_pos and len(term) > best_len
             ):
@@ -785,6 +791,98 @@ def extract_recovery(text: str) -> str | None:
     return None
 
 
+_POINT_LEADS: tuple[str, ...] = (
+    "vectors to",
+    "vector to",
+    "vectors for",
+    "range and bearing to",
+    "bearing to",
+    "heading to",
+    "steer to",
+    "steer for",
+    "how far to",
+    "distance to",
+)
+
+# Words that end a point name rather than being part of one. The divert terms
+# are here so "vectors to the nearest divert" is never read as a fix called
+# "nearest" — request_divert owns that call.
+_POINT_STOP: frozenset[str] = frozenset(
+    {
+        "alternate",
+        "and",
+        "at",
+        "but",
+        "closest",
+        "divert",
+        "emergency",
+        "field",
+        "for",
+        "i",
+        "if",
+        "my",
+        "navaid",
+        "nearest",
+        "now",
+        "over",
+        "please",
+        "request",
+        "requesting",
+        "station",
+        "suitable",
+        "tacan",
+        # "vectors to the tanker" is request_tanker's call, not a fix.
+        "tanker",
+        "then",
+        "vor",
+        "vortac",
+        "we",
+        "when",
+        "with",
+    }
+)
+_POINT_ARTICLES: frozenset[str] = frozenset({"a", "an", "the"})
+_POINT_MAX_WORDS = 4
+
+
+def extract_nav_point(text: str) -> str | None:
+    """
+    The point name after 'vectors to …' in a normalized transcript.
+
+    Returns the raw phrase; navaids.resolve_point does the catalog matching, so
+    'mormon mesa', 'stryk' and 'lincoln county' all come through intact.
+    """
+    for lead in _POINT_LEADS:
+        match = re.search(rf"(?<!\w){re.escape(lead)}\s+(.+)$", text)
+        if not match:
+            continue
+        words: list[str] = []
+        for tok in match.group(1).split():
+            if not words and tok in _POINT_ARTICLES:
+                continue
+            if tok in _POINT_STOP or tok.isdigit():
+                break
+            words.append(tok)
+            if len(words) >= _POINT_MAX_WORDS:
+                break
+        if words:
+            return " ".join(words)
+    return None
+
+
+def _resolved_nav_point(text: str) -> dict[str, Any] | None:
+    """The point in a 'vectors to …' call, resolved against the nav catalogs."""
+    phrase = extract_nav_point(text)
+    if not phrase:
+        return None
+    try:
+        import navaids
+
+        return navaids.resolve_point(phrase)
+    except Exception:
+        return None
+
+
 def extract_stryk_feeder(text: str) -> str | None:
     """SARAH / NIXON / Gass Peak — still the STRYK recovery; Blackjack names the entry."""
     for key, terms in _STRYK_FEEDER_TERMS.items():
@@ -836,6 +934,20 @@ _ASKING = (
     "request", "requesting", "say", "give", "check", "confirm",
     "like", "we d like", "need", "prefer", "how about", "what s", "what is",
     "can we get", "could we get", "can i get", "can you", "could you",
+)
+
+# Agencies with a scope in front of them: they can move you up and down and
+# say where something is. Ground and Tower cannot.
+_RADAR_CHANNELS: tuple[str, ...] = (
+    "departure",
+    "approach",
+    "control_east",
+    "control_west",
+    "center",
+    "other",
+    "joshua",
+    "blackjack",
+    "bandsaw",
 )
 
 # Multiplier for an intent that does not fit the agency or the stage of flight.
@@ -947,7 +1059,16 @@ INTENTS: tuple[Intent, ...] = (
         "request_tanker",
         (
             _ASKING + ("push", "go", "going"),
-            ("tanker", "texaco", "air refuel", "air refueling", "aar"),
+            (
+                "tanker",
+                "texaco",
+                "shell",
+                "arco",
+                "esso",
+                "air refuel",
+                "air refueling",
+                "aar",
+            ),
         ),
         veto=(
             "tacan",
@@ -1000,7 +1121,14 @@ INTENTS: tuple[Intent, ...] = (
     ),
     Intent(
         "tanker_freq",
-        (_ASKING, ("tanker frequency", "tanker freq", "frequency")),
+        (_ASKING, ("tanker frequency", "tanker freq")),
+        veto=(
+            "this frequency",
+            "check out",
+            "checkout",
+            "remain this frequency",
+            "frequency change",
+        ),
         kind="request",
         channels=("blackjack", "bandsaw", "joshua", "ops", "other", "control_east", "control_west", "center"),
         phases=("flight",),
@@ -1316,6 +1444,47 @@ INTENTS: tuple[Intent, ...] = (
         does="",
         veto=("unable unrestricted", "unable the unrestricted"),
     ),
+    Intent(
+        "request_altitude_change",
+        (
+            _ASKING,
+            (
+                "elevator",
+                "altitude change",
+                "change altitude",
+                "climb",
+                "descend",
+                "descent",
+                # "higher" / "lower" stay phrases: bare "lower" is one edit
+                # from "tower" and the fuzzy matcher would eat every Tower call.
+                "higher altitude",
+                "lower altitude",
+                "request higher",
+                "request lower",
+                "requesting higher",
+                "requesting lower",
+                "go higher",
+                "go lower",
+            ),
+        ),
+        channels=_RADAR_CHANNELS,
+        # A readback is not a request, and "unrestricted" belongs to Tower.
+        # The tower/fighter vetoes are for the fuzzy matcher: "request tower"
+        # and "request fighter" are each one edit from "request lower/higher".
+        veto=(
+            "unrestricted",
+            "cleared to climb",
+            "wilco",
+            "roger",
+            "request tower",
+            "requesting tower",
+            "contact tower",
+            "request fighter",
+        ),
+        weight=1.25,
+        example="request elevator one four thousand",
+        does="climb or descent to the altitude you ask for",
+    ),
     # ---- scripted step triggers -----------------------------------------
     Intent(
         "ready_clearance",
@@ -1371,6 +1540,7 @@ INTENTS: tuple[Intent, ...] = (
                 "climb as published",
                 "expect flight level",
                 "expect",
+                "monitor tower",
             ),
         ),
         kind="step",
@@ -1581,6 +1751,52 @@ INTENTS: tuple[Intent, ...] = (
         example="cancel hold",
         does="leave hold / continue recovery",
     ),
+    # Both of these are listed before request_vectors: on an equal score the
+    # first intent in this tuple wins, and "vectors to STRYK" is more specific
+    # than a bare "request vectors" for the approach.
+    Intent(
+        "request_divert",
+        (
+            (
+                "divert",
+                "nearest field",
+                "closest field",
+                "suitable field",
+                "nearest airfield",
+                "closest airfield",
+                "nearest suitable",
+                "alternate field",
+                "nearest runway",
+            ),
+        ),
+        kind="action",
+        channels=_RADAR_CHANNELS,
+        weight=1.4,
+        example="request vectors to the nearest divert",
+        does="heading and range to the closest suitable field",
+    ),
+    Intent(
+        "request_point_vectors",
+        (
+            (
+                "vectors to",
+                "vector to",
+                "vectors for",
+                "range and bearing to",
+                "bearing to",
+                "heading to",
+                "steer to",
+                "steer for",
+                "how far to",
+                "distance to",
+            ),
+        ),
+        kind="action",
+        channels=_RADAR_CHANNELS,
+        weight=1.35,
+        example="request vectors to Stryk",
+        does="magnetic heading and range to a named point",
+    ),
     Intent(
         "request_vectors",
         (
@@ -1591,6 +1807,19 @@ INTENTS: tuple[Intent, ...] = (
         channels=("approach",),
         phases=("approach", "flight"),
         weight=1.3,
+        # "vectors to the nearest divert" is a divert request, not a vector to
+        # the approach — request_divert answers those.
+        veto=(
+            "divert",
+            "nearest field",
+            "closest field",
+            "suitable field",
+            "nearest suitable",
+            "nearest airfield",
+            "closest airfield",
+            "nearest runway",
+            "alternate field",
+        ),
         example="request vectors",
         does="radar vectors",
     ),
@@ -2662,30 +2891,40 @@ _ALT_CARDINALS = {
 
 
 def _climb_readback_item(items: list[dict[str, Any]] | None) -> dict[str, Any] | None:
-    for item in _hinge_items(items):
-        if str(item.get("key") or "") == "climb":
-            return item
-    for item in items or []:
-        if isinstance(item, dict) and str(item.get("key") or "") == "climb":
-            return item
+    for key in ("climb", "expect"):
+        for item in _hinge_items(items):
+            if str(item.get("key") or "") == key:
+                return item
+        for item in items or []:
+            if isinstance(item, dict) and str(item.get("key") or "") == key:
+                return item
     return None
 
 
 def _assigned_climb_ft(item: dict[str, Any] | None) -> int | None:
     if not item:
         return None
-    digits = re.sub(r"\D", "", str(item.get("value") or ""))
-    if not digits:
-        return None
-    try:
-        n = int(digits)
-    except ValueError:
-        return None
-    return n if n >= 1000 else n * 100  # rare FL-style leftovers
+    raw = str(item.get("value") or "")
+    if "→" in raw or "->" in raw:
+        raw = re.split(r"→|->", raw)[-1]
+    digits = re.sub(r"\D", "", raw)
+    if digits:
+        try:
+            n = int(digits)
+        except ValueError:
+            n = None
+        else:
+            if n >= 1000:
+                return n
+            if 50 <= n <= 600:
+                return n * 100
+    spoken = normalize(str(item.get("spoken") or ""))
+    heard = _heard_altitudes_ft(spoken)
+    return heard[0] if heard else None
 
 
 def _add_altitude_ft(out: list[int], feet: int) -> None:
-    if 5000 <= feet <= 60000 and feet not in out:
+    if 1000 <= feet <= 60000 and feet not in out:
         out.append(feet)
 
 
@@ -2734,6 +2973,15 @@ def _heard_altitudes_ft(text: str) -> list[int]:
     # Bare foot values (15000) — comma already stripped by normalize().
     for m in re.finditer(r"(?<!\w)(\d{4,5})(?!\w)", text):
         _add_altitude_ft(found, int(m.group(1)))
+
+    # "climb and maintain 170" after digit-fold (one seven zero → 170).
+    for m in re.finditer(
+        r"(?:climb(?:\s+and\s+maintain)?|maintain|flight\s+levels?|fl)\s+(\d{3})\b",
+        text,
+    ):
+        n = int(m.group(1))
+        if 50 <= n <= 600:
+            _add_altitude_ft(found, n * 100)
 
     return found
 
@@ -2821,6 +3069,14 @@ def _hinge_item_hit(text: str, item: dict[str, Any] | None) -> bool:
         return _go_around_instruction_hit(text, item)
     if key == "climb":
         return _climb_readback_hit(text, item)
+    if key == "expect":
+        return _climb_readback_hit(text, item)
+    if key == "monitor":
+        return bool(
+            re.search(r"(?<!\w)monitor(?:\s+tower)?(?!\w)", text)
+            or re.search(r"(?<!\w)tower(?!\w)", text)
+            or _eor_readback_hit(text, {"spoken": "eor", "value": "EOR"})
+        )
     if key == "callsign":
         return _callsign_readback_hit(text, item)
     spoken = normalize(str(item.get("spoken") or ""))
@@ -3047,6 +3303,7 @@ def _score_intents(
     extra: tuple[Intent, ...] = (),
     current_step_id: str = "",
     steps: list[dict[str, Any]] | None = None,
+    last_tx_template: str = "",
 ) -> Match | None:
     """Highest-scoring intent for a transcript, before any addressing gate."""
     best: Match | None = None
@@ -3123,9 +3380,18 @@ def _score_intents(
             continue
         if awaiting_readback and intent.template == "monitor_tower":
             continue
+        # Already issued — "at EOR" / monitor tower is the readback, not a new ask.
+        if (
+            str(last_tx_template or "").strip().lower() == "monitor_tower"
+            and intent.id == "at_eor"
+        ):
+            continue
         # Ground already issued taxi — repeating "taxi via … runway 21R" is
         # the readback, not a new request that re-plays the taxi clearance.
         if awaiting_readback and intent.id == "ready_taxi":
+            continue
+        # Reading back the IFR clearance is not a new "request clearance".
+        if awaiting_readback and intent.id in ("ready_clearance", "ready_to_copy"):
             continue
         # Departure radar contact is an airborne check-in — not weather.
         if expected == "radar_contact" and intent.id in _DEPARTURE_CHECKIN_SKIP_IDS:
@@ -3276,6 +3542,22 @@ def _score_intents(
                 )
                 if assigned and _normalize_runway_token(runway) == assigned:
                     continue
+        if intent.id == "request_altitude_change":
+            heard = _heard_altitudes_ft(text)
+            # Last value wins: "leaving one five for angels two four".
+            if heard:
+                slots["altitude_ft"] = heard[-1]
+        if intent.id == "request_point_vectors":
+            phrase = extract_nav_point(text)
+            # No name after "vectors to" is a plain vector request, not this.
+            if not phrase:
+                continue
+            slots["nav_point_said"] = phrase
+            # A name we cannot place still fires, so the pilot hears
+            # "say again the point" instead of an Approach vector.
+            point = _resolved_nav_point(text)
+            if point is not None:
+                slots["nav_point"] = point
         recovery = extract_recovery(text)
         if recovery and intent.id in (
             "inbound_recovery",
@@ -3480,6 +3762,10 @@ def echoes_last_atc(
         return False
     last_tmpl = str(last_tx_template or "").strip().lower()
     cand_tmpl = str(candidate_template or "").strip().lower()
+    if "monitor tower" in last and "monitor tower" in text:
+        return True
+    if last_tmpl == "monitor_tower" and cand_tmpl == "monitor_tower":
+        return True
     if last_tmpl and cand_tmpl and last_tmpl != cand_tmpl:
         return False
     if any(cue in text and cue not in last for cue in _CHECKIN_NOT_READBACK):
@@ -3614,11 +3900,16 @@ def evaluate(
         extra=extra_intents,
         current_step_id=current_step_id,
         steps=steps,
+        last_tx_template=last_tx_template,
     )
     if (
         candidate is not None
         and not awaiting_readback
-        and (candidate.kind == "step" or candidate.step_id)
+        and (
+            candidate.kind == "step"
+            or candidate.step_id
+            or candidate.kind == "request"
+        )
         and echoes_last_atc(
             text,
             last_tx_text,

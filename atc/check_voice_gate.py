@@ -80,6 +80,10 @@ CASES = [
     ("LA Center, Fleece 1, with you", "center", "flight", True, "center_check_in"),
     ("Nellis Control, Fleece 1, contact Approach", "control_east", "flight", True, "control_handoff"),
     ("Blackjack, Fleece 1, request tanker", "blackjack", "flight", True, "request_tanker"),
+    ("Blackjack, Fleece 1, request another tanker", "blackjack", "flight", True, "request_tanker"),
+    ("Blackjack, Fleece 1, request the closest tanker", "blackjack", "flight", True, "request_tanker"),
+    ("Blackjack, Fleece 1, request Texaco 5", "blackjack", "flight", True, "request_tanker"),
+    ("Blackjack, Fleece 1, request Texaco five", "blackjack", "flight", True, "request_tanker"),
     ("Blackjack, Fleece 1, request vectors to the tanker", "blackjack", "flight", True, "request_tanker"),
     ("Bandsaw, Fleece 1, going to the tanker", "bandsaw", "flight", True, "request_tanker"),
     ("Blackjack, Fleece 1, back from the tanker", "blackjack", "flight", True, "tanker_return"),
@@ -88,6 +92,9 @@ CASES = [
     ("Bandsaw, Fleece 1, returning from the tanker", "bandsaw", "flight", True, "tanker_return"),
     ("Blackjack, Fleece 1, say TACAN", "blackjack", "flight", True, "tanker_tacan"),
     ("Blackjack, Fleece 1, say tanker frequency", "blackjack", "flight", True, "tanker_freq"),
+    # Blackjack check-in closer — not a tanker-freq request.
+    ("Copy, check out this frequency, Dagger one", "blackjack", "flight", False, None),
+    ("Blackjack, Dagger 1, check out this frequency", "blackjack", "flight", False, None),
     ("Blackjack, Fleece 1, say tanker bullseye", "blackjack", "flight", True, "tanker_bullseye"),
     ("Texaco, Fleece 1, request rejoin", "tanker", "flight", True, "tanker_check_in"),
     ("Texaco, Fleece 1, request reform", "tanker", "flight", True, "tanker_check_in"),
@@ -140,6 +147,19 @@ CASES = [
     ("Approach, Fleece 1, request hold", "approach", "approach", True, "request_hold"),
     ("Approach, Fleece 1, cancel hold", "approach", "approach", True, "cancel_hold"),
     ("Approach, Fleece 1, request vectors", "approach", "approach", True, "request_vectors"),
+    # Elevator: any radar agency will move you; Ground and Tower will not.
+    ("Nellis Control, Fleece 1, request elevator one four thousand", "control_east", "flight", True, "request_altitude_change"),
+    ("Blackjack, Fleece 1, request elevator angels four", "blackjack", "flight", True, "request_altitude_change"),
+    ("Bandsaw, Fleece 1, request descent to angels one zero", "bandsaw", "flight", True, "request_altitude_change"),
+    ("Departure, Fleece 1, request climb to flight level two two zero", "departure", "departure", True, "request_altitude_change"),
+    ("Nellis Control, Fleece 1, request higher altitude", "control_east", "flight", True, "request_altitude_change"),
+    ("Ground, Fleece 1, request elevator one four thousand", "ground", "departure", False, None),
+    # Vectors to a named point, and to the nearest suitable field.
+    ("Nellis Control, Fleece 1, request vectors to Stryk", "control_east", "approach", True, "request_point_vectors"),
+    ("Blackjack, Fleece 1, request bearing to Mormon Mesa", "blackjack", "flight", True, "request_point_vectors"),
+    ("Nellis Control, Fleece 1, how far to Beatty", "control_east", "flight", True, "request_point_vectors"),
+    ("Approach, Fleece 1, request vectors to the nearest divert", "approach", "approach", True, "request_divert"),
+    ("Blackjack, Fleece 1, request the closest suitable field", "blackjack", "flight", True, "request_divert"),
     ("Approach, Fleece 1, airport in sight, request tower", "approach", "approach", True, "approach_continue"),
     ("Approach, Fleece 1, request handoff", "approach", "approach", True, "approach_continue"),
     ("Approach, Fleece 1, established", "approach", "approach", True, "approach_established"),
@@ -1835,6 +1855,62 @@ def extras() -> int:
         bad += 1
     print("awaiting readback — squawk word, bare code, or roger closes it")
 
+    climb_clearance_items = [
+        {
+            "key": "climb",
+            "label": "Climb / maintain",
+            "value": "17,000 ft",
+            "spoken": "one seven thousand",
+            "hinge": True,
+            "highlight": True,
+        },
+        {
+            "key": "squawk",
+            "label": "Squawk",
+            "value": "2324",
+            "spoken": "squawk two tree two four",
+            "hinge": True,
+        },
+    ]
+    for text in (
+        "climb and maintain one seven thousand",
+        "seventeen thousand",
+        "one seven thousand",
+        "climb and maintain one seven zero",
+    ):
+        result = voice_intent.evaluate(
+            text,
+            channel="delivery",
+            phase="departure",
+            expected="clearance",
+            callsign=CALLSIGN,
+            runways=RUNWAYS,
+            awaiting_readback=True,
+            readback_items=climb_clearance_items,
+            last_tx_template="clearance",
+            require_address=True,
+        )
+        if not result.fired or result.match.intent != "acknowledge_readback":
+            print(f"  FAIL clearance altitude must close readback: {text!r} — {result.describe()}")
+            bad += 1
+    replay = voice_intent.evaluate(
+        "Delivery, Fleece 1, request clearance",
+        channel="delivery",
+        phase="departure",
+        expected="clearance",
+        callsign=CALLSIGN,
+        runways=RUNWAYS,
+        awaiting_readback=True,
+        readback_items=climb_clearance_items,
+        last_tx_template="clearance",
+        require_address=True,
+    )
+    if replay.fired and replay.match and replay.match.intent == "ready_clearance":
+        print(f"  FAIL request clearance during readback must not re-issue: {replay.describe()}")
+        bad += 1
+    else:
+        print("clearance readback — altitude closes; request clearance does not re-issue")
+
     taxi_items = [
         {
             "key": "runway",
@@ -2008,6 +2084,58 @@ def extras() -> int:
             print(f"  FAIL at-EOR needs Ground: {text!r} — {result.describe()}")
             bad += 1
     print("at EOR — letters, Whisper splits, or end of runway (agency required)")
+
+    monitor_items = [
+        {
+            "key": "monitor",
+            "label": "Monitor",
+            "value": "tower",
+            "spoken": "monitor tower",
+            "hinge": True,
+        },
+    ]
+    monitor_last = (
+        "Dagger one, Nellis Ground, monitor tower on three three three decimal three."
+    )
+    for text in (
+        "Ground, Fleece 1, monitor tower",
+        "Fleece 1, monitor tower",
+        "monitor tower",
+        "Ground, Fleece 1, at the EOR",
+    ):
+        result = voice_intent.evaluate(
+            text,
+            channel="ground",
+            phase="departure",
+            expected="monitor_tower",
+            callsign=CALLSIGN,
+            runways=RUNWAYS,
+            awaiting_readback=True,
+            readback_items=monitor_items,
+            last_tx_text=monitor_last,
+            last_tx_channel="ground",
+            last_tx_template="monitor_tower",
+            require_address=True,
+            tuned_channel="ground",
+            cursor_channel="tower",
+        )
+        if result.fired and result.match and result.match.intent == "at_eor":
+            print(f"  FAIL monitor-tower readback must not re-ask EOR: {text!r} — {result.describe()}")
+            bad += 1
+        elif text.endswith("at the EOR"):
+            if result.fired and result.match and result.match.intent not in (
+                "acknowledge_readback",
+                None,
+            ):
+                print(f"  FAIL at EOR after monitor tower: {text!r} — {result.describe()}")
+                bad += 1
+        elif not result.fired or result.match.intent != "acknowledge_readback":
+            if result.reason == "readback of last ATC":
+                continue
+            print(f"  FAIL monitor-tower readback should ack: {text!r} — {result.describe()}")
+            bad += 1
+    else:
+        print("monitor tower readback — ack / echo, not a new EOR request")
 
     takeoff_items = [
         {
@@ -3457,6 +3585,138 @@ def extras() -> int:
                 f"tanker BRAA is magnetic "
                 f"({mag_brg:.0f} vs true {true_brg:.0f})"
             )
+
+        if (
+            tanker_mod.extract_tanker_name("request texaco 5") != "texaco 5"
+            or tanker_mod.extract_tanker_name("request texaco five") != "texaco 5"
+            or tanker_mod.tanker_name_is_specific("texaco")
+            or not tanker_mod.tanker_name_is_specific("texaco 5")
+            or not tanker_mod.wants_reassign_tanker(
+                "blackjack fleece 1 request another tanker"
+            )
+            or tanker_mod.wants_reassign_tanker("request tanker")
+        ):
+            print("  FAIL tanker name / reassign parse")
+            bad += 1
+        else:
+            print("tanker name parse — texaco 5 + another tanker")
+
+        own_ll = (36.2362, -115.0343)
+        far_lat, far_lon = 36.2362, -112.0343
+        near_lat, near_lon = 36.2362, -114.8343
+        far_xz = atc_phrase.caoc_ll_to_xz(far_lat, far_lon)
+        near_xz = atc_phrase.caoc_ll_to_xz(near_lat, near_lon)
+        catalog = [
+            {
+                "callsign": "TEXACO 1",
+                "aircraft": "KC-135",
+                "track": "ARLNS",
+                "boom": True,
+                "freq_mhz": 322.3,
+            },
+            {
+                "callsign": "TEXACO 5",
+                "aircraft": "KC-135",
+                "track": "AR231V",
+                "boom": True,
+                "freq_mhz": 317.5,
+            },
+        ]
+        live_units = [
+            {
+                "name": "TEXACO 1",
+                "objectName": "KC-135",
+                "xMeters": far_xz[0],
+                "zMeters": far_xz[1],
+                "headingDeg": 90,
+                "altMeters": 7000,
+            },
+            {
+                "name": "TEXACO 5",
+                "objectName": "KC-135",
+                "xMeters": near_xz[0],
+                "zMeters": near_xz[1],
+                "headingDeg": 90,
+                "altMeters": 7000,
+            },
+        ]
+        cfg = {"bullseye_magnetic_declination_deg": 12}
+        nearest = tanker_mod.choose_catalog_tanker(
+            catalog,
+            boom_only=True,
+            units=live_units,
+            own_ll=own_ll,
+            config=cfg,
+        )
+        skipped = tanker_mod.choose_catalog_tanker(
+            catalog,
+            boom_only=True,
+            units=live_units,
+            own_ll=own_ll,
+            config=cfg,
+            exclude="TEXACO 5",
+        )
+        named_five = tanker_mod.choose_catalog_tanker(
+            catalog,
+            name="texaco 5",
+            boom_only=True,
+            units=live_units,
+            own_ll=own_ll,
+            config=cfg,
+        )
+        old_fetch = tanker_mod.fetch_opus_tankers
+        old_units = tanker_mod._caoc_tanker_units
+        tanker_mod.fetch_opus_tankers = lambda *a, **k: list(catalog)
+        tanker_mod._caoc_tanker_units = lambda *a, **k: list(live_units)
+        try:
+            remembered = {"tanker_callsign": "TEXACO 1", "tanker_id": "tex1"}
+            sticky = tanker_mod.pick_tanker(
+                cfg,
+                state=remembered,
+                own_ll=own_ll,
+                boom_only=True,
+            )
+            fresh = tanker_mod.pick_tanker(
+                cfg,
+                state=remembered,
+                own_ll=own_ll,
+                boom_only=True,
+                prefer_remembered=False,
+            )
+            asked = tanker_mod.pick_tanker(
+                cfg,
+                state=remembered,
+                name="texaco 5",
+                own_ll=own_ll,
+                boom_only=True,
+            )
+            info = tanker_mod.pick_tanker(
+                cfg,
+                state=remembered,
+                own_ll=own_ll,
+                boom_only=True,
+                prefer_remembered=True,
+            )
+        finally:
+            tanker_mod.fetch_opus_tankers = old_fetch
+            tanker_mod._caoc_tanker_units = old_units
+        if (
+            str((nearest or {}).get("callsign") or "").upper() != "TEXACO 5"
+            or str((skipped or {}).get("callsign") or "").upper() != "TEXACO 1"
+            or str((named_five or {}).get("callsign") or "").upper() != "TEXACO 5"
+            or str((sticky or {}).get("callsign") or "").upper() != "TEXACO 1"
+            or str((fresh or {}).get("callsign") or "").upper() != "TEXACO 5"
+            or str((asked or {}).get("callsign") or "").upper() != "TEXACO 5"
+            or str((info or {}).get("callsign") or "").upper() != "TEXACO 1"
+        ):
+            print(
+                f"  FAIL tanker re-pick: nearest={nearest} skipped={skipped} "
+                f"named={named_five} sticky={sticky} fresh={fresh} "
+                f"asked={asked} info={info}"
+            )
+            bad += 1
+        else:
+            print("tanker re-pick — nearest / named Texaco 5, TACAN stays on 1")
 
         import tanker_chat as tanker_chat_mod
 
@@ -6352,6 +6612,37 @@ def instruction_readback_echo() -> int:
     )
     if echo.fired:
         print(f"  FAIL handoff readback must not fire: {echo.describe()}")
+        bad += 1
+
+    bj_last = (
+        "Dagger one, Blackjack, radar contact, cleared tactical, "
+        "frequency change approved, check out this frequency when range work complete."
+    )
+    bj_echo = voice_intent.evaluate(
+        "Copy wheel, check out this frequency, dagger one",
+        channel="blackjack",
+        phase="flight",
+        expected="bj_check_in",
+        callsign=CALLSIGN,
+        last_tx_text=bj_last,
+        last_tx_channel="blackjack",
+        last_tx_template="bj_check_in",
+    )
+    if bj_echo.fired:
+        print(f"  FAIL Blackjack checkout readback must not TX tanker freq: {bj_echo.describe()}")
+        bad += 1
+    tanker_ask = voice_intent.evaluate(
+        "Blackjack, Fleece 1, say tanker frequency",
+        channel="blackjack",
+        phase="flight",
+        expected="bj_check_in",
+        callsign=CALLSIGN,
+        last_tx_text=bj_last,
+        last_tx_channel="blackjack",
+        last_tx_template="bj_check_in",
+    )
+    if not tanker_ask.fired or tanker_ask.match.intent != "tanker_freq":
+        print(f"  FAIL say tanker frequency must still fire: {tanker_ask.describe()}")
         bad += 1
 
     checkin = voice_intent.evaluate(

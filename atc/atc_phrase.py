@@ -33,6 +33,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import navaids
+
 HERE = Path(__file__).resolve().parent
 AIRPORTS_PATH = HERE / "airports.json"
 STATE_PATH = HERE / "state.json"
@@ -5666,6 +5668,212 @@ def build_vector_clearance(
     return ", ".join(bits) + "."
 
 
+# --- pilot-requested altitude change ("request elevator") -------------
+# ATC works in feet and flight levels; Blackjack and Bandsaw work in angels.
+
+ALTITUDE_REQUEST_MIN_FT = 1000
+ALTITUDE_REQUEST_MAX_FT = 45000
+
+
+def altitude_request_band_ft(
+    config: dict[str, Any] | None = None,
+    mission: dict[str, Any] | None = None,
+) -> tuple[int, int]:
+    """Lowest and highest altitude an agency will approve on request."""
+    lo, hi = ALTITUDE_REQUEST_MIN_FT, ALTITUDE_REQUEST_MAX_FT
+    for src in (config, mission):
+        if not isinstance(src, dict):
+            continue
+        for key, idx in (("altitude_request_min_ft", 0), ("altitude_request_max_ft", 1)):
+            raw = src.get(key)
+            if raw is None or str(raw).strip() == "":
+                continue
+            try:
+                val = int(float(raw))
+            except (TypeError, ValueError):
+                continue
+            if idx == 0:
+                lo = val
+            else:
+                hi = val
+    return (lo, hi) if lo <= hi else (hi, lo)
+
+
+def _agency_say(agency: str, airport: dict[str, Any] | None = None) -> str:
+    """Spoken agency name, field-prefixed where it needs to be."""
+    import agencies as agencies_mod
+
+    name = str((airport or {}).get("name") or "").strip()
+    spoken = agencies_mod.spoken_name(agency, name)
+    return spoken or speak_agency_name(agency)
+
+
+def altitude_change_verb(
+    altitude_ft: int, current_ft: int | None, *, tolerance_ft: int = 500
+) -> str:
+    """'climb', 'descend' or 'maintain' for a requested altitude."""
+    if current_ft is None:
+        return "maintain"
+    if altitude_ft > current_ft + tolerance_ft:
+        return "climb"
+    if altitude_ft < current_ft - tolerance_ft:
+        return "descend"
+    return "maintain"
+
+
+def build_altitude_change_clearance(
+    callsign: str,
+    *,
+    agency: str,
+    altitude_ft: int,
+    current_ft: int | None = None,
+    airport: dict[str, Any] | None = None,
+) -> str:
+    """
+    Answer to 'request elevator one four thousand'.
+
+    ATC issues 'climb and maintain one four thousand' / 'flight level two two
+    zero'; Blackjack and Bandsaw issue 'climb angels four'.
+    """
+    import agencies as agencies_mod
+
+    cs = speak_callsign(callsign)
+    ag = _agency_say(agency, airport)
+    verb = altitude_change_verb(int(altitude_ft), current_ft)
+    if agencies_mod.uses_bullseye(agency):
+        return f"{cs}, {ag}, {verb} {speak_angels(int(altitude_ft))}."
+    # No "one seven, seventeen thousand" clarify here — he picked the number.
+    spoken = speak_altitude_value(
+        str(int(altitude_ft)), prefer_fl_below=1000, clarify_chance=0.0
+    )
+    phrase = verb if verb == "maintain" else f"{verb} and maintain"
+    return f"{cs}, {ag}, {phrase} {spoken}."
+
+
+def build_altitude_change_unable(
+    callsign: str,
+    *,
+    agency: str,
+    current_ft: int | None = None,
+    airport: dict[str, Any] | None = None,
+) -> str:
+    """Requested altitude is outside the band — unable, hold what you have."""
+    import agencies as agencies_mod
+
+    cs = speak_callsign(callsign)
+    ag = _agency_say(agency, airport)
+    if current_ft is None:
+        return f"{cs}, {ag}, unable that altitude."
+    if agencies_mod.uses_bullseye(agency):
+        return f"{cs}, {ag}, unable, maintain {speak_angels(int(current_ft))}."
+    spoken = speak_altitude_value(
+        str(int(current_ft)), prefer_fl_below=1000, clarify_chance=0.0
+    )
+    return f"{cs}, {ag}, unable, maintain {spoken}."
+
+
+def build_altitude_request_unheard(
+    callsign: str,
+    *,
+    agency: str,
+    airport: dict[str, Any] | None = None,
+) -> str:
+    """Heard the request but not the altitude."""
+    cs = speak_callsign(callsign)
+    ag = _agency_say(agency, airport)
+    return f"{cs}, {ag}, say altitude requested."
+
+
+# --- vectors to a named point / nearest divert -------------------------
+# ATC gives a heading to fly; Blackjack and Bandsaw give bearing and range,
+# because C2 does not vector you.
+
+
+def build_point_vector_clearance(
+    callsign: str,
+    *,
+    agency: str,
+    point_say: str,
+    heading_deg: int,
+    range_nm: int,
+    airport: dict[str, Any] | None = None,
+) -> str:
+    """Radar vector to a named point: heading, the point, then how far."""
+    cs = speak_callsign(callsign)
+    ag = _agency_say(agency, airport)
+    hdg = speak_digits(f"{int(heading_deg) % 360:03d}")
+    return (
+        f"{cs}, {ag}, fly heading {hdg}, vectors to {point_say}, "
+        f"{speak_field_miles(range_nm)}."
+    )
+
+
+def build_point_bearing_advisory(
+    callsign: str,
+    *,
+    agency: str,
+    point_say: str,
+    bearing_deg: int,
+    range_nm: int,
+    airport: dict[str, Any] | None = None,
+) -> str:
+    """C2 answer to 'vectors to' — bearing and range, not a clearance."""
+    cs = speak_callsign(callsign)
+    ag = _agency_say(agency, airport)
+    brg = speak_digits(f"{int(bearing_deg) % 360:03d}")
+    return f"{cs}, {ag}, {point_say} bears {brg} at {speak_field_miles(range_nm)}."
+
+
+def build_divert_vector_clearance(
+    callsign: str,
+    *,
+    agency: str,
+    field_say: str,
+    bearing_deg: int,
+    range_nm: int,
+    airport: dict[str, Any] | None = None,
+    advisory: bool = False,
+) -> str:
+    """Nearest suitable field, vectored (ATC) or called out (C2)."""
+    cs = speak_callsign(callsign)
+    ag = _agency_say(agency, airport)
+    brg = speak_digits(f"{int(bearing_deg) % 360:03d}")
+    miles = speak_field_miles(range_nm)
+    if advisory:
+        return (
+            f"{cs}, {ag}, nearest suitable field is {field_say}, "
+            f"bearing {brg} at {miles}."
+        )
+    return (
+        f"{cs}, {ag}, nearest suitable field is {field_say}, "
+        f"fly heading {brg}, {miles}."
+    )
+
+
+def build_point_unknown(
+    callsign: str,
+    *,
+    agency: str,
+    airport: dict[str, Any] | None = None,
+) -> str:
+    """Could not place the fix the pilot asked for."""
+    cs = speak_callsign(callsign)
+    ag = _agency_say(agency, airport)
+    return f"{cs}, {ag}, unable, say again the point."
+
+
+def build_position_unknown(
+    callsign: str,
+    *,
+    agency: str,
+    airport: dict[str, Any] | None = None,
+) -> str:
+    """Nothing on the scope to vector — cannot work out a heading."""
+    cs = speak_callsign(callsign)
+    ag = _agency_say(agency, airport)
+    return f"{cs}, {ag}, unable, negative radar contact."
+
+
 def build_leave_hold_clearance(
     airport: dict[str, Any],
     callsign: str,
@@ -6621,12 +6829,13 @@ def build_blackjack_c2_redirect(
     )
 
 
-def build_joshua_check_in(callsign: str) -> str:
+def build_joshua_check_in(callsign: str, *, position: str = "") -> str:
     """Joshua Control check-in: radar contact, remain this frequency."""
     cs = speak_callsign(callsign)
+    where = f", {position}" if position else ""
     return _pick(
-        f"{cs}, Joshua, radar contact. Remain this frequency.",
-        f"{cs}, Joshua, radar contact, remain this frequency.",
+        f"{cs}, Joshua, radar contact{where}. Remain this frequency.",
+        f"{cs}, Joshua, radar contact{where}, remain this frequency.",
     )
 
 
@@ -6660,6 +6869,7 @@ def build_control_check_in(
     channel: str = "control_east",
     airport: dict[str, Any] | None = None,
     plan: dict[str, Any] | None = None,
+    position: str = "",
 ) -> str:
     """
     Nellis Control (NATCF) check-in: radar contact plus the recovery routing.
@@ -6670,6 +6880,11 @@ def build_control_check_in(
     cs = speak_callsign(callsign)
     del channel  # East / West share the spoken agency name; Local 7 vs 8 differentiates.
     bits = [f"{cs}, Nellis Control, radar contact"]
+    if position:
+        bits.append(position)
+    # A bare check-in ends "remain this frequency"; the position clause is not
+    # routing, so it does not count as having said something useful.
+    routing_from = len(bits)
     p = dict(plan or {})
     dest = ""
     if airport:
@@ -6704,7 +6919,7 @@ def build_control_check_in(
                 bits.append(speak_expect_vfr_recovery(vfr_say, expect_key, rwy))
             elif rwy or expect_key:
                 bits.append(speak_expect_pattern(expect_key, rwy))
-    if len(bits) == 1:
+    if len(bits) == routing_from:
         bits.append("remain this frequency")
     return ", ".join(bits) + "."
 
@@ -6740,12 +6955,13 @@ def build_contact_control(
     return with_freq_handoff_closer(f"{cs}, Blackjack, contact {target}")
 
 
-def build_center_check_in(callsign: str) -> str:
+def build_center_check_in(callsign: str, *, position: str = "") -> str:
     """Los Angeles Center radar contact."""
     cs = speak_callsign(callsign)
+    where = f", {position}" if position else ""
     return _pick(
-        f"{cs}, Los Angeles Center, radar contact. Remain this frequency.",
-        f"{cs}, Los Angeles Center, radar contact, remain this frequency.",
+        f"{cs}, Los Angeles Center, radar contact{where}. Remain this frequency.",
+        f"{cs}, Los Angeles Center, radar contact{where}, remain this frequency.",
     )
 
 
@@ -8075,6 +8291,108 @@ def resolve_alpha_bullseye(
     if unit is None:
         return None
     return bullseye_for_caoc_unit(unit, config, opus=opus)
+
+
+# --- ATC position reference (nearest VOR / TACAN) ----------------------
+# Blackjack and Bandsaw fix a contact off ELVIS. Departure, Approach, Nellis
+# Control, Joshua and Center are radar controllers: they call it off the
+# nearest ground station, the way the real ones do.
+
+
+def atc_position_reference(config: dict[str, Any] | None = None) -> str:
+    """How ATC fixes a radar contact: 'navaid' (default), 'bullseye', or 'off'."""
+    raw = str((config or {}).get("atc_position_reference") or "navaid").strip().lower()
+    return raw if raw in ("navaid", "bullseye", "off") else "navaid"
+
+
+def resolve_navaid_position(
+    config: dict[str, Any] | None,
+    *,
+    callsign: str | None = None,
+    opus: OpusFlightContext | None = None,
+    state: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """
+    Ownship as a bearing/range off the nearest VOR/TACAN.
+
+    Returns the navaids fix dict — `spoken` is the ready clause, e.g.
+    'two five miles northeast of Mormon Mesa' — or None if the jet cannot be
+    located or nothing is close enough to be worth naming.
+    """
+    ll = ownship_latlon(config, callsign=callsign, opus=opus, state=state)
+    if ll is None:
+        return None
+    return navaids.station_position_fix(ll[0], ll[1], config=config)
+
+
+def resolve_agency_position(
+    config: dict[str, Any] | None,
+    *,
+    agency: str,
+    callsign: str | None = None,
+    opus: OpusFlightContext | None = None,
+    state: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Where the jet is, in whichever reference that agency speaks."""
+    import agencies as agencies_mod
+
+    if agencies_mod.uses_bullseye(agency):
+        return resolve_alpha_bullseye(config or {}, callsign=callsign, opus=opus)
+    mode = atc_position_reference(config)
+    if mode == "off":
+        return None
+    if mode == "bullseye":
+        return resolve_alpha_bullseye(config or {}, callsign=callsign, opus=opus)
+    return resolve_navaid_position(
+        config, callsign=callsign, opus=opus, state=state
+    )
+
+
+def agency_position_clause(
+    config: dict[str, Any] | None,
+    *,
+    agency: str,
+    callsign: str | None = None,
+    opus: OpusFlightContext | None = None,
+    state: dict[str, Any] | None = None,
+) -> str:
+    """The spoken position clause for an agency, or '' when it cannot be had."""
+    fix = resolve_agency_position(
+        config, agency=agency, callsign=callsign, opus=opus, state=state
+    )
+    return str((fix or {}).get("spoken") or "")
+
+
+def ownship_altitude_ft(
+    config: dict[str, Any] | None,
+    *,
+    callsign: str | None = None,
+    opus: OpusFlightContext | None = None,
+) -> int | None:
+    """Ownship altitude in feet — map inject when the tester drives, else CAOC."""
+    inj = read_ownship_inject(config=config)
+    if inj:
+        for key in ("alt_ft", "alt_ft_agl"):
+            raw = inj.get(key)
+            if raw is None:
+                continue
+            try:
+                return int(round(float(raw)))
+            except (TypeError, ValueError):
+                continue
+    radar = fetch_caoc_radar(config or {})
+    if not radar:
+        return None
+    unit = match_caoc_unit_for_flight(
+        list(radar.get("units") or []), callsign=callsign, opus=opus, config=config
+    )
+    if unit is None:
+        return None
+    alt = caoc_unit_alt_ft(unit)
+    try:
+        return int(round(float(alt))) if alt is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 # Templates whose phrasing depends on the assigned recovery / approach plate.
@@ -9448,6 +9766,7 @@ AWAITING_READBACK_TEMPLATES = frozenset(
         "radar_contact",
         "climb_cruise",
         "bj_check_in",
+        "monitor_tower",
     }
 )
 
@@ -9554,7 +9873,13 @@ def build_readback_checklist(
         change = clearance_amendment_change(airport, opus, state)
         if climb_ft:
             spoken_climb = speak_altitude_value(str(climb_ft), prefer_fl_below=1000) or str(climb_ft)
-            add("climb", "Climb / maintain", f"{climb_ft:,} ft", spoken_climb)
+            add(
+                "climb",
+                "Climb / maintain",
+                f"{climb_ft:,} ft",
+                spoken_climb,
+                hinge=True,
+            )
         else:
             dep_match = match_departure(
                 airport, opus.fp_route_string if opus else None
@@ -9573,6 +9898,7 @@ def build_readback_checklist(
                 change["summary"],
                 assigned_say,
                 highlight=True,
+                hinge=True,
             )
         else:
             filed = speak_filed_altitude(opus.fp_altitude if opus else None)
@@ -9603,6 +9929,16 @@ def build_readback_checklist(
                 f"squawk {spoken}  ·  or just {spoken}",
                 hinge=True,
             )
+        return items
+
+    if tmpl == "monitor_tower":
+        add(
+            "monitor",
+            "Monitor",
+            "tower",
+            "monitor tower",
+            hinge=True,
+        )
         return items
 
     if tmpl == "taxi":
@@ -11748,8 +12084,17 @@ def build_template_text(
             f"{cs}, {name} Tower, {takeoff_departure_switch()}"
         )
     if template == "radar_contact":
+        where = agency_position_clause(
+            config,
+            agency=channel or "departure",
+            callsign=callsign,
+            opus=opus,
+            state=state,
+        )
+        pos = f" {where}," if where else ""
         return (
-            f"{cs}, {name} Departure, radar contact, climb and maintain {climb}."
+            f"{cs}, {name} Departure, radar contact,{pos} "
+            f"climb and maintain {climb}."
         )
     if template == "climb_cruise":
         target = cruise_climb_target_ft(opus, mission=mission, state=state)
@@ -11972,7 +12317,16 @@ def build_template_text(
     if template == "contact_joshua":
         return build_contact_joshua(airport, callsign)
     if template == "joshua_check_in":
-        return build_joshua_check_in(callsign)
+        return build_joshua_check_in(
+            callsign,
+            position=agency_position_clause(
+                config,
+                agency=channel or "joshua",
+                callsign=callsign,
+                opus=opus,
+                state=state,
+            ),
+        )
     if template == "joshua_check_out":
         handoff = resolve_handoff_channel(
             step=step,
@@ -12005,6 +12359,13 @@ def build_template_text(
             channel=channel or "control_east",
             airport=airport,
             plan=plan,
+            position=agency_position_clause(
+                config,
+                agency=channel or "control_east",
+                callsign=callsign,
+                opus=opus,
+                state=state,
+            ),
         )
     if template == "control_handoff":
         next_ch = resolve_handoff_channel(
@@ -12066,7 +12427,16 @@ def build_template_text(
         except Exception:
             return f"{cs}, Ops, go ahead."
     if template in ("center_radar", "center_check_in"):
-        return build_center_check_in(callsign)
+        return build_center_check_in(
+            callsign,
+            position=agency_position_clause(
+                config,
+                agency=channel or "center",
+                callsign=callsign,
+                opus=opus,
+                state=state,
+            ),
+        )
     if template == "center_handoff":
         # Center/Other → next agency (same auto target as departure_handoff)
         next_ch = resolve_handoff_channel(

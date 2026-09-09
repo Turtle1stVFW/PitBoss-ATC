@@ -61,6 +61,7 @@ SHARED_FLOW_KEYS = (
     "blackjack_checked_in",
     "clearance_amendment_copied",
     "amended_altitude_ft",
+    "assigned_altitude_ft",
     "approach_plan",
     "manual_cursor",
     "active_takeoff_mode",
