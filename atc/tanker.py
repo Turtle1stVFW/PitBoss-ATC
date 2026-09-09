@@ -61,8 +61,11 @@ _CHAT_STATE_KEYS = (
     "tanker_chat_llm_note",
     "tanker_chat_guard_until",
     "tanker_chat_last_spoke",
+    "tanker_chat_last_canned",
+    "tanker_chat_said",
 )
 
+CHAT_STATE_KEYS = _CHAT_STATE_KEYS
 SEAT_STATE_KEYS = _TANKER_STATE_KEYS + _CHAT_STATE_KEYS
 
 # Copied to the other ship in the element (1-2 or 3-4). Not boom chat.
@@ -467,6 +470,41 @@ def _find_named_row(
     return exact or brand_hit
 
 
+def tanker_name_is_specific(name: str | None) -> bool:
+    """True when the pilot named a numbered bird (Texaco 5), not just a brand."""
+    return bool(re.search(r"\d", normalize_tanker_name(name)))
+
+
+_REASSIGN_TANKER_PHRASES = (
+    "another tanker",
+    "different tanker",
+    "other tanker",
+    "new tanker",
+    "closer tanker",
+    "closest tanker",
+    "nearest tanker",
+    "switch tanker",
+    "change tanker",
+    "another texaco",
+    "different texaco",
+    "another shell",
+    "different shell",
+    "another arco",
+    "different arco",
+)
+
+
+def wants_reassign_tanker(text: str) -> bool:
+    """True for 'another tanker' / 'closest tanker' — skip the last assignment."""
+    blob = re.sub(r"[^a-z0-9\s]", " ", (text or "").casefold())
+    blob = re.sub(r"\s+", " ", blob).strip()
+    return any(phrase in blob for phrase in _REASSIGN_TANKER_PHRASES)
+
+
+def _row_name_key(row: dict[str, Any] | None) -> str:
+    return normalize_tanker_name(str((row or {}).get("callsign") or ""))
+
+
 def choose_catalog_tanker(
     catalog: list[dict[str, Any]],
     *,
@@ -476,10 +514,12 @@ def choose_catalog_tanker(
     own_ll: tuple[float, float] | None = None,
     config: dict[str, Any] | None = None,
     opus: Any = None,
+    exclude: str | None = None,
 ) -> dict[str, Any] | None:
     """Pick a catalog row. boom_only never returns KC-130 / MPRS."""
     units = units or []
     want = normalize_tanker_name(name)
+    skip = normalize_tanker_name(exclude)
     chosen: dict[str, Any] | None = None
     if want:
         chosen = _find_named_row(catalog, want, boom_only=boom_only, units=units)
@@ -490,6 +530,8 @@ def choose_catalog_tanker(
             for r in catalog
             if (not boom_only) or _row_is_boom(r, _match_live_unit(r, units))
         ]
+        if skip:
+            pool = [r for r in pool if _row_name_key(r) != skip]
         if not pool:
             return None
         scored: list[tuple[float, dict[str, Any]]] = []
@@ -520,17 +562,20 @@ def pick_tanker(
     name: str | None = None,
     own_ll: tuple[float, float] | None = None,
     boom_only: bool = True,
+    prefer_remembered: bool = True,
+    exclude: str | None = None,
 ) -> dict[str, Any] | None:
     """
     Choose a tanker: named request, then nearest live boom KC-135, then catalog.
     F-16 C2 requests never fall back to KC-130 or MPRS.
+    Unnamed request_tanker passes prefer_remembered=False so a closer boom wins.
     """
     catalog = fetch_opus_tankers(config, opus=opus)
     if not catalog:
         return None
     units = _caoc_tanker_units(config)
     want = str(name or "").strip()
-    if not want and isinstance(state, dict):
+    if prefer_remembered and not want and isinstance(state, dict):
         remembered = str(state.get("tanker_callsign") or state.get("tanker_id") or "")
         if remembered:
             row = _find_named_row(
@@ -549,6 +594,7 @@ def pick_tanker(
         own_ll=own_ll,
         config=config,
         opus=opus,
+        exclude=exclude,
     )
     if chosen is None:
         return None

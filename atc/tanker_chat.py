@@ -40,8 +40,10 @@ _RECENT_KEY = "tanker_chat_recent"
 _HISTORY_KEY = "tanker_chat_history"
 _GREETED_KEY = "tanker_chat_greeted"
 _GREET_ID = "hello_sir"
-_HISTORY_MAX = 8
+_HISTORY_MAX = 12
 _RECENT_MAX = 28
+_LAST_CANNED_KEY = "tanker_chat_last_canned"
+_SAID_KEY = "tanker_chat_said"
 _LLM_TIMEOUT_S = 6.5
 _OLLAMA_TIMEOUT_S = 35.0
 _OLLAMA_REACT_TIMEOUT_S = 20.0
@@ -82,6 +84,38 @@ _COFFEE_WORDS = (
     "french press",
     "k cup",
     "brew",
+)
+
+# Soft topic memory — llama3.2 will otherwise loop pizza / In-N-Out.
+_TOPIC_MARKERS: dict[str, tuple[str, ...]] = {
+    "coffee": _COFFEE_WORDS,
+    "pizza": ("pizza", "pepperoni", "pineapple"),
+    "in-n-out": (
+        "in-n-out",
+        "in n out",
+        "innout",
+        "in and out",
+        "animal style",
+        "double double",
+    ),
+    "whataburger": ("whataburger",),
+    "chick-fil-a": ("chick-fil-a", "chick fila", "chickfila", "chick fil a"),
+}
+
+_TOPIC_POOL = (
+    "short riddles",
+    "Viper / Eagle / Mudhen / Navy jokes",
+    "boom-pod life",
+    "range days",
+    "TDY",
+    "chow hall",
+    "dorms",
+    "squadron",
+    "pets",
+    "sports",
+    "cars",
+    "weekends",
+    "movies",
 )
 
 # Pause between one answered bit and the next question (ongoing session).
@@ -157,6 +191,12 @@ _DEFAULT_REACT_REPLIES = (
     "True enough. Hang in there.",
     "Fair enough, sir.",
     "That tracks.",
+)
+
+_QUESTION_FALLBACK = (
+    "Ha — good question. What's your usual?",
+    "Depends on the day. What do you get?",
+    "I'll take the regular. You?",
 )
 
 _QUESTION_CUES = {
@@ -290,9 +330,9 @@ def fly_request_rows(state: dict[str, Any] | None) -> list[tuple[str, str]]:
             rows.append(("tanker_chat_start", "Texaco next bit"))
         elif is_awaiting_react(state) and not current_choices(state):
             rows.append(("tanker_chat_choice__ack", "Roger"))
-        rows.append(("tanker_chat_stop", "Stop chat"))
+        rows.append(("tanker_chat_stop", "Talk later"))
     else:
-        rows.append(("tanker_chat_start", "Texaco starts chat"))
+        rows.append(("tanker_chat_start", "How's it going"))
     for choice in current_choices(state):
         say = str(choice.get("say") or choice.get("id") or "").strip()
         cid = str(choice.get("id") or "").strip()
@@ -433,18 +473,23 @@ def looks_like_own_echo(transcript: str, state: dict[str, Any] | None) -> bool:
     if not ws:
         return bool(in_guard)
     overlap = len(wb & ws) / float(max(1, min(len(wb), len(ws))))
+    compact_b = re.sub(r"[^a-z0-9]+", "", blob.casefold())
+    compact_s = re.sub(r"[^a-z0-9]+", "", spoke.casefold())
+    near_dup = (
+        len(compact_b) >= 12
+        and (compact_b in compact_s or compact_s in compact_b)
+        and abs(len(compact_b) - len(compact_s)) <= 10
+    )
+    if near_dup:
+        return True
+    # Follow-up on the same subject ("what do you order at In-N-Out?") is not echo.
+    if looks_like_question_or_chat(blob) and len(wb) >= 4:
+        return False
     # During the post-TX guard, be aggressive — mic often hears the boom play back.
     if in_guard and overlap >= 0.28:
         return True
     # One-word acks ("morning", "hey") share a word with the hello; that is not echo.
     if overlap >= 0.55 and (len(blob) >= 12 or len(wb) >= 4):
-        return True
-    # Near-substring echo of the opener / last line.
-    compact_b = re.sub(r"[^a-z0-9]+", "", blob.casefold())
-    compact_s = re.sub(r"[^a-z0-9]+", "", spoke.casefold())
-    if len(compact_b) >= 12 and (
-        compact_b in compact_s or compact_s in compact_b
-    ):
         return True
     return False
 
@@ -837,6 +882,114 @@ def invites_reply(text: str) -> bool:
     return any(hook in low for hook in _REPLY_HOOKS)
 
 
+_REPEAT_STOP = {
+    "the",
+    "and",
+    "for",
+    "you",
+    "your",
+    "that",
+    "this",
+    "sir",
+    "guys",
+    "good",
+    "like",
+    "do",
+    "does",
+    "did",
+    "are",
+    "was",
+    "have",
+    "got",
+    "just",
+}
+
+
+def _line_fingerprint(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(text or "").casefold())
+
+
+def _content_words(text: str) -> set[str]:
+    return {
+        w
+        for w in re.findall(r"[a-z0-9']+", str(text or "").casefold())
+        if len(w) > 2 and w not in _REPEAT_STOP
+    }
+
+
+def _said_fingerprints(state: dict[str, Any] | None) -> list[str]:
+    if not isinstance(state, dict):
+        return []
+    out: list[str] = []
+    for raw in state.get(_SAID_KEY) or []:
+        fp = _line_fingerprint(str(raw or ""))
+        if fp and fp not in out:
+            out.append(fp)
+    for row in state.get(_HISTORY_KEY) or []:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("role") or "") != "boom":
+            continue
+        fp = _line_fingerprint(str(row.get("text") or ""))
+        if fp and fp not in out:
+            out.append(fp)
+    spoke = _line_fingerprint(str(state.get(_LAST_SPOKE_KEY) or ""))
+    if spoke and spoke not in out:
+        out.append(spoke)
+    return out
+
+
+def remember_said(state: dict[str, Any] | None, text: str) -> None:
+    """Stamp a boom line so it cannot be asked / answered again this session."""
+    if not isinstance(state, dict):
+        return
+    fp = _line_fingerprint(text)
+    if len(fp) < 8:
+        return
+    said = [str(x) for x in (state.get(_SAID_KEY) or []) if str(x).strip()]
+    if fp not in said:
+        said.append(fp)
+    state[_SAID_KEY] = said[-40:]
+
+
+def line_is_repeat(state: dict[str, Any] | None, text: str) -> bool:
+    """
+    True when Texaco already said this (or a near-copy) this session.
+
+    The only allowed repeat is a pilot 'say again', which replays last TX
+    and never comes through start_chat / answer_chat.
+    """
+    blob = " ".join(str(text or "").split()).strip()
+    if not blob:
+        return False
+    fp = _line_fingerprint(blob)
+    if len(fp) < 8:
+        return False
+    said = _said_fingerprints(state)
+    if fp in said:
+        return True
+    for prev in said:
+        if len(prev) < 10 or len(fp) < 10:
+            continue
+        if fp in prev or prev in fp:
+            return True
+    words = _content_words(blob)
+    if len(words) < 3:
+        return False
+    if not isinstance(state, dict):
+        return False
+    for row in state.get(_HISTORY_KEY) or []:
+        if not isinstance(row, dict) or str(row.get("role") or "") != "boom":
+            continue
+        prev_w = _content_words(str(row.get("text") or ""))
+        if len(prev_w) < 3:
+            continue
+        overlap = len(words & prev_w) / float(min(len(words), len(prev_w)))
+        if overlap >= 0.65:
+            return True
+    return False
+
+
 def _remember(state: dict[str, Any], tid: str) -> None:
     recent = [
         str(x)
@@ -878,6 +1031,8 @@ def append_history(
     ]
     hist.append({"role": who, "text": line[:260]})
     state[_HISTORY_KEY] = hist[-_HISTORY_MAX:]
+    if who == "boom":
+        remember_said(state, line)
 
 
 def format_history(state: dict[str, Any] | None) -> str:
@@ -928,32 +1083,62 @@ def _mentions_coffee(text: str) -> bool:
 
 def coffee_on_cooldown(state: dict[str, Any] | None) -> bool:
     """True when recent boom chat already leaned on coffee — ban the next bit."""
+    return "coffee" in exhausted_topics(state)
+
+
+def _mentions_topic(text: str, markers: tuple[str, ...]) -> bool:
+    blob = str(text or "").casefold()
+    return any(word in blob for word in markers)
+
+
+def exhausted_topics(state: dict[str, Any] | None) -> set[str]:
+    """Topics already used this session — do not open them again."""
+    found: set[str] = set()
     if not isinstance(state, dict):
-        return False
-    recent_lines = [
+        return found
+    blobs = [
         str(row.get("text") or "")
-        for row in (state.get(_HISTORY_KEY) or [])[-5:]
+        for row in (state.get(_HISTORY_KEY) or [])
         if isinstance(row, dict)
     ]
-    hits = sum(1 for line in recent_lines if _mentions_coffee(line))
-    if hits >= 1:
-        return True
-    # Library / LLM ids that are coffee-flavored.
-    for tid in _recent_ids(state)[-8:]:
-        low = tid.casefold()
-        if any(
-            key in low
-            for key in (
-                "coffee",
-                "dunkin",
-                "starbucks",
-                "keurig",
-                "espresso",
-                "caffeine",
-            )
-        ):
-            return True
-    return False
+    blobs.extend(str(x) for x in _recent_ids(state))
+    spoke = str(state.get(_LAST_SPOKE_KEY) or "")
+    if spoke:
+        blobs.append(spoke)
+    for name, markers in _TOPIC_MARKERS.items():
+        if any(_mentions_topic(blob, markers) for blob in blobs):
+            found.add(name)
+    return found
+
+
+def _topic_ban_rule(topics: set[str]) -> str:
+    if not topics:
+        return "Coffee is allowed only rarely — prefer other topics. "
+    names = ", ".join(sorted(topics))
+    return f"Do NOT mention these exhausted topics: {names}. Pick something else. "
+
+
+def _canned_react(
+    state: dict[str, Any] | None,
+    *,
+    asked: bool = False,
+) -> str:
+    """Library fallback that does not keep saying 'looking stable'."""
+    pool = list(_QUESTION_FALLBACK if asked else _DEFAULT_REACT_REPLIES)
+    last = ""
+    if isinstance(state, dict):
+        last = str(state.get(_LAST_CANNED_KEY) or "")
+    fresh = [
+        line
+        for line in pool
+        if line != last and not line_is_repeat(state, line)
+    ]
+    if not fresh:
+        fresh = [line for line in pool if line != last] or pool
+    pick = random.choice(fresh)
+    if isinstance(state, dict):
+        state[_LAST_CANNED_KEY] = pick
+    return pick
 
 
 def _slug(text: str) -> str:
@@ -1473,14 +1658,17 @@ def _llm_prompt(
     *,
     history: str = "",
     ban_coffee: bool = False,
+    ban_topics: set[str] | None = None,
 ) -> str:
     avoid = ", ".join(recent[-8:]) if recent else "(none yet)"
-    coffee_rule = (
-        "Do NOT mention coffee, Keurig, Dunkin, Starbucks, caffeine, or brewing — "
-        "that topic is exhausted for now. "
-        if ban_coffee
-        else "Coffee is allowed only rarely — prefer other topics. "
-    )
+    topics = set(ban_topics or ())
+    topics |= exhausted_topics({"tanker_chat_history": [
+        {"role": "boom", "text": history}
+    ]}) if history else set()
+    if ban_coffee:
+        topics.add("coffee")
+    coffee_rule = _topic_ban_rule(topics)
+    pool = ", ".join(_TOPIC_POOL)
     hist = (history or "").strip() or "(new conversation)"
     return (
         "You write one short boom-operator radio bit for a KC-135 refueling an F-16. "
@@ -1502,11 +1690,11 @@ def _llm_prompt(
         "Replies may be one or two short sentences. "
         "Continue the same conversation when history exists — reference what was just "
         "said instead of starting a brand-new random topic. "
+        "Never repeat a question, joke, or punchline already in Recent chat — "
+        "the pilot will say 'say again' if they missed it. "
+        "If they already talked pizza or In-N-Out, do not ask those again. "
         f"{coffee_rule}"
-        "Good topic pool (rotate): short riddles, food they miss from home "
-        "(Chick-fil-A / Whataburger / In-N-Out — not only coffee), "
-        "Viper / Eagle / Mudhen / Navy jokes, boom-pod life, range days, "
-        "TDY, chow, dorms, squadron, pets, sports, cars, weekends, movies. "
+        f"Good topic pool (rotate, skip exhausted): {pool}. "
         "Do not ask boom pad vs Viper seat. "
         "Not airline, not passenger flying. "
         "Avoid these recent ids: "
@@ -1529,11 +1717,18 @@ def _llm_riff_prompt(
     *,
     history: str = "",
     ban_coffee: bool = False,
+    ban_topics: set[str] | None = None,
 ) -> str:
     avoid = ", ".join(recent[-8:]) if recent else "(none yet)"
+    topics = set(ban_topics or ())
+    topics |= exhausted_topics({"tanker_chat_history": [
+        {"role": "boom", "text": history}
+    ]}) if history else set()
+    if ban_coffee:
+        topics.add("coffee")
     coffee_rule = (
-        "No coffee/caffeine jokes this turn. "
-        if ban_coffee
+        _topic_ban_rule(topics)
+        if topics
         else "Skip coffee unless it clearly continues the last line. "
     )
     hist = (history or "").strip() or "(new conversation)"
@@ -2045,7 +2240,8 @@ def try_llm_thread(
         return None
     provider, key = resolved
     history = format_history_for_llm(state)
-    ban_coffee = coffee_on_cooldown(state)
+    ban_topics = exhausted_topics(state)
+    ban_coffee = "coffee" in ban_topics or coffee_on_cooldown(state)
     if provider == "ollama":
         if not resolve_ollama_model(config):
             _set_llm_error("Ollama unavailable — using library", state)
@@ -2072,8 +2268,19 @@ def try_llm_thread(
     if node is None:
         _set_llm_error(f"{provider}: bad/empty response — using library", state)
         return None
-    if ban_coffee and _mentions_coffee(str(node.get("opener") or "")):
+    opener_text = str(node.get("opener") or "")
+    if ban_coffee and _mentions_coffee(opener_text):
         _set_llm_error(f"{provider}: coffee cooldown — using library", state)
+        return None
+    if any(
+        _mentions_topic(opener_text, _TOPIC_MARKERS[name])
+        for name in ban_topics
+        if name in _TOPIC_MARKERS
+    ):
+        _set_llm_error(f"{provider}: topic cooldown — using library", state)
+        return None
+    if line_is_repeat(state, opener_text):
+        _set_llm_error(f"{provider}: already said — using library", state)
         return None
     opener = _fill(str(node.get("opener") or ""))
     if looks_like_official_tanker(opener):
@@ -2450,10 +2657,11 @@ def _pick_library(avoid: list[str], thread_id: str | None) -> dict[str, Any]:
 def _pick_library_for_state(
     state: dict[str, Any], avoid: list[str], thread_id: str | None
 ) -> dict[str, Any]:
-    """Library fallback that skips coffee bits while coffee is on cooldown."""
+    """Library fallback that skips used topics and lines already spoken."""
     node = _pick_library(avoid, thread_id)
-    if thread_id or not coffee_on_cooldown(state):
+    if thread_id:
         return node
+    banned = exhausted_topics(state)
     skip = set(avoid)
     pool = []
     for t in chat_lib.THREADS:
@@ -2461,7 +2669,14 @@ def _pick_library_for_state(
         if tid in skip:
             continue
         opener = str(t.get("opener") or "")
-        if _mentions_coffee(opener) or _mentions_coffee(tid):
+        blob = f"{tid} {opener}"
+        if any(
+            _mentions_topic(blob, _TOPIC_MARKERS[name])
+            for name in banned
+            if name in _TOPIC_MARKERS
+        ):
+            continue
+        if line_is_repeat(state, opener):
             continue
         pool.append(t)
     if not pool:
@@ -2556,6 +2771,17 @@ def start_chat(
         node = _pick_library_for_state(state, recent, None)
         opener = _fill(str((node or {}).get("opener") or ""), cs, tcs)
         _set_llm_error("off-register — library bit", state)
+    # Fresh line only — say again is the sole repeat path.
+    if not thread_id and line_is_repeat(state, opener):
+        for _extra in range(8):
+            recent = _recent_ids(state)
+            node = _pick_library_for_state(state, recent, None)
+            opener = _fill(str((node or {}).get("opener") or ""), cs, tcs)
+            tid_try = str((node or {}).get("id") or "")
+            if tid_try:
+                _remember(state, tid_try)
+            if opener and not line_is_repeat(state, opener):
+                break
     tid = str((node or {}).get("id") or "")
     _apply_open_bit(state, node, schedule_auto=True, opener=opener)
     _remember(state, tid)
@@ -2605,8 +2831,14 @@ def answer_chat(
     have to pick one of the two buttons. Freeform turns stay on the same bit
     for a few exchanges before Texaco rotates to a new opener.
     """
-    if not isinstance(state, dict) or not is_open(state):
+    if not isinstance(state, dict) or not is_session_active(state):
         return None
+    # Host may have closed the A/B after TX. If the pilot is still talking,
+    # reopen instead of "no matching tanker chat reply".
+    if not is_open(state):
+        if not str(transcript or "").strip():
+            return None
+        hold_for_pilot(state, last_spoke(state))
     choices = current_choices(state)
     awaiting = is_awaiting_react(state)
     row = _row(state) or {}
@@ -2621,7 +2853,7 @@ def answer_chat(
         choice = {
             "id": "_ack",
             "say": "Roger",
-            "reply": random.choice(_DEFAULT_REACT_REPLIES),
+            "reply": _canned_react(state, asked=False),
         }
         freeform = True
     elif want and want not in {"_any", "any"}:
@@ -2670,7 +2902,10 @@ def answer_chat(
         )
         if live:
             reply = naturalize_reply(_fill(live, cs, tcs))
-            used_live = True
+            if line_is_repeat(state, reply):
+                reply = ""
+            else:
+                used_live = True
     if not reply and choice is not None and not freeform:
         reply = naturalize_reply(
             _fill(str(choice.get("reply") or "Fair enough."), cs, tcs),
@@ -2680,8 +2915,11 @@ def answer_chat(
     if not reply and freeform:
         # LLM miss / Ollama down → canned boom chat, never a "hold on" stall.
         reacted = match_react(transcript or "roger", current_reacts(state))
+        asked = looks_like_question_or_chat(transcript)
         soft = str(
-            reacted.get("reply") or random.choice(_DEFAULT_REACT_REPLIES)
+            reacted.get("reply")
+            if reacted.get("id") not in {"_any", "_ack"}
+            else _canned_react(state, asked=asked)
         )
         follow = (
             reacted.get("follow")
@@ -2697,12 +2935,21 @@ def answer_chat(
         follow = choice.get("follow") if isinstance(choice.get("follow"), dict) else None
     if not reply:
         return None
+    if line_is_repeat(state, reply):
+        swapped = naturalize_reply(
+            _canned_react(state, asked=looks_like_question_or_chat(transcript)),
+            force=True,
+        )
+        if swapped and not line_is_repeat(state, swapped):
+            reply = swapped
     append_history(state, "boom", reply)
     if follow and (follow.get("choices") or follow.get("kind") in {"riff", "open"}):
         follow_open = _fill(str(follow.get("opener") or ""), cs, tcs)
-        _apply_open_bit(state, follow, schedule_auto=True, opener=follow_open)
-        append_history(state, "boom", follow_open)
-        return f"{reply} {follow_open}".strip()
+        if follow_open and not line_is_repeat(state, follow_open):
+            _apply_open_bit(state, follow, schedule_auto=True, opener=follow_open)
+            append_history(state, "boom", follow_open)
+            return f"{reply} {follow_open}".strip()
+        follow = None
 
     # First-contact hello is done — next bit is a real question, not more small talk.
     if str(row.get("id") or "") == _GREET_ID:
@@ -2710,10 +2957,11 @@ def answer_chat(
         state[_STATE_KEY]["break_s"] = wait
         return reply
 
-    # Keep the same bit open for a few freeform / live exchanges.
-    if freeform and (used_live or live_on or awaiting or chatty):
+    # Keep the same bit open while the pilot is still talking — including
+    # after an Ollama miss. Closing here is what produced "no matching reply".
+    if freeform:
         nxt = turns + 1
-        if nxt < _MAX_FREEFORM_TURNS:
+        if nxt < _MAX_FREEFORM_TURNS or chatty:
             _keep_react_open(
                 state,
                 opener=reply or opener,

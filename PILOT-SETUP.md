@@ -1,6 +1,6 @@
 # New pilot setup (testing)
 
-This is a testing build. You already have DCS, SRS, and an Opus / CAOC login. You do **not** need the Google TTS key — that stays on the Host.
+This is a testing build of **PitBoss ATC**. You already have DCS, SRS, and an Opus / CAOC login. You do **not** need the Google TTS key — that stays on the Host.
 
 Ask the person running ATC for two things only:
 
@@ -51,6 +51,7 @@ If the first-run window is gone: **Help → First-run setup…**
 2. Setup → Airport — SRS host should match the server you already use. Clients do not transmit ATC; the Host does.
 3. DCS must be restarted once after the radio-export install (Setup-Pilot does the install; restart is on you).
 4. Fly tab — hold your normal **SRS PTT** and talk. The Fly card lists what you can say right now.
+5. Setup → Preferences → **Simplified UI** trims the Fly tab to the frequency, whether you are on it, what to say, and what ATC will answer. Turn it off again if you need the diagnostic lines while troubleshooting.
 
 ## What you do *not* do
 

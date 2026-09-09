@@ -1,4 +1,4 @@
-# 455 Mission Flow Planner
+# PitBoss ATC
 
 **Sharing / first PC:** testers start with [PILOT-SETUP.md](../PILOT-SETUP.md) and
 `Setup-Pilot.cmd`. Host operators use [HOST-SETUP.md](../HOST-SETUP.md). This
@@ -23,8 +23,24 @@ as your jet (talk on the Fly tab; tankers still come from CAOC).
 1. **Plan Flight** — build the full sortie timeline (TTS template, custom text, or MP3/OGG). No JSON editing.
 2. **Fly** — big Next / Back / Reset / Flip for mid-flight.
 3. **Traffic** — connected pilots and per-frequency TX queues (Host role).
-4. **Setup** — Opus username, voice, airport freqs, SRS host, TTS provider, optional runway override, **Squadron** (solo/host/client), and **Controls** (HOTAS / hotkeys / voice).
+4. **Setup** — Opus username, voice, airport freqs, SRS host, TTS provider, optional runway override, **Squadron** (solo/host/client), **Controls** (HOTAS / hotkeys / voice), and **Preferences**.
 5. **Help** — in-app how-tos (Getting started, Google JSON setup, Plan Flight tips, troubleshooting). Also the top-right **Help** button.
+
+### Simplified UI (Setup → Preferences)
+
+The Fly tab carries a lot of lines that earn their keep while you are wiring the
+app up and prove nothing but clutter once you are strapped in. **Simplified UI**
+hides them: the SRS radio name, the agency name repeated under the frequency,
+`YOU CAN SAY`, the `Radio tune unknown — gate open` line, the READ BACK
+preamble, your own callsign in a readback, and the `TTS · template` line. The
+frequency header reads **FREQUENCY** instead of **NEXT TX FREQUENCY**, and the
+live-position line moves to the bottom of the frequency box as a tip.
+
+What is left is the frequency, one **YOU ARE ON** line — green on frequency, red
+off it, amber while tune is unknown — the cues to say, and what ATC will answer.
+Nothing changes about what transmits or what voice recognition accepts; the
+switch saves itself and takes effect immediately (config key `simple_ui`). Leave
+it off while troubleshooting.
 
 ## Multi-pilot (optional, this branch)
 
@@ -37,6 +53,8 @@ Default role is still **Solo** — one PC, same as today. To run ATC for several
 5. Host **Traffic** tab shows who is connected, which frequency is talking, and the per-channel queue.
 
 **Zone and distance auto-fire** (EOR 2/2, beyond 18 NM, …) is scored on the Client — that PC has the CAOC picture of your jet. The Host still transmits. Only **your Opus flight** counts in the zone (not Viper if you are Fleece). Turn on **Watch live position** on the Host or the flying Client; the dedicated-server box often cannot see you the same way.
+
+Every Client request (including the 1 Hz heartbeat) carries **that PC's own fix**, and the Host gates each seat on it. The Host never scores a Client's jet from its own map inject or CAOC feed — those watch the Host PC, so a parked contact near the field would otherwise fire the 12 NM tower handoff and the 6 NM landing clearance while the jet was still 38 NM out. A Client that cannot resolve its position reports none, which **holds** the Host's distance gates rather than opening them.
 
 **Tanker boom chat** is written on the flying Client (Ollama on that PC still counts) and transmitted only by the Host, so the two copies cannot talk over each other.
 
@@ -338,6 +356,7 @@ Calls it understands:
 
 | Say | Result |
 |-----|--------|
+| "Ops, request current WORDS" / "request start" | **Step 1** on Nellis Default. Tune **Backup UHF 269.025** before start. WORDS also approves start; then Fly tips you to Delivery |
 | "Ground, ready to taxi" / "request clearance" / "ready for departure" | Fires the matching flow step |
 | "Request runway two one left" | Sets the runway and reads back the approval |
 | "Say winds" / "say altimeter" | Live METAR answer |
@@ -356,11 +375,14 @@ Calls it understands:
 | Boom / reform small talk | After rejoin, say **how's it going** / **small talk** (or Fly **Texaco starts chat**) to start boom chat — it does not auto-fire. The **first** line is a time-of-day hello (*Good morning, sir*) — later bits are A/B polls, open questions, and riffs. Answer in a word, say anything, or just listen. With Ollama/Gemini/OpenAI on, freeform replies get a **live riff** (not locked to the two buttons). Texaco keeps chatting with short breaks until you **stop talking** / **talk later** / **standing by**, or leave the tanker. LLM falls back to the library if slow. The boom operator is always a woman. |
 | DCS tanker radio | **Ready pre-contact** → DCS *cleared contact* (boom). **Abort refueling** to disconnect. Do not use SRS for those. |
 | "Blackjack / Bandsaw, back from the tanker" / "checking in" after AAR | Radar contact, continue — returns to **whichever C2 freq you tuned** (Blackjack or Bandsaw) |
-| "Blackjack, off station / range complete" | Range checkout → **Nellis Control** East (ch 7) or West (ch 8) immediately. NATCF gives proceed-direct, descent, and the recovery clearance; Control hands to Approach **before** the exit fix |
+| "Blackjack, off station / range complete" | Range checkout → **Nellis Control** East (ch 7) or West (ch 8) immediately. NATCF gives proceed-direct, descent, and the recovery clearance, then hands you to Approach around **42 NM** from the field (`control_handoff_nm`) |
 | "Approach, checking in" / "inbound" | Approach assigns recovery from METAR (VMC → VFR recovery + TAC overhead; IFR → instrument + IAF). Prefers RWY 21 |
 | "Request ARCOE / TORYE / STRYK / MINTT / overhead / instrument" | Change the assigned recovery / approach |
 | "Request hold" / "cancel hold" | Spoken hold / continue (simple state) |
 | "Request vectors" | Radar vector clearance toward recovery / field |
+| "Nellis Control, request elevator one four thousand" / "Blackjack, request elevator angels four" | Climb or descent to the altitude you name. ATC answers in feet or flight levels (*climb and maintain flight level two two zero*); Blackjack and Bandsaw answer in angels (*descend angels four*). Climb vs descend comes from where you actually are. Also takes "request descent to …", "request climb to …", "request higher altitude". Any radar agency will move you — Ground and Tower will not. Outside the approvable band you get *unable, maintain …* |
+| "Request vectors to Stryk" / "how far to Beatty" / "bearing to Mormon Mesa" | Magnetic heading and range from where you are to that point. ATC vectors you (*fly heading two eight fife, vectors to Stryk, twenty six miles*); Blackjack and Bandsaw read out bearing and range instead, since C2 does not vector. Resolves VOR/TACAN idents, station names, recovery fixes, plate IAFs and any NTTR named point — including the way Whisper mishears them ("strike" → STRYK). A name it cannot place gets *unable, say again the point* |
+| "Request vectors to the nearest divert" / "closest suitable field" | *…nearest suitable field is Creech, fly heading two fife zero, thirty one miles.* Bearing and range instead from C2. Which fields qualify is `divert_categories` |
 | "Airport in sight, request tower" | Cleared approach / contact Tower |
 | "Alpha check" | Bullseye position for your aircraft |
 | "We'll take the rolling" / "unable rolling" | Accepts or declines the rolling departure. After Tower asks, **Next / Advance accepts** and **Previous declines** (HOTAS, hotkey, Stream Deck) — no voice or alt-tab needed. |
@@ -405,7 +427,10 @@ Check-in sounds like: *“Fleece 1, Nellis Approach, Nellis landing south, expec
 TAC Overhead runway two one right, cleared direct Arcoe, …”* (or Torye / Stryk /
 Mintt for that recovery; landing north when the 03s are active; instrument uses
 the plate name + IAF). Descend altitude comes from the VFR recovery or the
-**plate IAF altitude** in `approaches/nellis.json`. Speed is **not** cleared
+**plate IAF altitude** in `approaches/nellis.json`. A VFR recovery altitude is
+capped by the cruise altitude in use (Clearance Delivery's amendment, not the
+stale Opus number), but a plate crossing altitude is a published minimum and
+stands on its own — filing 4,700 still crosses KRYSS at 8,800. Speed is **not** cleared
 unless traffic (or similar) sets a restriction. Recoveries prefer the **21s** and use the **03s** only when the prevailing
 headwind/tailwind **component** exceeds **10 kt** (NAFBI 11-250 §1.12 — RWY 21 is
 the calm-wind runway; closest wind direction alone is not enough, so 090/15 stays
@@ -423,6 +448,47 @@ inside 12 NM of the field.
 When a call fires a step, the Fly card moves to the next step on its own — same as if you
 had pressed **Play and advance**. Answers that are not steps (winds, altimeter, picture,
 alpha check) transmit without moving the cursor.
+
+### Where ATC says you are
+
+Radar controllers do not talk bullseye. **Departure, Nellis Control, Joshua and LA
+Center** fix a radar contact off the nearest ground station, the way the real ones do:
+
+```
+Fleece one, Nellis Control, radar contact, twenty one miles northwest of Mormon Mesa, remain this frequency.
+Fleece one, Joshua, radar contact, nine miles northwest of Beatty. Remain this frequency.
+Fleece one, Los Angeles Center, radar contact, twenty four miles southwest of Mormon Mesa, remain this frequency.
+```
+
+It is range and a compass direction from the station, not a radial — which is how a
+controller actually says it. Under a mile you just get *over Mormon Mesa*.
+
+**Blackjack and Bandsaw keep ELVIS** — alpha checks, pictures, bogey dope and declares
+are unchanged, and so is the tanker. The split is by agency kind, so a mission that adds
+its own C2 agency gets bullseye and a new radar agency gets the station reference.
+
+**Approach is deliberately left alone.** Its check-in already opens with range from the
+field (*Fleece one, Nellis Approach, twenty two miles, Nellis landing south, …*) and
+never said "radar contact" in the first place.
+
+The station catalog is `atc/navaids.json` — 24 stations (civil VOR/VORTAC plus the
+military TACANs at Nellis, Indian Springs, Groom Lake, Mercury and Tonopah Test Range)
+and 12 divert fields. Positions come from the same NTTR.kml extract the route tester
+uses, so they line up with the sim. Edit the file to add a station, rename how one is
+pronounced, or drop a field from the divert list; it is re-read whenever it changes on
+disk, no restart needed. Groom Lake is a position reference only — never a divert.
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `atc_position_reference` | `"navaid"` | `"navaid"` for nearest VOR/TACAN, `"bullseye"` to make ATC talk bullseye too, `"off"` for no position at all |
+| `navaid_position_max_nm` | `150` | Past this there is no useful station, so the clause is dropped rather than naming somewhere absurd |
+| `divert_categories` | `["military", "civil"]` | Which fields count as a divert. Drop `"civil"` for military-only |
+| `altitude_request_min_ft` | `1000` | Below this an elevator request gets *unable* |
+| `altitude_request_max_ft` | `45000` | Above this an elevator request gets *unable* |
+| `control_handoff_nm` | `42` | Range from the field where NATCF hands the recovery to Approach. Not the same as the **18 NM** on the `dep_handoff` step, which is where Departure lets go to Blackjack |
+
+`check_navaids.py` covers the station math, the point lookup (including the fuzzy
+hits), the divert filter and the agency split — run it after editing `navaids.json`.
 
 ### Teaching a step your own wording
 

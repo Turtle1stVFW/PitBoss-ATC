@@ -248,19 +248,14 @@ def words_id_for(day: date, update: int = 1) -> str:
 
 
 def speak_words_id(raw: str) -> str:
-    """AA01 → Alpha Alpha Zero-One."""
+    """AA01 → Alpha Alpha Zero One (spaces — hyphens make Chirp stumble)."""
     token = re.sub(r"[^A-Za-z0-9]", "", str(raw or "")).upper()
     if len(token) < 2:
         return token
     letters, digits = token[:2], token[2:]
     bits = [_NATO[ord(ch) - ord("A")] for ch in letters if "A" <= ch <= "Z"]
     if digits:
-        bits.append(
-            "-".join(
-                w.title() if w.isalpha() else w
-                for w in atc_phrase.speak_digits(digits).split()
-            )
-        )
+        bits.append(atc_phrase.speak_digits(digits))
     return " ".join(bits)
 
 
@@ -725,7 +720,8 @@ def build_words_reply(
         bits.append(speak_time_now(when).rstrip(".").replace("time now ", "Time now ", 1))
     if start and not already_started:
         bits.append("Start approved")
-    body = ". ".join(bits)
+    # Commas keep Chirp in one breath group — ". ".join made hard sentence pauses.
+    body = ", ".join(bits)
     if not body.endswith("."):
         body += "."
     return body
@@ -755,8 +751,8 @@ def build_start_reply(
     cs = atc_phrase.speak_callsign(callsign)
     agency = spoken_ops_name(airport, opus=opus, config=config)
     if already_started:
-        return f"{cs}, {agency}, start already approved. {speak_time_now(when)}."
-    return f"{cs}, {agency}, start approved. {speak_time_now(when)}."
+        return f"{cs}, {agency}, start already approved, {speak_time_now(when)}."
+    return f"{cs}, {agency}, start approved, {speak_time_now(when)}."
 
 
 def build_status_reply(

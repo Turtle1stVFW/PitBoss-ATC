@@ -749,6 +749,16 @@ def execute_intent(
     if intent == "request_unrestricted_climb":
         return _request_unrestricted_climb(engine, airport, callsign, match)
 
+    if intent == "request_altitude_change":
+        return _handle_altitude_change(
+            engine, airport, callsign, match, opus=opus
+        )
+
+    if intent in ("request_point_vectors", "request_divert"):
+        return _handle_navigation_request(
+            intent, engine, airport, callsign, match, opus=opus
+        )
+
     if intent == "request_alpha_check":
         fix = atc_phrase.resolve_alpha_bullseye(config, callsign=callsign, opus=opus)
         channel = _resolve_tx_channel(engine, airport, match)
@@ -821,6 +831,13 @@ def execute_intent(
         return {"action": "none", "detail": "go-around not available"}
 
     if match.kind == "step":
+        if (
+            intent in ("ready_clearance", "ready_to_copy")
+            or match.template in ("clearance", "clearance_amendment")
+        ) and str(engine.state.get("last_tx_template") or "") == "clearance_amendment":
+            engine.state["clearance_amendment_copied"] = True
+            if hasattr(engine, "save_state"):
+                engine.save_state()
         # Cleared for the option → full stop / clear of runway: no second land clear.
         if atc_phrase.awaiting_option_on_the_go(engine.state) and (
             intent in ("request_landing", "clear_of_runway")
@@ -856,6 +873,13 @@ def execute_intent(
                 "action": "none",
                 "detail": "finish taxi readback first (say the runway or taxi to EOR)",
             }
+        # Ground already said monitor tower — repeating it / "at EOR" is the
+        # readback, not another request that re-issues and walks onto Tower.
+        if (
+            (match.template == "monitor_tower" or intent == "at_eor")
+            and str(engine.state.get("last_tx_template") or "") == "monitor_tower"
+        ):
+            return _acknowledge(engine, match)
         # Taxi + runway change in one transmission: apply the runway first so
         # the taxi clearance uses it.
         if match.template == "taxi" or intent == "ready_taxi":
@@ -933,7 +957,16 @@ def execute_intent(
                 tanker_chat_mod.end_chat(engine.state)
                 if hasattr(engine, "save_state"):
                     engine.save_state()
-            text = atc_phrase.build_joshua_check_in(callsign)
+            text = atc_phrase.build_joshua_check_in(
+                callsign,
+                position=atc_phrase.agency_position_clause(
+                    config,
+                    agency="joshua",
+                    callsign=callsign,
+                    opus=opus,
+                    state=engine.state,
+                ),
+            )
             return _transmit(engine, airport, text, "joshua")
         if intent == "joshua_check_out" or match.template == "joshua_check_out":
             played = _play_step(engine, match)
@@ -967,7 +1000,17 @@ def execute_intent(
             if hasattr(engine, "save_state"):
                 engine.save_state()
             text = atc_phrase.build_control_check_in(
-                callsign, channel=ch, airport=airport, plan=plan
+                callsign,
+                channel=ch,
+                airport=airport,
+                plan=plan,
+                position=atc_phrase.agency_position_clause(
+                    config,
+                    agency=ch,
+                    callsign=callsign,
+                    opus=opus,
+                    state=engine.state,
+                ),
             )
             result = _transmit(engine, airport, text, ch)
             if hasattr(engine, "_seek_template"):
@@ -998,10 +1041,19 @@ def execute_intent(
             if hasattr(engine, "_seek_template"):
                 if not engine._seek_template("center_check_in"):
                     engine._seek_template("center_radar")
-            text = atc_phrase.build_center_check_in(callsign)
             ch = _resolve_tx_channel(engine, airport, match) or "center"
             if ch not in ("center", "other"):
                 ch = "center"
+            text = atc_phrase.build_center_check_in(
+                callsign,
+                position=atc_phrase.agency_position_clause(
+                    config,
+                    agency=ch,
+                    callsign=callsign,
+                    opus=opus,
+                    state=engine.state,
+                ),
+            )
             return _transmit(engine, airport, text, ch)
         # Back on Blackjack after Bandsaw, the tanker, or still on the range:
         # check-in is "continue", not a second range-entry / Approach handoff.
@@ -1040,9 +1092,13 @@ def execute_intent(
                     }
             played = _play_step(engine, match)
             if played.get("action") != "none":
+                if isinstance(getattr(engine, "state", None), dict):
+                    engine.state["blackjack_checked_in"] = True
                 return played
             if hasattr(engine, "_seek_template"):
                 engine._seek_template("bj_check_in")
+            if isinstance(getattr(engine, "state", None), dict):
+                engine.state["blackjack_checked_in"] = True
             text = atc_phrase.build_blackjack_continue(callsign)
             return _transmit(engine, airport, text, "blackjack")
         if intent == "range_exit" or match.template == "bj_range_exit":
@@ -1213,6 +1269,11 @@ def _acknowledge(engine: Any, match: voice_intent.Match) -> dict[str, Any]:
     and Fly stops asking for it.
     """
     confirm = str(engine.state.get("awaiting_confirm_template") or "")
+    last = str(engine.state.get("last_tx_template") or "")
+    if last == "clearance_amendment":
+        engine.state["clearance_amendment_copied"] = True
+        if not confirm:
+            confirm = "clearance"
     engine.clear_readback()
     if confirm:
         index = int(engine.state.get("index") or 0)
@@ -1256,6 +1317,180 @@ def _request_unrestricted_climb(
             engine.config, engine.mission
         ),
     }
+    return result
+
+
+def _radar_channel(
+    engine: Any, airport: dict[str, Any], match: voice_intent.Match
+) -> str:
+    """Agency to answer an altitude / vector request on."""
+    ch = _resolve_tx_channel(engine, airport, match)
+    return ch if ch in voice_intent._RADAR_CHANNELS else "control_east"
+
+
+def _current_altitude_ft(engine: Any, callsign: str, opus: Any) -> int | None:
+    """Where the jet is now: live radar, else whatever it was last assigned."""
+    live = atc_phrase.ownship_altitude_ft(
+        engine.config, callsign=callsign, opus=opus
+    )
+    if live is not None:
+        return live
+    state = getattr(engine, "state", None) or {}
+    try:
+        assigned = int(state.get("assigned_altitude_ft"))
+    except (TypeError, ValueError):
+        assigned = None
+    if assigned:
+        return assigned
+    return atc_phrase.effective_filed_altitude_ft(opus, state)
+
+
+def _handle_altitude_change(
+    engine: Any,
+    airport: dict[str, Any],
+    callsign: str,
+    match: voice_intent.Match,
+    *,
+    opus: Any = None,
+) -> dict[str, Any]:
+    """
+    'Request elevator one four thousand' — climb or descent to what they ask.
+
+    ATC answers in feet and flight levels, Blackjack and Bandsaw in angels.
+    Anything outside the approvable band gets 'unable, maintain …'.
+    """
+    channel = _radar_channel(engine, airport, match)
+    raw = (match.slots or {}).get("altitude_ft")
+    try:
+        want_ft = int(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        want_ft = None
+    if want_ft is None:
+        text = atc_phrase.build_altitude_request_unheard(
+            callsign, agency=channel, airport=airport
+        )
+        return _transmit(engine, airport, text, channel)
+
+    current_ft = _current_altitude_ft(engine, callsign, opus)
+    low, high = atc_phrase.altitude_request_band_ft(
+        engine.config, getattr(engine, "mission", None)
+    )
+    if not low <= want_ft <= high:
+        text = atc_phrase.build_altitude_change_unable(
+            callsign, agency=channel, current_ft=current_ft, airport=airport
+        )
+        return _transmit(engine, airport, text, channel)
+
+    engine.state["assigned_altitude_ft"] = want_ft
+    # Keep the cruise pipeline in step — amended is what later calls read.
+    engine.state["amended_altitude_ft"] = want_ft
+    engine.save_state()
+    text = atc_phrase.build_altitude_change_clearance(
+        callsign,
+        agency=channel,
+        altitude_ft=want_ft,
+        current_ft=current_ft,
+        airport=airport,
+    )
+    result = _transmit(engine, airport, text, channel)
+    result["altitude_ft"] = want_ft
+    return result
+
+
+def _handle_navigation_request(
+    intent: str,
+    engine: Any,
+    airport: dict[str, Any],
+    callsign: str,
+    match: voice_intent.Match,
+    *,
+    opus: Any = None,
+) -> dict[str, Any]:
+    """
+    'Vectors to Stryk' / 'vectors to the nearest divert'.
+
+    ATC gives a heading to fly; Blackjack and Bandsaw give bearing and range,
+    since C2 does not vector anybody.
+    """
+    import agencies as agencies_mod
+    import navaids
+
+    channel = _radar_channel(engine, airport, match)
+    advisory = agencies_mod.uses_bullseye(channel)
+    position = atc_phrase.ownship_latlon(
+        engine.config, callsign=callsign, opus=opus, state=engine.state
+    )
+    if position is None:
+        text = atc_phrase.build_position_unknown(
+            callsign, agency=channel, airport=airport
+        )
+        return _transmit(engine, airport, text, channel)
+
+    if intent == "request_divert":
+        field = navaids.nearest_divert(
+            position[0], position[1], config=engine.config
+        )
+        if field is None:
+            text = atc_phrase.build_point_unknown(
+                callsign, agency=channel, airport=airport
+            )
+            return _transmit(engine, airport, text, channel)
+        text = atc_phrase.build_divert_vector_clearance(
+            callsign,
+            agency=channel,
+            field_say=str(field["say"]),
+            bearing_deg=int(field["bearing"]),
+            range_nm=int(field["range_nm"]),
+            airport=airport,
+            advisory=advisory,
+        )
+        result = _transmit(engine, airport, text, channel)
+        result["divert"] = field["id"]
+        return result
+
+    # Re-resolve with the airport so approach fixes bring their spoken name
+    # ("Stryk", not "STRYK"); the scored slot is the fallback.
+    point = None
+    phrase = voice_intent.extract_nav_point(match.normalized or "")
+    if phrase:
+        point = navaids.resolve_point(phrase, airport=airport)
+    if not isinstance(point, dict):
+        slot = (match.slots or {}).get("nav_point")
+        point = slot if isinstance(slot, dict) else None
+    if not isinstance(point, dict):
+        text = atc_phrase.build_point_unknown(
+            callsign, agency=channel, airport=airport
+        )
+        return _transmit(engine, airport, text, channel)
+
+    bearing, range_nm = navaids.bearing_range_nm(
+        position[0],
+        position[1],
+        float(point["lat"]),
+        float(point["lon"]),
+        config=engine.config,
+    )
+    say = str(point.get("say") or point.get("id") or "the fix")
+    if advisory:
+        text = atc_phrase.build_point_bearing_advisory(
+            callsign,
+            agency=channel,
+            point_say=say,
+            bearing_deg=bearing,
+            range_nm=range_nm,
+            airport=airport,
+        )
+    else:
+        text = atc_phrase.build_point_vector_clearance(
+            callsign,
+            agency=channel,
+            point_say=say,
+            heading_deg=bearing,
+            range_nm=range_nm,
+            airport=airport,
+        )
+    result = _transmit(engine, airport, text, channel)
+    result["nav_point"] = point.get("id")
     return result
 
 
@@ -1595,6 +1830,36 @@ def _transmit(
     }
 
 
+def _seek_delivery_after_ops(engine: Any) -> None:
+    """
+    After WORDS / start, park the cursor on Clearance Delivery.
+
+    Ops is step 1 now — without this the timeline stays on Ops after the
+    call and Fly keeps tipping Backup UHF instead of Delivery.
+    """
+    if not hasattr(engine, "state") or not isinstance(engine.state, dict):
+        return
+    sought = False
+    if hasattr(engine, "_seek_template"):
+        sought = bool(
+            engine._seek_template("clearance")
+            or engine._seek_template("clearance_amendment")
+        )
+    if not sought:
+        steps = list(getattr(engine, "steps", None) or [])
+        idx = int(engine.state.get("index") or 0)
+        if 0 <= idx < len(steps):
+            ch = str((steps[idx] or {}).get("channel") or "").strip().lower()
+            if ch == "ops":
+                engine.state["index"] = idx + 1
+                sought = True
+    if sought and hasattr(engine, "save_state"):
+        try:
+            engine.save_state()
+        except Exception:
+            pass
+
+
 def execute_ops_action(
     engine: Any,
     action: str,
@@ -1604,7 +1869,7 @@ def execute_ops_action(
     callsign: str = "",
     opus: Any = None,
 ) -> dict[str, Any]:
-    """WORDS / start approval / postflight codes. Does not move the flight cursor."""
+    """WORDS / start approval / postflight codes. Advances to Delivery after start."""
     import ops as ops_mod
 
     ap = airport if isinstance(airport, dict) else engine.airport()
@@ -1667,7 +1932,9 @@ def execute_ops_action(
         )
         if hasattr(engine, "save_state"):
             engine.save_state()
-        return _transmit(engine, ap, text, "ops")
+        result = _transmit(engine, ap, text, "ops", template="ops_words")
+        _seek_delivery_after_ops(engine)
+        return result
 
     if action == "ops_request_start":
         if not already:
@@ -1690,7 +1957,9 @@ def execute_ops_action(
         )
         if hasattr(engine, "save_state"):
             engine.save_state()
-        return _transmit(engine, ap, text, "ops")
+        result = _transmit(engine, ap, text, "ops", template="ops_start")
+        _seek_delivery_after_ops(engine)
+        return result
 
     if action == "ops_status":
         codes = ops_mod.parse_aircraft_codes(transcript, flight_callsign=callsign)
@@ -1863,22 +2132,43 @@ def execute_tanker_action(
         return result
 
     named = ""
+    transcript = ""
     if match is not None:
-        named = tanker_mod.extract_tanker_name(
-            str(match.normalized or match.transcript or "")
-        ) or str((match.slots or {}).get("tanker") or "")
+        transcript = str(match.normalized or match.transcript or "")
+        named = tanker_mod.extract_tanker_name(transcript) or str(
+            (match.slots or {}).get("tanker") or ""
+        )
     own_ll = atc_phrase.ownship_latlon(
         engine.config, callsign=callsign, opus=opus, state=engine.state
     )
     # F-16 C2 always wants the KC-135 boom. Named ARCO / MPRS is skipped.
     boom_only = action == "request_tanker" or action in tanker_mod.C2_TANKER_INFO_ACTIONS
+    prefer_remembered = True
+    exclude = None
+    pick_name = named or None
+    if action == "request_tanker":
+        # A new tanker request re-picks nearest. TACAN / freq / bullseye stay
+        # on the assigned bird unless they named a different one.
+        prefer_remembered = False
+        if not tanker_mod.tanker_name_is_specific(named):
+            pick_name = None
+            if tanker_mod.wants_reassign_tanker(transcript) and isinstance(
+                engine.state, dict
+            ):
+                exclude = str(
+                    engine.state.get("tanker_callsign")
+                    or engine.state.get("tanker_id")
+                    or ""
+                ) or None
     tanker = tanker_mod.pick_tanker(
         engine.config,
         opus=opus,
         state=engine.state,
-        name=named or None,
+        name=pick_name,
         own_ll=own_ll,
         boom_only=boom_only,
+        prefer_remembered=prefer_remembered,
+        exclude=exclude,
     )
     if tanker:
         tanker_mod.remember_tanker(
@@ -2432,6 +2722,37 @@ def _play_step(engine: Any, match: voice_intent.Match) -> dict[str, Any]:
     if not steps:
         return {"action": "none", "detail": "no enabled steps"}
     index = int(engine.state.get("index") or 0)
+    here = str((match.slots or {}).get("channel") or "").strip().lower()
+    if not here:
+        try:
+            import srs_radio as srs_radio_mod
+
+            radio = getattr(engine, "remote_radios", None)
+            here = str(
+                srs_radio_mod.channel_for_tuned_freq(
+                    engine.airport(),
+                    getattr(engine, "config", None),
+                    state=radio if radio is not None else None,
+                )
+                or ""
+            ).strip().lower()
+        except Exception:
+            here = ""
+    tmpl = str(match.template or "").strip().lower()
+    if here == "ground" and tmpl in (
+        "lineup",
+        "line_up_and_wait",
+        "clear_takeoff",
+        "clear_takeoff_rolling",
+        "clear_takeoff_intersection",
+        "rolling_accept",
+        "right_break",
+        "clear_land",
+    ):
+        return {
+            "action": "none",
+            "detail": "still on Ground — tune Tower before those calls",
+        }
 
     # A phrase written on a step names that step outright — no template search.
     if match.step_id:

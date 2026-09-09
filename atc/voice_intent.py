@@ -125,30 +125,118 @@ def resolve_context_channel(
     ) or cursor
 
 
+_TUNE_SHORT = {
+    "delivery": "Delivery",
+    "ground": "Ground",
+    "tower": "Tower",
+    "departure": "Departure",
+    "approach": "Approach",
+    "blackjack": "Blackjack",
+    "bandsaw": "Bandsaw",
+    "joshua": "Joshua",
+    "control_east": "Nellis Control",
+    "control_west": "Nellis Control",
+    "center": "Center",
+    "ops": "Ops",
+    "tanker": "Tanker",
+}
+
+
+def tune_short_label(channel: str) -> str:
+    ch = (channel or "").strip().lower()
+    return _TUNE_SHORT.get(ch) or ch.replace("_", " ").title() or "radio"
+
+
+def format_tune_cue(
+    channel: str, freq_mhz: float | None = None
+) -> tuple[str, str]:
+    """Kneeboard line: 'tune Ground on 275.800' (UI tip, not a voice intent)."""
+    label = tune_short_label(channel)
+    freq = ""
+    if freq_mhz not in (None, ""):
+        try:
+            import srs_radio
+
+            freq = srs_radio.format_mhz(float(freq_mhz))
+        except (TypeError, ValueError):
+            freq = ""
+        if freq == "—":
+            freq = ""
+    if freq:
+        return (
+            f"tune {label} on {freq}",
+            f"switch to {label} — then the next call",
+        )
+    return (f"tune {label}", f"change frequency to {label}")
+
+
+def should_tip_retune(here: str, dest: str) -> bool:
+    """True when cues should lead with a tune tip instead of the next call."""
+    a = (here or "").strip().lower()
+    b = (dest or "").strip().lower()
+    if not a or not b or a == b:
+        return False
+    if a == "tanker":
+        return False
+    c2 = {"blackjack", "bandsaw", "joshua"}
+    if a in c2 and b in c2:
+        return False
+    return True
+
+
+def retune_destination(
+    *,
+    here: str,
+    cursor: str = "",
+    pending: str = "",
+    ops_start_done: bool = False,
+) -> str:
+    """
+    Next radio to tip — empty means stay on this agency's calls.
+
+    OPS starts the card: WORDS / start stay the advance until start is
+    approved. The Delivery cursor must not steal that with a tune tip.
+    """
+    here_l = (here or "").strip().lower()
+    cursor_l = (cursor or "").strip().lower()
+    pending_l = (pending or "").strip().lower()
+    if here_l == "ops" and not ops_start_done:
+        return ""
+    if pending_l and pending_l != here_l:
+        return pending_l
+    return cursor_l
+
+
 def cue_channel(
     *,
     mission_phase: str,
     cursor_channel: str,
     tuned_channel: str | None,
     last_tx_channel: str = "",
+    pending_contact: str = "",
+    ops_start_done: bool = False,
 ) -> str:
     """
-    Agency the Fly tip should address — who you are calling next.
+    Agency the Fly tip should address — who you are talking to now.
 
-    Departure / Approach follow the next step (Ground taxi is Ground even if
-    the radio is still on Delivery). Flight follows the live tune so Blackjack
-    vs Control vs Joshua matches the radio.
+    When the radio tune is known, stay on that agency. Next-step calls wait
+    until you switch; suggestions() then leads with “tune Ground on 275.800”.
+    Unknown tune follows the cursor so the card is not empty.
     """
     cursor = (cursor_channel or "").strip().lower()
     tuned = (tuned_channel or "").strip().lower()
     last_tx = (last_tx_channel or "").strip().lower()
+    pending = (pending_contact or "").strip().lower()
     phase = normalize_mission_phase(mission_phase, channel=cursor)
-    # OPS / tanker are sandbox radios — tips follow the tune, not Delivery
-    # or a leftover tanker overlay / boom-chat session.
-    if tuned in ("ops", "tanker"):
+    # After OPS start approved, tip Delivery once they leave OPS (or radio is
+    # unknown). While still tuned to OPS, tips stay OPS and suggestions()
+    # adds the tune-to-Delivery line.
+    handoff_delivery = ops_start_done and pending == "delivery"
+    if tuned:
         return tuned
-    # After an OPS call, keep OPS tips when SRS is stale (no live tune).
     if last_tx == "ops" and not tuned:
+        if handoff_delivery:
+            return "delivery"
         return "ops"
     if phase == "flight":
         return resolve_context_channel(
@@ -427,6 +515,12 @@ def extract_channel(text: str) -> str | None:
             m = re.search(rf"(?<!\w){re.escape(term)}(?!\w)", head)
             if not m:
                 continue
+            # "monitor tower" / "contact tower" is the instruction, not
+            # an address — unless they opened with Nellis Tower.
+            if channel == "tower":
+                prefix = head[: m.start()].rstrip()
+                if prefix.endswith("monitor") or prefix.endswith("contact"):
+                    continue
             if m.start() < best_pos or (
                 m.start() == best_pos and len(term) > best_len
             ):
@@ -697,6 +791,98 @@ def extract_recovery(text: str) -> str | None:
     return None
 
 
+_POINT_LEADS: tuple[str, ...] = (
+    "vectors to",
+    "vector to",
+    "vectors for",
+    "range and bearing to",
+    "bearing to",
+    "heading to",
+    "steer to",
+    "steer for",
+    "how far to",
+    "distance to",
+)
+
+# Words that end a point name rather than being part of one. The divert terms
+# are here so "vectors to the nearest divert" is never read as a fix called
+# "nearest" — request_divert owns that call.
+_POINT_STOP: frozenset[str] = frozenset(
+    {
+        "alternate",
+        "and",
+        "at",
+        "but",
+        "closest",
+        "divert",
+        "emergency",
+        "field",
+        "for",
+        "i",
+        "if",
+        "my",
+        "navaid",
+        "nearest",
+        "now",
+        "over",
+        "please",
+        "request",
+        "requesting",
+        "station",
+        "suitable",
+        "tacan",
+        # "vectors to the tanker" is request_tanker's call, not a fix.
+        "tanker",
+        "then",
+        "vor",
+        "vortac",
+        "we",
+        "when",
+        "with",
+    }
+)
+_POINT_ARTICLES: frozenset[str] = frozenset({"a", "an", "the"})
+_POINT_MAX_WORDS = 4
+
+
+def extract_nav_point(text: str) -> str | None:
+    """
+    The point name after 'vectors to …' in a normalized transcript.
+
+    Returns the raw phrase; navaids.resolve_point does the catalog matching, so
+    'mormon mesa', 'stryk' and 'lincoln county' all come through intact.
+    """
+    for lead in _POINT_LEADS:
+        match = re.search(rf"(?<!\w){re.escape(lead)}\s+(.+)$", text)
+        if not match:
+            continue
+        words: list[str] = []
+        for tok in match.group(1).split():
+            if not words and tok in _POINT_ARTICLES:
+                continue
+            if tok in _POINT_STOP or tok.isdigit():
+                break
+            words.append(tok)
+            if len(words) >= _POINT_MAX_WORDS:
+                break
+        if words:
+            return " ".join(words)
+    return None
+
+
+def _resolved_nav_point(text: str) -> dict[str, Any] | None:
+    """The point in a 'vectors to …' call, resolved against the nav catalogs."""
+    phrase = extract_nav_point(text)
+    if not phrase:
+        return None
+    try:
+        import navaids
+
+        return navaids.resolve_point(phrase)
+    except Exception:
+        return None
+
+
 def extract_stryk_feeder(text: str) -> str | None:
     """SARAH / NIXON / Gass Peak — still the STRYK recovery; Blackjack names the entry."""
     for key, terms in _STRYK_FEEDER_TERMS.items():
@@ -748,6 +934,20 @@ _ASKING = (
     "request", "requesting", "say", "give", "check", "confirm",
     "like", "we d like", "need", "prefer", "how about", "what s", "what is",
     "can we get", "could we get", "can i get", "can you", "could you",
+)
+
+# Agencies with a scope in front of them: they can move you up and down and
+# say where something is. Ground and Tower cannot.
+_RADAR_CHANNELS: tuple[str, ...] = (
+    "departure",
+    "approach",
+    "control_east",
+    "control_west",
+    "center",
+    "other",
+    "joshua",
+    "blackjack",
+    "bandsaw",
 )
 
 # Multiplier for an intent that does not fit the agency or the stage of flight.
@@ -859,7 +1059,16 @@ INTENTS: tuple[Intent, ...] = (
         "request_tanker",
         (
             _ASKING + ("push", "go", "going"),
-            ("tanker", "texaco", "air refuel", "air refueling", "aar"),
+            (
+                "tanker",
+                "texaco",
+                "shell",
+                "arco",
+                "esso",
+                "air refuel",
+                "air refueling",
+                "aar",
+            ),
         ),
         veto=(
             "tacan",
@@ -912,7 +1121,14 @@ INTENTS: tuple[Intent, ...] = (
     ),
     Intent(
         "tanker_freq",
-        (_ASKING, ("tanker frequency", "tanker freq", "frequency")),
+        (_ASKING, ("tanker frequency", "tanker freq")),
+        veto=(
+            "this frequency",
+            "check out",
+            "checkout",
+            "remain this frequency",
+            "frequency change",
+        ),
         kind="request",
         channels=("blackjack", "bandsaw", "joshua", "ops", "other", "control_east", "control_west", "center"),
         phases=("flight",),
@@ -1228,6 +1444,47 @@ INTENTS: tuple[Intent, ...] = (
         does="",
         veto=("unable unrestricted", "unable the unrestricted"),
     ),
+    Intent(
+        "request_altitude_change",
+        (
+            _ASKING,
+            (
+                "elevator",
+                "altitude change",
+                "change altitude",
+                "climb",
+                "descend",
+                "descent",
+                # "higher" / "lower" stay phrases: bare "lower" is one edit
+                # from "tower" and the fuzzy matcher would eat every Tower call.
+                "higher altitude",
+                "lower altitude",
+                "request higher",
+                "request lower",
+                "requesting higher",
+                "requesting lower",
+                "go higher",
+                "go lower",
+            ),
+        ),
+        channels=_RADAR_CHANNELS,
+        # A readback is not a request, and "unrestricted" belongs to Tower.
+        # The tower/fighter vetoes are for the fuzzy matcher: "request tower"
+        # and "request fighter" are each one edit from "request lower/higher".
+        veto=(
+            "unrestricted",
+            "cleared to climb",
+            "wilco",
+            "roger",
+            "request tower",
+            "requesting tower",
+            "contact tower",
+            "request fighter",
+        ),
+        weight=1.25,
+        example="request elevator one four thousand",
+        does="climb or descent to the altitude you ask for",
+    ),
     # ---- scripted step triggers -----------------------------------------
     Intent(
         "ready_clearance",
@@ -1242,6 +1499,24 @@ INTENTS: tuple[Intent, ...] = (
         example="request clearance",
         does="IFR clearance",
         veto=("readback", "squawk", "as filed"),
+    ),
+    Intent(
+        "ready_to_copy",
+        (
+            (
+                "ready to copy",
+                "ready copy",
+                "go ahead",
+                "ready to copy amendment",
+            ),
+        ),
+        kind="step",
+        template="clearance",
+        channels=("delivery",),
+        phases=("departure",),
+        example="ready to copy",
+        does="copy the flight-plan amendment",
+        veto=("request clearance", "ifr clearance"),
     ),
     # After ATC issues a clearance the pilot reads the key items back — no
     # agency opener required while awaiting_readback is set.
@@ -1265,6 +1540,7 @@ INTENTS: tuple[Intent, ...] = (
                 "climb as published",
                 "expect flight level",
                 "expect",
+                "monitor tower",
             ),
         ),
         kind="step",
@@ -1475,6 +1751,52 @@ INTENTS: tuple[Intent, ...] = (
         example="cancel hold",
         does="leave hold / continue recovery",
     ),
+    # Both of these are listed before request_vectors: on an equal score the
+    # first intent in this tuple wins, and "vectors to STRYK" is more specific
+    # than a bare "request vectors" for the approach.
+    Intent(
+        "request_divert",
+        (
+            (
+                "divert",
+                "nearest field",
+                "closest field",
+                "suitable field",
+                "nearest airfield",
+                "closest airfield",
+                "nearest suitable",
+                "alternate field",
+                "nearest runway",
+            ),
+        ),
+        kind="action",
+        channels=_RADAR_CHANNELS,
+        weight=1.4,
+        example="request vectors to the nearest divert",
+        does="heading and range to the closest suitable field",
+    ),
+    Intent(
+        "request_point_vectors",
+        (
+            (
+                "vectors to",
+                "vector to",
+                "vectors for",
+                "range and bearing to",
+                "bearing to",
+                "heading to",
+                "steer to",
+                "steer for",
+                "how far to",
+                "distance to",
+            ),
+        ),
+        kind="action",
+        channels=_RADAR_CHANNELS,
+        weight=1.35,
+        example="request vectors to Stryk",
+        does="magnetic heading and range to a named point",
+    ),
     Intent(
         "request_vectors",
         (
@@ -1485,6 +1807,19 @@ INTENTS: tuple[Intent, ...] = (
         channels=("approach",),
         phases=("approach", "flight"),
         weight=1.3,
+        # "vectors to the nearest divert" is a divert request, not a vector to
+        # the approach — request_divert answers those.
+        veto=(
+            "divert",
+            "nearest field",
+            "closest field",
+            "suitable field",
+            "nearest suitable",
+            "nearest airfield",
+            "closest airfield",
+            "nearest runway",
+            "alternate field",
+        ),
         example="request vectors",
         does="radar vectors",
     ),
@@ -2126,8 +2461,11 @@ def step_holds_after_play(step: dict[str, Any] | None) -> bool:
         return True
     if tmpl in ("joshua_check_in", "control_check_in", "center_check_in", "center_radar"):
         return True
-    if tmpl in ("ops_check_in", "ops_words", "ops_start", "ops_status"):
+    # Bare Ops check-in holds; WORDS / start leave for Delivery (see Play remap).
+    if tmpl == "ops_check_in":
         return True
+    if tmpl in ("ops_words", "ops_start", "ops_status"):
+        return False
     # Tanker is a side trip: Play stays on AAR until they retune C2.
     return str(step.get("channel") or "").strip().lower() == "tanker"
 
@@ -2556,30 +2894,40 @@ _ALT_CARDINALS = {
 
 
 def _climb_readback_item(items: list[dict[str, Any]] | None) -> dict[str, Any] | None:
-    for item in _hinge_items(items):
-        if str(item.get("key") or "") == "climb":
-            return item
-    for item in items or []:
-        if isinstance(item, dict) and str(item.get("key") or "") == "climb":
-            return item
+    for key in ("climb", "expect"):
+        for item in _hinge_items(items):
+            if str(item.get("key") or "") == key:
+                return item
+        for item in items or []:
+            if isinstance(item, dict) and str(item.get("key") or "") == key:
+                return item
     return None
 
 
 def _assigned_climb_ft(item: dict[str, Any] | None) -> int | None:
     if not item:
         return None
-    digits = re.sub(r"\D", "", str(item.get("value") or ""))
-    if not digits:
-        return None
-    try:
-        n = int(digits)
-    except ValueError:
-        return None
-    return n if n >= 1000 else n * 100  # rare FL-style leftovers
+    raw = str(item.get("value") or "")
+    if "→" in raw or "->" in raw:
+        raw = re.split(r"→|->", raw)[-1]
+    digits = re.sub(r"\D", "", raw)
+    if digits:
+        try:
+            n = int(digits)
+        except ValueError:
+            n = None
+        else:
+            if n >= 1000:
+                return n
+            if 50 <= n <= 600:
+                return n * 100
+    spoken = normalize(str(item.get("spoken") or ""))
+    heard = _heard_altitudes_ft(spoken)
+    return heard[0] if heard else None
 
 
 def _add_altitude_ft(out: list[int], feet: int) -> None:
-    if 5000 <= feet <= 60000 and feet not in out:
+    if 1000 <= feet <= 60000 and feet not in out:
         out.append(feet)
 
 
@@ -2628,6 +2976,15 @@ def _heard_altitudes_ft(text: str) -> list[int]:
     # Bare foot values (15000) — comma already stripped by normalize().
     for m in re.finditer(r"(?<!\w)(\d{4,5})(?!\w)", text):
         _add_altitude_ft(found, int(m.group(1)))
+
+    # "climb and maintain 170" after digit-fold (one seven zero → 170).
+    for m in re.finditer(
+        r"(?:climb(?:\s+and\s+maintain)?|maintain|flight\s+levels?|fl)\s+(\d{3})\b",
+        text,
+    ):
+        n = int(m.group(1))
+        if 50 <= n <= 600:
+            _add_altitude_ft(found, n * 100)
 
     return found
 
@@ -2715,6 +3072,14 @@ def _hinge_item_hit(text: str, item: dict[str, Any] | None) -> bool:
         return _go_around_instruction_hit(text, item)
     if key == "climb":
         return _climb_readback_hit(text, item)
+    if key == "expect":
+        return _climb_readback_hit(text, item)
+    if key == "monitor":
+        return bool(
+            re.search(r"(?<!\w)monitor(?:\s+tower)?(?!\w)", text)
+            or re.search(r"(?<!\w)tower(?!\w)", text)
+            or _eor_readback_hit(text, {"spoken": "eor", "value": "EOR"})
+        )
     if key == "callsign":
         return _callsign_readback_hit(text, item)
     spoken = normalize(str(item.get("spoken") or ""))
@@ -2941,6 +3306,7 @@ def _score_intents(
     extra: tuple[Intent, ...] = (),
     current_step_id: str = "",
     steps: list[dict[str, Any]] | None = None,
+    last_tx_template: str = "",
 ) -> Match | None:
     """Highest-scoring intent for a transcript, before any addressing gate."""
     best: Match | None = None
@@ -3017,9 +3383,18 @@ def _score_intents(
             continue
         if awaiting_readback and intent.template == "monitor_tower":
             continue
+        # Already issued — "at EOR" / monitor tower is the readback, not a new ask.
+        if (
+            str(last_tx_template or "").strip().lower() == "monitor_tower"
+            and intent.id == "at_eor"
+        ):
+            continue
         # Ground already issued taxi — repeating "taxi via … runway 21R" is
         # the readback, not a new request that re-plays the taxi clearance.
         if awaiting_readback and intent.id == "ready_taxi":
+            continue
+        # Reading back the IFR clearance is not a new "request clearance".
+        if awaiting_readback and intent.id in ("ready_clearance", "ready_to_copy"):
             continue
         # Departure radar contact is an airborne check-in — not weather.
         if expected == "radar_contact" and intent.id in _DEPARTURE_CHECKIN_SKIP_IDS:
@@ -3170,6 +3545,22 @@ def _score_intents(
                 )
                 if assigned and _normalize_runway_token(runway) == assigned:
                     continue
+        if intent.id == "request_altitude_change":
+            heard = _heard_altitudes_ft(text)
+            # Last value wins: "leaving one five for angels two four".
+            if heard:
+                slots["altitude_ft"] = heard[-1]
+        if intent.id == "request_point_vectors":
+            phrase = extract_nav_point(text)
+            # No name after "vectors to" is a plain vector request, not this.
+            if not phrase:
+                continue
+            slots["nav_point_said"] = phrase
+            # A name we cannot place still fires, so the pilot hears
+            # "say again the point" instead of an Approach vector.
+            point = _resolved_nav_point(text)
+            if point is not None:
+                slots["nav_point"] = point
         recovery = extract_recovery(text)
         if recovery and intent.id in (
             "inbound_recovery",
@@ -3374,6 +3765,10 @@ def echoes_last_atc(
         return False
     last_tmpl = str(last_tx_template or "").strip().lower()
     cand_tmpl = str(candidate_template or "").strip().lower()
+    if "monitor tower" in last and "monitor tower" in text:
+        return True
+    if last_tmpl == "monitor_tower" and cand_tmpl == "monitor_tower":
+        return True
     if last_tmpl and cand_tmpl and last_tmpl != cand_tmpl:
         return False
     if any(cue in text and cue not in last for cue in _CHECKIN_NOT_READBACK):
@@ -3508,11 +3903,16 @@ def evaluate(
         extra=extra_intents,
         current_step_id=current_step_id,
         steps=steps,
+        last_tx_template=last_tx_template,
     )
     if (
         candidate is not None
         and not awaiting_readback
-        and (candidate.kind == "step" or candidate.step_id)
+        and (
+            candidate.kind == "step"
+            or candidate.step_id
+            or candidate.kind == "request"
+        )
         and echoes_last_atc(
             text,
             last_tx_text,
@@ -3737,6 +4137,39 @@ _DEPARTURE_CHECKIN_SKIP_IDS = frozenset(
     {"request_winds", "request_altimeter", "inbound_recovery"}
 )
 
+# Blackjack already answered the flight — do not keep tipping "checking in".
+_BJ_ON_FREQ_TEMPLATES = frozenset(
+    {"bj_check_in", "bj_continue", "bj_alpha_check", "bj_range_entry"}
+)
+_BJ_AWAY_CHANNELS = frozenset(
+    {
+        "bandsaw",
+        "tanker",
+        "joshua",
+        "control_east",
+        "control_west",
+        "center",
+        "approach",
+    }
+)
+
+
+def hide_blackjack_checkin_cue(
+    *,
+    blackjack_checked_in: bool = False,
+    last_tx_template: str = "",
+    last_tx_channel: str = "",
+) -> bool:
+    """True once the flight is on Blackjack and does not need to check in again."""
+    last_tmpl = str(last_tx_template or "").strip().lower()
+    last_ch = str(last_tx_channel or "").strip().lower()
+    if last_tmpl in _BJ_ON_FREQ_TEMPLATES:
+        return True
+    if not blackjack_checked_in:
+        return False
+    # Back from Bandsaw / tanker / NATCF — "checking in" is continue.
+    return last_ch not in _BJ_AWAY_CHANNELS
+
 
 def suggestions(
     *,
@@ -3755,6 +4188,14 @@ def suggestions(
     tanker_chat_choices: list[dict[str, Any]] | None = None,
     tanker_chat_session: bool = False,
     tanker_chat_last_spoke: str = "",
+    pending_contact: str = "",
+    ops_start_done: bool = False,
+    last_tx_template: str = "",
+    last_tx_channel: str = "",
+    blackjack_checked_in: bool = False,
+    tuned_channel: str = "",
+    next_channel: str = "",
+    next_freq_mhz: float | None = None,
 ) -> list[tuple[str, str, str, bool]]:
     """
     Fly kneeboard cues: (payload, what it does, role, agency_required).
@@ -3779,6 +4220,18 @@ def suggestions(
     phase_l = normalize_mission_phase(phase, channel=channel_l)
     expected_l = (expected or "").strip().lower()
     current_id = str(current_step_id or "").strip()
+    pending_l = (pending_contact or "").strip().lower()
+    here_l = (tuned_channel or channel_l).strip().lower()
+    dest_l = retune_destination(
+        here=here_l,
+        cursor=next_channel,
+        pending=pending_l,
+        ops_start_done=ops_start_done,
+    )
+    # Off the next agency's freq — lead with a tune tip, not that agency's call.
+    if should_tip_retune(here_l, dest_l) and not awaiting_readback:
+        say, does = format_tune_cue(dest_l, next_freq_mhz)
+        out.append((say, does, "advance", False))
     current_step = step_by_id(steps, current_id)
     authored = step_is_authored(current_step)
     if authored:
@@ -3839,9 +4292,8 @@ def suggestions(
     current_phrases = step_voice_phrases(steps, current_id)
     current_does = "run this step"
     step_ch = str((current_step or {}).get("channel") or "").strip().lower()
-    hide_cursor_phrases = channel_l in ("ops", "tanker") and step_ch not in (
-        channel_l,
-        "",
+    hide_cursor_phrases = bool(
+        channel_l and step_ch and step_ch not in (channel_l, "")
     )
     if current_id and current_phrases and not awaiting_readback and not hide_cursor_phrases:
         if isinstance(current_step, dict):
@@ -3872,6 +4324,11 @@ def suggestions(
             continue
         # Custom/file steps: only the author's cue advances — not "with you".
         if authored and intent.kind == "step":
+            continue
+        # Live boom chat tips "talk later"; idle tips "how's it going" — not both.
+        if intent.id == "tanker_chat_start" and tanker_chat_session:
+            continue
+        if intent.id == "tanker_chat_stop":
             continue
         if intent.id in _C2_INTENT_IDS and not step_offers_c2(
             current_step, channel=channel_l
@@ -3943,9 +4400,20 @@ def suggestions(
             continue
         if expected_l in _APPROACH_TOWER_HANDOFF_TEMPLATES and intent.id == "inbound_recovery":
             continue
+        if expected_l == "clearance_amendment" and intent.id == "ready_clearance":
+            continue
+        # Don't tip "ready to copy" until Delivery has offered the amendment.
+        if intent.id == "ready_to_copy" and last_tx_template != "clearance_amendment":
+            continue
         # Range checkout ends Flight → Approach; tip it on the range-exit step
-        # (and allow check-in "continue" while still working the range).
+        # (and allow check-in "continue" after they leave Blackjack).
         if intent.id == "range_exit" and expected_l != "bj_range_exit":
+            continue
+        if intent.id == "range_entry" and hide_blackjack_checkin_cue(
+            blackjack_checked_in=blackjack_checked_in,
+            last_tx_template=last_tx_template,
+            last_tx_channel=last_tx_channel,
+        ):
             continue
         # Bandsaw: check-in does not advance; tip checkout while still on check-in.
         if intent.id == "bandsaw_check_in" and expected_l in (
@@ -3958,10 +4426,9 @@ def suggestions(
             "joshua_check_out",
         ):
             continue
-        if intent.id == "control_check_in" and expected_l in (
-            "control_check_in",
-            "control_handoff",
-        ):
+        # Unlike Bandsaw/Joshua, checking in with Nellis Control is required and
+        # does advance — tip it while it is due, and only hide it afterwards.
+        if intent.id == "control_check_in" and expected_l == "control_handoff":
             continue
         if intent.id == "center_check_in" and expected_l in (
             "center_check_in",
@@ -3992,15 +4459,14 @@ def suggestions(
             "joshua_check_out",
         ):
             rank = 0
-        elif intent.id == "control_handoff" and expected_l in (
-            "control_check_in",
-            "control_handoff",
-        ):
+        elif intent.id == "control_handoff" and expected_l == "control_handoff":
             rank = 0
         elif intent.id == "center_check_in" and expected_l in (
             "center_check_in",
             "center_radar",
         ):
+            rank = 0
+        elif intent.id == "ready_to_copy" and expected_l == "clearance_amendment":
             rank = 0
         elif intent.id == "range_entry" and expected_l == "bj_range_exit":
             # Back from Bandsaw / still on the range — tip check-in (continue).
@@ -4049,6 +4515,11 @@ def suggestions(
         ):
             # Prefer on ALSO AVAILABLE; rank still orders within optional.
             rank = 0 if intent.id == "request_winds" else 1
+        elif expected_l == "ops_check_in" and intent.id in (
+            "ops_request_words",
+            "ops_request_start",
+        ):
+            rank = 0
         elif expected and intent.template and intent.template == expected:
             rank = 0
         elif channel_l == "ops" and intent.id in (
@@ -4056,9 +4527,12 @@ def suggestions(
             "ops_request_start",
         ):
             rank = 0
-        elif channel_l == "tanker" and intent.id in (
-            "tanker_check_in",
-            "tanker_chat_start",
+        elif channel_l == "tanker" and intent.id == "tanker_check_in":
+            rank = 0
+        elif (
+            channel_l == "tanker"
+            and intent.id == "tanker_chat_start"
+            and not tanker_chat_session
         ):
             rank = 0
         elif intent.phases or intent.channels:
@@ -4068,17 +4542,21 @@ def suggestions(
 
         # Step / mission phrases that are the expected call → advance.
         # Requests and actions → optional (even when ranked high for visibility).
-        # OPS / tanker have no timeline step — the speakable requests *are* the card.
+        # OPS step 1 and tanker side-trip: the speakable requests *are* the card.
         if intent.kind == "step" or intent.step_id:
             role = "advance" if rank == 0 else ""
         elif channel_l == "ops" and intent.id in (
             "ops_request_words",
             "ops_request_start",
         ):
+            # Start already done — the tune-to-Delivery line is the advance tip.
+            role = "optional" if should_tip_retune(here_l, dest_l) else "advance"
+        elif channel_l == "tanker" and intent.id == "tanker_check_in":
             role = "advance"
-        elif channel_l == "tanker" and intent.id in (
-            "tanker_check_in",
-            "tanker_chat_start",
+        elif (
+            channel_l == "tanker"
+            and intent.id == "tanker_chat_start"
+            and not tanker_chat_session
         ):
             role = "advance"
         elif intent.kind in ("request", "action"):

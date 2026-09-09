@@ -1,11 +1,17 @@
 {
-  "_comment": "Nellis (KLSV) departures. Instrument SIDs (DREAM7/FYTTR7/MMM8/PEAKS) only when explicitly filed. PEAKS21R is the SID plus runway, same idea as FLEX21R. Any FLEX token is a visual DP, including runway-coded forms: FLEX, FLEX21, FLEX21L, FLEX21R, FLEX03, FLEX03L, FLEX03R. North/west inferred from the next fix (DREAM/MINTT/JUNNO vs FYTTR). Otherwise clearance stays plain 'as filed'.",
+  "_comment": "Nellis (KLSV) departures. Instrument SIDs (DREAM7/FYTTR7/MMM8/PEAKS) only when explicitly filed. PEAKS21R is the SID plus runway, same idea as FLEX21R. Any FLEX token is a visual DP, including runway-coded forms: FLEX, FLEX21, FLEX21L, FLEX21R, FLEX03, FLEX03L, FLEX03R. North/west inferred from the next fix (DREAM/MINTT/JUNNO vs FYTTR). Otherwise clearance stays plain 'as filed'. Altitude numbers are NATCF judgment, not plate law: MSA is the only hard floor on Flex; SID crossings are enforced only on instrument 'climb via' SIDs. typical_ft is what CD assigns when the plan has no usable cruise.",
+  "default_typical_ft": 15000,
   "instrument": [
     {
       "id": "DREAM7",
       "aliases": ["DREAM7", "DREAMSEVEN"],
       "say": "Dream seven",
       "kind": "instrument",
+      "typical_ft": 19000,
+      "crossing_ft": {
+        "MINTT": 17000,
+        "JUNNO": 19000
+      },
       "transitions": {
         "MINTT": "Mintt",
         "JUNNO": "Junno"
@@ -16,6 +22,7 @@
       "aliases": ["FYTTR7", "FYTTRSEVEN"],
       "say": "Fighter seven",
       "kind": "instrument",
+      "typical_ft": 17000,
       "transitions": {
         "FYTTR": "Fighter"
       }
@@ -25,6 +32,7 @@
       "aliases": ["MMM8", "MORMONMESA8", "MORMONMESAEIGHT"],
       "say": "Mormon Mesa eight",
       "kind": "instrument",
+      "typical_ft": 17000,
       "transitions": {
         "MMM": "Mormon Mesa"
       }
@@ -34,6 +42,7 @@
       "aliases": ["PEAKS"],
       "say": "Peaks",
       "kind": "instrument",
+      "typical_ft": 19000,
       "transitions": {
         "HAYFD": "Hayford Peak",
         "HAYFORD": "Hayford Peak",
@@ -51,6 +60,12 @@
       "aliases": ["FLEXN", "FLEXNORTH", "FLEX.NORTH", "FLEX_NORTH"],
       "say": "Flex north",
       "kind": "visual",
+      "typical_ft": 17000,
+      "usual_ft": {
+        "MINTT": 17000,
+        "JUNNO": 19000,
+        "DREAM": 17000
+      },
       "route_prefixes": [
         ["FLEX", "MINTT"],
         ["FLEX", "JUNNO"],
@@ -64,6 +79,10 @@
       "aliases": ["FLEXW", "FLEXWEST", "FLEX.WEST", "FLEX_WEST"],
       "say": "Flex west",
       "kind": "visual",
+      "typical_ft": 13000,
+      "usual_ft": {
+        "FYTTR": 13000
+      },
       "route_prefixes": [
         ["FLEX", "FYTTR"],
         ["FLEX", "WEST"]
@@ -75,6 +94,7 @@
       "aliases": [],
       "say": "Flex",
       "kind": "visual",
+      "typical_ft": 15000,
       "route_prefixes": []
     }
   ],

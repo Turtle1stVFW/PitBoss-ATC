@@ -309,6 +309,9 @@ class FlowEngine:
         steps = self.steps
         if not steps:
             return
+        if self.state.get("manual_step_view"):
+            # Parked there by an arrow — do not walk off it on the next poll.
+            return
         idx = int(self.state.get("index") or 0)
         if idx < 0:
             idx = 0
@@ -525,23 +528,25 @@ class FlowEngine:
         }
 
     def seek(self, index: int) -> dict[str, Any]:
-        """Move cursor to step index (0-based) without transmitting."""
+        """
+        Move cursor to step index (0-based) without transmitting.
+
+        An arrow press wins over the skip rules: it may park on a step the
+        flow would auto-skip (the Control check-in after checking in, say),
+        and Fly shows that step instead of the agency it is nudging you to.
+        Both hold only until the next transmission clears manual_step_view.
+        """
         steps = self.steps
         if not steps:
             raise RuntimeError("No enabled steps")
-        prev = int(self.state.get("index") or 0)
         idx = max(0, min(int(index), len(steps)))  # len(steps) == past end
         self.state["index"] = idx
+        self.state["manual_step_view"] = True
         # Mark before prepare_takeoff_cursor so Watch-park cannot snap a
         # forward skip back onto departure_handoff.
         self._remember_manual_cursor(idx)
         if idx < len(steps):
-            if idx < prev:
-                # Moving earlier — do not bounce forward over skipped approach steps.
-                self.state["index"] = self._retreat_past_skippable(idx)
-                self._remember_manual_cursor(int(self.state.get("index") or 0))
-            else:
-                self.prepare_takeoff_cursor()
+            self.prepare_takeoff_cursor()
         self._clear_landing_progress_if_before_clear_land(
             int(self.state.get("index") or 0)
         )
@@ -554,11 +559,7 @@ class FlowEngine:
         return st
 
     def seek_relative(self, delta: int) -> dict[str, Any]:
-        idx = int(self.state.get("index") or 0) + int(delta)
-        if int(delta) < 0:
-            # One Back click should land on the previous *playable* step.
-            idx = self._retreat_past_skippable(idx)
-        return self.seek(idx)
+        return self.seek(int(self.state.get("index") or 0) + int(delta))
 
     def seek_number(self, number: int) -> dict[str, Any]:
         """Jump to 1-based step number without transmitting."""
@@ -642,6 +643,25 @@ class FlowEngine:
             detail["text"] = str(step.get("text") or step.get("label") or "")
         else:
             template = step.get("template") or "radio_check"
+            spoken = atc_phrase.effective_clearance_template(
+                template, airport=airport, opus=opus, state=self.state
+            )
+            if spoken == "clearance_amendment":
+                needed, assigned, _rules = atc_phrase.clearance_msa_amendment(
+                    airport, opus
+                )
+                if needed and assigned:
+                    self.state["amended_altitude_ft"] = int(assigned)
+                    self.state["filed_altitude_ft"] = int(assigned)
+                template = spoken
+                step = dict(step)
+                step["template"] = spoken
+            # Kneeboard Play on the Ops step: issue WORDS + start, then leave
+            # for Delivery (ops_words does not hold the cursor).
+            if str(template or "").strip().lower() == "ops_check_in":
+                template = "ops_words"
+                step = dict(step)
+                step["template"] = "ops_words"
             custom_text = step.get("text")
             text, tx_name, _freq_ignored, _mod_ignored = atc_phrase.build_flow_step_phrase(
                 airport,
@@ -752,6 +772,8 @@ class FlowEngine:
             self.state["awaiting_readback"] = True
             # Clearance → expect the readback-correct step; others just prompt.
             confirm = "clearance_readback" if template == "clearance" else ""
+            if template == "clearance_amendment":
+                confirm = "clearance"
             self.state["awaiting_confirm_template"] = confirm
         elif not items:
             # Non-readback call — don't wipe a pending checklist until confirmed.
@@ -780,6 +802,8 @@ class FlowEngine:
         card until the pilot reads back the instruction.
         """
         if atc_phrase.go_around_readback_open(self.state):
+            return
+        if str(self.state.get("last_tx_template") or "") == "clearance_amendment":
             return
         steps = self.steps
         idx = int(self.state.get("index") or 0)
@@ -872,6 +896,8 @@ class FlowEngine:
 
     def _hold_cursor_after_tx(self, step: dict[str, Any] | None) -> bool:
         """Hold after TX when more per-ship landing clearances remain."""
+        if str(self.state.get("last_tx_template") or "") == "clearance_amendment":
+            return True
         if self._hold_cursor_after_play(step):
             return True
         tmpl = str((step or {}).get("template") or "")
@@ -1132,6 +1158,7 @@ class FlowEngine:
         if seek_range_exit and not self._seek_template("bj_range_exit"):
             pass
         self.state["last_step_id"] = "bj_continue"
+        self.state["blackjack_checked_in"] = True
         self.state["last_tx_text"] = text
         self.state["last_tx_template"] = "bj_continue"
         self.state["last_tx_channel"] = channel
@@ -1313,12 +1340,17 @@ class FlowEngine:
             )
         # READ BACK card is the active step — close it, do not TX the next call.
         if self.state.get("awaiting_readback") and self.state.get("readback_items"):
-            self.clear_readback()
-            return {
-                "acknowledged": True,
-                "label": "Readback noted",
-                "readback_cleared": True,
-            }
+            if str(self.state.get("last_tx_template") or "") == "clearance_amendment":
+                self.state["clearance_amendment_copied"] = True
+                self._clear_readback_state()
+                # Fall through — issue the amended clearance on this Play.
+            else:
+                self.clear_readback()
+                return {
+                    "acknowledged": True,
+                    "label": "Readback noted",
+                    "readback_cleared": True,
+                }
         steps = self.steps
         if not steps:
             raise RuntimeError("No enabled steps")
@@ -1628,7 +1660,7 @@ def make_handler(engine: FlowEngine) -> type[BaseHTTPRequestHandler]:
                 self._send(
                     200,
                     _html_ok(
-                        "ATC Flow",
+                        "PitBoss ATC",
                         "Endpoints: /next /back /reset /flip /play?id=... /seek?n=7 /seek_next /seek_prev /status",
                     ),
                 )

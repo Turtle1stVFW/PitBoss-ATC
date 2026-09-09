@@ -1,6 +1,6 @@
-# 455 ATC Flow (testing)
+# PitBoss ATC
 
-Patched `DCS-SR-ExternalAudio` plus a Python Mission Flow app. **Testing build** — expect rough edges.
+Patched `DCS-SR-ExternalAudio` plus the **PitBoss ATC** Python app. **Testing build** — expect rough edges.
 
 ## Share this with a new pilot
 

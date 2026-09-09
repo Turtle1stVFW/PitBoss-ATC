@@ -1,0 +1,295 @@
+{
+  "_comment": "Ground stations ATC can fix a radar contact off, plus the fields it can send you to. Positions are the NTTR.kml values from atc/nttr_navpoints.json so they line up with the sim; `say` is how the controller pronounces the station. Frequencies and channels are deliberately absent — nothing in the phraseology needs them. Two 3-letter NTTR points (AZC, UTI) are left out because the station behind them is not identified.",
+  "stations": [
+    {
+      "id": "LSV",
+      "kind": "tacan",
+      "say": "Nellis",
+      "aliases": ["KLSV", "NELLIS"],
+      "lat": 36.24467,
+      "lon": -115.025
+    },
+    {
+      "id": "LAS",
+      "kind": "vortac",
+      "say": "Las Vegas",
+      "aliases": ["KLAS", "MCCARRAN", "HARRY REID", "VEGAS"],
+      "lat": 36.07969,
+      "lon": -115.15981
+    },
+    {
+      "id": "MMM",
+      "kind": "vortac",
+      "say": "Mormon Mesa",
+      "aliases": ["MORMON MESA", "MORMON"],
+      "lat": 36.76928,
+      "lon": -114.27747
+    },
+    {
+      "id": "BTY",
+      "kind": "vortac",
+      "say": "Beatty",
+      "aliases": ["BEATTY"],
+      "lat": 36.80058,
+      "lon": -116.74764
+    },
+    {
+      "id": "BLD",
+      "kind": "vortac",
+      "say": "Boulder City",
+      "aliases": ["BOULDER CITY", "BOULDER"],
+      "lat": 35.99583,
+      "lon": -114.86367
+    },
+    {
+      "id": "GFS",
+      "kind": "vortac",
+      "say": "Goffs",
+      "aliases": ["GOFFS"],
+      "lat": 35.13114,
+      "lon": -115.17644
+    },
+    {
+      "id": "ILC",
+      "kind": "vortac",
+      "say": "Wilson Creek",
+      "aliases": ["WILSON CREEK", "WILSON"],
+      "lat": 38.25019,
+      "lon": -114.39422
+    },
+    {
+      "id": "TPH",
+      "kind": "vortac",
+      "say": "Tonopah",
+      "aliases": ["TONOPAH"],
+      "lat": 38.03064,
+      "lon": -117.0335
+    },
+    {
+      "id": "OAL",
+      "kind": "vortac",
+      "say": "Coaldale",
+      "aliases": ["COALDALE"],
+      "lat": 38.00325,
+      "lon": -117.77044
+    },
+    {
+      "id": "MVA",
+      "kind": "vortac",
+      "say": "Mina",
+      "aliases": ["MINA"],
+      "lat": 38.56531,
+      "lon": -118.03286
+    },
+    {
+      "id": "MLF",
+      "kind": "vortac",
+      "say": "Milford",
+      "aliases": ["MILFORD"],
+      "lat": 38.36036,
+      "lon": -113.01322
+    },
+    {
+      "id": "CDC",
+      "kind": "vortac",
+      "say": "Cedar City",
+      "aliases": ["CEDAR CITY", "CEDAR"],
+      "lat": 37.78733,
+      "lon": -113.06822
+    },
+    {
+      "id": "BCE",
+      "kind": "vortac",
+      "say": "Bryce Canyon",
+      "aliases": ["BRYCE CANYON", "BRYCE"],
+      "lat": 37.68919,
+      "lon": -112.30389
+    },
+    {
+      "id": "GCN",
+      "kind": "vor",
+      "say": "Grand Canyon",
+      "aliases": ["GRAND CANYON"],
+      "lat": 35.96034,
+      "lon": -112.14605
+    },
+    {
+      "id": "PGS",
+      "kind": "vortac",
+      "say": "Peach Springs",
+      "aliases": ["PEACH SPRINGS", "PEACH"],
+      "lat": 35.62472,
+      "lon": -113.54447
+    },
+    {
+      "id": "IGM",
+      "kind": "vor",
+      "say": "Kingman",
+      "aliases": ["KINGMAN"],
+      "lat": 35.26051,
+      "lon": -113.93408
+    },
+    {
+      "id": "EED",
+      "kind": "vortac",
+      "say": "Needles",
+      "aliases": ["NEEDLES"],
+      "lat": 34.766,
+      "lon": -114.4741
+    },
+    {
+      "id": "HEC",
+      "kind": "vortac",
+      "say": "Hector",
+      "aliases": ["HECTOR"],
+      "lat": 34.79193,
+      "lon": -116.46292
+    },
+    {
+      "id": "DAG",
+      "kind": "vortac",
+      "say": "Daggett",
+      "aliases": ["DAGGETT"],
+      "lat": 34.95759,
+      "lon": -116.57817
+    },
+    {
+      "id": "BIH",
+      "kind": "vor",
+      "say": "Bishop",
+      "aliases": ["BISHOP"],
+      "lat": 37.37694,
+      "lon": -118.36653
+    },
+    {
+      "id": "INS",
+      "kind": "tacan",
+      "say": "Indian Springs",
+      "aliases": ["KINS", "INDIAN SPRINGS", "CREECH"],
+      "lat": 36.58504,
+      "lon": -115.67032
+    },
+    {
+      "id": "GRL",
+      "kind": "tacan",
+      "say": "Groom Lake",
+      "aliases": ["GROOM LAKE", "GROOM"],
+      "lat": 37.23174,
+      "lon": -115.80266
+    },
+    {
+      "id": "MCY",
+      "kind": "tacan",
+      "say": "Mercury",
+      "aliases": ["MERCURY", "DESERT ROCK"],
+      "lat": 36.6275,
+      "lon": -116.028
+    },
+    {
+      "id": "TTR",
+      "kind": "tacan",
+      "say": "Tonopah Test Range",
+      "aliases": ["TONOPAH TEST RANGE", "TEE TEE ARE"],
+      "lat": 37.80108,
+      "lon": -116.77827
+    }
+  ],
+  "diverts": [
+    {
+      "id": "KLSV",
+      "say": "Nellis",
+      "category": "military",
+      "aliases": ["NELLIS", "LSV", "HOME"],
+      "lat": 36.23619,
+      "lon": -115.03436
+    },
+    {
+      "id": "KINS",
+      "say": "Creech",
+      "category": "military",
+      "aliases": ["CREECH", "INDIAN SPRINGS", "INS"],
+      "lat": 36.58719,
+      "lon": -115.67335
+    },
+    {
+      "id": "KTNX",
+      "say": "Tonopah Test Range",
+      "category": "military",
+      "aliases": ["TONOPAH TEST RANGE", "TTR"],
+      "lat": 37.80108,
+      "lon": -116.77827
+    },
+    {
+      "id": "KEDW",
+      "say": "Edwards",
+      "category": "military",
+      "aliases": ["EDWARDS", "EDW"],
+      "lat": 34.90542,
+      "lon": -117.88383
+    },
+    {
+      "id": "KNID",
+      "say": "China Lake",
+      "category": "military",
+      "aliases": ["CHINA LAKE", "NID"],
+      "lat": 35.68542,
+      "lon": -117.692
+    },
+    {
+      "id": "KDRA",
+      "say": "Desert Rock",
+      "category": "military",
+      "aliases": ["DESERT ROCK", "MERCURY"],
+      "lat": 36.6275,
+      "lon": -116.028
+    },
+    {
+      "id": "KLAS",
+      "say": "Harry Reid",
+      "category": "civil",
+      "aliases": ["HARRY REID", "MCCARRAN", "LAS VEGAS", "LAS"],
+      "lat": 36.08006,
+      "lon": -115.15225
+    },
+    {
+      "id": "KVGT",
+      "say": "North Las Vegas",
+      "category": "civil",
+      "aliases": ["NORTH LAS VEGAS", "NORTH TOWN", "VGT"],
+      "lat": 36.21028,
+      "lon": -115.19602
+    },
+    {
+      "id": "KTPH",
+      "say": "Tonopah",
+      "category": "civil",
+      "aliases": ["TONOPAH", "TPH"],
+      "lat": 38.05909,
+      "lon": -117.0848
+    },
+    {
+      "id": "BEATTY",
+      "say": "Beatty",
+      "category": "civil",
+      "aliases": ["BEATTY", "BTY"],
+      "lat": 36.86137,
+      "lon": -116.78643
+    },
+    {
+      "id": "MESQUITE",
+      "say": "Mesquite",
+      "category": "civil",
+      "aliases": ["MESQUITE"],
+      "lat": 36.83207,
+      "lon": -114.05756
+    },
+    {
+      "id": "LINCOLN",
+      "say": "Lincoln County",
+      "category": "civil",
+      "aliases": ["LINCOLN COUNTY", "LINCOLN", "PANACA"],
+      "lat": 37.78868,
+      "lon": -114.41984
+    }
+  ]
+}

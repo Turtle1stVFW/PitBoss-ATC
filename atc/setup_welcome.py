@@ -36,7 +36,7 @@ def show(app: Any, *, force: bool = False) -> None:
         return
 
     win = tk.Toplevel(app)
-    win.title("First-run setup  ·  testing")
+    win.title("PitBoss ATC — first-run setup")
     win.configure(bg=C_PANEL)
     win.transient(app)
     win.grab_set()
@@ -46,7 +46,7 @@ def show(app: Any, *, force: bool = False) -> None:
     pad = tk.Frame(win, bg=C_PANEL)
     pad.pack(fill=tk.BOTH, expand=True, padx=18, pady=16)
 
-    ttk.Label(pad, text="455 ATC Flow — testing", style="Header.TLabel").pack(anchor="w")
+    ttk.Label(pad, text="PitBoss ATC", style="Header.TLabel").pack(anchor="w")
     tk.Label(
         pad,
         text=(

@@ -22,7 +22,7 @@ VOICE_REQ = HERE / "requirements-voice.txt"
 # Shown when Setup-Pilot.cmd finishes so the operator can read it back.
 NEXT_STEPS = """
 Next (on this PC)
-  1. The app should open. Use the First-run setup window if it appears.
+  1. PitBoss ATC should open. Use the First-run setup window if it appears.
   2. Opus username = your CAOC name. Client = squadron hop. Solo = this PC only.
   3. Clients: ATC address + shared token from the Host (port 8766, not SRS 5002).
   4. Title bar: pick your Opus flight. Restart DCS once if the radio export just installed.
