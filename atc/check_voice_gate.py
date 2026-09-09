@@ -2816,6 +2816,111 @@ def extras() -> int:
     else:
         print(f"tower exit 21R (ramp) — {exit_21r}")
 
+    exit_landed_left = _exit_text("21R", state={"landed_runway": "21L"})
+    if "cross" not in exit_landed_left or "two one right" not in exit_landed_left:
+        print(
+            f"  FAIL overhead plan 21R but landed 21L must still cross 21R: "
+            f"{exit_landed_left}"
+        )
+        bad += 1
+    else:
+        print(f"tower exit landed 21L (plan 21R) — {exit_landed_left}")
+
+    taxi_21l = atc_phrase.build_template_text(
+        nellis, "taxi", "Razor 1", wx_exit, "21L"
+    ).lower()
+    if (
+        "hold short" not in taxi_21l
+        or "two one right" not in taxi_21l
+        or "two one left" not in taxi_21l
+    ):
+        print(f"  FAIL Ground taxi to 21L must hold short of 21R: {taxi_21l}")
+        bad += 1
+    else:
+        print(f"ground taxi 21L — {taxi_21l}")
+
+    taxi_21r = atc_phrase.build_template_text(
+        nellis, "taxi", "Razor 1", wx_exit, "21R"
+    ).lower()
+    if "hold short" in taxi_21r or "cross" in taxi_21r:
+        print(f"  FAIL Ground taxi to 21R must not cross/hold 21R: {taxi_21r}")
+        bad += 1
+    else:
+        print(f"ground taxi 21R — {taxi_21r}")
+
+    to_21l = atc_phrase.build_template_text(
+        nellis, "clear_takeoff", "Razor 1", wx_exit, "21L", state={}
+    ).lower()
+    if (
+        "cross runway two one right" not in to_21l
+        or "runway two one left" not in to_21l
+        or "cleared for takeoff" not in to_21l
+    ):
+        print(f"  FAIL Tower takeoff 21L from NW EOR must cross 21R: {to_21l}")
+        bad += 1
+    else:
+        print(f"tower takeoff 21L — {to_21l}")
+
+    to_21r = atc_phrase.build_template_text(
+        nellis, "clear_takeoff", "Razor 1", wx_exit, "21R", state={}
+    ).lower()
+    if "cross" in to_21r:
+        print(f"  FAIL Tower takeoff 21R must not cross a parallel: {to_21r}")
+        bad += 1
+    else:
+        print(f"tower takeoff 21R — {to_21r}")
+
+    lineup_21l = atc_phrase.build_template_text(
+        nellis, "lineup", "Razor 1", wx_exit, "21L", state={}
+    ).lower()
+    if "cross runway two one right" not in lineup_21l:
+        print(f"  FAIL LUAW 21L from NW EOR must cross 21R: {lineup_21l}")
+        bad += 1
+    else:
+        print(f"tower lineup 21L — {lineup_21l}")
+
+    taxi_in_missed_exit = atc_phrase.build_template_text(
+        nellis,
+        "taxi_in",
+        "Razor 1",
+        wx_exit,
+        "21L",
+        state={"last_tx_template": "clear_land"},
+    ).lower()
+    if "hold short" not in taxi_in_missed_exit or "two one right" not in taxi_in_missed_exit:
+        print(
+            f"  FAIL taxi-in after 21L without Tower exit must hold short 21R: "
+            f"{taxi_in_missed_exit}"
+        )
+        bad += 1
+    else:
+        print(f"ground taxi-in 21L (no exit) — {taxi_in_missed_exit}")
+
+    taxi_in_after_exit = atc_phrase.build_template_text(
+        nellis,
+        "taxi_in",
+        "Razor 1",
+        wx_exit,
+        "21L",
+        state={"last_tx_template": "exit_runway"},
+    ).lower()
+    if "hold short" in taxi_in_after_exit or "cross" in taxi_in_after_exit:
+        print(
+            f"  FAIL taxi-in after Tower already crossed 21R must not repeat: "
+            f"{taxi_in_after_exit}"
+        )
+        bad += 1
+    else:
+        print(f"ground taxi-in 21L (after exit) — {taxi_in_after_exit}")
+
+    parked_21l = atc_phrase.resolve_taxi_route(nellis, "21L")
+    if str(parked_21l.get("departure_cross") or "") != "21R":
+        print(f"  FAIL 21L from NW EOR must list departure_cross 21R: {parked_21l}")
+        bad += 1
+    if str(parked_21l.get("exit_cross") or "") != "21R":
+        print(f"  FAIL 21L west parking exit must cross 21R: {parked_21l}")
+        bad += 1
+
     park_g = atc_phrase.resolve_parking(nellis, squadron_name="64th AGRS")
     if park_g != "G Revetments":
         print(f"  FAIL 64th AGRS should park G Revetments, got {park_g!r}")
@@ -5867,6 +5972,65 @@ def agency_sandbox() -> int:
             + " dep="
             + wait_dep
         )
+    # Client Watch often has last_tx_channel (synced) but not last_agency.
+    ready_txch, wait_txch = atc_phrase.control_handoff_auto_ready(
+        airport=nellis,
+        state={
+            "approach_plan": {"vfr_recovery": "ARCOE", "vfr_recovery_say": "Arcoe"},
+            "ownship_ll": [36.85, -114.85],
+            "last_tx_at": 1.0,
+            "last_tx_channel": "control_east",
+            "last_agency": "blackjack",
+        },
+        gap_s=0,
+    )
+    if not ready_txch:
+        print(f"  FAIL Control handoff should trust last_tx_channel: {wait_txch}")
+        bad += 1
+    # Past ARCOE, already inbound to the field — distance to the fix grows again.
+    ready_field, wait_field = atc_phrase.control_handoff_auto_ready(
+        airport=nellis,
+        state={
+            "approach_plan": {"vfr_recovery": "ARCOE", "vfr_recovery_say": "Arcoe"},
+            "ownship_ll": [36.30, -115.03],
+            "last_tx_at": 1.0,
+            "control_checked_in": True,
+            "last_agency": "control_east",
+        },
+        gap_s=0,
+    )
+    if not ready_field:
+        print(f"  FAIL Control handoff should fire near the field past the IAF: {wait_field}")
+        bad += 1
+    st_bs = {}
+    agencies.note_tx(st_bs, "blackjack", "contact_bandsaw")
+    if agencies.pending_contact(st_bs) != "bandsaw":
+        print(f"  FAIL contact Bandsaw should set pending_contact: {st_bs}")
+        bad += 1
+    agencies.note_tx(st_bs, "bandsaw", "bandsaw_check_in")
+    if agencies.pending_contact(st_bs):
+        print(f"  FAIL Bandsaw check-in should clear pending_contact: {st_bs}")
+        bad += 1
+    miles = atc_phrase.speak_field_miles(22.4)
+    if miles != "twenty two miles":
+        print(f"  FAIL Approach DME speech: {miles}")
+        bad += 1
+    wx_dme = atc_phrase.Weather(210, 8, 29.92, "KLSV 010000Z 21008KT 10SM FEW100 20/05 A2992")
+    plan_dme = atc_phrase.assign_approach_plan(nellis, wx_dme, state={}, force=True)
+    phrase_dme = atc_phrase.build_approach_recovery(
+        nellis,
+        "Fleece 1",
+        wx_dme,
+        str(plan_dme.get("runway") or "21R"),
+        plan=plan_dme,
+        distance_nm=22.4,
+    )
+    if "twenty two miles" not in phrase_dme.lower():
+        print(f"  FAIL Approach check-in should include DME: {phrase_dme}")
+        bad += 1
+    elif "radar contact" in phrase_dme.lower():
+        print(f"  FAIL Approach check-in still must not say radar contact: {phrase_dme}")
+        bad += 1
     chk_w = atc_phrase.build_control_check_in("Fleece 1", channel="control_west")
     if "nellis control" not in chk_w.lower():
         print(f"  FAIL Control West check-in should speak Nellis Control: {chk_w}")
@@ -6052,6 +6216,61 @@ def agency_sandbox() -> int:
         bad += 1
     if agencies.approaching_joshua(nellis, 36.23, -115.03):
         print("  FAIL Nellis field must not count as approaching R-2508")
+        bad += 1
+    if agencies.owning_agency_for_ll(nellis, 36.23, -115.03) == "joshua":
+        print("  FAIL Nellis field must not be owned by Joshua")
+        bad += 1
+    if agencies.owning_agency_for_ll(nellis, edwards_ll[0], edwards_ll[1]) != "joshua":
+        print("  FAIL Edwards should be owned by Joshua")
+        bad += 1
+    if agencies.control_for_ll(nellis, 37.5, -116.5) != "control_west":
+        print("  FAIL R-4807A should be NATCF West")
+        bad += 1
+    if agencies.owning_agency_for_ll(nellis, 37.5, -116.5) not in (
+        "blackjack",
+        "control_west",
+    ):
+        print(
+            f"  FAIL R-4807A owner should be Blackjack or NATCF West: "
+            f"{agencies.owning_agency_for_ll(nellis, 37.5, -116.5)}"
+        )
+        bad += 1
+    if agencies.owning_agency_for_ll(nellis, 37.0, -114.8) not in (
+        "control_east",
+        "blackjack",
+    ):
+        print(
+            f"  FAIL Desert MOA should be NATCF East or Blackjack: "
+            f"{agencies.owning_agency_for_ll(nellis, 37.0, -114.8)}"
+        )
+        bad += 1
+    josh_step = {"channel": "joshua", "template": "joshua_check_in"}
+    if not atc_phrase.should_skip_joshua_step(
+        josh_step,
+        airport=nellis,
+        state={"ownship_ll": [36.23, -115.03], "ownship_ll_t": __import__("time").time()},
+    ):
+        print("  FAIL Joshua step should skip over Nellis / NTTR")
+        bad += 1
+    if atc_phrase.should_skip_joshua_step(
+        josh_step,
+        airport=nellis,
+        state={
+            "ownship_ll": [edwards_ll[0], edwards_ll[1]],
+            "ownship_ll_t": __import__("time").time(),
+        },
+    ):
+        print("  FAIL Joshua step must stay live over Edwards")
+        bad += 1
+    if atc_phrase.should_skip_joshua_step(
+        josh_step,
+        airport=nellis,
+        state={"pending_contact": "joshua"},
+    ):
+        print("  FAIL Joshua step must stay live after contact Joshua")
+        bad += 1
+    if agencies.fly_label("control_west") != "Nellis Control West":
+        print(f"  FAIL Fly label West: {agencies.fly_label('control_west')}")
         bad += 1
     josh_now = agencies.handoff_from_plan(
         "center", r2508, airport=nellis, lat=edwards_ll[0], lon=edwards_ll[1]

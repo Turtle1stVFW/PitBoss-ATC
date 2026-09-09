@@ -332,6 +332,12 @@ class FlowEngine:
             or atc_phrase.should_skip_takeoff_step(step, self.mission, self.state)
             or atc_phrase.should_skip_approach_step(step, self.mission, self.state)
             or atc_phrase.should_skip_control_step(step, self.state)
+            or atc_phrase.should_skip_joshua_step(
+                step,
+                airport=self.airport(),
+                state=self.state,
+                config=self.config,
+            )
             or atc_phrase.should_skip_cruise_climb_step(step, self.mission, self.state)
         )
 

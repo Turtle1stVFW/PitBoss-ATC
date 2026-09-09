@@ -2556,10 +2556,19 @@ def _ownship_ll_from_state(state: dict[str, Any] | None) -> tuple[float, float] 
     raw = state.get("ownship_ll")
     try:
         if isinstance(raw, (list, tuple)) and len(raw) >= 2:
-            return (float(raw[0]), float(raw[1]))
+            ll = (float(raw[0]), float(raw[1]))
+        else:
+            return None
     except (TypeError, ValueError):
         return None
-    return None
+    stamp = state.get("ownship_ll_t")
+    if stamp is not None:
+        try:
+            if (time.time() - float(stamp)) > OWNSHIP_FIX_MAX_AGE_S:
+                return None
+        except (TypeError, ValueError):
+            pass
+    return ll
 
 
 def approach_clearance_auto_ready(
@@ -2642,6 +2651,45 @@ CONTROL_HANDOFF_BEFORE_FIX_NM = 18.0
 CONTROL_HANDOFF_GAP_S = 8.0
 
 
+def _with_nellis_control(state: dict[str, Any] | None) -> bool:
+    """True once this sortie has actually checked in with NATCF."""
+    st = state if isinstance(state, dict) else {}
+    last_ag = str(st.get("last_agency") or "").strip().lower()
+    last_tx = str(st.get("last_tx_channel") or "").strip().lower()
+    # Departure radar near TORYE must not steal the recovery handoff, even if
+    # a leftover control_checked_in flag is sitting in state.
+    if last_ag in ("departure", "ground", "tower", "delivery"):
+        return False
+    if last_ag in ("control_east", "control_west"):
+        return True
+    if last_tx in ("control_east", "control_west"):
+        return True
+    return bool(st.get("control_checked_in"))
+
+
+def _airport_field_latlon(airport: dict[str, Any] | None) -> tuple[float, float] | None:
+    """Field reference for recovery distance gates (avoids a circular import)."""
+    if not airport:
+        return None
+    try:
+        import runway_position as rp
+
+        return rp.airport_field_latlon(airport)
+    except Exception:
+        return None
+
+
+def field_distance_nm(
+    airport: dict[str, Any] | None,
+    pos: tuple[float, float] | None,
+) -> float | None:
+    """NM from ownship to the field reference, or None when either fix is missing."""
+    field = _airport_field_latlon(airport)
+    if pos is None or field is None:
+        return None
+    return _haversine_nm(pos[0], pos[1], field[0], field[1])
+
+
 def control_handoff_auto_ready(
     *,
     airport: dict[str, Any] | None,
@@ -2656,14 +2704,15 @@ def control_handoff_auto_ready(
 
     After NATCF check-in (this sortie is actually with Control): wait a short
     radio gap, then fire while still inbound to the exit fix — do not wait
-    until they arrive. Departure radar near TORYE must not steal this call.
+    until they arrive. Already past the fix toward the field also counts
+    (distance to ARCOE grows again on the way to Nellis). Departure radar
+    near TORYE must not steal this call.
     """
     st = state if isinstance(state, dict) else {}
     hold = auto_tx_hold_reason(st)
     if hold:
         return False, hold
-    last_ag = str(st.get("last_agency") or "").strip().lower()
-    if last_ag not in ("control_east", "control_west"):
+    if not _with_nellis_control(st):
         return False, "waiting for Nellis Control"
     gap = float(CONTROL_HANDOFF_GAP_S if gap_s is None else gap_s)
     if gap > 0:
@@ -2693,9 +2742,19 @@ def control_handoff_auto_ready(
         return True, "after Control check-in"
     dist = _haversine_nm(pos[0], pos[1], fix[0], fix[1])
     need = CONTROL_HANDOFF_BEFORE_FIX_NM
-    if dist > need:
-        return False, f"{dist:.1f} NM to {name} — hand to Approach at ≤ {need:g} NM"
-    return True, f"{dist:.1f} NM to {name} — Approach handoff"
+    if dist <= need:
+        return True, f"{dist:.1f} NM to {name} — Approach handoff"
+    field = _airport_field_latlon(airport)
+    if field is not None:
+        field_nm = _haversine_nm(pos[0], pos[1], field[0], field[1])
+        if field_nm <= need:
+            return True, f"{field_nm:.1f} NM to field — Approach handoff"
+        return (
+            False,
+            f"{dist:.1f} NM to {name}, {field_nm:.1f} NM to field — "
+            f"hand to Approach at ≤ {need:g} NM",
+        )
+    return False, f"{dist:.1f} NM to {name} — hand to Approach at ≤ {need:g} NM"
 
 
 def _enroute_tokens(route: str | None, *, dep_icao: str | None = None) -> list[str]:
@@ -2955,6 +3014,14 @@ def resolve_taxi_route(
         exit_via = ", ".join(bits)
     if not intersection:
         intersection = "Delta" if rwy.startswith("21") else "Bravo"
+    departure_cross = resolve_departure_cross(
+        airport,
+        rwy,
+        eor=eor,
+        parking=parking,
+        opus=opus,
+        config=config,
+    )
     return {
         "eor": eor,
         "outbound_via": outbound,
@@ -2962,6 +3029,7 @@ def resolve_taxi_route(
         "exit": exit_via,
         "exit_turn": str(exit_plan.get("turn") or ""),
         "exit_cross": str(exit_plan.get("cross") or ""),
+        "departure_cross": departure_cross,
         "parking": parking,
         "intersection": intersection,
     }
@@ -3052,6 +3120,118 @@ def resolve_landing_exit(
         "parking": park,
         "parking_side": park_side,
     }
+
+
+_WEST_EOR_HINTS = (
+    "nw eor",
+    "northwest eor",
+    "alpha south",
+    "west eor",
+)
+_EAST_EOR_HINTS = (
+    "east eor",
+    "g eor",
+    "golf eor",
+)
+
+
+def eor_field_side(
+    airport: dict[str, Any] | None,
+    eor: str,
+    *,
+    parking: str = "",
+) -> str:
+    """
+    Which side of the parallels an EOR / hold-short pad sits on.
+
+    Nellis NW EOR and Alpha South are west of 21R / 03L. Named east pads
+    (G) sit east of 21L. airport.eor_sides can override a place name.
+    """
+    name = str(eor or "").strip()
+    sides = (airport or {}).get("eor_sides")
+    if isinstance(sides, dict) and name:
+        raw = sides.get(name)
+        if raw is None:
+            for key, val in sides.items():
+                if str(key).strip().casefold() == name.casefold():
+                    raw = val
+                    break
+        side = str(raw or "").strip().casefold()
+        if side in ("east", "west"):
+            return side
+    low = re.sub(r"[\s_\-]+", " ", name.casefold()).strip()
+    if any(h in low for h in _EAST_EOR_HINTS):
+        return "east"
+    if any(h in low for h in _WEST_EOR_HINTS):
+        return "west"
+    if parking:
+        return parking_field_side(airport, parking)
+    return "west"
+
+
+def resolve_departure_cross(
+    airport: dict[str, Any] | None,
+    runway: str,
+    *,
+    eor: str = "",
+    parking: str = "",
+    opus: OpusFlightContext | None = None,
+    config: dict[str, Any] | None = None,
+) -> str:
+    """
+    Parallel the flight must cross to reach the assigned takeoff runway.
+
+    NW EOR is west of 21R. Takeoff 21L from there needs a Tower crossing
+    of 21R in the same clearance — Ground only holds short of that strip.
+    Already on the assigned runway → no cross.
+    """
+    rwy = normalize_runway(runway) or str(runway or "").strip().upper()
+    if not rwy:
+        return ""
+    park = parking or resolve_parking(airport, opus=opus, config=config)
+    start_side = eor_field_side(airport, eor, parking=park)
+    if start_side == runway_pair_side(rwy):
+        return ""
+    return _flip_runway_side(rwy) or ""
+
+
+def landing_runway_now(
+    airport: dict[str, Any] | None,
+    assigned: str,
+    *,
+    state: dict[str, Any] | None = None,
+    config: dict[str, Any] | None = None,
+) -> str:
+    """
+    Strip the jet is actually on after landing, else the assigned runway.
+
+    Overhead / visual plans default to 21R. A 21L rollout (ILS or a left
+    overhead) still needs Tower's 21R crossing — use the occupied strip.
+    """
+    landed = normalize_runway((state or {}).get("landed_runway")) if isinstance(state, dict) else None
+    if landed:
+        return landed
+    assigned_n = normalize_runway(assigned) or str(assigned or "").strip().upper()
+    ll = None
+    try:
+        ll = ownship_latlon(config, state=state)
+    except Exception:
+        ll = None
+    if ll is None:
+        try:
+            ll = _ownship_ll_from_state(state)
+        except Exception:
+            ll = None
+    if not ll:
+        return assigned_n
+    try:
+        import runway_position as rp
+
+        x_m, z_m = caoc_ll_to_xz(float(ll[0]), float(ll[1]))
+        occupied = rp.occupied_runway_of_pair(airport, assigned_n, x_m, z_m)
+    except Exception:
+        return assigned_n
+    return occupied or assigned_n
 
 
 def resolve_parking(
@@ -4183,6 +4363,47 @@ def should_skip_control_step(
     return False
 
 
+def should_skip_joshua_step(
+    step: dict[str, Any] | None,
+    *,
+    airport: dict[str, Any] | None = None,
+    state: dict[str, Any] | None = None,
+    config: dict[str, Any] | None = None,
+    opus: Any = None,
+    tuned_channel: str | None = None,
+) -> bool:
+    """
+    Skip optional Joshua check-in/out unless this sortie is actually going there.
+
+    The default timeline parks Joshua after Bandsaw. Local NTTR / NATCF hops
+    must not land the cursor (or Fly hints) on Joshua just because the step
+    exists.
+    """
+    if not step:
+        return False
+    ch = str(step.get("channel") or "").strip().lower()
+    tmpl = str(step.get("template") or "").strip().lower()
+    if ch != "joshua" and not tmpl.startswith("joshua_"):
+        return False
+    try:
+        import agencies as agencies_mod
+
+        ll = ownship_latlon(config, opus=opus, state=state)
+        if ll is None:
+            ll = _ownship_ll_from_state(state)
+        lat = ll[0] if ll else None
+        lon = ll[1] if ll else None
+        return not agencies_mod.joshua_is_live(
+            airport,
+            state,
+            lat=lat,
+            lon=lon,
+            tuned_channel=tuned_channel,
+        )
+    except Exception:
+        return True
+
+
 def effective_takeoff_template(
     template: str,
     mission: dict[str, Any] | None = None,
@@ -4721,6 +4942,20 @@ def _plan_direct_say(
     return str(by_side or "").strip()
 
 
+def speak_field_miles(distance_nm: float | None) -> str:
+    """DME-style range for Approach check-in: 'twenty two miles'."""
+    if distance_nm is None:
+        return ""
+    try:
+        n = int(round(float(distance_nm)))
+    except (TypeError, ValueError):
+        return ""
+    if n < 1:
+        return "less than a mile"
+    unit = "mile" if n == 1 else "miles"
+    return f"{speak_natural_number(n)} {unit}"
+
+
 def build_approach_recovery(
     airport: dict[str, Any],
     callsign: str,
@@ -4732,11 +4967,12 @@ def build_approach_recovery(
     speed_kt: int | None = None,
     expect: str | None = None,
     plan: dict[str, Any] | None = None,
+    distance_nm: float | None = None,
 ) -> str:
     """
     Approach check-in (NATCF style), e.g.:
-    Fleece 1, Nellis Approach, Nellis landing south, expect Arcoe recovery
-    for the TAC Overhead runway two one right, …
+    Fleece 1, Nellis Approach, twenty two miles, Nellis landing south,
+    expect Arcoe recovery for the TAC Overhead runway two one right, …
     """
     name = airport["name"]
     cs = speak_callsign(callsign)
@@ -4746,10 +4982,11 @@ def build_approach_recovery(
     rwy = str(p.get("runway") or runway or "")
     rwy_s = speak_runway(rwy) if rwy else ""
 
-    bits = [
-        f"{cs}, {name} Approach",
-        speak_landing_flow(rwy, name),
-    ]
+    bits = [f"{cs}, {name} Approach"]
+    miles = speak_field_miles(distance_nm)
+    if miles:
+        bits.append(miles)
+    bits.append(speak_landing_flow(rwy, name))
 
     instrument = rec_key == "instrument" or bool(p.get("iaf"))
     if instrument:
@@ -8703,6 +8940,14 @@ def build_readback_checklist(
                 speak_place_label(eor),
                 hinge=True,
             )
+        dep_cross = str((taxi or {}).get("departure_cross") or "").strip()
+        if dep_cross:
+            add(
+                "hold_short",
+                "Hold short",
+                dep_cross,
+                f"hold short runway {speak_runway(dep_cross)}",
+            )
         return items
 
     if tmpl == "rolling_accept":
@@ -8734,6 +8979,16 @@ def build_readback_checklist(
                 f"runway {speak_runway(rwy)}",
                 hinge=True,
             )
+        if tmpl in ("clear_takeoff", "lineup", "line_up_and_wait") and rwy:
+            taxi = resolve_taxi_route(airport, rwy, opus=opus)
+            dep_cross = str((taxi or {}).get("departure_cross") or "").strip()
+            if dep_cross:
+                add(
+                    "cross",
+                    "Cross",
+                    dep_cross,
+                    f"cross runway {speak_runway(dep_cross)}",
+                )
         if tmpl == "clear_takeoff":
             add(
                 "clearance",
@@ -10564,8 +10819,12 @@ def build_template_text(
     if template == "taxi":
         eor = speak_place_label(taxi["eor"])
         via = speak_taxi_via(taxi["outbound_via"])
+        hold = ""
+        dep_cross = str(taxi.get("departure_cross") or "").strip()
+        if dep_cross:
+            hold = f", hold short runway {speak_runway(dep_cross)}"
         return (
-            f"{cs}, {name} Ground, runway {rwy}, taxi {eor} via {via}, "
+            f"{cs}, {name} Ground, runway {rwy}, taxi {eor} via {via}{hold}, "
             f"{name} altimeter {alt}."
         )
     if template == "monitor_tower":
@@ -10589,32 +10848,47 @@ def build_template_text(
             f"{speak_freq(float(tower['freq_mhz']))}"
         )
     if template == "exit_runway":
+        land_rwy = landing_runway_now(airport, runway, state=state, config=config)
         plan = resolve_landing_exit(
-            airport, runway, opus=opus, config=config, parking=taxi.get("parking")
+            airport, land_rwy, opus=opus, config=config, parking=taxi.get("parking")
         )
         turn = str(plan.get("turn") or "right")
         bits = [f"exit {turn}"]
         cross = str(plan.get("cross") or "").strip()
         if cross:
-            bits.append(f"cross {speak_runway(cross)}")
+            bits.append(f"cross runway {speak_runway(cross)}")
         ground = speak_ground_contact_target(airport)
         bits.append(f"contact {ground}")
         return with_freq_handoff_closer(
             f"{cs}, {name} Tower, {', '.join(bits)}"
         )
     if template == "taxi_in":
-        parking = speak_place_label(taxi["parking"])
-        via = speak_taxi_via(taxi["inbound_via"])
-        return f"{cs}, {name} Ground, taxi to {parking} via {via}."
+        land_rwy = landing_runway_now(airport, runway, state=state, config=config)
+        inbound = resolve_taxi_route(
+            airport, land_rwy, opus=opus, config=config
+        )
+        parking = speak_place_label(inbound["parking"])
+        via = speak_taxi_via(inbound["inbound_via"])
+        last = ""
+        if isinstance(state, dict):
+            last = str(state.get("last_tx_template") or "").strip().lower()
+        cross = str(inbound.get("exit_cross") or "").strip()
+        hold = ""
+        if cross and last != "exit_runway":
+            hold = f", hold short runway {speak_runway(cross)}"
+        return f"{cs}, {name} Ground, taxi to {parking} via {via}{hold}."
     if template == "lineup":
         reply = ""
         if isinstance(state, dict):
             reply = str(state.get("rolling_offer_reply") or "").strip().casefold()
+        cross = str(taxi.get("departure_cross") or "").strip()
+        cross_bit = f"cross runway {speak_runway(cross)}, " if cross else ""
         if reply == "deny":
             return (
-                f"No worries, {cs}, {name} Tower, runway {rwy}, line up-and wait."
+                f"No worries, {cs}, {name} Tower, {cross_bit}runway {rwy}, "
+                f"line up-and wait."
             )
-        return f"{cs}, {name} Tower, runway {rwy}, line up-and wait."
+        return f"{cs}, {name} Tower, {cross_bit}runway {rwy}, line up-and wait."
     if template == "remain_position":
         # Traffic: hold at EOR / short of runway until further clearance
         return f"{cs}, {name} Tower, remain in position."
@@ -10624,23 +10898,26 @@ def build_template_text(
     if template == "clear_takeoff":
         # Switch to departure in the takeoff clearance (change freq before roll).
         # Unrestricted (when approved) leads: climb unrestricted up to FL…, winds…
+        # From the west EOR to 21L: cross 21R in the same call.
         unres = unrestricted_climb_prefix(state, opus)
         reply = ""
         if isinstance(state, dict):
             reply = str(state.get("rolling_offer_reply") or "").strip().casefold()
         dep = takeoff_departure_switch()
+        dep_cross = str(taxi.get("departure_cross") or "").strip()
+        cross_bit = f"cross runway {speak_runway(dep_cross)}, " if dep_cross else ""
         if reply == "accept":
             return with_freq_handoff_closer(
-                f"{cs}, {name} Tower, thanks, {wind}, runway {rwy}, "
+                f"{cs}, {name} Tower, thanks, {cross_bit}{wind}, runway {rwy}, "
                 f"cleared for takeoff, {dep}"
             )
         if flex_west:
             return with_freq_handoff_closer(
-                f"{cs}, {name} Tower, {unres}VFR Flex west, {wind}, runway {rwy}, "
-                f"cleared for takeoff, {dep}"
+                f"{cs}, {name} Tower, {unres}{cross_bit}VFR Flex west, {wind}, "
+                f"runway {rwy}, cleared for takeoff, {dep}"
             )
         return with_freq_handoff_closer(
-            f"{cs}, {name} Tower, {unres}{wind}, runway {rwy}, "
+            f"{cs}, {name} Tower, {unres}{cross_bit}{wind}, runway {rwy}, "
             f"cleared for takeoff, {dep}"
         )
     if template == "clear_takeoff_rolling":
@@ -10651,20 +10928,24 @@ def build_template_text(
         if isinstance(state, dict):
             reply = str(state.get("rolling_offer_reply") or "").strip().casefold()
         dep = takeoff_departure_switch()
+        dep_cross = str(taxi.get("departure_cross") or "").strip()
+        cross_bit = f"cross runway {speak_runway(dep_cross)}, " if dep_cross else ""
         if reply == "accept":
             return with_freq_handoff_closer(
-                f"{cs}, {name} Tower, thanks, {wind}, runway {rwy}, "
+                f"{cs}, {name} Tower, thanks, {cross_bit}{wind}, runway {rwy}, "
                 f"cleared for takeoff, {dep}"
             )
         return with_freq_handoff_closer(
-            f"{cs}, {name} Tower, {unres}{wind}, runway {rwy}, "
+            f"{cs}, {name} Tower, {unres}{cross_bit}{wind}, runway {rwy}, "
             f"cleared for takeoff, {dep}"
         )
     if template == "clear_takeoff_intersection":
         unres = unrestricted_climb_prefix(state, opus)
         ix = taxi.get("intersection") or ("Delta" if str(runway).upper().startswith("21") else "Bravo")
+        dep_cross = str(taxi.get("departure_cross") or "").strip()
+        cross_bit = f"cross runway {speak_runway(dep_cross)}, " if dep_cross else ""
         return with_freq_handoff_closer(
-            f"{cs}, {name} Tower, {unres}{wind}, runway {rwy} at {ix}, "
+            f"{cs}, {name} Tower, {unres}{cross_bit}{wind}, runway {rwy} at {ix}, "
             f"cleared for takeoff, {takeoff_departure_switch()}"
         )
     if template == "right_break":
@@ -10771,6 +11052,11 @@ def build_template_text(
                 except (TypeError, ValueError):
                     pass
         rwy_use = str(plan.get("runway") or runway)
+        pos = _ownship_ll_from_state(state)
+        if pos is None:
+            pos = ownship_latlon(
+                config, callsign=callsign, opus=opus, state=state
+            )
         return build_approach_recovery(
             airport,
             callsign,
@@ -10780,6 +11066,7 @@ def build_template_text(
             descend_ft=descend_ft,
             speed_kt=speed_kt,
             plan=plan,
+            distance_nm=field_distance_nm(airport, pos),
         )
     if template == "cleared_approach":
         # Always go through the assigner so a filed route can refresh the plan.

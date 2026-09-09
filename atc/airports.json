@@ -3,7 +3,7 @@
     "name": "Nellis",
     "icao": "KLSV",
     "coalition": 2,
-    "srs_host": "127.0.0.1",
+    "srs_host": "showtime.455aew.com",
     "srs_port": 5002,
     "runways": [
       "21R",

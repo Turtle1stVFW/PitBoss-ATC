@@ -591,11 +591,15 @@ def execute_intent(
 
     if intent == "request_bandsaw":
         text = atc_phrase.build_contact_bandsaw(airport, callsign)
-        return _transmit(engine, airport, text, "blackjack")
+        return _transmit(
+            engine, airport, text, "blackjack", template="contact_bandsaw"
+        )
 
     if intent == "request_joshua":
         text = atc_phrase.build_contact_joshua(airport, callsign)
-        return _transmit(engine, airport, text, "blackjack")
+        return _transmit(
+            engine, airport, text, "blackjack", template="contact_joshua"
+        )
 
     if intent == "request_control":
         ctrl = atc_phrase.control_channel_for_ownship(
@@ -608,7 +612,12 @@ def execute_intent(
         text = atc_phrase.build_contact_control(
             airport, callsign, handoff_channel=ctrl
         )
-        return _transmit(engine, airport, text, "blackjack")
+        st = getattr(engine, "state", None)
+        if isinstance(st, dict) and ctrl:
+            st["control_channel"] = ctrl
+        return _transmit(
+            engine, airport, text, "blackjack", template="contact_control"
+        )
 
     if intent in (
         "request_tanker",
@@ -1508,6 +1517,7 @@ def _transmit(
     channel: str,
     *,
     freq_mhz: float | None = None,
+    template: str = "",
 ) -> dict[str, Any]:
     srs_radio.apply_config(engine.config)
     remote = getattr(engine, "remote_radios", None)
@@ -1564,8 +1574,11 @@ def _transmit(
         st["last_tx_text"] = text
         st["last_tx_channel"] = str(channel or "")
         st["last_tx_at"] = time.time()
-        # Boom / ad-hoc TX is not a clearance hinge — don't invent a template.
-        if not st.get("awaiting_readback"):
+        tmpl = str(template or "").strip()
+        if tmpl:
+            st["last_tx_template"] = tmpl
+        elif not st.get("awaiting_readback"):
+            # Boom / ad-hoc TX is not a clearance hinge — don't invent a template.
             st["last_tx_template"] = ""
         try:
             import agencies as agencies_mod
@@ -2214,6 +2227,12 @@ def _approach_check_in(
         str(plan.get("runway") or ""),
         recovery=str(plan.get("pattern") or ""),
         plan=plan,
+        distance_nm=atc_phrase.field_distance_nm(
+            airport,
+            atc_phrase.ownship_latlon(
+                engine.config, callsign=callsign, opus=opus, state=engine.state
+            ),
+        ),
     )
     return _transmit(engine, airport, text, "approach")
 

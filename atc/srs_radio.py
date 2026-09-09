@@ -843,6 +843,7 @@ def channel_for_tuned_freq(
     Prefers the keyed / selected radio so voice replies TX on the PTT net.
     If that radio is intra-flight VHF (no agency), falls through to another
     tuned agency so Blackjack / Bandsaw tips still follow the UHF stack.
+    Joshua / Center in the stack do not steal Fly — those are geographic.
     """
     import atc_phrase
 
@@ -851,6 +852,7 @@ def channel_for_tuned_freq(
     st = state if state is not None else current_radio_state(cfg)
     if not st.fresh or not st.freqs_mhz:
         return None
+    skip_stack = frozenset({"joshua", "center", "other"})
 
     def _channel_for_mhz(target: float) -> str | None:
         for ch in atc_phrase.CHANNELS:
@@ -883,7 +885,7 @@ def channel_for_tuned_freq(
             return keyed
     for freq in st.freqs_mhz:
         matched = _channel_for_mhz(float(freq))
-        if matched:
+        if matched and matched not in skip_stack:
             return matched
     return None
 

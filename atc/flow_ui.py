@@ -1550,13 +1550,24 @@ class MissionPlanner(tk.Tk):
                 return
             for sess in server.unique_flow_sessions():
                 try:
-                    self._position_work(
-                        engine=sess.engine,
-                        tracker=self._position_tracker_for(sess.session_id),
-                        bind_live=False,
-                        session=sess,
-                        busy_attr="",
-                    )
+                    bind = getattr(atc_server, "_session_engine_binding", None)
+                    if bind is not None:
+                        with bind(sess):
+                            self._position_work(
+                                engine=sess.engine,
+                                tracker=self._position_tracker_for(sess.session_id),
+                                bind_live=False,
+                                session=sess,
+                                busy_attr="",
+                            )
+                    else:
+                        self._position_work(
+                            engine=sess.engine,
+                            tracker=self._position_tracker_for(sess.session_id),
+                            bind_live=False,
+                            session=sess,
+                            busy_attr="",
+                        )
                 except Exception:
                     continue
         finally:
@@ -1773,6 +1784,10 @@ class MissionPlanner(tk.Tk):
             tracker.pending_latch = latch
             return step_id, waiting
 
+        # Tower check-in is voice / Play only — never auto after the 12 NM handoff.
+        if tmpl == "right_break":
+            return "", "waiting for tower check-in"
+
         if trigger is None:
             return "", ""
         if not trigger.enabled(cfg):
@@ -1815,7 +1830,16 @@ class MissionPlanner(tk.Tk):
             config=cfg,
             tracker=tracker,
             leave_key=key,
+            airport=airport,
         )
+        if (
+            held
+            and tmpl == "exit_runway"
+            and isinstance(state, dict)
+        ):
+            landed = str(status.occupied_runway or status.runway or "").strip()
+            if landed:
+                state["landed_runway"] = landed
 
         # After a go-around: land only on base / short final, and only after
         # they have left the final they waved off from.
@@ -2356,6 +2380,69 @@ class MissionPlanner(tk.Tk):
             return
         self._ui_jobs.put(fn)
 
+    def _ownship_ll(self) -> tuple[float, float] | None:
+        try:
+            return atc_phrase.ownship_latlon(
+                self.config_data, state=getattr(self.engine, "state", None)
+            )
+        except Exception:
+            return None
+
+    def _map_owning_agency(self) -> str:
+        """Joshua / NATCF East-West / Blackjack from the jet's lat/lon."""
+        ll = self._ownship_ll()
+        if not ll:
+            return ""
+        try:
+            import agencies as agencies_mod
+
+            return agencies_mod.owning_agency_for_ll(
+                self.engine.airport(), ll[0], ll[1]
+            )
+        except Exception:
+            return ""
+
+    def _prefer_map_agency(self, channel: str, *, tuned: str = "") -> str:
+        """
+        Fly hero / tips follow the map for Joshua vs NATCF East/West.
+
+        A leftover Joshua cursor or stacked preset must not win over Desert MOA
+        / Control airspace. Selected Joshua UHF still wins.
+        """
+        ch = str(channel or "").strip().lower()
+        tun = str(tuned or "").strip().lower()
+        owning = self._map_owning_agency()
+        if ch in ("control_east", "control_west"):
+            ll = self._ownship_ll()
+            if ll:
+                try:
+                    import agencies as agencies_mod
+
+                    return agencies_mod.control_for_ll(
+                        self.engine.airport(), ll[0], ll[1]
+                    )
+                except Exception:
+                    return owning if owning in ("control_east", "control_west") else ch
+            if owning in ("control_east", "control_west"):
+                return owning
+            return ch
+        if ch == "joshua" and tun != "joshua":
+            try:
+                import agencies as agencies_mod
+
+                ll = self._ownship_ll()
+                if not agencies_mod.joshua_is_live(
+                    self.engine.airport(),
+                    getattr(self.engine, "state", None),
+                    lat=ll[0] if ll else None,
+                    lon=ll[1] if ll else None,
+                    tuned_channel=tun,
+                ):
+                    return owning or ""
+            except Exception:
+                return owning or ""
+        return ch or owning
+
     def _voice_context(self) -> dict[str, Any]:
         """
         Where the flight is right now, so the recognizer knows what to expect.
@@ -2428,6 +2515,10 @@ class MissionPlanner(tk.Tk):
                 cursor_channel=cursor_channel,
                 tuned_channel=tuned,
             )
+        context["channel"] = self._prefer_map_agency(
+            str(context.get("channel") or ""),
+            tuned=str(tuned or ""),
+        )
         context["tuned_channel"] = tuned or ""
         context["cursor_channel"] = cursor_channel
         context["phase"] = mission_phase
@@ -8503,6 +8594,9 @@ class MissionPlanner(tk.Tk):
             tuned_channel=str(context.get("tuned_channel") or "") or None,
             last_tx_channel=str(context.get("last_tx_channel") or ""),
         ) or str(context.get("channel") or "")
+        cue_ch = self._prefer_map_agency(
+            cue_ch, tuned=str(context.get("tuned_channel") or "")
+        )
         on_tanker_cues = cue_ch == "tanker"
         lines = voice_intent.suggestions(
             phase=str(context.get("phase") or ""),
@@ -8533,6 +8627,12 @@ class MissionPlanner(tk.Tk):
             return
 
         agency = voice_intent.agency_spoken(cue_ch, str(airport.get("name") or "")) if cue_ch else ""
+        try:
+            import agencies as agencies_mod
+
+            agency = agencies_mod.fly_label(cue_ch, str(airport.get("name") or "")) or agency
+        except Exception:
+            pass
         if cue_ch == "ops":
             # Address is always "Ops" — Knight/Wool/Toro is who answers, not
             # what the pilot has to say (Whisper often drops "Knight").
@@ -8764,6 +8864,8 @@ class MissionPlanner(tk.Tk):
             except Exception:
                 sandbox = False
             live_ch = ""
+            pending_ch = ""
+            switch_to = False
             if sandbox:
                 try:
                     live_ch = srs_radio.channel_for_tuned_freq(
@@ -8771,17 +8873,57 @@ class MissionPlanner(tk.Tk):
                     ) or ""
                 except Exception:
                     live_ch = ""
-                if not live_ch:
-                    live_ch = str(
+                try:
+                    import agencies as agencies_mod
+
+                    pending_ch = agencies_mod.pending_contact(
+                        getattr(self.engine, "state", None)
+                    )
+                except Exception:
+                    pending_ch = str(
+                        (getattr(self.engine, "state", None) or {}).get(
+                            "pending_contact"
+                        )
+                        or ""
+                    ).strip().lower()
+                live_ch = str(live_ch or "").strip().lower()
+                owning_ch = self._map_owning_agency()
+                if live_ch and pending_ch and live_ch == pending_ch:
+                    try:
+                        (self.engine.state or {}).pop("pending_contact", None)
+                    except Exception:
+                        pass
+                    pending_ch = ""
+                if pending_ch in ("control_east", "control_west"):
+                    ll = self._ownship_ll()
+                    if ll:
+                        try:
+                            import agencies as agencies_mod
+
+                            pending_ch = agencies_mod.control_for_ll(
+                                self.engine.airport(), ll[0], ll[1]
+                            )
+                        except Exception:
+                            if owning_ch in ("control_east", "control_west"):
+                                pending_ch = owning_ch
+                    elif owning_ch in ("control_east", "control_west"):
+                        pending_ch = owning_ch
+                hero_ch = live_ch
+                if pending_ch and live_ch != pending_ch:
+                    hero_ch = pending_ch
+                    switch_to = True
+                elif not hero_ch:
+                    hero_ch = owning_ch or str(
                         (getattr(self.engine, "state", None) or {}).get("last_agency")
                         or step.get("channel")
                         or ""
                     ).strip().lower()
+                hero_ch = self._prefer_map_agency(hero_ch, tuned=live_ch)
                 ap_name = str((self.engine.airport() or {}).get("name") or "")
                 try:
                     import agencies as agencies_mod
 
-                    if live_ch == "ops":
+                    if hero_ch == "ops":
                         try:
                             opus_live, _wx = atc_phrase.resolve_opus_and_metar(
                                 self.config_data,
@@ -8795,23 +8937,43 @@ class MissionPlanner(tk.Tk):
                             config=self.config_data,
                         ) or "Ops"
                     else:
-                        with_name = agencies_mod.spoken_name(live_ch, ap_name) or label
+                        with_name = agencies_mod.fly_label(hero_ch, ap_name) or label
                 except Exception:
                     with_name = label
-                self.fly_step_num.set("YOU ARE WITH")
+                self.fly_step_num.set("SWITCH TO" if switch_to else "YOU ARE WITH")
                 self.fly_step_name.set(with_name)
             else:
                 self.fly_step_num.set(f"STEP {num} / {total}")
                 self.fly_step_name.set(label)
-            ch, freq, mod, tx = self._fly_upcoming_radio(step)
-            display_ch = ch
-            # NEXT TX FREQUENCY is the upcoming step, not the radio you are
-            # tuned to (that is YOU ARE ON / YOU ARE WITH). Overwriting with
-            # live Ground after a Tower handoff left the hero on GND.
-            self.fly_freq.set(freq)
-            self.fly_mod.set(mod)
-            self.fly_channel.set(display_ch)
-            self.fly_tx_name.set(f"SRS name: {tx}" if tx else "")
+            if switch_to and pending_ch:
+                try:
+                    ap = self.engine.airport()
+                    freq, mod, tx_name = atc_phrase.channel_radio(ap, pending_ch)
+                    ch = pending_ch.upper()
+                    freq_disp = f"{float(freq):.3f}"
+                    tx = str(tx_name or "")
+                    display_ch = ch
+                    self.fly_freq.set(freq_disp)
+                    self.fly_mod.set(str(mod or "AM").upper())
+                    self.fly_channel.set(display_ch)
+                    self.fly_tx_name.set(f"SRS name: {tx}" if tx else "")
+                except Exception:
+                    ch, freq, mod, tx = self._fly_upcoming_radio(step)
+                    display_ch = ch
+                    self.fly_freq.set(freq)
+                    self.fly_mod.set(mod)
+                    self.fly_channel.set(display_ch)
+                    self.fly_tx_name.set(f"SRS name: {tx}" if tx else "")
+            else:
+                ch, freq, mod, tx = self._fly_upcoming_radio(step)
+                display_ch = ch
+                # NEXT TX FREQUENCY is the upcoming step, not the radio you are
+                # tuned to (that is YOU ARE ON / YOU ARE WITH). Overwriting with
+                # live Ground after a Tower handoff left the hero on GND.
+                self.fly_freq.set(freq)
+                self.fly_mod.set(mod)
+                self.fly_channel.set(display_ch)
+                self.fly_tx_name.set(f"SRS name: {tx}" if tx else "")
             mode = step.get("mode") or "tts"
             tmpl = step.get("template") or step.get("file") or ""
             eff = atc_phrase.effective_takeoff_template(

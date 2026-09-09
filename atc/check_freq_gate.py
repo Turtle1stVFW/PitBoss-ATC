@@ -142,6 +142,33 @@ def main() -> int:
         else:
             print("selected Bandsaw wins over other tuned agencies — ok")
 
+        JOSHUA_MHZ = 348.7
+        keyed_vhf_josh = srs_radio.RadioState(
+            source="srs",
+            freqs_mhz=[JOSHUA_MHZ, VHF_MHZ],
+            selected_mhz=VHF_MHZ,
+            fresh=True,
+            age_s=0.1,
+        )
+        tuned_josh = srs_radio.channel_for_tuned_freq(
+            AIRPORT, cfg, state=keyed_vhf_josh
+        )
+        if tuned_josh == "joshua":
+            print("  FAIL stacked Joshua must not steal Fly when VHF is keyed")
+            bad += 1
+        else:
+            print("stacked Joshua ignored when VHF is keyed — ok")
+        keyed_josh = srs_radio.RadioState(
+            source="srs",
+            freqs_mhz=[JOSHUA_MHZ, VHF_MHZ],
+            selected_mhz=JOSHUA_MHZ,
+            fresh=True,
+            age_s=0.1,
+        )
+        if srs_radio.channel_for_tuned_freq(AIRPORT, cfg, state=keyed_josh) != "joshua":
+            print("  FAIL selected Joshua UHF must still resolve")
+            bad += 1
+
         line = srs_radio.format_you_are_on(bank, AIRPORT)
         if "BLACKJACK" not in line or "TX" not in line or "132.650" not in line:
             print(f"  FAIL YOU ARE ON should list UHF + VHF TX, got {line!r}")

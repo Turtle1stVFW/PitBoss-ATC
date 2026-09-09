@@ -145,6 +145,18 @@ RECOVERY_TEMPLATES: frozenset[str] = frozenset(
     }
 )
 
+# After ATC says "contact X", Fly shows SWITCH TO until that UHF is tuned.
+HANDOFF_PENDING_BY_TEMPLATE: dict[str, str] = {
+    "contact_bandsaw": "bandsaw",
+    "contact_joshua": "joshua",
+    "control_handoff": "approach",
+    "cleared_approach": "tower",
+    "contact_tower": "tower",
+    "departure_handoff": "blackjack",
+    "bandsaw_check_out": "blackjack",
+    "joshua_check_out": "blackjack",
+}
+
 
 @dataclass(frozen=True)
 class Agency:
@@ -665,6 +677,11 @@ def last_agency(state: dict[str, Any] | None) -> str:
     return str((state or {}).get("last_agency") or "").strip().lower()
 
 
+def pending_contact(state: dict[str, Any] | None) -> str:
+    """Agency ATC just sent them to, until they tune or check in there."""
+    return str((state or {}).get("pending_contact") or "").strip().lower()
+
+
 def note_tx(
     state: dict[str, Any] | None,
     channel: str,
@@ -677,6 +694,17 @@ def note_tx(
     tmpl = (template or "").strip().lower()
     if ch:
         state["last_agency"] = ch
+        if pending_contact(state) == ch:
+            state.pop("pending_contact", None)
+    dest = ""
+    if tmpl == "bj_range_exit":
+        dest = str(state.get("control_channel") or "control_east").strip().lower()
+    elif tmpl == "contact_control":
+        dest = str(state.get("control_channel") or "control_east").strip().lower()
+    else:
+        dest = str(HANDOFF_PENDING_BY_TEMPLATE.get(tmpl) or "").strip().lower()
+    if dest:
+        state["pending_contact"] = dest
     phase = contact_phase(state)
     if tmpl in TAKEOFF_TEMPLATES or (
         ch == "departure" and tmpl in ("radar_contact", "climb_cruise", "departure_handoff")
@@ -701,6 +729,7 @@ def reset_contact(state: dict[str, Any] | None) -> None:
     state["last_agency"] = "delivery"
     state.pop("control_checked_in", None)
     state.pop("control_channel", None)
+    state.pop("pending_contact", None)
 
 
 def field_agency(engine: Any) -> str:
@@ -916,6 +945,65 @@ def control_for_ll(
     if ll_in_agency(airport, "control_east", lat_f, lon_f):
         return "control_east"
     return default
+
+
+def owning_agency_for_ll(
+    airport: dict[str, Any] | None,
+    lat: float | None,
+    lon: float | None,
+) -> str:
+    """
+    Who owns this lat/lon right now: Joshua, NATCF East/West, or Blackjack.
+
+    Empty when the fix is missing or outside those polygons. Does not guess
+    Joshua from a filed R-2508 hop — that is a later handoff, not who you
+    are with over the NTTR.
+    """
+    try:
+        lat_f = float(lat)  # type: ignore[arg-type]
+        lon_f = float(lon)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return ""
+    if ll_in_agency(airport, "joshua", lat_f, lon_f):
+        return "joshua"
+    if ll_in_agency(airport, "blackjack", lat_f, lon_f):
+        return "blackjack"
+    if ll_in_agency(airport, "control_west", lat_f, lon_f):
+        return "control_west"
+    if ll_in_agency(airport, "control_east", lat_f, lon_f):
+        return "control_east"
+    return ""
+
+
+def joshua_is_live(
+    airport: dict[str, Any] | None,
+    state: dict[str, Any] | None,
+    *,
+    lat: float | None = None,
+    lon: float | None = None,
+    tuned_channel: str | None = None,
+) -> bool:
+    """True when this sortie is actually with / going to Joshua."""
+    tun = str(tuned_channel or "").strip().lower()
+    if tun == "joshua":
+        return True
+    if last_agency(state) == "joshua" or pending_contact(state) == "joshua":
+        return True
+    if lat is None or lon is None:
+        return False
+    return ll_in_agency(airport, "joshua", lat, lon) or approaching_joshua(
+        airport, lat, lon
+    )
+
+
+def fly_label(channel: str, airport_name: str = "") -> str:
+    """Fly hero / cue header. NATCF keeps East vs West; radio calls stay Nellis Control."""
+    ch = (channel or "").strip().lower()
+    if ch == "control_east":
+        return "Nellis Control East"
+    if ch == "control_west":
+        return "Nellis Control West"
+    return spoken_name(ch, airport_name)
 
 
 def blackjack_exit_handoff(

@@ -723,6 +723,9 @@ class FlightStatus:
     has_position_area: bool = False
     has_eor_area: bool = False
     runway_length_m: float = 0.0
+    # Parallel the jet is actually on when that differs from `runway`
+    # (21L rollout while the plan still says 21R).
+    occupied_runway: str = ""
     # Thresholds evaluate() used, so a later in_zone() call matches the verdicts
     # above without the caller re-reading config.
     tuning: dict[str, float] = field(default_factory=dict)
@@ -1096,17 +1099,90 @@ def within_nm_held(
 RUNWAY_END_ZONES = frozenset({"runway_end", "departure_end", "rollout_end"})
 
 
+def occupied_runway_of_pair(
+    airport: dict[str, Any] | None,
+    assigned: str | None,
+    x: float,
+    z: float,
+    *,
+    max_lateral_m: float = 80.0,
+) -> str:
+    """
+    Which parallel the jet is sitting on (assigned or its L/R twin).
+
+    Empty when the point is not clearly on either strip. A 21L rollout
+    while the plan still says 21R must still count as on 21L.
+    """
+    want = atc_phrase.normalize_runway(assigned) or str(assigned or "").strip().upper()
+    if not want:
+        return ""
+    flipped = atc_phrase._flip_runway_side(want)
+    best = ""
+    best_lat: float | None = None
+    for rwy in (want, flipped):
+        if not rwy:
+            continue
+        geo = runway_geometry(airport, rwy)
+        frame = RunwayFrame.build(rwy, geo)
+        if frame is None:
+            continue
+        along, lateral = frame.project(x, z)
+        half = max(frame.width_m / 2.0 + 20.0, max_lateral_m)
+        on = abs(lateral) <= half and -60.0 <= along <= frame.length_m + 80.0
+        if not on:
+            continue
+        lat_abs = abs(lateral)
+        if best_lat is None or lat_abs < best_lat:
+            best = rwy
+            best_lat = lat_abs
+    return best
+
+
+def _runway_end_on_strip(
+    along_m: float,
+    lateral_m: float,
+    length_m: float,
+    *,
+    height_m: float | None,
+    speed_mps: float | None,
+    on_runway: bool,
+    config: dict[str, Any] | None,
+) -> tuple[bool, str]:
+    remaining = rule(config, "runway_end_remaining_m")
+    max_agl = rule(config, "runway_end_max_agl_m")
+    max_spd = rule(config, "runway_end_max_speed_mps")
+    left = length_m - along_m
+    airborne = height_m is not None and abs(height_m) > max_agl
+    fast = speed_mps is not None and speed_mps > max_spd
+    near = (length_m - remaining) <= along_m <= (length_m + 80.0)
+    on_strip = on_runway or abs(lateral_m) <= 50.0
+    if airborne:
+        return False, "still airborne — rollout not started"
+    if fast:
+        return False, "too fast for rollout (go-around / low approach)"
+    if near and on_strip:
+        return True, f"departure end ({max(0.0, left):.0f} m remaining)"
+    if along_m < 0:
+        return False, "short of the threshold"
+    if left > remaining:
+        return False, f"{left:.0f} m remaining to the departure end"
+    return False, "not on the landing runway"
+
+
 def runway_end_held(
     trigger: StepTrigger,
     status: FlightStatus,
     *,
     config: dict[str, Any] | None = None,
+    airport: dict[str, Any] | None = None,
 ) -> tuple[bool, str]:
     """
     Ownship rolling out near the departure end of the landing runway.
 
     Tower's exit / contact-Ground call. Uses the landing centreline, not a
     drawn box — 21L is offset from 21R when only one strip is traced.
+    If the plan runway is the parallel (overhead on 21R, rollout on 21L),
+    the occupied strip still counts.
     """
     del trigger
     if not status.ok:
@@ -1117,25 +1193,48 @@ def runway_end_held(
     own = next((fix for fix in status.fixes if fix.own), None)
     if own is None:
         return False, "own aircraft not in the flight sample"
-    remaining = rule(config, "runway_end_remaining_m")
-    max_agl = rule(config, "runway_end_max_agl_m")
-    max_spd = rule(config, "runway_end_max_speed_mps")
-    left = length - own.along_m
-    airborne = own.height_m is not None and abs(own.height_m) > max_agl
-    fast = own.speed_mps is not None and own.speed_mps > max_spd
-    near = (length - remaining) <= own.along_m <= (length + 80.0)
-    on_strip = own.on_runway or abs(own.lateral_m) <= 50.0
-    if airborne:
-        return False, "still airborne — rollout not started"
-    if fast:
-        return False, "too fast for rollout (go-around / low approach)"
-    if near and on_strip:
-        return True, f"departure end ({max(0.0, left):.0f} m remaining)"
-    if own.along_m < 0:
-        return False, "short of the threshold"
-    if left > remaining:
-        return False, f"{left:.0f} m remaining to the departure end"
-    return False, "not on the landing runway"
+    held, waiting = _runway_end_on_strip(
+        own.along_m,
+        own.lateral_m,
+        length,
+        height_m=own.height_m,
+        speed_mps=own.speed_mps,
+        on_runway=own.on_runway,
+        config=config,
+    )
+    if held:
+        status.occupied_runway = status.runway
+        return held, waiting
+    if airport is None:
+        return held, waiting
+    occupied = occupied_runway_of_pair(
+        airport, status.runway, own.x_m, own.z_m
+    )
+    if not occupied or occupied == status.runway:
+        return held, waiting
+    geo = runway_geometry(airport, occupied)
+    frame = RunwayFrame.build(occupied, geo)
+    if frame is None:
+        return held, waiting
+    along, lateral = frame.project(own.x_m, own.z_m)
+    held_p, waiting_p = _runway_end_on_strip(
+        along,
+        lateral,
+        frame.length_m,
+        height_m=own.height_m,
+        speed_mps=own.speed_mps,
+        on_runway=abs(lateral) <= 50.0,
+        config=config,
+    )
+    if held_p:
+        status.occupied_runway = occupied
+        status.runway = occupied
+        status.runway_length_m = frame.length_m
+        own.along_m = along
+        own.lateral_m = lateral
+        own.on_runway = True
+        return True, f"{occupied} {waiting_p}"
+    return held, waiting
 
 
 def field_proximity_applies(watch: list[dict[str, Any]] | None) -> bool:
@@ -1166,6 +1265,7 @@ def condition_held(
     config: dict[str, Any] | None = None,
     tracker: PositionTracker | None = None,
     leave_key: str = "",
+    airport: dict[str, Any] | None = None,
 ) -> tuple[bool, str]:
     """
     Whether a step's distance and/or zone condition is true.
@@ -1182,7 +1282,7 @@ def condition_held(
     zone_list = [z for z in (zones or []) if isinstance(z, dict)]
     zone_name = str(trigger.zone or "").strip().casefold()
     if zone_name in RUNWAY_END_ZONES:
-        return runway_end_held(trigger, status, config=config)
+        return runway_end_held(trigger, status, config=config, airport=airport)
 
     held_dist = False
     waiting_dist = ""
@@ -1405,7 +1505,7 @@ def resolve_step_trigger(
         # All recoveries: wait for "with you" / "initial" (or Play).
         # Contact-tower handoff stays on the 12 NM gate; landing clearance
         # remains 6 NM on clear_land after they check in.
-        return base
+        return None
 
     if tmpl == "climb_cruise":
         nm = CRUISE_CLIMB_BEYOND_NM

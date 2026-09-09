@@ -18,7 +18,8 @@
       "template": "clearance",
       "file": null,
       "enabled": true,
-      "text": null
+      "text": null,
+      "initial_climb_ft": 14000
     },
     {
       "id": "del_readback",
@@ -103,7 +104,8 @@
       "template": "radar_contact",
       "file": null,
       "enabled": true,
-      "text": null
+      "text": null,
+      "initial_climb_ft": 14000
     },
     {
       "id": "dep_cruise",
@@ -388,5 +390,6 @@
     }
   ],
   "active_takeoff_mode": "lineup",
-  "landing_intent": "full_stop"
+  "landing_intent": "full_stop",
+  "initial_climb_ft": 14000
 }
