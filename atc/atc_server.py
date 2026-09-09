@@ -43,7 +43,9 @@ _IDENTITY_CONFIG_KEYS = (
     "opus_flight_label",
     "callsign_override",
 )
-_SHARED_FLOW_KEYS = (
+# Client Fly copies these, then drops any key the host omitted so a cache
+# reset does not leave the last sortie (OPS start, pending Delivery, …).
+SHARED_FLOW_KEYS = (
     "index",
     "last_step_id",
     "awaiting_readback",
@@ -485,6 +487,8 @@ class AtcServer:
                 return engine.back()
             if cmd == "reset":
                 return engine.reset()
+            if cmd in ("clear_flight_cache", "reset_flight_cache"):
+                return engine.clear_flight_cache()
             if cmd == "play":
                 sid = str(body.get("step_id") or body.get("id") or "")
                 if not sid:
@@ -640,7 +644,7 @@ def _attach_fly_status(
 def _shared_flow_state(state: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(state, dict):
         return {"index": 0, "awaiting_readback": False}
-    out = {key: state[key] for key in _SHARED_FLOW_KEYS if key in state}
+    out = {key: state[key] for key in SHARED_FLOW_KEYS if key in state}
     out.setdefault("index", int(state.get("index") or 0))
     out.setdefault("awaiting_readback", False)
     out.setdefault("blackjack_checked_in", False)

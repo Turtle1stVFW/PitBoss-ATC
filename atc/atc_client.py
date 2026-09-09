@@ -254,6 +254,9 @@ class ClientEngineProxy:
     def reset(self) -> dict[str, Any]:
         return self.client.action("reset")
 
+    def clear_flight_cache(self) -> dict[str, Any]:
+        return self.client.action("clear_flight_cache")
+
     def flip(self) -> dict[str, Any]:
         return {"note": "Single timeline — flip is unused"}
 

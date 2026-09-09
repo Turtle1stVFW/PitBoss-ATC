@@ -5080,6 +5080,40 @@ def extras() -> int:
             bad += 1
         else:
             print("clearance amendment cue — 10,000 -> FL190 highlighted")
+        before_call = voice_intent.suggestions(
+            phase="departure",
+            channel="delivery",
+            expected="clearance",
+            callsign=CALLSIGN,
+            last_tx_template="",
+            limit=5,
+            advance_limit=2,
+            optional_limit=3,
+        )
+        after_offer = voice_intent.suggestions(
+            phase="departure",
+            channel="delivery",
+            expected="clearance_amendment",
+            callsign=CALLSIGN,
+            last_tx_template="clearance_amendment",
+            limit=5,
+            advance_limit=2,
+            optional_limit=3,
+        )
+        before_says = [str(s).casefold() for s, *_ in before_call]
+        after_adv = [
+            str(s).casefold()
+            for s, _d, r, *_ in after_offer
+            if r == "advance"
+        ]
+        if any("ready to copy" in s for s in before_says):
+            print(f"  FAIL do not tip ready to copy before Delivery offers: {before_call}")
+            bad += 1
+        elif not after_adv or "ready to copy" not in after_adv[0]:
+            print(f"  FAIL after amendment offer tip ready to copy: {after_offer}")
+            bad += 1
+        else:
+            print("clearance amendment cues — ready to copy only after CD offers")
 
         alias_sq = atc_phrase._opus_mode3_from_fields({"squawk": "4321"})
         if alias_sq != "4321":
@@ -5831,19 +5865,52 @@ def extras() -> int:
             }
         ],
         current_step_id="del_clearance",
+        tuned_channel="ops",
+        next_channel="delivery",
+        next_freq_mhz=289.4,
         limit=5,
         advance_limit=2,
         optional_limit=3,
     )
     ops_says = [str(s).casefold() for s, _d, r, *_ in ops_tips]
-    if not any("request current words" in s for s in ops_says):
-        print(f"  FAIL OPS Fly tips missing WORDS: {ops_tips}")
+    ops_adv = [str(s).casefold() for s, _d, r, *_ in ops_tips if r == "advance"]
+    if not ops_adv or "request current words" not in ops_adv[0]:
+        print(f"  FAIL OPS Fly tips must lead with WORDS, not Delivery: {ops_tips}")
+        bad += 1
+    elif any("tune" in s and "delivery" in s for s in ops_says):
+        print(f"  FAIL OPS before start must not tip Delivery: {ops_tips}")
         bad += 1
     elif any("request clearance" in s or "runway" in s for s in ops_says):
         print(f"  FAIL OPS Fly tips must not show Delivery/runway: {ops_tips}")
         bad += 1
     else:
         print(f"OPS Fly tips — {ops_says}")
+
+    stale_pending = voice_intent.suggestions(
+        phase="departure",
+        channel="ops",
+        expected="clearance",
+        callsign=CALLSIGN,
+        airport_name="Nellis",
+        pending_contact="delivery",
+        ops_start_done=False,
+        tuned_channel="ops",
+        next_channel="delivery",
+        next_freq_mhz=289.4,
+        limit=5,
+        advance_limit=2,
+        optional_limit=3,
+    )
+    stale_adv = [
+        str(s).casefold() for s, _d, r, *_ in stale_pending if r == "advance"
+    ]
+    if not stale_adv or "request current words" not in stale_adv[0]:
+        print(
+            f"  FAIL leftover Delivery pending must not steal OPS cues: {stale_pending}"
+        )
+        bad += 1
+    else:
+        print("OPS Fly tips — leftover Delivery pending ignored until start")
 
     after_start_tips = voice_intent.suggestions(
         phase="departure",

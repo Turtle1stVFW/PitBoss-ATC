@@ -184,6 +184,29 @@ def should_tip_retune(here: str, dest: str) -> bool:
     return True
 
 
+def retune_destination(
+    *,
+    here: str,
+    cursor: str = "",
+    pending: str = "",
+    ops_start_done: bool = False,
+) -> str:
+    """
+    Next radio to tip — empty means stay on this agency's calls.
+
+    OPS starts the card: WORDS / start stay the advance until start is
+    approved. The Delivery cursor must not steal that with a tune tip.
+    """
+    here_l = (here or "").strip().lower()
+    cursor_l = (cursor or "").strip().lower()
+    pending_l = (pending or "").strip().lower()
+    if here_l == "ops" and not ops_start_done:
+        return ""
+    if pending_l and pending_l != here_l:
+        return pending_l
+    return cursor_l
+
+
 def cue_channel(
     *,
     mission_phase: str,
@@ -3905,22 +3928,12 @@ def suggestions(
     current_id = str(current_step_id or "").strip()
     pending_l = (pending_contact or "").strip().lower()
     here_l = (tuned_channel or channel_l).strip().lower()
-    dest_l = (next_channel or "").strip().lower()
-    if (
-        pending_l
-        and here_l
-        and pending_l != here_l
-        and (not dest_l or dest_l == here_l or dest_l == pending_l)
-    ):
-        dest_l = pending_l
-    if (
-        not dest_l
-        and channel_l == "ops"
-        and ops_start_done
-        and pending_l
-        and pending_l != here_l
-    ):
-        dest_l = pending_l
+    dest_l = retune_destination(
+        here=here_l,
+        cursor=next_channel,
+        pending=pending_l,
+        ops_start_done=ops_start_done,
+    )
     # Off the next agency's freq — lead with a tune tip, not that agency's call.
     if should_tip_retune(here_l, dest_l) and not awaiting_readback:
         say, does = format_tune_cue(dest_l, next_freq_mhz)
@@ -4094,6 +4107,9 @@ def suggestions(
         if expected_l in _APPROACH_TOWER_HANDOFF_TEMPLATES and intent.id == "inbound_recovery":
             continue
         if expected_l == "clearance_amendment" and intent.id == "ready_clearance":
+            continue
+        # Don't tip "ready to copy" until Delivery has offered the amendment.
+        if intent.id == "ready_to_copy" and last_tx_template != "clearance_amendment":
             continue
         # Range checkout ends Flight → Approach; tip it on the range-exit step
         # (and allow check-in "continue" after they leave Blackjack).

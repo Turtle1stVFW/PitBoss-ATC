@@ -2668,7 +2668,17 @@ class MissionPlanner(tk.Tk):
         if not isinstance(state, dict):
             return
         for key, value in fs.items():
-            state[key] = value
+            if value is None:
+                state.pop(key, None)
+            else:
+                state[key] = value
+        # Host omits cleared sortie fields. Leaving them set keeps OPS start
+        # approved and the Delivery switch-to after a local cache reset.
+        for key in atc_server.SHARED_FLOW_KEYS:
+            if key == "index":
+                continue
+            if key not in fs:
+                state.pop(key, None)
         # Host omits these when idle; leave them set and cues stay on the old
         # readback / tanker list instead of the current step.
         if "awaiting_readback" not in fs:
@@ -6950,7 +6960,13 @@ class MissionPlanner(tk.Tk):
             self._sync_identity_to_config()
             self.engine.config = self.config_data
             self.engine.mission = self.mission
-            status = self.engine.clear_flight_cache()
+            if self._atc_role() == "client" and getattr(self, "_atc_client", None):
+                status = self._atc_client.action("clear_flight_cache")
+                self._sync_client_flow_cursor()
+                if not isinstance(status, dict):
+                    status = {}
+            else:
+                status = self.engine.clear_flight_cache()
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("Reset flight cache", str(exc))
             return
@@ -8814,10 +8830,11 @@ class MissionPlanner(tk.Tk):
         tuned_now = str(context.get("tuned_channel") or "").strip().lower()
         cursor_now = str(context.get("cursor_channel") or "").strip().lower()
         pending_now = str(context.get("pending_contact") or "").strip().lower()
-        dest_ch = (
-            pending_now
-            if pending_now and pending_now != tuned_now
-            else cursor_now
+        dest_ch = voice_intent.retune_destination(
+            here=tuned_now or cue_ch,
+            cursor=cursor_now,
+            pending=pending_now,
+            ops_start_done=bool(context.get("ops_start_done")),
         )
         next_mhz = None
         if dest_ch and dest_ch != (tuned_now or cue_ch):
@@ -8880,9 +8897,11 @@ class MissionPlanner(tk.Tk):
             agency = "Ops"
         callsign = str(context.get("callsign") or "").strip()
         amendment = None
-        if cue_ch == "delivery" and str(context.get("expected") or "") in (
-            "clearance",
-            "clearance_amendment",
+        # Only after Delivery has said they have an amendment — not before
+        # the first call.
+        if (
+            cue_ch == "delivery"
+            and str(context.get("last_tx_template") or "") == "clearance_amendment"
         ):
             amendment = self._clearance_amendment_change()
         self._paint_fly_voice_cues(
@@ -9172,6 +9191,7 @@ class MissionPlanner(tk.Tk):
                 sandbox = False
             live_ch = ""
             pending_ch = ""
+            hero_ch = ""
             switch_to = False
             if sandbox:
                 try:
@@ -9195,6 +9215,20 @@ class MissionPlanner(tk.Tk):
                     ).strip().lower()
                 live_ch = str(live_ch or "").strip().lower()
                 owning_ch = self._map_owning_agency()
+                ops_start_done = False
+                try:
+                    import ops as ops_mod
+
+                    sortie = ops_mod.sortie_from_state(
+                        getattr(self.engine, "state", None)
+                    )
+                    ops_start_done = bool(sortie and sortie.start_utc)
+                except Exception:
+                    ops_start_done = False
+                # WORDS/start leftover must not steal the OPS hero before
+                # start is actually approved on this sortie.
+                if live_ch == "ops" and pending_ch == "delivery" and not ops_start_done:
+                    pending_ch = ""
                 if live_ch and pending_ch and live_ch == pending_ch:
                     try:
                         (self.engine.state or {}).pop("pending_contact", None)
@@ -9292,15 +9326,31 @@ class MissionPlanner(tk.Tk):
                     self.fly_channel.set(display_ch)
                     self.fly_tx_name.set(f"SRS name: {tx}" if tx else "")
             else:
-                ch, freq, mod, tx = self._fly_upcoming_radio(step)
-                display_ch = ch
-                # Sandbox Flight: hero is the agency on the radio (Bandsaw
-                # while Blackjack still holds). Field sequence still uses the
-                # upcoming step so a Tower handoff does not snap to Ground.
-                self.fly_freq.set(freq)
-                self.fly_mod.set(mod)
-                self.fly_channel.set(display_ch)
-                self.fly_tx_name.set(f"SRS name: {tx}" if tx else "")
+                painted_hero = False
+                if sandbox and hero_ch:
+                    try:
+                        ap = self.engine.airport()
+                        freq, mod, tx_name = atc_phrase.channel_radio(ap, hero_ch)
+                        self.fly_freq.set(f"{float(freq):.3f}")
+                        self.fly_mod.set(str(mod or "AM").upper())
+                        self.fly_channel.set(hero_ch.upper())
+                        self.fly_tx_name.set(
+                            f"SRS name: {tx_name}" if tx_name else ""
+                        )
+                        ch = hero_ch.upper()
+                        painted_hero = True
+                    except Exception:
+                        painted_hero = False
+                if not painted_hero:
+                    ch, freq, mod, tx = self._fly_upcoming_radio(step)
+                    display_ch = ch
+                    # Sandbox Flight: hero is the agency on the radio (Bandsaw
+                    # while Blackjack still holds). Field sequence still uses the
+                    # upcoming step so a Tower handoff does not snap to Ground.
+                    self.fly_freq.set(freq)
+                    self.fly_mod.set(mod)
+                    self.fly_channel.set(display_ch)
+                    self.fly_tx_name.set(f"SRS name: {tx}" if tx else "")
             mode = step.get("mode") or "tts"
             tmpl = step.get("template") or step.get("file") or ""
             eff = atc_phrase.effective_takeoff_template(

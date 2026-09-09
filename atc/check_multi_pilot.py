@@ -144,6 +144,60 @@ def test_session_isolation() -> list[str]:
     return fails
 
 
+def test_clear_flight_cache_scoped() -> list[str]:
+    fails: list[str] = []
+    import ops as ops_mod
+
+    cfg = _host_config()
+    server = atc_server.AtcServer(
+        cfg, AIRPORTS, lambda: copy.deepcopy(MISSION), transmit_fn=lambda _j: 0
+    )
+    a = server.hello(
+        {
+            "callsign_override": "Fleece 1",
+            "opus_flight_id": 101,
+            "opus_seat": 1,
+            "radio_fresh": False,
+        }
+    )
+    b = server.hello(
+        {
+            "callsign_override": "Viper 3",
+            "opus_flight_id": 202,
+            "opus_seat": 1,
+            "radio_fresh": False,
+        }
+    )
+    sa = server.get_session(a["session_id"])
+    sb = server.get_session(b["session_id"])
+    if sa is None or sb is None:
+        return ["cache scope: no sessions"]
+    ops_mod.approve_start(sa.engine.state, callsign="Fleece 1")
+    ops_mod.approve_start(sb.engine.state, callsign="Viper 3")
+    sa.engine.state["pending_contact"] = "delivery"
+    sa.engine.state["last_tx_template"] = "ops_words"
+    sb.engine.state["pending_contact"] = "delivery"
+    sb.engine.state["last_tx_template"] = "ops_words"
+    idx_b = int(sb.engine.state.get("index") or 0)
+    result = server.handle_command(sa, "clear_flight_cache", {"radio_fresh": False})
+    if ops_mod.sortie_from_state(sa.engine.state) is not None:
+        fails.append("Fleece cache reset must clear OPS start")
+    if sa.engine.state.get("pending_contact"):
+        fails.append("Fleece cache reset must clear pending Delivery")
+    if sa.engine.state.get("last_tx_template"):
+        fails.append("Fleece cache reset must clear last TX")
+    if ops_mod.sortie_from_state(sb.engine.state) is None:
+        fails.append("Viper OPS start must survive Fleece cache reset")
+    if str(sb.engine.state.get("pending_contact") or "") != "delivery":
+        fails.append("Viper pending Delivery must survive Fleece cache reset")
+    if int(sb.engine.state.get("index") or 0) != idx_b:
+        fails.append("Viper cursor moved when Fleece reset cache")
+    fs = result.get("flow_state") if isinstance(result, dict) else None
+    if isinstance(fs, dict) and fs.get("ops_sortie"):
+        fails.append("host status still has ops_sortie after cache reset")
+    return fails
+
+
 def test_client_freq_gate() -> list[str]:
     fails: list[str] = []
     cfg = _host_config(freq_gate_enabled=True)
@@ -1040,6 +1094,7 @@ def main() -> int:
         test_injected_radio_gate,
         test_channel_parallel_and_fifo,
         test_session_isolation,
+        test_clear_flight_cache_scoped,
         test_flight_shared_cursor,
         test_element_tanker_peel,
         test_tanker_fly_freq_matches_pick,

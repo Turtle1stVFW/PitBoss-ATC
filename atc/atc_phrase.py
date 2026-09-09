@@ -4178,6 +4178,13 @@ def clear_flight_session_cache(
     if isinstance(state, dict):
         for key in _SORTIE_STATE_CACHE_KEYS:
             state.pop(key, None)
+        for key in (
+            "last_tx_template",
+            "last_tx_channel",
+            "last_tx_text",
+            "last_tx_at",
+        ):
+            state.pop(key, None)
         state["hold_active"] = False
         state["vectors_active"] = False
         state["takeoff_offer_rolled"] = False
