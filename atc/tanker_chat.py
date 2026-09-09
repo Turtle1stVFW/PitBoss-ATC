@@ -48,6 +48,9 @@ _OLLAMA_REACT_TIMEOUT_S = 20.0
 _OLLAMA_NUM_PREDICT = 220
 _OLLAMA_REACT_NUM_PREDICT = 110
 _OLLAMA_KEEP_ALIVE = "10m"
+# 0 = CPU only. Ollama's default is GPU; loading a model into VRAM while DCS
+# is running has frozen the display and taken the whole PC down.
+_DEFAULT_OLLAMA_NUM_GPU = 0
 # llama3.2 likes to keep writing the pilot's next line. Cut it off.
 _OLLAMA_STOP = (
     "Pilot:",
@@ -92,6 +95,7 @@ _LLM_BREAK_MAX_S = 22.0
 _LAST_LLM_ERROR: str = ""
 _OLLAMA_LOCK = threading.Lock()
 _OLLAMA_MODELS_CACHE: dict[str, Any] = {"t": 0.0, "names": []}
+_OLLAMA_GPU_RELEASED = False
 
 # Soft acks acknowledge without picking a side — still keep the session going.
 _SOFT_ACK = (
@@ -449,6 +453,19 @@ def _pick_break_s(*, llm: bool = False) -> float:
     if llm:
         return random.uniform(_LLM_BREAK_MIN_S, _LLM_BREAK_MAX_S)
     return random.uniform(_BREAK_MIN_S, _BREAK_MAX_S)
+
+
+def hold_for_pilot(state: dict[str, Any] | None, opener: str = "") -> None:
+    """Keep the live bit open — Texaco waits instead of auto-continuing."""
+    if not isinstance(state, dict):
+        return
+    row = _row(state) or {}
+    _keep_react_open(
+        state,
+        opener=str(opener or row.get("opener") or ""),
+        turns=int(row.get("turns") or 0),
+        llm=True,
+    )
 
 
 def schedule_next_question(
@@ -1641,6 +1658,15 @@ def _llm_dialogue_nudge_prompt(
 
 
 
+def _http_get_json(url: str, timeout: float = 0.8) -> dict[str, Any]:
+    with urllib.request.urlopen(url, timeout=timeout) as resp:
+        raw = resp.read().decode("utf-8", errors="replace")
+    data = json.loads(raw) if raw else {}
+    if not isinstance(data, dict):
+        raise ValueError("GET response was not an object")
+    return data
+
+
 def _http_json(
     url: str,
     payload: dict[str, Any],
@@ -1779,6 +1805,71 @@ def _openai_thread(
     )
 
 
+def ollama_num_gpu(config: dict[str, Any] | None) -> int:
+    """
+    How many layers Ollama may put on the GPU.
+
+    Default 0 (CPU) so a radio call / boom-chat turn cannot steal VRAM from DCS.
+    Set tanker_chat_ollama_num_gpu > 0 only when the GPU is not flying.
+    """
+    if not isinstance(config, dict):
+        return _DEFAULT_OLLAMA_NUM_GPU
+    if "tanker_chat_ollama_num_gpu" not in config:
+        return _DEFAULT_OLLAMA_NUM_GPU
+    raw = config.get("tanker_chat_ollama_num_gpu")
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return _DEFAULT_OLLAMA_NUM_GPU
+
+
+def release_ollama_gpu(config: dict[str, Any] | None = None) -> int:
+    """
+    Unload Ollama models that are sitting in VRAM.
+
+    num_gpu=0 on the next /api/chat is not enough if a model is already loaded
+    on the card (ollama run, a previous GPU request). Returns how many models
+    were asked to unload. No-ops when the daemon is down or nothing is on GPU.
+    """
+    global _OLLAMA_GPU_RELEASED
+    cfg = config if isinstance(config, dict) else {}
+    if ollama_num_gpu(cfg) > 0:
+        return 0
+    base = _ollama_base_url(cfg)
+    try:
+        data = _http_get_json(f"{base}/api/ps", timeout=0.8)
+    except Exception:
+        return 0
+    names: list[str] = []
+    for row in (data.get("models") or []) if isinstance(data, dict) else []:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or row.get("model") or "").strip()
+        if not name:
+            continue
+        if "size_vram" in row:
+            try:
+                if int(row.get("size_vram") or 0) <= 0:
+                    continue
+            except (TypeError, ValueError):
+                pass
+        names.append(name)
+    unloaded = 0
+    for name in names:
+        try:
+            _http_json(
+                f"{base}/api/generate",
+                {"model": name, "keep_alive": 0},
+                {"Content-Type": "application/json"},
+                timeout=2.0,
+            )
+            unloaded += 1
+        except Exception:
+            continue
+    _OLLAMA_GPU_RELEASED = True
+    return unloaded
+
+
 def _ollama_base_url(config: dict[str, Any]) -> str:
     url = str(config.get("tanker_chat_llm_url") or _DEFAULT_OLLAMA_URL).strip()
     url = url or _DEFAULT_OLLAMA_URL
@@ -1836,10 +1927,15 @@ def _ollama_chat(
 
     The OpenAI-compat endpoint with max_tokens=700 was hanging until urllib
     gave up (Fly: 'ollama: timed out') and boom chat fell back to the library.
+
+    num_gpu defaults to 0 (CPU). A GPU load during a radio call has frozen
+    the display and shut the PC down while DCS was using the same card.
     """
     model = resolve_ollama_model(config)
     if not model:
         raise RuntimeError("No Ollama models installed — run: ollama pull llama3.2")
+    if ollama_num_gpu(config) == 0 and not _OLLAMA_GPU_RELEASED:
+        release_ollama_gpu(config)
     url = _ollama_base_url(config) + "/api/chat"
     payload = {
         "model": model,
@@ -1848,6 +1944,7 @@ def _ollama_chat(
         "options": {
             "temperature": float(temperature),
             "num_predict": max(40, int(num_predict)),
+            "num_gpu": ollama_num_gpu(config),
             "stop": list(_OLLAMA_STOP),
         },
         "messages": messages,

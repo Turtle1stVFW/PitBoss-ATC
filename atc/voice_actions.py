@@ -165,7 +165,6 @@ def _track_dict(
         "range_nm": int(fix["range_nm"]),
         "name": fix.get("name") or "BULLSEYE",
         "label": fix.get("label") or fix.get("unit_name") or "unknown",
-        "object": fix.get("object_name") or "",
         "lat": fix.get("lat"),
         "lon": fix.get("lon"),
         "feet": _feet(unit.get("altMeters")),
@@ -175,6 +174,7 @@ def _track_dict(
         "declaration": declaration,
         "coalition": str(unit.get("coalition") or "").lower(),
         "unit_id": str(uid).strip() if uid is not None else "",
+        "object": fix.get("object_name") or unit.get("objectName") or unit.get("object_name") or "",
     }
 
 
@@ -203,7 +203,11 @@ def _groups_from_tracks(
             y = sum(math.sin(math.radians(h)) for h in headings)
             mean_hdg = (math.degrees(math.atan2(y, x)) + 360.0) % 360.0
         ids = [str(t.get("unit_id") or "") for t in cluster if t.get("unit_id")]
-        coalitions = [str(t.get("coalition") or "") for t in cluster if t.get("coalition")]
+        coalitions = [
+            pl.normalize_coalition(t.get("coalition"))
+            for t in cluster
+            if t.get("coalition") not in (None, "")
+        ]
         coal = ""
         if coalitions:
             # Majority coalition; enemy-side wins a tie so we don't friendly-wash.
@@ -215,6 +219,7 @@ def _groups_from_tracks(
         lead_ft = int(lead["feet"]) if lead.get("feet") is not None else (
             max(int(f) for f in feet) if feet else None
         )
+        obj = str(lead.get("object") or "")
         decl = book.assign(
             ids,
             brg=int(lead["bearing"]),
@@ -237,9 +242,10 @@ def _groups_from_tracks(
                 lat=lead.get("lat"),
                 lon=lead.get("lon"),
                 label=str(lead.get("label") or ""),
-                object=str(lead.get("object") or ""),
+                object=obj,
                 declaration=decl,
                 unit_ids=ids,
+                coalition=coal,
             )
         )
     groups.sort(key=lambda g: g.distance_nm)
@@ -859,13 +865,12 @@ def build_declare_reply(
 
     Matching uses the pilot's bullseye and altitude when given; the response
     does not read the fix back (e.g. 'Fleece 1, Bandsaw, hostile.').
-    Bandsaw declare, or the flight lead saying hostile, upgrades that group.
+    Bandsaw declare, or the flight lead saying hostile, upgrades a CAOC
+    enemy-side group only. Neutral tracks stay bogey / bogey spades.
     """
     cs = atc_phrase.speak_callsign(callsign)
     cue = parse_declare_cue(transcript or "", config=config)
-    upgrade = pl.agency_can_upgrade_hostile(agency, channel) or (
-        pl.transcript_upgrades_hostile(transcript)
-    )
+    hostile_side = _hostile_coalition(airport)
     groups, _own, own_ll = collect_declare_groups(
         config,
         airport,
@@ -881,13 +886,21 @@ def build_declare_reply(
         if cue is not None:
             return f"{cs}, {agency}, unable, say again.", []
         return f"{cs}, {agency}, clean.", []
-    if upgrade and pl.normalize_declaration(g.declaration) != "friendly":
+    if pl.declare_may_upgrade_hostile(
+        g,
+        agency=agency,
+        channel=channel,
+        transcript=transcript,
+        hostile_side=hostile_side,
+    ):
         book = pl.DeclarationMemory.from_state(state)
         g.declaration = book.upgrade_to_hostile(
             g.unit_ids,
             brg=g.bearing,
             rng=g.range_nm,
             feet=g.feet,
+            coalition=g.coalition,
+            hostile_side=hostile_side,
         )
         book.to_state(state)
     decl = str(g.declaration or "bogey").strip() or "bogey"

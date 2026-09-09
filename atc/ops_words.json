@@ -1,0 +1,13 @@
+{
+  "_comment": "Fallback WORDS bulletin when Opus is unreachable. Live current WORDS come from GET /opus/words.",
+  "update": 1,
+  "items": [
+    "NTTR hot. Recoveries as published."
+  ],
+  "weather": "",
+  "range_status": "NTTR hot",
+  "timing": "",
+  "threat": "",
+  "package": "",
+  "frequencies": ""
+}

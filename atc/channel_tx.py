@@ -24,13 +24,26 @@ def _default_transmit(job: dict[str, Any]) -> int:
     airport = job["airport"]
     wav = job.get("wav_path")
     file_path = str(job.get("file_path") or "")
+    radio = job.get("radio")
     if wav:
         return atc_phrase.transmit_file(
-            config, airport, str(wav), job["tx_name"], job["freq"], job["mod"]
+            config,
+            airport,
+            str(wav),
+            job["tx_name"],
+            job["freq"],
+            job["mod"],
+            radio=radio,
         )
     if file_path:
         return atc_phrase.transmit_file(
-            config, airport, file_path, job["tx_name"], job["freq"], job["mod"]
+            config,
+            airport,
+            file_path,
+            job["tx_name"],
+            job["freq"],
+            job["mod"],
+            radio=radio,
         )
     return atc_phrase.transmit(
         config,
@@ -42,6 +55,7 @@ def _default_transmit(job: dict[str, Any]) -> int:
         channel=job.get("channel"),
         voice_override=job.get("voice"),
         step=job.get("step"),
+        radio=radio,
     )
 
 

@@ -35,6 +35,9 @@ tools/_nttr_sua.geojson
 atc/_tmp*
 atc/**/_tmp*
 
+# Tester share zips (Pack-Share-Zip.cmd writes next to the repo)
+ATC-Flow-Share-*.zip
+
 # Logs / editor junk
 *.log
 .DS_Store

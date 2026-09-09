@@ -293,16 +293,63 @@ def tanker_freqs_mhz(config: dict[str, Any] | None, *, opus: Any = None) -> list
     """Published tanker UHF freqs (for tune matching)."""
     out: list[float] = []
     for row in fetch_opus_tankers(config, opus=opus):
-        mhz = row.get("freq_mhz")
-        if mhz is None:
-            continue
-        try:
-            val = float(mhz)
-        except (TypeError, ValueError):
-            continue
-        if val > 0 and not any(abs(val - x) < 0.01 for x in out):
+        val = _positive_mhz(row.get("freq_mhz"))
+        if val is not None and not any(abs(val - x) < 0.01 for x in out):
             out.append(val)
     return out
+
+
+def _positive_mhz(value: Any) -> float | None:
+    mhz = atc_phrase._parse_mhz(value)
+    if mhz is None or mhz <= 0:
+        return None
+    return float(mhz)
+
+
+def catalog_freq_for_tanker(
+    tanker: dict[str, Any] | None,
+    config: dict[str, Any] | None = None,
+    *,
+    opus: Any = None,
+) -> float | None:
+    """UHF for this tanker identity — never another track's published freq."""
+    if not isinstance(tanker, dict):
+        return None
+    direct = _positive_mhz(tanker.get("freq_mhz"))
+    if direct is not None:
+        return direct
+    try:
+        catalog = fetch_opus_tankers(config, opus=opus)
+    except Exception:
+        catalog = []
+    want_id = tanker.get("id")
+    if want_id is None:
+        want_id = tanker.get("tanker_id")
+    want_cs = normalize_tanker_name(
+        str(tanker.get("callsign") or tanker.get("tanker_callsign") or "")
+    )
+    want_track = str(
+        tanker.get("track") or tanker.get("tanker_track") or ""
+    ).strip().upper()
+    if want_id is None and not want_cs:
+        return None
+    exact_cs: float | None = None
+    want_id_s = "" if want_id is None else str(want_id).strip()
+    for row in catalog:
+        row_mhz = _positive_mhz(row.get("freq_mhz"))
+        if row_mhz is None:
+            continue
+        row_id = row.get("id")
+        if want_id_s and row_id is not None and str(row_id).strip() == want_id_s:
+            return row_mhz
+        row_cs = normalize_tanker_name(str(row.get("callsign") or ""))
+        if want_cs and row_cs == want_cs:
+            row_track = str(row.get("track") or "").strip().upper()
+            if want_track and row_track == want_track:
+                return row_mhz
+            if exact_cs is None:
+                exact_cs = row_mhz
+    return exact_cs
 
 
 def _caoc_tanker_units(config: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -511,7 +558,13 @@ def pick_tanker(
     return _enrich_live(chosen, unit, config, opus=opus, own_ll=own_ll)
 
 
-def remember_tanker(state: dict[str, Any] | None, tanker: dict[str, Any] | None) -> None:
+def remember_tanker(
+    state: dict[str, Any] | None,
+    tanker: dict[str, Any] | None,
+    *,
+    config: dict[str, Any] | None = None,
+    opus: Any = None,
+) -> None:
     if not isinstance(state, dict):
         return
     if not tanker:
@@ -523,11 +576,10 @@ def remember_tanker(state: dict[str, Any] | None, tanker: dict[str, Any] | None)
     state["tanker_aircraft"] = str(tanker.get("aircraft") or "")
     state["tanker_track"] = str(tanker.get("track") or "")
     state["tanker_tcn"] = str(tanker.get("tcn") or "")
-    mhz = tanker.get("freq_mhz")
-    try:
-        state["tanker_freq_mhz"] = float(mhz) if mhz is not None else None
-    except (TypeError, ValueError):
-        state["tanker_freq_mhz"] = None
+    mhz = _positive_mhz(tanker.get("freq_mhz"))
+    if mhz is None:
+        mhz = catalog_freq_for_tanker(tanker, config, opus=opus)
+    state["tanker_freq_mhz"] = mhz
     if not state.get("tanker_phase") or state.get("tanker_phase") == PHASE_DEPARTED:
         state["tanker_phase"] = PHASE_JOIN
 
@@ -546,19 +598,38 @@ def tanker_target_mhz(state: dict[str, Any] | None) -> float | None:
 def effective_tanker_mhz(
     state: dict[str, Any] | None = None,
     config: dict[str, Any] | None = None,
+    *,
+    opus: Any = None,
 ) -> float | None:
     """
     Frequency the pilot should be on for the active / nearest tanker.
 
-    Prefers the remembered Opus tanker from the last request / rejoin, then any
-    live published tanker UHF. Falls through to None so callers can keep the
-    airports.json placeholder.
+    Prefers the remembered Opus tanker from the last request / rejoin. If that
+    row has no UHF stored, looks up the same callsign / id / track. Never
+    substitutes another published tanker (Fly used to show TEXACO 1's 322.3
+    after Blackjack sent you to TEXACO 2). Anonymous fallback is only when no
+    tanker is assigned. None keeps the airports.json placeholder.
     """
     live = tanker_target_mhz(state)
     if live is not None:
         return live
+    assigned = isinstance(state, dict) and bool(
+        state.get("tanker_callsign")
+        or state.get("tanker_id")
+        or state.get("tanker_track")
+    )
+    if assigned:
+        return catalog_freq_for_tanker(
+            {
+                "id": state.get("tanker_id"),
+                "callsign": state.get("tanker_callsign"),
+                "track": state.get("tanker_track"),
+            },
+            config,
+            opus=opus,
+        )
     try:
-        freqs = tanker_freqs_mhz(config)
+        freqs = tanker_freqs_mhz(config, opus=opus)
     except Exception:
         freqs = []
     return float(freqs[0]) if freqs else None

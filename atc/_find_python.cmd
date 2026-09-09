@@ -119,7 +119,7 @@ echo.
 echo Windows cannot find Python 3.
 echo The "py" launcher is not required — python.exe is enough.
 echo.
-echo Install desktop Python on THIS machine ^(the ATC Host / dedicated server^):
+echo Install desktop Python on THIS PC ^(pilot or Host^):
 echo   https://www.python.org/downloads/windows/
 echo.
 echo In the installer, check:

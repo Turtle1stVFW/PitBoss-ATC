@@ -1,33 +1,42 @@
-# SRS ExternalAudio Remote + ATC Flow
+# 455 ATC Flow (testing)
 
-Patched `DCS-SR-ExternalAudio` that can transmit to a **remote** SRS host (`--ip`), plus a Python ATC / Mission Flow planner for Stream Deck and desktop use.
+Patched `DCS-SR-ExternalAudio` plus a Python Mission Flow app. **Testing build** — expect rough edges.
+
+## Share this with a new pilot
+
+**You (Host operator)**
+
+1. Run `atc\Pack-Share-Zip.cmd` — it builds a zip **without** your `config.json`, tokens, or Google key.
+2. Send the zip, [PILOT-SETUP.md](PILOT-SETUP.md), the ATC hostname, and the shared token.
+3. Keep the Host running (`atc\Start-ATC-Host.cmd`). Your checklist: [HOST-SETUP.md](HOST-SETUP.md).
+
+**Them (pilot PC)** — [PILOT-SETUP.md](PILOT-SETUP.md) is the walkthrough. Short version:
+
+1. Install Python 3.10+ from python.org (PATH + tcl/tk).
+2. Unzip. Double-click `atc\Setup-Pilot.cmd`.
+3. First-run window: Opus username, **Client**, hostname + token, Test connection, Save.
+4. Title bar: pick the Opus flight. Fly: hold SRS PTT and talk.
 
 ## Requirements
 
-- Windows 10/11 x64 (dedicated-server Host is the same)
-- [Python 3.10+](https://www.python.org/downloads/windows/) **on the machine that runs the Host UI**
-  - `py` is optional. The `.cmd` launchers look for `python.exe` on PATH and in the usual install folders.
-  - Enable **Add python.exe to PATH** and **tcl/tk and IDLE** in the installer. The Microsoft Store stub is not enough.
-- .NET desktop runtime only if you **rebuild** ExternalAudio (prebuilt exe is included)
+- Windows 10/11 x64
+- [Python 3.10+](https://www.python.org/downloads/windows/) on every PC that runs the UI  
+  Enable **Add python.exe to PATH** and **tcl/tk and IDLE**. The Microsoft Store stub is not enough.
+- DCS + SRS already installed on flying PCs
+- .NET desktop runtime only if you **rebuild** ExternalAudio (prebuilt exe is in this folder)
 
-## Quick start
+## Launchers (`atc\`)
 
-1. Clone this repo anywhere.
-2. Copy the example config:
-
-   ```powershell
-   Copy-Item atc\config.example.json atc\config.json
-   ```
-
-3. Edit `atc\config.json` (Opus URLs/user, airport defaults).  
-   `external_audio_exe` defaults to `../DCS-SR-ExternalAudio.exe` (relative to `atc\`).
-   First launch copies `config.example.json` if `config.json` is missing.
-4. Launch:
-
-   - `atc\Open-ATC-Setup.cmd` or `atc\Open-Flight-Flow.cmd`
-   - Dedicated-server Host: `atc\Start-ATC-Host.cmd` (same app). Setup → Squadron → **Host** → Save.
+| File | Who |
+|------|-----|
+| `Setup-Pilot.cmd` | First time on a PC (deps + radio export + open the app) |
+| `Open-Flight-Flow.cmd` | Everyday launch |
+| `Start-ATC-Host.cmd` | Dedicated-server Host box |
+| `Pack-Share-Zip.cmd` | Host operator: zip a tester copy with secrets stripped |
+| `Allow-ATC-Host-Firewall.cmd` | Host: inbound TCP 8766 (Run as administrator) |
 
 5. Optional Google Neural2 voices: see [docs/ATC.md](docs/ATC.md). Put your service-account JSON in `atc\secrets\` (gitignored).
+First launch copies `config.example.json` → `config.json` if needed. Do not commit or zip `config.json`.
 
 ## Layout
 
@@ -43,14 +52,19 @@ Patched `DCS-SR-ExternalAudio` that can transmit to a **remote** SRS host (`--ip
 ## Rebuild ExternalAudio
 
 See [docs/PATCHES.md](docs/PATCHES.md). Upstream project: [ciribob/DCS-SimpleRadioStandalone](https://github.com/ciribob/DCS-SimpleRadioStandalone) (GPL-3.0).
+| `DCS-SR-ExternalAudio.exe` | Slim Windows build with `--ip` / hostname support |
+| `atc\` | Flow planner, Fly tab, voice, Host/Client |
+| `atc\dcs\` | DCS radio-export hook (frequency gate) |
+| `tools\` | Zone editor / map-jet tester |
+| `patches\` | Source + rebuild notes for the `--ip` patch |
 
-## Manual transmit example
+In-app **Help** covers voices, Plan Flight, and troubleshooting. The long reference is [atc/README.md](atc/README.md).
 
-```powershell
-.\DCS-SR-ExternalAudio.exe --text="Radio check." --freqs=251.0 --modulations=AM --coalition=2 --ip=your.srs.host --port=5002 --name=LocalTrigger --volume=0.5
-```
+## Rebuild ExternalAudio
+
+See [patches/README.md](patches/README.md). Upstream: [ciribob/DCS-SimpleRadioStandalone](https://github.com/ciribob/DCS-SimpleRadioStandalone) (GPL-3.0).
 
 ## License
 
 - `DCS-SR-ExternalAudio` binaries and `patches\` are derived from Ciribob’s SRS (GPL-3.0). See [LICENSE](LICENSE).
-- The `atc\` Python tools in this repo are provided alongside that for squadron use; keep GPL obligations if you redistribute the ExternalAudio binaries.
+- The `atc\` Python tools are for squadron use; keep GPL obligations if you redistribute the ExternalAudio binaries.

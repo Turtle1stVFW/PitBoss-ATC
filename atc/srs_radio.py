@@ -382,18 +382,29 @@ def maybe_force_eam_tx_freq(
     config: dict[str, Any] | None,
     freq: float,
     mod: str,
+    radio: RadioState | None = None,
 ) -> tuple[float, str]:
     """
     Common-PTT EAM mode: ExternalAudio must TX only on the selected radio.
 
-    Prefer the live SRS client selection; fall back to the manual EAM strip.
+    Prefer the calling pilot's radios (host session), then this PC's SRS
+    client, then the manual EAM strip. A dedicated host must not steal the
+    TX frequency from its own (or empty) radio bank.
     """
     apply_config(config)
     if not _eam_enabled:
         return float(freq), mod
+    if radio is not None and radio.fresh:
+        if radio.selected_mhz is not None:
+            return float(radio.selected_mhz), mod
+        if radio.freqs_mhz:
+            return float(radio.freqs_mhz[0]), mod
     srs = read_srs_client_selected()
-    if srs.fresh and srs.freqs_mhz:
-        return float(srs.freqs_mhz[0]), mod
+    if srs.fresh:
+        if srs.selected_mhz is not None:
+            return float(srs.selected_mhz), mod
+        if srs.freqs_mhz:
+            return float(srs.freqs_mhz[0]), mod
     active = eam_active_mhz()
     if active is None:
         return float(freq), mod
@@ -729,7 +740,9 @@ def seed_eam_from_airport(airport: dict[str, Any]) -> list[float]:
     import atc_phrase
 
     freqs: list[float] = []
-    for ch in atc_phrase.CHANNELS:
+    # Backup / first EAM radio is OPS (preflight), then the rest of the strip.
+    order = ["ops"] + [c for c in atc_phrase.CHANNELS if c != "ops"]
+    for ch in order:
         try:
             mhz, _mod, _name = atc_phrase.channel_radio(airport, ch)
         except Exception:  # noqa: BLE001
@@ -830,6 +843,7 @@ def channel_for_tuned_freq(
     Prefers the keyed / selected radio so voice replies TX on the PTT net.
     If that radio is intra-flight VHF (no agency), falls through to another
     tuned agency so Blackjack / Bandsaw tips still follow the UHF stack.
+    Joshua / Center in the stack do not steal Fly — those are geographic.
     """
     import atc_phrase
 
@@ -838,6 +852,7 @@ def channel_for_tuned_freq(
     st = state if state is not None else current_radio_state(cfg)
     if not st.fresh or not st.freqs_mhz:
         return None
+    skip_stack = frozenset({"joshua", "center", "other"})
 
     def _channel_for_mhz(target: float) -> str | None:
         for ch in atc_phrase.CHANNELS:
@@ -870,7 +885,7 @@ def channel_for_tuned_freq(
             return keyed
     for freq in st.freqs_mhz:
         matched = _channel_for_mhz(float(freq))
-        if matched:
+        if matched and matched not in skip_stack:
             return matched
     return None
 

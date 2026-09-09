@@ -225,6 +225,62 @@ def main() -> int:
     else:
         print("OK declaration memory survives state round-trip")
 
+    neu = pl.DeclarationMemory()
+    neu_first = neu.assign(
+        ["civ1"], brg=40, rng=30, feet=32000, coalition="neutral", hostile_side="red"
+    )
+    neu_up = neu.assign(
+        ["civ1"],
+        brg=41,
+        rng=31,
+        feet=31800,
+        coalition="neutral",
+        hostile_side="red",
+        upgrade_hostile=True,
+    )
+    civ_red = pl.DeclarationMemory().assign(
+        ["airliner"],
+        brg=80,
+        rng=50,
+        feet=35000,
+        coalition="red",
+        hostile_side="red",
+        upgrade_hostile=True,
+    )
+    sticky_wrong = pl.DeclarationMemory()
+    sticky_wrong.force(["civ2"], "hostile", brg=12, rng=20, feet=28000)
+    repaired = sticky_wrong.assign(
+        ["civ2"], brg=13, rng=21, feet=27800, coalition="neutral", hostile_side="red"
+    )
+    red_g = _g(6.0, 270, heading=90, feet=28000, bearing=56, range_nm=67)
+    red_g.declaration = "bandit"
+    red_g.coalition = "red"
+    neu_g = _g(12.0, 250, heading=90, feet=32000, bearing=40, range_nm=20)
+    neu_g.declaration = "bogey spades"
+    neu_g.coalition = "neutral"
+    neu_g.object = "Yak-40"
+    bandsaw_red = pl.declare_may_upgrade_hostile(
+        red_g, agency="Bandsaw", channel="bandsaw", hostile_side="red"
+    )
+    bandsaw_neu = pl.declare_may_upgrade_hostile(
+        neu_g, agency="Bandsaw", channel="bandsaw", hostile_side="red"
+    )
+    if (
+        neu_first != "bogey spades"
+        or neu_up != "bogey spades"
+        or civ_red != "hostile"
+        or repaired != "bogey spades"
+        or not bandsaw_red
+        or bandsaw_neu
+    ):
+        print(
+            f"FAIL civilian/neutral declare: {neu_first=} {neu_up=} {civ_red=} "
+            f"{repaired=} bandsaw_red={bandsaw_red} bandsaw_neu={bandsaw_neu}"
+        )
+        bad += 1
+    else:
+        print("OK declare: CAOC neutrals stay bogey spades; red can be hostile")
+
     import atc_phrase
 
     # Spoken BRAA is magnetic (true − 12°E on NTTR).

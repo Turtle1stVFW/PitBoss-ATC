@@ -157,7 +157,7 @@
       "radial_ref": "LAS 349°/38 NM"
     }
   ],
-  "_instrument_comment": "IAFs and crossing altitudes from the KLSV CIFP procedure records. '+' constraints are at-or-above. ILS and LOC are separate procedures on the same plate — only one is ever assigned. range_gate IAFs (ARCOE/DUDBE/LUCIL) are the only ones position-based recoveries may pick — intermediate fixes like SHEET stay request/route-only.",
+  "_instrument_comment": "IAFs and crossing altitudes from the KLSV CIFP procedure records. '+' constraints are at-or-above. ILS and LOC are separate procedures on the same plate — only one is ever assigned. range_gate IAFs (ARCOE/DUDBE/LUCIL) are the only ones position-based recoveries may pick. Filed KRYSS with no ARCOE is ILS X (KRYSS is the start of that plate; on ILS Z it is only an intermediate).",
   "instrument": [
     {
       "id": "ILS_Z_21L",

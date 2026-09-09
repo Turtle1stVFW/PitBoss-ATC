@@ -3,7 +3,7 @@
     "name": "Nellis",
     "icao": "KLSV",
     "coalition": 2,
-    "srs_host": "127.0.0.1",
+    "srs_host": "showtime.455aew.com",
     "srs_port": 5002,
     "runways": [
       "21R",
@@ -14,23 +14,28 @@
       {
         "match": [
           "469th",
-          "469"
+          "469",
+          "toro"
         ],
-        "parking": "Row 18"
+        "parking": "Row 18",
+        "ops": "Toro Ops"
       },
       {
         "match": [
           "561st",
-          "561"
+          "561",
+          "knight"
         ],
-        "parking": "Knight Ramp"
+        "parking": "Knight Ramp",
+        "ops": "Knight Ops"
       },
       {
         "match": [
           "8th",
           "wool"
         ],
-        "parking": "WOOL Ramp"
+        "parking": "WOOL Ramp",
+        "ops": "Wool Ops"
       },
       {
         "match": [
@@ -149,9 +154,10 @@
       "source": "local"
     },
     "ops": {
-      "freq_mhz": 255.0,
+      "freq_mhz": 269.025,
       "mod": "AM",
-      "source": "local"
+      "source": "opus",
+      "local_preset": 1
     },
     "other": {
       "freq_mhz": 251.0,
