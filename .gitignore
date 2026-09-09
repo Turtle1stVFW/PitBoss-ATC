@@ -45,3 +45,6 @@ Thumbs.db
 .vs/
 .idea/
 *.user
+
+# Cursor IDE (local rules, plans)
+.cursor/

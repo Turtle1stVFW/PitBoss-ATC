@@ -35,12 +35,23 @@ Patched `DCS-SR-ExternalAudio` plus a Python Mission Flow app. **Testing build**
 | `Pack-Share-Zip.cmd` | Host operator: zip a tester copy with secrets stripped |
 | `Allow-ATC-Host-Firewall.cmd` | Host: inbound TCP 8766 (Run as administrator) |
 
+5. Optional Google Neural2 voices: see [docs/ATC.md](docs/ATC.md). Put your service-account JSON in `atc\secrets\` (gitignored).
 First launch copies `config.example.json` → `config.json` if needed. Do not commit or zip `config.json`.
 
 ## Layout
 
 | Path | Purpose |
 |------|---------|
+| `DCS-SR-ExternalAudio.exe` + DLLs | Slim Windows build with `--ip` / hostname support |
+| `runtimes\win-x64\` | Native Speech / gRPC libs |
+| `atc\` | Flow planner, phrase board, Stream Deck scripts |
+| `atc\Install-DCS-Radio-Export.cmd` | Auto-install DCS Export hook for the freq gate (installer-safe) |
+| `docs\` | Maintainer architecture / flow overview ([docs/README.md](docs/README.md)) |
+| `patches\` | Source files + rebuild instructions for the `--ip` patch |
+
+## Rebuild ExternalAudio
+
+See [docs/PATCHES.md](docs/PATCHES.md). Upstream project: [ciribob/DCS-SimpleRadioStandalone](https://github.com/ciribob/DCS-SimpleRadioStandalone) (GPL-3.0).
 | `DCS-SR-ExternalAudio.exe` | Slim Windows build with `--ip` / hostname support |
 | `atc\` | Flow planner, Fly tab, voice, Host/Client |
 | `atc\dcs\` | DCS radio-export hook (frequency gate) |

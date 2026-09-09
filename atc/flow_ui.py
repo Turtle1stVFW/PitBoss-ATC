@@ -7136,6 +7136,7 @@ class MissionPlanner(tk.Tk):
         self.fly_step_num = tk.StringVar(value="")
         self.fly_step_name = tk.StringVar(value="…")
         self.fly_channel = tk.StringVar(value="")
+        self.fly_local_preset = tk.StringVar(value="")
         self.fly_freq = tk.StringVar(value="—")
         self.fly_mod = tk.StringVar(value="")
         self.fly_tx_name = tk.StringVar(value="")
@@ -7299,6 +7300,15 @@ class MissionPlanner(tk.Tk):
         ).pack(anchor="w", padx=14, pady=(8, 0))
         freq_row = tk.Frame(freq_left, bg="#0a0e14")
         freq_row.pack(fill=tk.X, padx=14, pady=(0, 2))
+        self._fly_local_preset_lbl = tk.Label(
+            freq_row,
+            textvariable=self.fly_local_preset,
+            bg="#0a0e14",
+            fg=C_AMBER,
+            font=("Consolas", 34, "bold"),
+            anchor="w",
+        )
+        self._fly_local_preset_lbl.pack(side=tk.LEFT)
         self._fly_freq_lbl = tk.Label(
             freq_row,
             textvariable=self.fly_freq,
@@ -7702,10 +7712,15 @@ class MissionPlanner(tk.Tk):
         self._refresh_fly_status()
         self.after_idle(self._fly_update_scrollregion)
 
-    def _fly_upcoming_radio(self, step: dict[str, Any] | None) -> tuple[str, str, str, str]:
-        """Return (channel_label, freq_display, mod, tx_name) for the next step."""
+    def _fly_upcoming_radio(
+        self, step: dict[str, Any] | None
+    ) -> tuple[str, str, str, str, str]:
+        """Return (channel_label, local_preset, freq_display, mod, tx_name) for the next step.
+
+        local_preset is '[N] ' when the airport channel has local_preset, else ''.
+        """
         if not step:
-            return ("—", "—", "", "")
+            return ("—", "", "—", "", "")
         channel = str(step.get("channel") or step.get("phase") or "other").strip().lower()
         try:
             ap = self.engine.airport()
@@ -7747,7 +7762,15 @@ class MissionPlanner(tk.Tk):
         # UHF/VFR style: always three decimals for glanceable kneeboard read
         freq_disp = f"{float(freq):.3f}"
         ch_label = channel.upper()
-        return ch_label, freq_disp, str(mod or "AM").upper(), str(tx_name or "")
+        local_prefix = ""
+        block = ap.get(channel) or {}
+        raw_preset = block.get("local_preset")
+        if raw_preset is not None:
+            try:
+                local_prefix = f"[{int(raw_preset)}] "
+            except (TypeError, ValueError):
+                local_prefix = ""
+        return ch_label, local_prefix, freq_disp, str(mod or "AM").upper(), str(tx_name or "")
 
     def _queue_fly_phrase_preview(self, step: dict[str, Any] | None) -> None:
         """Fill EXPECTED RESPONSE with the upcoming radio phrase (async; may re-roll)."""
@@ -8840,6 +8863,7 @@ class MissionPlanner(tk.Tk):
             total = st.get("total", 0)
             self.fly_step_num.set(f"STEP — / {total}")
             self.fly_step_name.set("No next step")
+            self.fly_local_preset.set("")
             self.fly_freq.set("—")
             self.fly_mod.set("")
             self.fly_channel.set("NO NEXT TRANSMIT")
@@ -8945,6 +8969,16 @@ class MissionPlanner(tk.Tk):
             else:
                 self.fly_step_num.set(f"STEP {num} / {total}")
                 self.fly_step_name.set(label)
+            ch, local_preset, freq, mod, tx = self._fly_upcoming_radio(step)
+            display_ch = ch
+            # NEXT TX FREQUENCY is the upcoming step, not the radio you are
+            # tuned to (that is YOU ARE ON / YOU ARE WITH). Overwriting with
+            # live Ground after a Tower handoff left the hero on GND.
+            self.fly_local_preset.set(local_preset)
+            self.fly_freq.set(freq)
+            self.fly_mod.set(mod)
+            self.fly_channel.set(display_ch)
+            self.fly_tx_name.set(f"SRS name: {tx}" if tx else "")
             if switch_to and pending_ch:
                 try:
                     ap = self.engine.airport()
