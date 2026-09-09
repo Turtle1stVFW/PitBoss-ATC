@@ -155,7 +155,7 @@ HANDOFF_PENDING_BY_TEMPLATE: dict[str, str] = {
     "departure_handoff": "blackjack",
     "bandsaw_check_out": "blackjack",
     "joshua_check_out": "blackjack",
-    # OPS start / WORDS+start → Clearance Delivery (sandbox, not a flow step).
+    # OPS start / WORDS+start → Clearance Delivery (Ops is flow step 1).
     "ops_words": "delivery",
     "ops_start": "delivery",
 }

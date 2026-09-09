@@ -169,6 +169,38 @@ def main() -> int:
             print("  FAIL selected Joshua UHF must still resolve")
             bad += 1
 
+        # Ops in the stack with TX parked on the 251 "other" catch-all used to
+        # paint Fly as Control and hide WORDS / start. Fall through like VHF.
+        OPS_MHZ = float((AIRPORT.get("ops") or {}).get("freq_mhz") or 269.025)
+        OTHER_MHZ = float((AIRPORT.get("other") or {}).get("freq_mhz") or 251.0)
+        keyed_other_ops = srs_radio.RadioState(
+            source="srs",
+            freqs_mhz=[OPS_MHZ, OTHER_MHZ, 30.0, 124.8],
+            selected_mhz=OTHER_MHZ,
+            fresh=True,
+            age_s=0.1,
+        )
+        tuned_ops = srs_radio.channel_for_tuned_freq(
+            AIRPORT, cfg, state=keyed_other_ops
+        )
+        if tuned_ops != "ops":
+            print(
+                f"  FAIL Ops in the stack must win over keyed other/251, got {tuned_ops!r}"
+            )
+            bad += 1
+        else:
+            print("keyed other/251 falls through to Ops — ok")
+        keyed_ops = srs_radio.RadioState(
+            source="srs",
+            freqs_mhz=[OPS_MHZ, OTHER_MHZ],
+            selected_mhz=OPS_MHZ,
+            fresh=True,
+            age_s=0.1,
+        )
+        if srs_radio.channel_for_tuned_freq(AIRPORT, cfg, state=keyed_ops) != "ops":
+            print("  FAIL selected Ops UHF must still resolve")
+            bad += 1
+
         line = srs_radio.format_you_are_on(bank, AIRPORT)
         if "BLACKJACK" not in line or "TX" not in line or "132.650" not in line:
             print(f"  FAIL YOU ARE ON should list UHF + VHF TX, got {line!r}")

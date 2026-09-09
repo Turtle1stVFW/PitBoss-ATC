@@ -1830,6 +1830,36 @@ def _transmit(
     }
 
 
+def _seek_delivery_after_ops(engine: Any) -> None:
+    """
+    After WORDS / start, park the cursor on Clearance Delivery.
+
+    Ops is step 1 now — without this the timeline stays on Ops after the
+    call and Fly keeps tipping Backup UHF instead of Delivery.
+    """
+    if not hasattr(engine, "state") or not isinstance(engine.state, dict):
+        return
+    sought = False
+    if hasattr(engine, "_seek_template"):
+        sought = bool(
+            engine._seek_template("clearance")
+            or engine._seek_template("clearance_amendment")
+        )
+    if not sought:
+        steps = list(getattr(engine, "steps", None) or [])
+        idx = int(engine.state.get("index") or 0)
+        if 0 <= idx < len(steps):
+            ch = str((steps[idx] or {}).get("channel") or "").strip().lower()
+            if ch == "ops":
+                engine.state["index"] = idx + 1
+                sought = True
+    if sought and hasattr(engine, "save_state"):
+        try:
+            engine.save_state()
+        except Exception:
+            pass
+
+
 def execute_ops_action(
     engine: Any,
     action: str,
@@ -1839,7 +1869,7 @@ def execute_ops_action(
     callsign: str = "",
     opus: Any = None,
 ) -> dict[str, Any]:
-    """WORDS / start approval / postflight codes. Does not move the flight cursor."""
+    """WORDS / start approval / postflight codes. Advances to Delivery after start."""
     import ops as ops_mod
 
     ap = airport if isinstance(airport, dict) else engine.airport()
@@ -1902,7 +1932,9 @@ def execute_ops_action(
         )
         if hasattr(engine, "save_state"):
             engine.save_state()
-        return _transmit(engine, ap, text, "ops", template="ops_words")
+        result = _transmit(engine, ap, text, "ops", template="ops_words")
+        _seek_delivery_after_ops(engine)
+        return result
 
     if action == "ops_request_start":
         if not already:
@@ -1925,7 +1957,9 @@ def execute_ops_action(
         )
         if hasattr(engine, "save_state"):
             engine.save_state()
-        return _transmit(engine, ap, text, "ops", template="ops_start")
+        result = _transmit(engine, ap, text, "ops", template="ops_start")
+        _seek_delivery_after_ops(engine)
+        return result
 
     if action == "ops_status":
         codes = ops_mod.parse_aircraft_codes(transcript, flight_callsign=callsign)

@@ -656,6 +656,12 @@ class FlowEngine:
                 template = spoken
                 step = dict(step)
                 step["template"] = spoken
+            # Kneeboard Play on the Ops step: issue WORDS + start, then leave
+            # for Delivery (ops_words does not hold the cursor).
+            if str(template or "").strip().lower() == "ops_check_in":
+                template = "ops_words"
+                step = dict(step)
+                step["template"] = "ops_words"
             custom_text = step.get("text")
             text, tx_name, _freq_ignored, _mod_ignored = atc_phrase.build_flow_step_phrase(
                 airport,

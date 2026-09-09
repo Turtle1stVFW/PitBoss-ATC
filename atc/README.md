@@ -354,6 +354,7 @@ Calls it understands:
 
 | Say | Result |
 |-----|--------|
+| "Ops, request current WORDS" / "request start" | **Step 1** on Nellis Default. Tune **Backup UHF 269.025** before start. WORDS also approves start; then Fly tips you to Delivery |
 | "Ground, ready to taxi" / "request clearance" / "ready for departure" | Fires the matching flow step |
 | "Request runway two one left" | Sets the runway and reads back the approval |
 | "Say winds" / "say altimeter" | Live METAR answer |

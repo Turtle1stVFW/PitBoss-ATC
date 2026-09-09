@@ -2461,8 +2461,11 @@ def step_holds_after_play(step: dict[str, Any] | None) -> bool:
         return True
     if tmpl in ("joshua_check_in", "control_check_in", "center_check_in", "center_radar"):
         return True
-    if tmpl in ("ops_check_in", "ops_words", "ops_start", "ops_status"):
+    # Bare Ops check-in holds; WORDS / start leave for Delivery (see Play remap).
+    if tmpl == "ops_check_in":
         return True
+    if tmpl in ("ops_words", "ops_start", "ops_status"):
+        return False
     # Tanker is a side trip: Play stays on AAR until they retune C2.
     return str(step.get("channel") or "").strip().lower() == "tanker"
 
@@ -4512,6 +4515,11 @@ def suggestions(
         ):
             # Prefer on ALSO AVAILABLE; rank still orders within optional.
             rank = 0 if intent.id == "request_winds" else 1
+        elif expected_l == "ops_check_in" and intent.id in (
+            "ops_request_words",
+            "ops_request_start",
+        ):
+            rank = 0
         elif expected and intent.template and intent.template == expected:
             rank = 0
         elif channel_l == "ops" and intent.id in (
@@ -4534,7 +4542,7 @@ def suggestions(
 
         # Step / mission phrases that are the expected call → advance.
         # Requests and actions → optional (even when ranked high for visibility).
-        # OPS / tanker have no timeline step — the speakable requests *are* the card.
+        # OPS step 1 and tanker side-trip: the speakable requests *are* the card.
         if intent.kind == "step" or intent.step_id:
             role = "advance" if rank == 0 else ""
         elif channel_l == "ops" and intent.id in (

@@ -6889,7 +6889,54 @@ def agency_sandbox() -> int:
     bad = 0
     import agencies
     import atc_phrase
+    import json as _json
+    from pathlib import Path as _Path
+
+    import flow_engine as fe
     import voice_engine
+
+    flow_path = _Path(__file__).resolve().parent / "flows" / "nellis_default.json"
+    mission = _json.loads(flow_path.read_text(encoding="utf-8"))
+    first = (mission.get("steps") or [None])[0] or {}
+    if (
+        str(first.get("channel") or "") != "ops"
+        or "269.025" not in str(first.get("label") or "")
+    ):
+        print(f"  FAIL Nellis Default step 1 must be Ops Backup UHF, got {first}")
+        bad += 1
+    else:
+        print("nellis default — Ops is step 1 (Backup UHF 269.025)")
+
+    ops_eng = fe.FlowEngine(
+        dry_run=True,
+        persist_state=False,
+        config={
+            "dry_run": True,
+            "freq_gate_enabled": False,
+            "flow_file": "flows/nellis_default.json",
+        },
+        mission=mission,
+        airports=atc_phrase.load_json(atc_phrase.AIRPORTS_PATH),
+    )
+    cur0 = ops_eng.current_step() or {}
+    if str(cur0.get("channel") or "") != "ops":
+        print(f"  FAIL fresh engine must start on Ops, got {cur0.get('id')}")
+        bad += 1
+    played = voice_engine.execute_ops_action(
+        ops_eng, "ops_request_start", callsign="Fleece 1"
+    )
+    after = ops_eng.current_step() or {}
+    if str(after.get("template") or "") != "clearance":
+        print(
+            f"  FAIL after Ops start cursor must be on Delivery clearance, "
+            f"got {after.get('id')!r} / {after.get('template')!r}"
+        )
+        bad += 1
+    elif not (played.get("text") or played.get("detail")):
+        print(f"  FAIL Ops start should transmit, got {played}")
+        bad += 1
+    else:
+        print("ops step 1 — start advances to Clearance Delivery")
 
     if voice_intent.extract_channel("nellis control fleece 1 checking in") != "control_east":
         print("  FAIL Nellis Control must address control_east")

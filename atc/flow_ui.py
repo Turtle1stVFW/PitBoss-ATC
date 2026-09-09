@@ -9223,6 +9223,19 @@ class MissionPlanner(tk.Tk):
             # with its number and radio, not the agency we are nudging them to.
             if (getattr(self.engine, "state", None) or {}).get("manual_step_view"):
                 sandbox = False
+            # Ops is not a timeline step — without this, a custom Plan (Untitled)
+            # keeps painting Delivery over the Ops radio the pilot just selected.
+            if not sandbox:
+                try:
+                    if (
+                        srs_radio.channel_for_tuned_freq(
+                            self.engine.airport(), self.config_data
+                        )
+                        or ""
+                    ).strip().lower() == "ops":
+                        sandbox = True
+                except Exception:
+                    pass
             live_ch = ""
             pending_ch = ""
             hero_ch = ""
@@ -9392,6 +9405,17 @@ class MissionPlanner(tk.Tk):
                 atc_phrase.resolve_active_takeoff_mode(self.mission, self.engine.state)
             )
             hint = f"{mode.upper()}  ·  {tmpl}"
+            if str(ch).strip().lower() == "ops":
+                try:
+                    ops_mhz, ops_mod, _tx = atc_phrase.channel_radio(
+                        self.engine.airport(), "ops"
+                    )
+                    hint = (
+                        f"Tune Backup UHF {float(ops_mhz):.3f} {str(ops_mod or 'AM').upper()} "
+                        f"before start  ·  {hint}"
+                    )
+                except Exception:
+                    hint = f"Tune Backup UHF 269.025 before start  ·  {hint}"
             step_phase = atc_phrase.resolve_pilot_request_phase(
                 phase=str(step.get("phase") or ""),
                 channel=str(ch).strip().lower(),
