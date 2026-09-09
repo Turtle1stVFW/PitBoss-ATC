@@ -21,6 +21,7 @@ import atc_phrase
 import atc_server
 import channel_tx
 import flow_engine
+import runway_position
 import srs_radio
 import tanker
 import voice_engine
@@ -224,7 +225,27 @@ def test_client_freq_gate() -> list[str]:
     except RuntimeError as exc:
         if "Blocked" not in str(exc):
             fails.append(f"expected Blocked, got {exc}")
-    # Delivery is 289.4 at Nellis
+    # Ops is step 1 at Nellis, so the gate wants 269.025 before Delivery's 289.4.
+    try:
+        server.handle_command(
+            sess,
+            "next",
+            {"tuned_freqs_mhz": [269.025], "radio_fresh": True},
+        )
+    except RuntimeError as exc:
+        fails.append(f"on-freq Ops should allow: {exc}")
+    # Ops holds the cursor until WORDS/start, so step to Delivery by hand.
+    delivery_idx = next(
+        (
+            i
+            for i, s in enumerate(MISSION.get("steps") or [])
+            if str(s.get("channel") or "") == "delivery"
+        ),
+        -1,
+    )
+    if delivery_idx < 0:
+        return fails + ["mission has no Delivery step"]
+    server.handle_command(sess, "seek", {"index": delivery_idx})
     try:
         server.handle_command(
             sess,
@@ -881,7 +902,33 @@ def test_client_tanker_chat_gap() -> list[str]:
         "choices": [],
         "next_at": time.time() - 1,
     }
-    line = "Coffee holding up okay up there?"
+    # A boom line that asks a question holds the bit open for the pilot
+    # instead of arming another opener on top of him.
+    question = "Coffee holding up okay up there?"
+    played = server.handle_command(
+        sess,
+        "tanker_chat",
+        {
+            "continue": True,
+            "auto": True,
+            "text": question,
+            "radio_fresh": False,
+        },
+    )
+    got = str(played.get("text") or "")
+    if question not in got:
+        fails.append(f"client-generated boom line should TX, got {played}")
+    row = (sess.local_state or {}).get("tanker_chat") or {}
+    if row.get("next_at") is not None or row.get("awaiting") != "react":
+        fails.append(f"a boom question should wait for the pilot, got {row}")
+
+    # A line that closes itself out arms the next gap.
+    sess.local_state["tanker_chat"] = {
+        "session": True,
+        "choices": [],
+        "next_at": time.time() - 1,
+    }
+    line = "Boom's showing a green light back here."
     played = server.handle_command(
         sess,
         "tanker_chat",
@@ -892,8 +939,7 @@ def test_client_tanker_chat_gap() -> list[str]:
             "radio_fresh": False,
         },
     )
-    got = str(played.get("text") or "")
-    if line not in got:
+    if line not in str(played.get("text") or ""):
         fails.append(f"client-generated boom line should TX, got {played}")
     row = (sess.local_state or {}).get("tanker_chat") or {}
     try:
@@ -1086,6 +1132,104 @@ def test_wild6_ownship_and_shared_cursor() -> list[str]:
     return fails
 
 
+def test_seat_position_beats_host_feed() -> list[str]:
+    """
+    The host must gate on the client's fix, never on its own map / CAOC feed.
+
+    Host Fly seeing a parked contact 0.8 NM out is what fired the 12 NM tower
+    handoff and the 6 NM landing clearance on a jet still 38 NM from Nellis.
+    """
+    fails: list[str] = []
+    cfg = _host_config(ownship_from_map=True)
+    server = atc_server.AtcServer(
+        cfg, AIRPORTS, lambda: copy.deepcopy(MISSION), transmit_fn=lambda _j: 0
+    )
+    hello = server.hello({"callsign_override": "Fleece 1", "opus_flight_id": 707})
+    sess = server.get_session(hello["session_id"])
+    if sess is None:
+        return ["no session"]
+    nellis = AIRPORTS["nellis"]
+    field = runway_position.airport_field_latlon(nellis)
+
+    # Host-side feed says the jet is on the field, and a stale cached fix agrees.
+    parked = [field[0] + 0.012, field[1]]
+    atc_phrase.write_ownship_inject(
+        lat=parked[0], lon=parked[1], alt_ft_agl=0, heading_deg=210,
+        speed_kt=0, callsign="Fleece 1", airport=nellis,
+    )
+    sess.engine.state["ownship_ll"] = list(parked)
+    sess.engine.state["ownship_ll_t"] = time.time()
+    try:
+        # Client reports 38 NM out on the KRYSS side.
+        inbound = (36.79, -114.72)
+        sess.apply_ownship({"ownship_ll": [inbound[0], inbound[1]]})
+        with atc_server._session_engine_binding(sess):
+            dist = runway_position.ownship_distance_nm(
+                nellis, config=sess.engine.config, state=sess.engine.state
+            )
+        if dist is None or abs(dist - 36.5) > 2.0:
+            fails.append(f"host should gate on the client's 38 NM fix, got {dist}")
+
+        # No client fix at all must hold the gates, not fall back to the host.
+        sess.apply_ownship({"ownship_ll": None})
+        with atc_server._session_engine_binding(sess):
+            blind = runway_position.ownship_distance_nm(
+                nellis, config=sess.engine.config, state=sess.engine.state
+            )
+        if blind is not None:
+            fails.append(f"no client fix should read as unknown, got {blind}")
+        trig = runway_position.resolve_step_trigger(
+            {"template": "clear_land", "trigger": {"when": "inside"}},
+            mission=MISSION,
+            state={"approach_plan": {"pattern": "instrument"}},
+        )
+        held, _why = runway_position.within_nm_held(trig, blind)
+        if held:
+            fails.append("landing clearance must not fire without a position")
+
+        # Outside the binding the host's own feed is fine again (solo Fly).
+        solo = runway_position.ownship_distance_nm(
+            nellis, config=sess.engine.config, state={}
+        )
+        if solo is None or solo > 3.0:
+            fails.append(f"host solo Fly should still use its own feed, got {solo}")
+    finally:
+        atc_phrase.clear_ownship_inject()
+    return fails
+
+
+def test_client_sends_its_own_fix() -> list[str]:
+    """Every client request carries this PC's fix so the host can gate on it."""
+    fails: list[str] = []
+    import atc_client
+
+    cfg = _host_config(atc_role="client", ownship_from_map=True)
+    nellis = AIRPORTS["nellis"]
+    atc_phrase.write_ownship_inject(
+        lat=36.79, lon=-114.72, alt_ft_agl=17000, heading_deg=210,
+        speed_kt=400, callsign="Fleece 1", airport=nellis,
+    )
+    try:
+        payload = atc_client._radio_payload(cfg)
+        if "ownship_ll" not in payload:
+            fails.append("radio payload should always carry ownship_ll")
+        ll = payload.get("ownship_ll")
+        if not isinstance(ll, list) or len(ll) != 2:
+            fails.append(f"client should send its fix, got {ll}")
+        elif abs(ll[0] - 36.79) > 0.01 or abs(ll[1] + 114.72) > 0.01:
+            fails.append(f"client sent the wrong fix: {ll}")
+    finally:
+        atc_phrase.clear_ownship_inject()
+
+    # Unknown position sends an explicit null, not a missing key.
+    blind = atc_client._radio_payload(cfg)
+    if "ownship_ll" not in blind:
+        fails.append("unknown position should still send the key")
+    elif blind.get("ownship_ll") is not None:
+        fails.append(f"unknown position should send null, got {blind.get('ownship_ll')}")
+    return fails
+
+
 def main() -> int:
     tests = (
         test_session_key,
@@ -1105,6 +1249,8 @@ def main() -> int:
         test_client_tanker_chat_gap,
         test_voice_tanker_chat_updates_flow_state,
         test_wild6_ownship_and_shared_cursor,
+        test_seat_position_beats_host_feed,
+        test_client_sends_its_own_fix,
     )
     bad = 0
     for fn in tests:

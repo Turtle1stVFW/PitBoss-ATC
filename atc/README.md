@@ -54,6 +54,8 @@ Default role is still **Solo** — one PC, same as today. To run ATC for several
 
 **Zone and distance auto-fire** (EOR 2/2, beyond 18 NM, …) is scored on the Client — that PC has the CAOC picture of your jet. The Host still transmits. Only **your Opus flight** counts in the zone (not Viper if you are Fleece). Turn on **Watch live position** on the Host or the flying Client; the dedicated-server box often cannot see you the same way.
 
+Every Client request (including the 1 Hz heartbeat) carries **that PC's own fix**, and the Host gates each seat on it. The Host never scores a Client's jet from its own map inject or CAOC feed — those watch the Host PC, so a parked contact near the field would otherwise fire the 12 NM tower handoff and the 6 NM landing clearance while the jet was still 38 NM out. A Client that cannot resolve its position reports none, which **holds** the Host's distance gates rather than opening them.
+
 **Tanker boom chat** is written on the flying Client (Ollama on that PC still counts) and transmitted only by the Host, so the two copies cannot talk over each other.
 
 **Same Opus flight = one timeline.** Every Client that picks the same Opus flight shares the Host C2 cursor. Dash-1 checking in with Ground (or Play Next) moves dash-3’s Fly tab too. Picture / declare from number 3 work on that shared C2 step — say *Fleece 1* or *Fleece 1-3*. A different Opus flight stays on its own cursor.
@@ -425,7 +427,10 @@ Check-in sounds like: *“Fleece 1, Nellis Approach, Nellis landing south, expec
 TAC Overhead runway two one right, cleared direct Arcoe, …”* (or Torye / Stryk /
 Mintt for that recovery; landing north when the 03s are active; instrument uses
 the plate name + IAF). Descend altitude comes from the VFR recovery or the
-**plate IAF altitude** in `approaches/nellis.json`. Speed is **not** cleared
+**plate IAF altitude** in `approaches/nellis.json`. A VFR recovery altitude is
+capped by the cruise altitude in use (Clearance Delivery's amendment, not the
+stale Opus number), but a plate crossing altitude is a published minimum and
+stands on its own — filing 4,700 still crosses KRYSS at 8,800. Speed is **not** cleared
 unless traffic (or similar) sets a restriction. Recoveries prefer the **21s** and use the **03s** only when the prevailing
 headwind/tailwind **component** exceeds **10 kt** (NAFBI 11-250 §1.12 — RWY 21 is
 the calm-wind runway; closest wind direction alone is not enough, so 090/15 stays

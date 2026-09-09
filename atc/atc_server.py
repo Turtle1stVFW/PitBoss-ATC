@@ -91,6 +91,8 @@ class PilotSession:
         self.last_result: dict[str, Any] | None = None
         self.token: str = ""
         self.local_state: dict[str, Any] = {}
+        self.ownship_ll: tuple[float, float] | None = None
+        self.ownship_ll_t: float = 0.0
 
     @property
     def callsign(self) -> str:
@@ -98,6 +100,33 @@ class PilotSession:
 
     def touch(self) -> None:
         self.last_seen = time.time()
+
+    def apply_ownship(self, body: dict[str, Any]) -> None:
+        """
+        Record where this seat says it is.
+
+        Stamped on receipt rather than from the client's clock, so a skewed PC
+        cannot make its fix look fresh (or stale) to the host's gates.
+        """
+        if "ownship_ll" not in body:
+            return
+        raw = body.get("ownship_ll")
+        ll: tuple[float, float] | None = None
+        if isinstance(raw, (list, tuple)) and len(raw) >= 2:
+            try:
+                ll = (float(raw[0]), float(raw[1]))
+            except (TypeError, ValueError):
+                ll = None
+        self.ownship_ll = ll
+        self.ownship_ll_t = time.time() if ll is not None else 0.0
+
+    def fresh_ownship_ll(self) -> tuple[float, float] | None:
+        """This seat's fix while it is recent enough to gate on."""
+        if self.ownship_ll is None:
+            return None
+        if (time.time() - self.ownship_ll_t) > atc_phrase.OWNSHIP_FIX_MAX_AGE_S:
+            return None
+        return self.ownship_ll
 
     def apply_radios(self, body: dict[str, Any], *, inject: bool = True) -> None:
         freqs = body.get("tuned_freqs_mhz")
@@ -115,6 +144,7 @@ class PilotSession:
             self.selected_mhz = float(sel) if sel is not None else None
         except (TypeError, ValueError):
             self.selected_mhz = None
+        self.apply_ownship(body)
         if inject:
             self.engine.set_remote_radios(
                 self.tuned_freqs_mhz,
@@ -735,6 +765,7 @@ def _session_engine_binding(
     saved_radios = getattr(engine, "remote_radios", None)
     saved_ident = {key: cfg.get(key) for key in _IDENTITY_CONFIG_KEYS}
     saved_tts = cfg.get("_tts_session_id")
+    saved_seat_pos = {key: cfg.get(key) for key in _SEAT_POSITION_CONFIG_KEYS}
     try:
         _apply_identity_to_config(cfg, sess.identity)
         cfg["_tts_session_id"] = sess.session_id
@@ -746,6 +777,7 @@ def _session_engine_binding(
                 fresh=sess.radio_fresh,
                 selected_mhz=sess.selected_mhz,
             )
+        _bind_seat_position(cfg, sess, engine)
         yield
     finally:
         engine.remote_radios = saved_radios
@@ -754,10 +786,51 @@ def _session_engine_binding(
                 cfg.pop(key, None)
             else:
                 cfg[key] = value
+        for key, value in saved_seat_pos.items():
+            if value is None:
+                cfg.pop(key, None)
+            else:
+                cfg[key] = value
         if saved_tts is None:
             cfg.pop("_tts_session_id", None)
         else:
             cfg["_tts_session_id"] = saved_tts
+
+
+_SEAT_POSITION_CONFIG_KEYS = (
+    atc_phrase.OWNSHIP_SEAT_BOUND_KEY,
+    atc_phrase.OWNSHIP_SEAT_LL_KEY,
+)
+
+
+def _bind_seat_position(
+    cfg: dict[str, Any],
+    sess: PilotSession,
+    engine: flow_engine.FlowEngine,
+) -> None:
+    """
+    Make this seat's own fix the only position for the bound action.
+
+    Host Fly's map inject and CAOC feed watch the host PC. Reading them for a
+    client's jet is how a 38 NM recovery fired the 12 NM tower handoff and the
+    6 NM landing clearance off a parked contact 0.8 NM from the field.
+
+    The cached fix on the shared flow state is overwritten too, so gates that
+    read state before config cannot fall back to the host's position.
+    """
+    cfg[atc_phrase.OWNSHIP_SEAT_BOUND_KEY] = True
+    ll = sess.fresh_ownship_ll()
+    state = engine.state if isinstance(getattr(engine, "state", None), dict) else None
+    if ll is None:
+        cfg.pop(atc_phrase.OWNSHIP_SEAT_LL_KEY, None)
+        if state is not None:
+            state.pop("ownship_ll", None)
+            state.pop("ownship_ll_t", None)
+        return
+    cfg[atc_phrase.OWNSHIP_SEAT_LL_KEY] = [ll[0], ll[1]]
+    if state is not None:
+        state["ownship_ll"] = [ll[0], ll[1]]
+        state["ownship_ll_t"] = sess.ownship_ll_t
 
 
 def _new_session_engine(

@@ -1765,8 +1765,17 @@ def approach_plan_is_valid(
     # Catalog id may have been renamed (HI_ILS_OR_LOC_Z → ILS_Z).
     if inst_id and str(inst.get("id") or "") != inst_id:
         return False
-    if iaf_id and find_iaf(inst, iaf_id) is None:
+    iaf_entry = find_iaf(inst, iaf_id) if iaf_id else None
+    if iaf_id and iaf_entry is None:
         return False
+    # A cached descent below the plate's crossing altitude is a leftover from
+    # the old filed-altitude cap — rebuild rather than clear under the minimum.
+    if iaf_entry is not None:
+        try:
+            if int(plan["descend_ft"]) < int(iaf_entry["altitude_ft"]):
+                return False
+        except (KeyError, TypeError, ValueError):
+            pass
     say = str(plan.get("instrument_say") or "")
     if re.search(r"\bor\s+(localizer|loc)\b", say, flags=re.IGNORECASE):
         return False
@@ -1864,6 +1873,29 @@ def _ownship_fix_is_fresh(state: dict[str, Any] | None) -> bool:
         return (time.time() - float(state.get("ownship_ll_t") or 0)) <= OWNSHIP_FIX_MAX_AGE_S
     except (TypeError, ValueError):
         return False
+
+
+# The host owns TX but its map inject / CAOC feed watches the host PC, not the
+# client's jet. While a seat is bound, that seat's reported fix is the only
+# position for it — "no fix" must stay None so distance gates hold.
+OWNSHIP_SEAT_BOUND_KEY = "_ownship_seat_bound"
+OWNSHIP_SEAT_LL_KEY = "_ownship_seat_ll"
+
+
+def ownship_seat_bound(config: dict[str, Any] | None) -> bool:
+    """True while a client seat's own fix is bound over the local feeds."""
+    return bool((config or {}).get(OWNSHIP_SEAT_BOUND_KEY))
+
+
+def seat_ownship_latlon(config: dict[str, Any] | None) -> tuple[float, float] | None:
+    """The bound seat's fix, or None when that seat has not reported one."""
+    raw = (config or {}).get(OWNSHIP_SEAT_LL_KEY)
+    if not isinstance(raw, (list, tuple)) or len(raw) < 2:
+        return None
+    try:
+        return float(raw[0]), float(raw[1])
+    except (TypeError, ValueError):
+        return None
 
 
 def _iaf_is_range_gate(iaf_entry: dict[str, Any] | None) -> bool:
@@ -2151,7 +2183,8 @@ def assign_approach_plan(
     the flight-plan scan — only an explicit fix name does.
 
     Descend / speed come from the chosen recovery or instrument entry
-    (not a single global 10k/300), capped by filed altitude when known.
+    (not a single global 10k/300), capped by the cruise altitude in use unless
+    the plate's IAF crossing altitude is higher.
     """
     catalog = load_approach_catalog(airport)
     defs = approach_defaults(catalog)
@@ -2346,6 +2379,8 @@ def assign_approach_plan(
     plan["speed_kt"] = None
     plan["speed_restrict"] = bool(st.get("speed_restrict"))
 
+    iaf_floor_ft: int | None = None
+
     if instrument:
         inst = None
         iaf_entry = None
@@ -2424,6 +2459,10 @@ def assign_approach_plan(
                     inst.get("descend_ft"),
                     defs.get("descend_ft"),
                 )
+                try:
+                    iaf_floor_ft = int(iaf_entry["altitude_ft"])
+                except (KeyError, TypeError, ValueError):
+                    iaf_floor_ft = None
             else:
                 plan["descend_ft"] = _int_or(
                     plan["descend_ft"], inst.get("descend_ft"), defs.get("descend_ft")
@@ -2470,10 +2509,13 @@ def assign_approach_plan(
     if plan.get("speed_restrict"):
         plan["speed_kt"] = _int_or(300, st.get("speed_kt"), defs.get("speed_kt"))
 
-    # Never clear above filed altitude when Opus has one.
-    filed_ft = filed_altitude_feet(opus.fp_altitude if opus else None)
-    if filed_ft is not None and plan["descend_ft"] > filed_ft:
-        plan["descend_ft"] = filed_ft
+    # Never clear above the cruise altitude in use — CD's amendment, not the
+    # stale Opus number. A plate IAF crossing altitude is a published minimum,
+    # so it survives a lower filed cruise (KRYSS stays 8800 on a filed 4700).
+    cruise_ft = effective_filed_altitude_ft(opus, state=st)
+    if cruise_ft is not None and plan["descend_ft"] > cruise_ft:
+        if iaf_floor_ft is None or cruise_ft >= iaf_floor_ft:
+            plan["descend_ft"] = cruise_ft
 
     if state is not None:
         state["approach_assigned"] = True
@@ -2650,10 +2692,10 @@ def approach_clearance_auto_ready(
         or plan.get("vfr_recovery")
         or "fix"
     )
+    # No position is not "close enough" — the 40 NM gate below exists so the
+    # procedure is not cleared from 75 NM out.
     if pos is None:
-        if need_fix:
-            return False, f"waiting for position to {name}"
-        return True, "after check-in (no position)"
+        return False, f"waiting for position to {name}"
     dist = _haversine_nm(pos[0], pos[1], fix[0], fix[1])
     if need_fix:
         need = APPROACH_CLEARANCE_AFTER_MISSED_NM
@@ -8436,7 +8478,7 @@ def ownship_latlon(
     max_age_s: float = 10.0,
 ) -> tuple[float, float] | None:
     """
-    Own aircraft position: map inject if the tester is driving, else CAOC.
+    Own aircraft position: bound client seat, else map inject, else CAOC.
 
     Approach uses this to hand out the recovery/plate nearest the jet. The feed
     is often unavailable (no mission, no backend), so callers must treat None as
@@ -8451,6 +8493,15 @@ def ownship_latlon(
 
     def _cached_ll() -> tuple[float, float] | None:
         return _ownship_ll_from_state(state)
+
+    # A bound client seat is authoritative for itself: the host's own inject /
+    # CAOC would answer with whatever jet the host PC can see.
+    if ownship_seat_bound(config):
+        seat = seat_ownship_latlon(config)
+        if seat is not None and isinstance(state, dict):
+            state["ownship_ll"] = [seat[0], seat[1]]
+            state["ownship_ll_t"] = time.time()
+        return seat
 
     inj = read_ownship_inject(config=config)
     if inj:

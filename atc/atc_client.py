@@ -14,6 +14,7 @@ import urllib.request
 from typing import Any
 
 import atc_net
+import atc_phrase
 import srs_radio
 import voice_intent
 
@@ -294,10 +295,29 @@ def _identity_payload(config: dict[str, Any]) -> dict[str, Any]:
 def _radio_payload(config: dict[str, Any]) -> dict[str, Any]:
     try:
         radio = srs_radio.current_radio_state(config)
-        return {
+        out = {
             "tuned_freqs_mhz": list(radio.freqs_mhz or []),
             "radio_fresh": bool(radio.fresh),
             "selected_mhz": radio.selected_mhz,
         }
     except Exception:
-        return {"tuned_freqs_mhz": [], "radio_fresh": False, "selected_mhz": None}
+        out = {"tuned_freqs_mhz": [], "radio_fresh": False, "selected_mhz": None}
+    out["ownship_ll"] = _ownship_payload(config)
+    return out
+
+
+def _ownship_payload(config: dict[str, Any]) -> list[float] | None:
+    """
+    This PC's ownship fix, for the host's distance gates.
+
+    The host owns TX but its own map inject / CAOC feed cannot see this jet, so
+    every request carries our fix. None means "we do not know", which holds the
+    host's gates rather than letting them read the host's position.
+    """
+    try:
+        ll = atc_phrase.ownship_latlon(config)
+    except Exception:
+        return None
+    if ll is None:
+        return None
+    return [float(ll[0]), float(ll[1])]

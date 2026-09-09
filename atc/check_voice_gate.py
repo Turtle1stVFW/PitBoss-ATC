@@ -596,6 +596,83 @@ def extras() -> int:
             f"IAF {plan_kryss_ifr.get('iaf')} desc {plan_kryss_ifr.get('descend_ft')}"
         )
 
+    # A low Opus cruise must not pull the crossing below the plate. Opus files
+    # 047 and CD amends to 17000 — KRYSS stays 8800, not "descend to 4700".
+    class _KryssLowFP:
+        fp_route_string = "KLSV DREAM COYOT KRYSS KLSV"
+        fp_altitude = "047"
+
+    plan_amended = atc_phrase.assign_approach_plan(
+        nellis,
+        ifr,
+        state={"amended_altitude_ft": 17000, "clearance_amendment_copied": True},
+        force=True,
+        opus=_KryssLowFP(),
+    )
+    if int(plan_amended.get("descend_ft") or 0) != 8800:
+        print(
+            "  FAIL amended cruise 17000 keeps KRYSS at 8800: "
+            f"{plan_amended.get('descend_ft')}"
+        )
+        bad += 1
+
+    plan_low = atc_phrase.assign_approach_plan(
+        nellis, ifr, state={}, force=True, opus=_KryssLowFP()
+    )
+    if int(plan_low.get("descend_ft") or 0) != 8800:
+        print(
+            "  FAIL plate crossing is a minimum — filed 4700 must not lower "
+            f"KRYSS: {plan_low.get('descend_ft')}"
+        )
+        bad += 1
+    else:
+        print("approach plate crossing survives a low filed cruise — KRYSS 8800")
+
+    # A VFR recovery altitude has no published minimum, so it still caps.
+    class _ArcoeLowFP:
+        fp_route_string = "KLSV DREAM COYOT ARCOE KLSV"
+        fp_altitude = "047"
+
+    plan_vfr_cap = atc_phrase.assign_approach_plan(
+        nellis, vmc, state={}, force=True, opus=_ArcoeLowFP()
+    )
+    if int(plan_vfr_cap.get("descend_ft") or 0) != 4700:
+        print(f"  FAIL VFR recovery still caps at filed: {plan_vfr_cap.get('descend_ft')}")
+        bad += 1
+
+    # A plan already saved with the old cap is a leftover — rebuild it.
+    plan_stale_alt = atc_phrase.assign_approach_plan(
+        nellis,
+        ifr,
+        state={
+            "approach_assigned": True,
+            "active_recovery": "instrument",
+            "approach_plan": {
+                "pattern": "instrument",
+                "runway": "21L",
+                "instrument_id": "ILS_X_21L",
+                "instrument_say": "ILS X-ray runway two one left",
+                "iaf": "KRYSS",
+                "iaf_say": "Kryss",
+                "descend_ft": 4700,
+                "fp_route": "KLSV DREAM COYOT KRYSS KLSV",
+                "source": "route",
+            },
+        },
+        opus=_KryssLowFP(),
+    )
+    if int(plan_stale_alt.get("descend_ft") or 0) != 8800:
+        print(
+            "  FAIL cached 4700 on KRYSS must rebuild to 8800: "
+            f"{plan_stale_alt.get('descend_ft')}"
+        )
+        bad += 1
+    elif plan_stale_alt.get("iaf") != "KRYSS":
+        print(f"  FAIL rebuild should keep KRYSS: {plan_stale_alt.get('iaf')}")
+        bad += 1
+    else:
+        print("approach cached low crossing rebuilt — KRYSS 4700 to 8800")
+
     # ARCOE still in the tail keeps HI ILS Z even if KRYSS is the last fix.
     class _ArcoeKryssFP:
         fp_route_string = "KLSV DREAM COYOT ARCOE KRYSS KLSV"

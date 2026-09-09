@@ -1047,13 +1047,12 @@ def ownship_distance_nm(
         pos = atc_phrase.ownship_latlon(
             config, callsign=callsign, opus=opus, state=state
         )
-    if pos is None and isinstance(state, dict):
-        try:
-            raw = state.get("ownship_ll")
-            if isinstance(raw, (list, tuple)) and len(raw) >= 2:
-                pos = (float(raw[0]), float(raw[1]))
-        except (TypeError, ValueError):
-            pos = None
+        # A bound seat that reported no fix has no position at all — the cached
+        # one belongs to whoever the host last saw.
+        if pos is None and atc_phrase.ownship_seat_bound(config):
+            return None
+    if pos is None:
+        pos = atc_phrase._ownship_ll_from_state(state)
     if pos is None:
         return None
     return atc_phrase._haversine_nm(pos[0], pos[1], field[0], field[1])
