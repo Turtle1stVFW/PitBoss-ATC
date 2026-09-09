@@ -80,7 +80,7 @@ $s.Speak('{safe_text}')
 class AtcUi(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("455 ATC Setup — Ground / Tower")
+        self.title("PitBoss ATC — Setup")
         self.geometry("720x620")
         self.minsize(640, 560)
 

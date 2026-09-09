@@ -1,6 +1,6 @@
 # Host setup (one ATC box)
 
-One machine speaks ATC on SRS for the whole hop. A Windows DCS dedicated server is fine. Flying PCs are **Clients** — they never get the Google JSON.
+One machine runs **PitBoss ATC** as Host and speaks ATC on SRS for the whole hop. A Windows DCS dedicated server is fine. Flying PCs are **Clients** — they never get the Google JSON.
 
 ## On the Host PC
 

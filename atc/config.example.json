@@ -91,5 +91,6 @@
   "tanker_chat_llm": "off",
   "tanker_chat_llm_key": "",
   "tanker_chat_ollama_num_gpu": 0,
+  "simple_ui": false,
   "setup_complete": false
 }

@@ -1628,7 +1628,7 @@ def make_handler(engine: FlowEngine) -> type[BaseHTTPRequestHandler]:
                 self._send(
                     200,
                     _html_ok(
-                        "ATC Flow",
+                        "PitBoss ATC",
                         "Endpoints: /next /back /reset /flip /play?id=... /seek?n=7 /seek_next /seek_prev /status",
                     ),
                 )

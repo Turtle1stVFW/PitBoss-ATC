@@ -66,7 +66,7 @@ def iter_files() -> list[Path]:
 
 def pack(dest: Path | None = None) -> Path:
     stamp = dt.datetime.now().strftime("%Y%m%d")
-    out = dest or (ROOT.parent / f"ATC-Flow-Share-{stamp}.zip")
+    out = dest or (ROOT.parent / f"PitBoss-ATC-Share-{stamp}.zip")
     files = iter_files()
     with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for path in files:

@@ -37,7 +37,7 @@ def channel_freq(airport: dict[str, Any], channel: str) -> str:
 def build_lines(mission: dict[str, Any], airport: dict[str, Any]) -> list[tuple[str, str | None]]:
     """Return list of (display_text, url_or_None)."""
     lines: list[tuple[str, str | None]] = []
-    lines.append(("ATC FLOW / COMMS", None))
+    lines.append(("PITBOSS ATC / COMMS", None))
     lines.append((mission.get("name") or "Mission", None))
     lines.append(("", None))
     lines.append(("CONTROLS", None))

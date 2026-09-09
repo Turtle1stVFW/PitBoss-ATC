@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-455 Mission Flow Planner — one timeline, plan then fly with Play Next.
+PitBoss ATC — one timeline, plan then fly with Play Next.
 No JSON editing required.
 """
 
@@ -134,7 +134,7 @@ def slug_id(label: str) -> str:
 class MissionPlanner(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("455 Mission Flow Planner  ·  testing")
+        self.title("PitBoss ATC")
         self.geometry("1240x820")
         self.minsize(1020, 700)
         self.configure(bg=C_BG)
@@ -896,9 +896,16 @@ class MissionPlanner(tk.Tk):
         if hasattr(self, "_fly_freq_gate_lbl"):
             self._fly_freq_gate_lbl.configure(fg=gate_color)
         if hasattr(self, "_fly_tuned_now_lbl"):
-            self._fly_tuned_now_lbl.configure(
-                fg=C_GREEN if "YOU ARE ON" in tuned_line else C_MUTED
-            )
+            if self._simple_ui():
+                # Simplified Fly leans on this one line for "is my radio right":
+                # green on frequency, red off it, amber while tune is unknown.
+                tuned_color = {
+                    "match": C_GREEN,
+                    "mismatch": C_RED,
+                }.get(result, C_AMBER)
+            else:
+                tuned_color = C_GREEN if "YOU ARE ON" in tuned_line else C_MUTED
+            self._fly_tuned_now_lbl.configure(fg=tuned_color)
 
     def _maybe_follow_tanker_tune(self, tuned: str) -> None:
         """AAR is a side trip — after tanker UHF, retune Blackjack or Bandsaw to resume C2."""
@@ -2315,7 +2322,7 @@ class MissionPlanner(tk.Tk):
             return
         if not messagebox.askyesno(
             "Restart as administrator",
-            "Restart the Flow Planner with administrator rights?\n\n"
+            "Restart PitBoss ATC with administrator rights?\n\n"
             "This lets keyboard hotkeys work while DCS is focused. "
             "Unsaved plan changes will be lost.",
         ):
@@ -3126,7 +3133,7 @@ class MissionPlanner(tk.Tk):
     def _build(self) -> None:
         top = tk.Frame(self, bg=C_BG)
         top.pack(fill=tk.X, padx=16, pady=(10, 4))
-        ttk.Label(top, text="Mission Flow Planner", style="Title.TLabel").pack(side=tk.LEFT)
+        ttk.Label(top, text="PitBoss ATC", style="Title.TLabel").pack(side=tk.LEFT)
         self.mission_name_var = tk.StringVar(value=self.mission.get("name") or "Untitled")
         name_entry = ttk.Entry(top, textvariable=self.mission_name_var, width=22)
         name_entry.pack(side=tk.LEFT, padx=(16, 8))
@@ -3158,6 +3165,7 @@ class MissionPlanner(tk.Tk):
         self._build_traffic()
         self._build_setup()
         self._build_help()
+        self._apply_simple_ui()
         self.nb.bind("<<NotebookTabChanged>>", self._on_notebook_tab_changed)
 
     def _on_notebook_tab_changed(self, _evt: object | None = None) -> None:
@@ -3227,6 +3235,90 @@ class MissionPlanner(tk.Tk):
     def _fly_update_scrollregion(self) -> None:
         if hasattr(self, "_fly_canvas"):
             self._fly_canvas.configure(scrollregion=self._fly_canvas.bbox("all"))
+
+    # ---------- Simplified UI (Setup → Preferences) ----------
+
+    # Frequency column when Simplified UI is on: hero freq, the one line that
+    # says whether the radio is right, and the live-position tip last.
+    _FLY_SIMPLE_FREQ_ROWS = (
+        "_fly_freq_hdr_lbl",
+        "_fly_freq_row",
+        "_fly_tuned_now_lbl",
+        "_fly_boom_lbl",
+        "_fly_position_lbl",
+    )
+
+    def _simple_ui(self) -> bool:
+        """True when Fly should hide the setup / testing detail lines."""
+        var = getattr(self, "var_simple_ui", None)
+        if var is not None:
+            try:
+                return bool(var.get())
+            except tk.TclError:
+                pass
+        return bool(self.config_data.get("simple_ui"))
+
+    def _repack_fly_hint(self, *, show: bool) -> None:
+        """TTS / template line — keep it above the recovery and request strips."""
+        lbl = getattr(self, "_fly_hint_lbl", None)
+        if lbl is None:
+            return
+        try:
+            lbl.pack_forget()
+        except tk.TclError:
+            return
+        if not show:
+            return
+        kwargs: dict[str, Any] = {"fill": tk.X, "padx": 20, "pady": (0, 14)}
+        for name in ("_fly_rec_box", "_fly_offer_fr", "_fly_req_box"):
+            box = getattr(self, name, None)
+            if box is not None and box.winfo_manager():
+                kwargs["before"] = box
+                break
+        lbl.pack(**kwargs)
+
+    def _apply_simple_ui(self) -> None:
+        """Repaint the Fly tab for the current Simplified UI preference."""
+        rows = getattr(self, "_fly_freq_left_rows", None)
+        if not rows:
+            return
+        simple = self._simple_ui()
+        self._fly_freq_hdr_lbl.configure(
+            text="FREQUENCY" if simple else "NEXT TX FREQUENCY"
+        )
+        opts = dict(rows)
+        order = self._FLY_SIMPLE_FREQ_ROWS if simple else tuple(name for name, _ in rows)
+        if simple:
+            # Live position closes the box as a tip, so it carries the bottom pad.
+            opts["_fly_boom_lbl"] = {"fill": tk.X, "padx": 14, "pady": (0, 2)}
+            opts["_fly_position_lbl"] = {"fill": tk.X, "padx": 14, "pady": (4, 10)}
+        for name, _kw in rows:
+            widget = getattr(self, name, None)
+            if widget is not None:
+                widget.pack_forget()
+        for name in order:
+            widget = getattr(self, name, None)
+            if widget is not None:
+                widget.pack(**opts[name])
+
+        hint = getattr(self, "_fly_readback_hint_lbl", None)
+        if hint is not None:
+            hint.pack_forget()
+            if not simple:
+                hint.pack(
+                    anchor="w", padx=14, pady=(0, 6), before=self.fly_readback_body
+                )
+        self._repack_fly_hint(show=not simple)
+        if hasattr(self, "fly_readback_frame"):
+            self._refresh_readback_panel()
+        if hasattr(self, "fly_freq_gate"):
+            self._update_fly_freq_gate_status()
+        self.after_idle(self._fly_update_scrollregion)
+
+    def _on_simple_ui_changed(self) -> None:
+        self.config_data["simple_ui"] = bool(self.var_simple_ui.get())
+        save_json(CONFIG_PATH, self.config_data)
+        self._apply_simple_ui()
 
     # ---------- Plan tab ----------
     def _build_plan(self) -> None:
@@ -7290,14 +7382,16 @@ class MissionPlanner(tk.Tk):
         freq_right = tk.Frame(freq_split, bg="#0a0e14")
         freq_right.grid(row=0, column=1, sticky="nsew", padx=(8, 10), pady=(8, 10))
 
-        tk.Label(
+        self._fly_freq_hdr_lbl = tk.Label(
             freq_left,
             text="NEXT TX FREQUENCY",
             bg="#0a0e14",
             fg=C_MUTED,
             font=("Segoe UI Semibold", 11),
-        ).pack(anchor="w", padx=14, pady=(8, 0))
+        )
+        self._fly_freq_hdr_lbl.pack(anchor="w", padx=14, pady=(8, 0))
         freq_row = tk.Frame(freq_left, bg="#0a0e14")
+        self._fly_freq_row = freq_row
         freq_row.pack(fill=tk.X, padx=14, pady=(0, 2))
         self._fly_freq_lbl = tk.Label(
             freq_row,
@@ -7327,14 +7421,15 @@ class MissionPlanner(tk.Tk):
             anchor="w",
         )
         self._fly_channel_lbl.pack(fill=tk.X, padx=14, pady=(0, 2))
-        tk.Label(
+        self._fly_tx_name_lbl = tk.Label(
             freq_left,
             textvariable=self.fly_tx_name,
             bg="#0a0e14",
             fg=C_MUTED,
             font=("Segoe UI", 11),
             anchor="w",
-        ).pack(fill=tk.X, padx=14, pady=(0, 4))
+        )
+        self._fly_tx_name_lbl.pack(fill=tk.X, padx=14, pady=(0, 4))
         self.fly_tuned_now = tk.StringVar(value="YOU ARE ON  ·  radio tune unknown")
         self._fly_tuned_now_lbl = tk.Label(
             freq_left,
@@ -7391,6 +7486,20 @@ class MissionPlanner(tk.Tk):
             justify=tk.LEFT,
         )
         self._fly_boom_lbl.pack(fill=tk.X, padx=14, pady=(0, 10))
+
+        # Simplified UI drops rows from this column, so the pack order lives in
+        # one place — _apply_simple_ui() re-packs from it either way.
+        self._fly_freq_left_rows: list[tuple[str, dict[str, Any]]] = [
+            ("_fly_freq_hdr_lbl", {"anchor": "w", "padx": 14, "pady": (8, 0)}),
+            ("_fly_freq_row", {"fill": tk.X, "padx": 14, "pady": (0, 2)}),
+            ("_fly_channel_lbl", {"fill": tk.X, "padx": 14, "pady": (0, 2)}),
+            ("_fly_tx_name_lbl", {"fill": tk.X, "padx": 14, "pady": (0, 4)}),
+            ("_fly_tuned_now_lbl", {"fill": tk.X, "padx": 14, "pady": (0, 2)}),
+            ("_fly_next_radio_lbl", {"fill": tk.X, "padx": 14, "pady": (0, 2)}),
+            ("_fly_freq_gate_lbl", {"fill": tk.X, "padx": 14, "pady": (0, 2)}),
+            ("_fly_position_lbl", {"fill": tk.X, "padx": 14, "pady": (0, 2)}),
+            ("_fly_boom_lbl", {"fill": tk.X, "padx": 14, "pady": (0, 10)}),
+        ]
 
         tk.Label(
             freq_right,
@@ -7475,7 +7584,7 @@ class MissionPlanner(tk.Tk):
             fg=C_AMBER,
             font=("Segoe UI Semibold", 12),
         ).pack(anchor="w", padx=14, pady=(10, 2))
-        tk.Label(
+        self._fly_readback_hint_lbl = tk.Label(
             self.fly_readback_frame,
             text="Required — say the highlighted items. Agency name optional. "
             "You can still ask for winds or a runway change.",
@@ -7485,7 +7594,8 @@ class MissionPlanner(tk.Tk):
             anchor="w",
             wraplength=920,
             justify=tk.LEFT,
-        ).pack(anchor="w", padx=14, pady=(0, 6))
+        )
+        self._fly_readback_hint_lbl.pack(anchor="w", padx=14, pady=(0, 6))
         self.fly_readback_body = tk.Frame(self.fly_readback_frame, bg="#14100a")
         self.fly_readback_body.pack(fill=tk.X, padx=14, pady=(0, 12))
 
@@ -7615,7 +7725,7 @@ class MissionPlanner(tk.Tk):
             font=("Segoe UI", 10),
         ).pack(side=tk.LEFT, padx=(8, 0))
 
-        tk.Label(
+        self._fly_hint_lbl = tk.Label(
             card,
             textvariable=self.fly_hint,
             bg=C_PANEL,
@@ -7624,7 +7734,8 @@ class MissionPlanner(tk.Tk):
             wraplength=900,
             justify=tk.LEFT,
             anchor="w",
-        ).pack(fill=tk.X, padx=20, pady=(0, 14))
+        )
+        self._fly_hint_lbl.pack(fill=tk.X, padx=20, pady=(0, 14))
 
         nav = tk.Frame(shell, bg=C_PANEL, highlightbackground=C_BORDER, highlightthickness=1)
         nav.pack(fill=tk.X, pady=(0, 10))
@@ -8461,6 +8572,11 @@ class MissionPlanner(tk.Tk):
             and i not in hinges
             and str(i.get("value") or "").strip()
         ]
+        if self._simple_ui() and len(hinges) + len(colour) > 1:
+            # A pilot knows their own callsign — only worth a row when it is the
+            # single thing ATC is waiting to hear back.
+            hinges = [i for i in hinges if str(i.get("key") or "") != "callsign"]
+            colour = [i for i in colour if str(i.get("key") or "") != "callsign"]
         hinge_keys = {str(i.get("key") or "") for i in hinges}
         if hinge_keys == {"runway", "eor"}:
             self.fly_readback_title.set(
@@ -9549,7 +9665,7 @@ class MissionPlanner(tk.Tk):
                     ("heading", "Voice quality"),
                     ("body", "Windows voices work with zero setup (robotic)."),
                     ("body", "Google Cloud TTS is optional and sounds much more natural — see the Google topic."),
-                    ("muted", "Server ATIS is separate and stays on the server. This app only does your local ATC phrases → SRS."),
+                    ("muted", "Server ATIS is separate and stays on the server. PitBoss ATC only does your local ATC phrases → SRS."),
                 ],
             ),
             (
@@ -9735,11 +9851,13 @@ class MissionPlanner(tk.Tk):
         self.setup_tab_voices = ttk.Frame(self.setup_nb)
         self.setup_tab_airport = ttk.Frame(self.setup_nb)
         self.setup_tab_controls = ttk.Frame(self.setup_nb)
+        self.setup_tab_prefs = ttk.Frame(self.setup_nb)
         self.setup_nb.add(self.setup_tab_squadron, text="  Squadron  ")
         self.setup_nb.add(self.setup_tab_identity, text="  Identity & TTS  ")
         self.setup_nb.add(self.setup_tab_voices, text="  Voices  ")
         self.setup_nb.add(self.setup_tab_airport, text="  Airport & radios  ")
         self.setup_nb.add(self.setup_tab_controls, text="  Controls  ")
+        self.setup_nb.add(self.setup_tab_prefs, text="  Preferences  ")
 
         self._ensure_identity_vars()
         self.var_volume = tk.DoubleVar(value=0.8)
@@ -9762,6 +9880,49 @@ class MissionPlanner(tk.Tk):
         self._build_setup_voices()
         self._build_setup_airport()
         self._build_setup_controls()
+        self._build_setup_prefs()
+
+    def _build_setup_prefs(self) -> None:
+        root = self.setup_tab_prefs
+        panel = tk.Frame(root, bg=C_PANEL, highlightbackground=C_BORDER, highlightthickness=1)
+        panel.pack(fill=tk.BOTH, expand=True, padx=12, pady=12)
+        inner = tk.Frame(panel, bg=C_PANEL)
+        inner.pack(fill=tk.BOTH, expand=True, padx=14, pady=14)
+        ttk.Label(inner, text="Fly tab display", style="Header.TLabel").pack(anchor="w")
+        tk.Label(
+            inner,
+            text=(
+                "Simplified UI strips the Fly tab back to what a pilot needs in the "
+                "cockpit: the frequency, whether you are on it, what to say, and what "
+                "ATC will answer. The lines that only matter while setting the app up "
+                "or testing it — SRS radio name, agency name repeated under the "
+                "frequency, YOU CAN SAY, the gate line, the readback preamble, your own "
+                "callsign, and the TTS / template line — are hidden. Nothing changes "
+                "about what transmits or what voice recognizes, and the live-position "
+                "line moves to the bottom of the frequency box as a tip."
+            ),
+            bg=C_PANEL,
+            fg=C_MUTED,
+            font=("Segoe UI", 9),
+            wraplength=880,
+            justify="left",
+        ).pack(anchor="w", pady=(4, 12))
+        self.var_simple_ui = tk.BooleanVar(
+            value=bool(self.config_data.get("simple_ui"))
+        )
+        ttk.Checkbutton(
+            inner,
+            text="Simplified UI — hide setup / testing detail on Fly",
+            variable=self.var_simple_ui,
+            command=self._on_simple_ui_changed,
+        ).pack(anchor="w")
+        tk.Label(
+            inner,
+            text="Takes effect immediately and saves on its own — Save setup is not needed.",
+            bg=C_PANEL,
+            fg=C_MUTED,
+            font=("Segoe UI", 8),
+        ).pack(anchor="w", pady=(4, 0))
 
     def _build_setup_squadron(self) -> None:
         root = self.setup_tab_squadron
@@ -12714,7 +12875,7 @@ def main() -> int:
         try:
             root = tk.Tk()
             root.withdraw()
-            messagebox.showerror("Mission Flow Planner", f"Could not start:\n\n{exc}")
+            messagebox.showerror("PitBoss ATC", f"Could not start:\n\n{exc}")
             root.destroy()
         except Exception:
             print(f"Could not start: {exc}", file=sys.stderr)

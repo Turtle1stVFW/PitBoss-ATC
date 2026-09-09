@@ -4629,6 +4629,83 @@ def extras() -> int:
         else:
             print("VFR Flex — climb as published; SID — climb via the SID")
 
+        # Dotted Opus/map routes stuffed into dest must not be spelled letter-by-letter.
+        dotted = "KLSV.MMM8.ILC171028.KRYSS.KLSV"
+        mmm_opus = atc_phrase.synthetic_flight_context("Dagger 1")
+        mmm_opus.fp_route_string = dotted
+        mmm_opus.fp_altitude = "FL240"
+        mmm_opus.arr_icao = dotted
+        mmm_txt, _mmm_climb = atc_phrase.build_clearance_delivery(
+            nellis, "Dagger 1", wx, "21R", mmm_opus, initial_climb_ft=14000,
+            channel="delivery",
+        )
+        mmm_low = mmm_txt.lower()
+        if atc_phrase.destination_icao(dotted) != "KLSV":
+            print(f"  FAIL dotted route dest should be KLSV: {dotted}")
+            bad += 1
+        elif "k l s v . m m m" in mmm_low or "m m m 8" in mmm_low or "i l c" in mmm_low:
+            print(f"  FAIL clearance must not spell the flight plan: {mmm_txt!r}")
+            bad += 1
+        elif "cleared to nellis" not in mmm_low:
+            print(f"  FAIL local MMM8 should clear to Nellis: {mmm_txt!r}")
+            bad += 1
+        elif "mormon mesa" not in mmm_low or "then as filed" not in mmm_low:
+            print(f"  FAIL MMM8 clearance should name the SID then as filed: {mmm_txt!r}")
+            bad += 1
+        else:
+            print(f"clearance dest — Nellis, not spelled route ({mmm_txt})")
+
+        if "squawk" not in mmm_low:
+            print(f"  FAIL filed-plan clearance must assign a squawk: {mmm_txt!r}")
+            bad += 1
+        else:
+            print(f"clearance squawk — assigned when Opus has none ({mmm_txt})")
+
+        known_sq = atc_phrase.synthetic_flight_context("Dagger 1")
+        known_sq.fp_route_string = dotted
+        known_sq.fp_altitude = "FL240"
+        known_sq.arr_icao = "KLSV"
+        known_sq.mode3 = "0551"
+        known_txt, _ = atc_phrase.build_clearance_delivery(
+            nellis, "Dagger 1", wx, "21R", known_sq, initial_climb_ft=14000,
+            channel="delivery",
+        )
+        if "squawk zero fife fife one" not in known_txt.lower():
+            print(f"  FAIL Opus Mode 3 must be spoken: {known_txt!r}")
+            bad += 1
+        else:
+            print("clearance squawk — uses Opus Mode 3 when filed")
+
+        alias_sq = atc_phrase._opus_mode3_from_fields({"squawk": "4321"})
+        if alias_sq != "4321":
+            print(f"  FAIL Opus squawk field should map to Mode 3: {alias_sq!r}")
+            bad += 1
+        camel_sq = atc_phrase._opus_mode3_from_fields({"Mode3": 551})
+        if camel_sq != "0551":
+            print(f"  FAIL Opus Mode3 551 should keep the leading zero: {camel_sq!r}")
+            bad += 1
+        nested_sq = atc_phrase._opus_mode3_from_fields(
+            {"fp_route_string": "KLSV.MMM8.KLSV", "flight_plan": {"squawk": "3210"}}
+        )
+        if nested_sq != "3210":
+            print(f"  FAIL nested flight_plan squawk: {nested_sq!r}")
+            bad += 1
+        remark_sq = atc_phrase._opus_mode3_from_fields(
+            {"fp_remarks": "MODE3 4321 / TCN 17Y"}
+        )
+        if remark_sq != "4321":
+            print(f"  FAIL remarks Mode 3: {remark_sq!r}")
+            bad += 1
+        st_sq: dict = {}
+        first = atc_phrase.ensure_clearance_squawk(mmm_opus, state=st_sq)
+        again = atc_phrase.ensure_clearance_squawk(
+            atc_phrase.synthetic_flight_context("Dagger 1"),
+            state=st_sq,
+        )
+        if not first or first != again or first != st_sq.get("assigned_squawk"):
+            print(f"  FAIL assigned squawk must stick: {first!r} {again!r} {st_sq}")
+            bad += 1
+
         hold_rb = atc_phrase.auto_tx_hold_reason(
             {"awaiting_readback": True, "readback_items": [{"key": "climb"}]}
         )

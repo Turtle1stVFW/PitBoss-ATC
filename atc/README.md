@@ -1,4 +1,4 @@
-# 455 Mission Flow Planner
+# PitBoss ATC
 
 **Sharing / first PC:** testers start with [PILOT-SETUP.md](../PILOT-SETUP.md) and
 `Setup-Pilot.cmd`. Host operators use [HOST-SETUP.md](../HOST-SETUP.md). This
@@ -23,8 +23,24 @@ as your jet (talk on the Fly tab; tankers still come from CAOC).
 1. **Plan Flight** — build the full sortie timeline (TTS template, custom text, or MP3/OGG). No JSON editing.
 2. **Fly** — big Next / Back / Reset / Flip for mid-flight.
 3. **Traffic** — connected pilots and per-frequency TX queues (Host role).
-4. **Setup** — Opus username, voice, airport freqs, SRS host, TTS provider, optional runway override, **Squadron** (solo/host/client), and **Controls** (HOTAS / hotkeys / voice).
+4. **Setup** — Opus username, voice, airport freqs, SRS host, TTS provider, optional runway override, **Squadron** (solo/host/client), **Controls** (HOTAS / hotkeys / voice), and **Preferences**.
 5. **Help** — in-app how-tos (Getting started, Google JSON setup, Plan Flight tips, troubleshooting). Also the top-right **Help** button.
+
+### Simplified UI (Setup → Preferences)
+
+The Fly tab carries a lot of lines that earn their keep while you are wiring the
+app up and prove nothing but clutter once you are strapped in. **Simplified UI**
+hides them: the SRS radio name, the agency name repeated under the frequency,
+`YOU CAN SAY`, the `Radio tune unknown — gate open` line, the READ BACK
+preamble, your own callsign in a readback, and the `TTS · template` line. The
+frequency header reads **FREQUENCY** instead of **NEXT TX FREQUENCY**, and the
+live-position line moves to the bottom of the frequency box as a tip.
+
+What is left is the frequency, one **YOU ARE ON** line — green on frequency, red
+off it, amber while tune is unknown — the cues to say, and what ATC will answer.
+Nothing changes about what transmits or what voice recognition accepts; the
+switch saves itself and takes effect immediately (config key `simple_ui`). Leave
+it off while troubleshooting.
 
 ## Multi-pilot (optional, this branch)
 

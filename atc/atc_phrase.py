@@ -665,6 +665,7 @@ def _enrich_opus_flight_row(
             row["fp_filed_at"] = _str_or_none(detail.get("fp_filed_at")) or row.get(
                 "fp_filed_at"
             )
+            row["mode3"] = _opus_mode3_from_fields(detail, row) or row.get("mode3")
             row["has_filed_plan"] = bool(
                 row["fp_filed_at"] or row["fp_route_string"] or row["fp_altitude"]
             )
@@ -810,7 +811,15 @@ def _context_from_opus_flight(
         event_date=str(detail.get("event_date") or flight_list.get("event_date") or "") or None,
         theater_id=theater_id,
         dep_icao=_str_or_none(detail.get("fp_departure") or detail.get("dep_icao")),
-        arr_icao=_str_or_none(detail.get("arr_icao")),
+        arr_icao=destination_icao(
+            _str_or_none(
+                detail.get("arr_icao")
+                or detail.get("fp_arrival")
+                or detail.get("fp_destination")
+                or detail.get("fp_arr_icao")
+            ),
+            route=_str_or_none(detail.get("fp_route_string")),
+        ),
         aircraft=_str_or_none(detail.get("aircraft") or flight_list.get("aircraft")),
         fp_altitude=_str_or_none(detail.get("fp_altitude")),
         fp_speed=_str_or_none(detail.get("fp_speed")),
@@ -818,7 +827,7 @@ def _context_from_opus_flight(
         fp_remarks=_str_or_none(detail.get("fp_remarks")),
         fp_aircraft_type=_str_or_none(detail.get("fp_aircraft_type")),
         fp_filed_at=_str_or_none(detail.get("fp_filed_at")),
-        mode3=_str_or_none(detail.get("mode3")),
+        mode3=_opus_mode3_from_fields(detail, flight_list, *signups),
         tcn=_str_or_none(detail.get("tcn")),
         comms_vhf=_str_or_none(detail.get("comms_vhf")),
         signup_count=len(signups),
@@ -1035,15 +1044,16 @@ def resolve_active_opus_flight(config: dict[str, Any]) -> OpusFlightContext | No
             flight_list, _opus_flights_list_row(config, fid)
         )
     detail: dict[str, Any] = dict(flight_list)
-    # If we only have a list row, fetch detail for FP fields
-    if not detail.get("fp_route_string") and not detail.get("fp_altitude"):
-        try:
-            fetched = http_get_json(f"{backend}/opus/flights/{fid}", ua)
-            if isinstance(fetched, dict):
-                # Keep list VUL/event — detail never carries them.
-                detail = _merge_opus_list_metadata(fetched, flight_list)
-        except urllib.error.URLError as exc:
-            print(f"WARNING: Opus flight detail fetch failed ({exc}); using list fields", file=sys.stderr)
+    # Always pull /opus/flights/{id}. The list row often has route + altitude
+    # already, and we used to skip this fetch — Mode 3 / dest / remarks live
+    # on the detail payload, so a filed squawk never reached the clearance.
+    try:
+        fetched = http_get_json(f"{backend}/opus/flights/{fid}", ua)
+        if isinstance(fetched, dict):
+            # Keep list VUL/event — detail never carries them.
+            detail = _merge_opus_list_metadata(fetched, flight_list)
+    except urllib.error.URLError as exc:
+        print(f"WARNING: Opus flight detail fetch failed ({exc}); using list fields", file=sys.stderr)
 
     base = str(flight_list.get("callsign") or detail.get("callsign") or "").strip()
     if not base or not fid:
@@ -6333,12 +6343,17 @@ def map_flight_context(config: dict[str, Any] | None) -> OpusFlightContext | Non
     route = str(inj.get("fp_route_string") or "").strip()
     if route:
         ctx.fp_route_string = route
-        tokens = [t for t in re.split(r"\s+", route) if t]
-        ctx.dep_icao = tokens[0] if tokens else None
-        ctx.arr_icao = tokens[-1] if len(tokens) >= 2 else ctx.dep_icao
+        tokens = parse_route_tokens(route)
+        ctx.dep_icao = destination_icao(tokens[0] if tokens else None) or (
+            tokens[0].upper() if tokens else None
+        )
+        ctx.arr_icao = destination_icao(None, route=route) or ctx.dep_icao
     alt = str(inj.get("fp_altitude") or "").strip()
     if alt:
         ctx.fp_altitude = alt
+    sq = _opus_mode3_from_fields(inj)
+    if sq:
+        ctx.mode3 = sq
     return ctx
 
 
@@ -8661,14 +8676,50 @@ def speak_fix(fix: str) -> str:
     return fix.strip().upper()
 
 
-def speak_icao_or_name(icao: str | None, airport: dict[str, Any]) -> str:
-    if not icao:
+_ICAO_CODE = re.compile(r"^[A-Z]{3,4}$")
+
+
+def destination_icao(
+    raw: str | None,
+    *,
+    route: str | None = None,
+) -> str | None:
+    """
+    Destination airport only — never a dotted / spaced flight-plan string.
+
+    Opus and the map tester sometimes put the whole route in arr_icao
+    (KLSV.MMM8.ILC171028.KRYSS.KLSV). Spelling that letter-by-letter is
+    not a clearance.
+    """
+    def _from_blob(text: str | None) -> str | None:
+        if not text:
+            return None
+        s = str(text).strip().upper()
+        if _ICAO_CODE.fullmatch(s):
+            return s
+        tokens = parse_route_tokens(s)
+        for tok in reversed(tokens):
+            t = tok.upper()
+            if _ICAO_CODE.fullmatch(t) and not any(ch.isdigit() for ch in t):
+                return t
+        return None
+
+    return _from_blob(raw) or _from_blob(route)
+
+
+def speak_icao_or_name(
+    icao: str | None,
+    airport: dict[str, Any],
+    *,
+    route: str | None = None,
+) -> str:
+    code = destination_icao(icao, route=route)
+    if not code:
         return "destination"
-    code = icao.strip().upper()
     if code == str(airport.get("icao") or "").strip().upper():
         return str(airport.get("name") or code)
-    # Spell ICAO for TTS (K L S V -> each letter)
-    return " ".join(ch for ch in code)
+    # Spell a real ICAO for TTS (KEDW → K E D W). Never a route string.
+    return " ".join(code)
 
 
 # Non-Blackjack ATC: feet at/above this are spoken as flight levels.
@@ -8768,9 +8819,164 @@ def speak_squawk(mode3: str | None) -> str | None:
     return speak_digits(digits[:4])
 
 
-def squawk_clearance_phrase(opus: OpusFlightContext | None) -> str | None:
+_RESERVED_SQUAWKS = frozenset(
+    {"0000", "1200", "2000", "7000", "7500", "7600", "7700"}
+)
+_OPUS_SQUAWK_KEYS = frozenset(
+    {
+        "mode3",
+        "mode_3",
+        "mode3a",
+        "mode_3a",
+        "squawk",
+        "fp_squawk",
+        "fp_mode3",
+        "assigned_squawk",
+        "iff",
+        "iff_mode3",
+        "iff_code",
+        "beacon",
+        "transponder",
+    }
+)
+_REMARKS_SQUAWK = re.compile(
+    r"(?:mode\s*[-_]?3a?|squawk|sqk|iff)\s*[:#\-]?\s*(\d{3,4})\b",
+    re.IGNORECASE,
+)
+
+
+def mode3_digits(mode3: Any) -> str | None:
+    """Normalize a Mode 3 to four digits. JSON ints drop a leading zero (551 → 0551)."""
+    if mode3 is None or mode3 == "":
+        return None
+    if isinstance(mode3, bool):
+        return None
+    if isinstance(mode3, (int, float)):
+        try:
+            n = int(mode3)
+        except (TypeError, ValueError):
+            return None
+        if n < 0 or n > 7777:
+            return None
+        return f"{n:04d}"
+    digits = re.sub(r"\D", "", str(mode3))
+    if not digits:
+        return None
+    if len(digits) < 4:
+        digits = digits.zfill(4)
+    return digits[:4] if len(digits) >= 4 else None
+
+
+def _opus_mode3_from_fields(*sources: Any) -> str | None:
+    """
+    Mode 3 from Opus / map inject.
+
+    Field names and nesting vary (mode3, Mode3, squawk, flight_plan.squawk).
+    A numeric 551 is 0551 — JSON cannot keep the leading zero.
+    """
+    found = _walk_opus_mode3(sources, depth=0)
+    if found:
+        return found
+    for src in sources:
+        if not isinstance(src, dict):
+            continue
+        remarks = src.get("fp_remarks") or src.get("remarks") or src.get("fp_comment")
+        m = _REMARKS_SQUAWK.search(str(remarks or ""))
+        if m:
+            digits = mode3_digits(m.group(1))
+            if digits:
+                return digits
+    return None
+
+
+def _walk_opus_mode3(sources: Any, *, depth: int) -> str | None:
+    if depth > 3:
+        return None
+    if isinstance(sources, dict):
+        lowered = {
+            str(k).strip().lower().replace("-", "_"): v for k, v in sources.items()
+        }
+        for key in _OPUS_SQUAWK_KEYS:
+            digits = mode3_digits(lowered.get(key))
+            if digits:
+                return digits
+        for key, val in lowered.items():
+            if (
+                key.endswith("mode3")
+                or key.endswith("mode_3")
+                or key.endswith("squawk")
+                or "mode_3" in key
+            ):
+                digits = mode3_digits(val)
+                if digits:
+                    return digits
+            if isinstance(val, (dict, list)):
+                found = _walk_opus_mode3(val, depth=depth + 1)
+                if found:
+                    return found
+        return None
+    if isinstance(sources, (list, tuple)):
+        for item in sources:
+            found = _walk_opus_mode3(item, depth=depth + 1)
+            if found:
+                return found
+    return None
+
+
+def _allocate_squawk(opus: OpusFlightContext) -> str:
+    """Stable discrete IFR code for this flight when Opus did not file one."""
+    seed = int(opus.flight_id or 0) or (
+        abs(hash(str(opus.radio_callsign or "CALLSIGN"))) % 4096
+    )
+    n = 0o2100 + (seed % 0o3500)
+    for _ in range(64):
+        code = format(n, "o").zfill(4)[-4:]
+        if all(ch in "01234567" for ch in code) and code not in _RESERVED_SQUAWKS:
+            return code
+        n += 1
+        if n > 0o5777:
+            n = 0o2100
+    return "4321"
+
+
+def ensure_clearance_squawk(
+    opus: OpusFlightContext | None,
+    *,
+    state: dict[str, Any] | None = None,
+) -> str | None:
+    """
+    IFR clearance always assigns a Mode 3.
+
+    Prefer the Opus / filed code, then a sticky code from this session, then
+    allocate one so Delivery does not skip 'squawk …'.
+    """
+    for raw in (
+        getattr(opus, "mode3", None) if opus is not None else None,
+        (state or {}).get("assigned_squawk") if isinstance(state, dict) else None,
+    ):
+        digits = mode3_digits(raw)
+        if digits:
+            if opus is not None:
+                opus.mode3 = digits
+            if isinstance(state, dict):
+                state["assigned_squawk"] = digits
+            return digits
+    if opus is None or not opus.has_filed_plan:
+        return None
+    code = _allocate_squawk(opus)
+    opus.mode3 = code
+    if isinstance(state, dict):
+        state["assigned_squawk"] = code
+    return code
+
+
+def squawk_clearance_phrase(
+    opus: OpusFlightContext | None,
+    *,
+    state: dict[str, Any] | None = None,
+) -> str | None:
     """'squawk six fife four one' or '... in sequence' for multi-ship flights."""
-    code = speak_squawk(opus.mode3 if opus else None)
+    code = speak_squawk(ensure_clearance_squawk(opus, state=state))
     if not code:
         return None
     if opus and opus.squawk_in_sequence:
@@ -8811,11 +9017,6 @@ def auto_tx_hold_reason(state: dict[str, Any] | None) -> str:
     if state.get("awaiting_readback") and state.get("readback_items"):
         return "waiting for readback"
     return ""
-
-
-def mode3_digits(mode3: str | None) -> str | None:
-    digits = re.sub(r"\D", "", str(mode3 or ""))
-    return digits[:4] if len(digits) >= 4 else None
 
 
 def go_around_readback_open(state: dict[str, Any] | None) -> bool:
@@ -8873,7 +9074,9 @@ def build_readback_checklist(
             # Nothing to copy — Delivery did not issue an IFR clearance.
             return items
         if opus.arr_icao:
-            dest = speak_icao_or_name(opus.arr_icao, airport)
+            dest = speak_icao_or_name(
+                opus.arr_icao, airport, route=opus.fp_route_string
+            )
             add("destination", "Cleared to", str(opus.arr_icao).upper(), dest)
         dep_via = speak_departure_clearance(airport, opus.fp_route_string if opus else None)
         if dep_via:
@@ -8905,7 +9108,7 @@ def build_readback_checklist(
         elif dep_mhz > 0:
             disp = f"{dep_mhz:.3f}".rstrip("0").rstrip(".")
             add("dep_freq", "Departure", f"{disp} MHz", dep_spoken)
-        code = mode3_digits(opus.mode3 if opus else None)
+        code = ensure_clearance_squawk(opus, state=state)
         if code:
             spoken = speak_squawk(code) or code
             # Tip shows both forms — matching accepts squawk/squawking + code
@@ -9385,6 +9588,7 @@ def build_clearance_delivery(
     opus: OpusFlightContext | None,
     initial_climb_ft: int | None = None,
     channel: str | None = None,
+    state: dict[str, Any] | None = None,
 ) -> tuple[str, int]:
     """
     NATCF clearance (455 wiki + Bruiser PDF):
@@ -9412,14 +9616,16 @@ def build_clearance_delivery(
         return f"{cs}, {name} {agency}, {no_fp}, {remain}.", 0
 
     filed_alt = speak_filed_altitude(opus.fp_altitude if opus else None)
-    squawk = squawk_clearance_phrase(opus)
+    squawk = squawk_clearance_phrase(opus, state=state)
     dep_clause = speak_departure_freq_or_local(airport)
     climb_ft = random_initial_climb_feet(initial_climb_ft)
     climb = speak_altitude_value(str(climb_ft), prefer_fl_below=1000)
     minutes = expect_minutes_value(airport)
     natural = speak_minutes_natural(minutes)
 
-    dest = speak_icao_or_name(opus.arr_icao, airport)
+    dest = speak_icao_or_name(
+        opus.arr_icao, airport, route=opus.fp_route_string
+    )
     dep_match = match_departure(airport, opus.fp_route_string)
     dep_via = speak_departure_clearance(airport, opus.fp_route_string)
     if dep_via:
@@ -10792,6 +10998,7 @@ def build_template_text(
             opus,
             initial_climb_ft=initial_climb_ft,
             channel=channel or "delivery",
+            state=state,
         )
         if climb_ft_out is not None and used_climb:
             climb_ft_out.append(used_climb)
@@ -11429,7 +11636,11 @@ def build_flow_step_phrase(
         rwy = speak_runway(runway)
         alt = speak_altimeter(weather.altimeter_inhg or 29.92)
         wind = speak_wind(weather.wind_dir, weather.wind_speed_kt)
-        dest = speak_icao_or_name(opus.arr_icao if opus else None, airport)
+        dest = speak_icao_or_name(
+            opus.arr_icao if opus else None,
+            airport,
+            route=opus.fp_route_string if opus else None,
+        )
         filed_alt = speak_filed_altitude(opus.fp_altitude if opus else None) or ""
         squawk = speak_squawk(opus.mode3 if opus else None) or ""
         sid = filed_sid(airport, opus.fp_route_string if opus else None)
