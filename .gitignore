@@ -46,10 +46,5 @@ Thumbs.db
 .idea/
 *.user
 
-# Cursor IDE — keep shared rules / archived plans; ignore the rest locally
-.cursor/*
-!.cursor/rules/
-!.cursor/rules/**
-!.cursor/plans/
-!.cursor/plans/executed/
-!.cursor/plans/executed/**
+# Cursor IDE — local only (rules/plans must not overwrite other contributors)
+.cursor/
