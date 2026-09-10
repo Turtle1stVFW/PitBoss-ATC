@@ -30,6 +30,7 @@ from typing import Any
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
+import app_diag  # noqa: E402
 import atc_phrase  # noqa: E402
 import atc_client  # noqa: E402
 import atc_net  # noqa: E402
@@ -139,26 +140,40 @@ class MissionPlanner(tk.Tk):
         self.minsize(1020, 700)
         self.configure(bg=C_BG)
 
+        app_diag.ensure_started()
+        app_diag.checkpoint("ui_construct")
+
         self.engine = flow_engine.FlowEngine()
         self.mission = flow_engine.normalize_mission_to_steps(self.engine.mission)
         self.engine.mission = self.mission
         self.config_data = self.engine.config
+        app_diag.checkpoint(
+            "config_loaded",
+            flow_file=str(self.config_data.get("flow_file") or ""),
+            role=str(self.config_data.get("atc_role") or "solo"),
+        )
         # Google retired en-CA WaveNet; rewrite saved ids before anything synthesizes.
         voice_notes = atc_phrase.migrate_retired_google_voices(self.config_data)
         for note in voice_notes:
             print(note, file=sys.stderr)
+            app_diag.info(app_diag.CAT_CONFIG, note)
         # Persist a repaired flow_file (or retired-voice remap) so the next launch
         # does not hit the same missing-mission crash.
         repaired = bool(self.config_data.pop("_flow_file_repaired", False))
         if voice_notes or repaired:
             try:
                 save_json(CONFIG_PATH, self.config_data)
-            except Exception:
-                pass
+            except Exception as exc:
+                app_diag.warn(app_diag.CAT_CONFIG, f"could not persist repaired config: {exc}")
             if repaired:
                 print(
                     f"Restored missing mission → {self.config_data.get('flow_file')}",
                     file=sys.stderr,
+                )
+                app_diag.warn(
+                    app_diag.CAT_CONFIG,
+                    "restored missing mission flow_file",
+                    flow_file=str(self.config_data.get("flow_file") or ""),
                 )
         self.airports = self.engine.airports
         self.selected_index: int | None = None
@@ -169,8 +184,9 @@ class MissionPlanner(tk.Tk):
         try:
             port = int(self.config_data.get("flow_http_port") or 8765)
             self.http = flow_engine.start_http_server(self.engine, port)
-        except OSError:
-            pass
+            app_diag.checkpoint("flow_http_listening", port=port)
+        except OSError as exc:
+            app_diag.error(app_diag.CAT_HTTP, f"flow HTTP bind failed: {exc}")
 
         self._hotkey_listener = hotkeys.GlobalHotkeyListener()
         self._hotkey_listener.on_trigger = self._on_trigger_received
@@ -199,8 +215,23 @@ class MissionPlanner(tk.Tk):
 
         srs_radio.apply_config(self.config_data)
         srs_radio.ensure_srs_udp_listener()
+        udp = srs_radio.srs_udp_status()
+        if udp.get("error"):
+            app_diag.warn(
+                app_diag.CAT_NETWORK,
+                "SRS UDP listener error",
+                error=str(udp.get("error") or ""),
+                ports=udp.get("ports_bound"),
+            )
+        else:
+            app_diag.checkpoint(
+                "srs_udp_listener",
+                ports=udp.get("ports_bound"),
+                port=udp.get("port"),
+            )
         self._style()
         self._build()
+        app_diag.checkpoint("ui_built")
         self._load_setup_fields()
         self.refresh_timeline()
         self._apply_hotkeys()
@@ -211,6 +242,7 @@ class MissionPlanner(tk.Tk):
         self._schedule_airports_poll()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(400, self._maybe_first_run)
+        app_diag.checkpoint("launch_ready")
 
     def _style(self) -> None:
         style = ttk.Style(self)
@@ -1157,6 +1189,7 @@ class MissionPlanner(tk.Tk):
                 )
             except Exception as exc:  # noqa: BLE001
                 print(f"NET link probe failed: {exc}", file=sys.stderr)
+                app_diag.error(app_diag.CAT_NETWORK, f"NET LINK probe failed: {exc}")
             finally:
                 self._ui_call(self._srs_link_on_sample)
 
@@ -1216,6 +1249,31 @@ class MissionPlanner(tk.Tk):
         color = C_GREEN if all_ok else (C_AMBER if any_ok else C_RED)
         if hasattr(self, "_srs_link_status_lbl"):
             self._srs_link_status_lbl.configure(fg=color)
+        # Log connectivity flips only — not every 1 Hz sample.
+        app_diag.note_transition(
+            "netlink.tcp",
+            "ok" if tcp_ok else "fail",
+            f"NET LINK SRS TCP {'ok' if tcp_ok else 'fail'}",
+            level=app_diag.LEVEL_INFO if tcp_ok else app_diag.LEVEL_WARN,
+            error="" if tcp_ok else str(latest.get("tcp_error") or ""),
+            rtt_ms=latest.get("tcp_rtt_ms"),
+        )
+        app_diag.note_transition(
+            "netlink.udp",
+            "ok" if udp_ok else "quiet",
+            f"NET LINK SRS UDP {'ok' if udp_ok else 'quiet'}",
+            level=app_diag.LEVEL_INFO if udp_ok else app_diag.LEVEL_WARN,
+            error="" if udp_ok else str(latest.get("udp_error") or ""),
+        )
+        if has_atc:
+            app_diag.note_transition(
+                "netlink.atc",
+                "ok" if atc_ok else "fail",
+                f"NET LINK ATC Host {'ok' if atc_ok else 'fail'}",
+                level=app_diag.LEVEL_INFO if atc_ok else app_diag.LEVEL_WARN,
+                error="" if atc_ok else str(latest.get("atc_error") or ""),
+                rtt_ms=latest.get("atc_rtt_ms"),
+            )
 
     def _redraw_srs_link_graph(self) -> None:
         canvas = getattr(self, "_srs_link_canvas", None)
@@ -1470,21 +1528,36 @@ class MissionPlanner(tk.Tk):
                 if fw:
                     bits.append(fw)
                 self._set_net_status("  ·  ".join(bits))
+                app_diag.info(
+                    app_diag.CAT_NETWORK,
+                    "ATC Host listening",
+                    port=self._atc_server.port,
+                    firewall=fw or "ok",
+                )
             except OSError as exc:
                 self._atc_server = None
                 self._set_net_status(f"HOST failed: {exc}")
+                app_diag.error(app_diag.CAT_NETWORK, f"ATC Host bind failed: {exc}")
         elif role == "client":
             self._atc_client = atc_client.AtcClient(self.config_data)
             warn = self._atc_client.start()
             if warn:
                 self._set_net_status(warn)
+                app_diag.warn(app_diag.CAT_NETWORK, warn)
             else:
                 self._set_net_status(
                     f"CLIENT  {self._atc_client.base_url}  ·  {self._atc_client.callsign or 'connected'}"
                 )
                 self._ensure_local_http(atc_client.ClientEngineProxy(self._atc_client))
+                app_diag.info(
+                    app_diag.CAT_NETWORK,
+                    "ATC Client connected",
+                    url=self._atc_client.base_url,
+                    callsign=self._atc_client.callsign or "",
+                )
         else:
             self._set_net_status("")
+            app_diag.info(app_diag.CAT_NETWORK, "ATC role solo")
         if hasattr(self, "_refresh_traffic"):
             self._refresh_traffic()
 
@@ -1498,8 +1571,9 @@ class MissionPlanner(tk.Tk):
             self.http = None
         try:
             self.http = flow_engine.start_http_server(engine, port)
-        except OSError:
-            pass
+            app_diag.info(app_diag.CAT_HTTP, "flow HTTP (re)bound", port=port)
+        except OSError as exc:
+            app_diag.error(app_diag.CAT_HTTP, f"flow HTTP (re)bind failed: {exc}", port=port)
 
     def _set_net_status(self, text: str) -> None:
         if hasattr(self, "fly_net"):
@@ -3016,8 +3090,17 @@ class MissionPlanner(tk.Tk):
         warnings = self._voice.start(self.config_data)
         if not self.config_data.get("voice_enabled"):
             self._set_voice_status("Voice control off")
+            app_diag.info(app_diag.CAT_VOICE, "voice control off")
         elif warnings:
             self._set_voice_status("; ".join(warnings))
+            for w in warnings:
+                app_diag.warn(app_diag.CAT_VOICE, w)
+        else:
+            app_diag.info(
+                app_diag.CAT_VOICE,
+                "voice control starting",
+                model=str(self.config_data.get("voice_model") or ""),
+            )
         self._refresh_voice_prompts()
         self._release_ollama_gpu()
 
@@ -3317,6 +3400,14 @@ class MissionPlanner(tk.Tk):
             parts.append(ch)
         line = "  ·  ".join(parts) + f"  —  {why}"
         self._voice_log(line)
+        app_diag.warn(
+            app_diag.CAT_TX,
+            "NO TX",
+            reason=why,
+            action=act or "",
+            label=label or "",
+            channel=ch or "",
+        )
         self._on_trigger_received(line)
 
     def _append_fly_voice_feed(self, line: str) -> None:
@@ -10209,6 +10300,11 @@ class MissionPlanner(tk.Tk):
         ttk.Label(hdr, text="How-to & Help", style="Header.TLabel").pack(side=tk.LEFT)
         ttk.Button(
             hdr,
+            text="App log…",
+            command=self._show_app_log,
+        ).pack(side=tk.RIGHT, padx=(0, 8))
+        ttk.Button(
+            hdr,
             text="First-run setup…",
             command=self._show_first_run,
         ).pack(side=tk.RIGHT, padx=(0, 8))
@@ -10284,6 +10380,143 @@ class MissionPlanner(tk.Tk):
 
     def _show_first_run(self) -> None:
         setup_welcome.show(self, force=True)
+
+    def _show_app_log(self) -> None:
+        """Live application troubleshooting log (not radio traffic)."""
+        dlg = tk.Toplevel(self)
+        dlg.title("App log")
+        dlg.geometry("920x560")
+        dlg.minsize(640, 360)
+        dlg.configure(bg=C_BG)
+        dlg.transient(self)
+
+        top = tk.Frame(dlg, bg=C_BG)
+        top.pack(fill=tk.X, padx=12, pady=(12, 6))
+        log_file = app_diag.log_path()
+        tk.Label(
+            top,
+            text=f"Troubleshooting log  ·  {log_file}",
+            bg=C_BG,
+            fg=C_MUTED,
+            font=("Segoe UI", 9),
+            anchor="w",
+            justify=tk.LEFT,
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        body = tk.Frame(dlg, bg=C_BG)
+        body.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 8))
+        box = tk.Text(
+            body,
+            wrap=tk.NONE,
+            bg="#0a0e14",
+            fg=C_TEXT,
+            insertbackground=C_TEXT,
+            font=("Consolas", 9),
+            relief=tk.FLAT,
+            padx=10,
+            pady=8,
+        )
+        ysb = ttk.Scrollbar(body, orient=tk.VERTICAL, command=box.yview)
+        xsb = ttk.Scrollbar(body, orient=tk.HORIZONTAL, command=box.xview)
+        box.configure(yscrollcommand=ysb.set, xscrollcommand=xsb.set)
+        ysb.pack(side=tk.RIGHT, fill=tk.Y)
+        xsb.pack(side=tk.BOTTOM, fill=tk.X)
+        box.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        box.tag_configure("WARN", foreground=C_AMBER)
+        box.tag_configure("ERROR", foreground=C_RED)
+        box.tag_configure("INFO", foreground=C_TEXT)
+        box.tag_configure("DEBUG", foreground=C_MUTED)
+
+        state = {"closed": False, "follow": True}
+
+        def render(*, scroll: bool = False) -> None:
+            if state["closed"]:
+                return
+            at_end = False
+            try:
+                at_end = float(box.yview()[1]) >= 0.98
+            except (tk.TclError, ValueError, TypeError):
+                at_end = True
+            blob = app_diag.format_text()
+            box.configure(state=tk.NORMAL)
+            box.delete("1.0", tk.END)
+            if blob:
+                for line in blob.splitlines():
+                    tag = "INFO"
+                    if " ERROR " in f" {line} ":
+                        tag = "ERROR"
+                    elif " WARN " in f" {line} ":
+                        tag = "WARN"
+                    elif " DEBUG " in f" {line} ":
+                        tag = "DEBUG"
+                    box.insert(tk.END, line + "\n", tag)
+            else:
+                box.insert(tk.END, "(no events yet)\n", "DEBUG")
+            box.configure(state=tk.DISABLED)
+            if scroll or (state["follow"] and at_end):
+                box.see(tk.END)
+
+        def on_entry(_entry: app_diag.DiagEntry) -> None:
+            self._ui_call(lambda: render(scroll=True))
+
+        def refresh() -> None:
+            render(scroll=False)
+
+        def copy_all() -> None:
+            dlg.clipboard_clear()
+            dlg.clipboard_append(app_diag.format_text() or "")
+            dlg.update()
+
+        def save_copy() -> None:
+            dest = filedialog.asksaveasfilename(
+                parent=dlg,
+                title="Save app log",
+                defaultextension=".log",
+                filetypes=[("Log files", "*.log"), ("Text files", "*.txt"), ("All files", "*.*")],
+                initialfile="pitboss-app.log",
+            )
+            if not dest:
+                return
+            try:
+                Path(dest).write_text(app_diag.format_text() + "\n", encoding="utf-8")
+            except OSError as exc:
+                messagebox.showerror("App log", str(exc), parent=dlg)
+
+        def clear_mem() -> None:
+            if not messagebox.askyesno(
+                "App log",
+                "Clear the in-memory log view?\n(The on-disk file is kept.)",
+                parent=dlg,
+            ):
+                return
+            app_diag.clear()
+            render()
+
+        def open_folder() -> None:
+            try:
+                log_file.parent.mkdir(parents=True, exist_ok=True)
+                os.startfile(str(log_file.parent))  # type: ignore[attr-defined]
+            except Exception as exc:  # noqa: BLE001
+                messagebox.showerror("App log", str(exc), parent=dlg)
+
+        def on_close() -> None:
+            state["closed"] = True
+            app_diag.unsubscribe(on_entry)
+            dlg.destroy()
+
+        btns = tk.Frame(dlg, bg=C_BG)
+        btns.pack(fill=tk.X, padx=12, pady=(0, 12))
+        ttk.Button(btns, text="Refresh", command=refresh).pack(side=tk.LEFT)
+        ttk.Button(btns, text="Copy", command=copy_all).pack(side=tk.LEFT, padx=6)
+        ttk.Button(btns, text="Save as…", command=save_copy).pack(side=tk.LEFT)
+        ttk.Button(btns, text="Open folder", command=open_folder).pack(side=tk.LEFT, padx=6)
+        ttk.Button(btns, text="Clear view", command=clear_mem).pack(side=tk.LEFT)
+        ttk.Button(btns, text="Close", command=on_close).pack(side=tk.RIGHT)
+
+        app_diag.subscribe(on_entry)
+        dlg.protocol("WM_DELETE_WINDOW", on_close)
+        render(scroll=True)
+
 
     def _on_help_topic(self) -> None:
         sel = self.help_topics.curselection()
@@ -10487,6 +10720,10 @@ class MissionPlanner(tk.Tk):
             (
                 "Troubleshooting",
                 [
+                    ("heading", "App log (diagnostics)"),
+                    ("bullet", "• Help → App log… records launch, library loads, network probes, and failures."),
+                    ("bullet", "• It does not store radio call text or MIC transcripts — use Fly LAST HEARD for that."),
+                    ("bullet", "• File lives under %LOCALAPPDATA%\\PitBossATC\\app.log (Open folder from the dialog)."),
                     ("heading", "No audio on SRS"),
                     ("bullet", "• Confirm SRS client is on the same server (Setup → Airport → SRS host/port)."),
                     ("bullet", "• Check the step frequency matches a radio you’re monitoring."),
@@ -13541,9 +13778,12 @@ class MissionPlanner(tk.Tk):
 
 
 def main() -> int:
+    app_diag.ensure_started()
+    app_diag.checkpoint("main_enter")
     try:
         app = MissionPlanner()
     except Exception as exc:  # noqa: BLE001
+        app_diag.error(app_diag.CAT_LAUNCH, f"startup failed: {exc}")
         # start "" hides the console — surface the crash so it is not a silent blink.
         try:
             root = tk.Tk()
@@ -13554,6 +13794,7 @@ def main() -> int:
             print(f"Could not start: {exc}", file=sys.stderr)
         return 1
     app.mainloop()
+    app_diag.checkpoint("main_exit")
     return 0
 
 

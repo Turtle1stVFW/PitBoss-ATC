@@ -19,7 +19,7 @@ as your jet (talk on the Fly tab; tankers still come from CAOC).
 2. **Fly** — big Next / Back / Reset / Flip for mid-flight.
 3. **Traffic** — connected pilots and per-frequency TX queues (Host role).
 4. **Setup** — Opus username, voice, airport freqs, SRS host, TTS provider, optional runway override, **Squadron** (solo/host/client), and **Controls** (HOTAS / hotkeys / voice).
-5. **Help** — in-app how-tos (Getting started, Google JSON setup, Plan Flight tips, troubleshooting). Also the top-right **Help** button.
+5. **Help** — in-app how-tos (Getting started, Google JSON setup, Plan Flight tips, troubleshooting). Also the top-right **Help** button. **App log…** opens the application troubleshooting log (launch / network / failures — not radio call text).
 
 ## Multi-pilot (optional, this branch)
 

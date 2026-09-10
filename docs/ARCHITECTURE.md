@@ -135,6 +135,7 @@ flowchart LR
 | Layer | Symbols |
 |-------|---------|
 | UI | `flow_ui.MissionPlanner` |
+| Diagnostics | `app_diag` — application troubleshooting log (launch / libraries / network / TX metadata; no radio phrase text) |
 | Engine | `FlowEngine.play_step`, `next`, `back`, `reset`, `flip`, `seek*`, `emit_radio`, `_freq_gate_or_raise`; `start_http_server` |
 | Phrases / TX | `atc_phrase.build_flow_step_phrase`, `build_template_text`, `synthesize_tts_wav`, `transmit`, `transmit_file` |
 | Freq gate | `srs_radio.current_radio_state`, `check_freq_gate`, `read_dcs_radios` |
@@ -147,7 +148,8 @@ flowchart LR
 
 ### UI
 
-- **`flow_ui.py`** — Main Tk app (`MissionPlanner`). Owns `FlowEngine`, local `:8765`, optional Host/Client, voice, zone-editor subprocess, and all tabs. Fly **NET LINK** strip: opt-in 1 Hz sparkline (SRS TCP RTT, UDP age, Client ATC Host health).
+- **`flow_ui.py`** — Main Tk app (`MissionPlanner`). Owns `FlowEngine`, local `:8765`, optional Host/Client, voice, zone-editor subprocess, and all tabs. Fly **NET LINK** strip: opt-in 1 Hz sparkline (SRS TCP RTT, UDP age, Client ATC Host health). Help → **App log…** opens the live troubleshooting viewer.
+- **`app_diag.py`** — Central application troubleshooting log (ring buffer + `%LOCALAPPDATA%\PitBossATC\app.log`). Records launch checkpoints, library loads, connectivity transitions, ExternalAudio exit codes, and meaningful failures. **Omits** ATC↔pilot radio call text and MIC transcripts; TX lines keep channel/freq/mod/cmd with `--text=` redacted.
 - **`atc_ui.py`** — Legacy Ground/Tower phrase board over `atc_phrase`; not the primary entry point.
 - **`kneeboard_pdf.py`** — Kneeboard PDF export from the planned flow.
 - **`hotkeys.py`** — Polled / registered keyboard Next/Back (survives DCS focus when polled).
