@@ -38,6 +38,13 @@ atc/**/_tmp*
 # Tester share zips (Pack-Share-Zip.cmd writes next to the repo)
 ATC-Flow-Share-*.zip
 
+# Native runtimes for other platforms - this is a Windows x64 distribution.
+# A fresh `dotnet publish` drops android/ios/linux/osx RID folders here; the
+# win-x64 host never probes them.
+runtimes/*
+!runtimes/win/
+!runtimes/win-x64/
+
 # Logs / editor junk
 *.log
 .DS_Store
