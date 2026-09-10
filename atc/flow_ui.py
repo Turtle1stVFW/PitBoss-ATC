@@ -462,6 +462,12 @@ class MissionPlanner(tk.Tk):
         except Exception:
             pass
         try:
+            self._srs_link_active = False
+            self._cancel_srs_link_tick()
+            srs_radio.srs_link_clear()
+        except Exception:
+            pass
+        try:
             srs_radio.stop_srs_udp_listener()
         except Exception:
             pass
@@ -1069,6 +1075,236 @@ class MissionPlanner(tk.Tk):
         except Exception:  # noqa: BLE001
             pass
         self.after(500, self._schedule_freq_gate_poll)
+
+    # --- NET LINK sparkline (SRS TCP RTT + UDP age + ATC Host when Client) ---
+
+    def _toggle_srs_link_monitor(self) -> None:
+        """User toggle beside the Fly NET LINK graph — 1 Hz until turned off."""
+        active = not bool(getattr(self, "_srs_link_active", False))
+        self._srs_link_active = active
+        if active:
+            srs_radio.srs_link_clear()
+            srs_radio.ensure_srs_udp_listener()
+            if hasattr(self, "_srs_link_btn"):
+                self._srs_link_btn.configure(text="ON")
+            self.fly_srs_link.set("probing…")
+            if hasattr(self, "_srs_link_status_lbl"):
+                self._srs_link_status_lbl.configure(fg=C_AMBER)
+            self._redraw_srs_link_graph()
+            self._schedule_srs_link_tick(immediate=True)
+        else:
+            self._cancel_srs_link_tick()
+            srs_radio.srs_link_clear()
+            if hasattr(self, "_srs_link_btn"):
+                self._srs_link_btn.configure(text="OFF")
+            self.fly_srs_link.set("idle — press ON to probe")
+            if hasattr(self, "_srs_link_status_lbl"):
+                self._srs_link_status_lbl.configure(fg=C_MUTED)
+            self._redraw_srs_link_graph()
+
+    def _cancel_srs_link_tick(self) -> None:
+        aid = getattr(self, "_srs_link_after_id", None)
+        if aid is not None:
+            try:
+                self.after_cancel(aid)
+            except (RuntimeError, tk.TclError, ValueError):
+                pass
+        self._srs_link_after_id = None
+
+    def _schedule_srs_link_tick(self, *, immediate: bool = False) -> None:
+        self._cancel_srs_link_tick()
+        if not getattr(self, "_srs_link_active", False):
+            return
+        delay = 0 if immediate else 1000
+        try:
+            self._srs_link_after_id = self.after(delay, self._srs_link_tick)
+        except (RuntimeError, tk.TclError):
+            self._srs_link_after_id = None
+
+    def _srs_link_tick(self) -> None:
+        self._srs_link_after_id = None
+        if not getattr(self, "_srs_link_active", False):
+            return
+        # Keep cadence at ~1 Hz even if a probe is still in flight.
+        self._schedule_srs_link_tick(immediate=False)
+        if getattr(self, "_srs_link_probing", False):
+            return
+        ap = self._airport()
+        host = str(ap.get("srs_host") or "")
+        try:
+            port = int(ap.get("srs_port") or 5002)
+        except (TypeError, ValueError):
+            port = 5002
+        atc_host: str | None = None
+        atc_port: int | None = None
+        if self._atc_role() == "client":
+            atc_host = str(self.config_data.get("atc_host") or "127.0.0.1").strip() or "127.0.0.1"
+            try:
+                atc_port = int(
+                    self.config_data.get("atc_port") or atc_net.DEFAULT_ATC_PORT
+                )
+            except (TypeError, ValueError):
+                atc_port = atc_net.DEFAULT_ATC_PORT
+        self._srs_link_probing = True
+
+        def work() -> None:
+            try:
+                srs_radio.srs_link_record_sample(
+                    host,
+                    port,
+                    atc_host=atc_host,
+                    atc_port=atc_port,
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(f"NET link probe failed: {exc}", file=sys.stderr)
+            finally:
+                self._ui_call(self._srs_link_on_sample)
+
+        threading.Thread(target=work, name="atc-net-link", daemon=True).start()
+
+    def _srs_link_on_sample(self) -> None:
+        self._srs_link_probing = False
+        if not getattr(self, "_srs_link_active", False):
+            return
+        self._update_srs_link_status()
+        self._redraw_srs_link_graph()
+
+    def _update_srs_link_status(self) -> None:
+        snap = srs_radio.srs_link_snapshot()
+        latest = snap.get("latest") or {}
+        if not latest:
+            self.fly_srs_link.set("probing…")
+            if hasattr(self, "_srs_link_status_lbl"):
+                self._srs_link_status_lbl.configure(fg=C_AMBER)
+            return
+        tcp_ok = bool(latest.get("tcp_ok"))
+        udp_ok = bool(latest.get("udp_ok"))
+        if tcp_ok:
+            rtt = latest.get("tcp_rtt_ms")
+            tcp_txt = f"{float(rtt):.0f} ms" if isinstance(rtt, (int, float)) else "TCP ok"
+        else:
+            err = str(latest.get("tcp_error") or "fail")
+            tcp_txt = f"TCP fail ({err})" if err and err != "fail" else "TCP fail"
+        if udp_ok:
+            age = latest.get("udp_age_ms")
+            udp_txt = (
+                f"UDP {float(age):.0f} ms"
+                if isinstance(age, (int, float))
+                else "UDP ok"
+            )
+        else:
+            udp_err = str(latest.get("udp_error") or "")
+            udp_txt = f"UDP quiet ({udp_err})" if udp_err else "UDP quiet"
+        parts = [tcp_txt, udp_txt]
+        has_atc = "atc_ok" in latest
+        atc_ok = bool(latest.get("atc_ok")) if has_atc else True
+        if has_atc:
+            if atc_ok:
+                artt = latest.get("atc_rtt_ms")
+                atc_txt = (
+                    f"ATC {float(artt):.0f} ms"
+                    if isinstance(artt, (int, float))
+                    else "ATC ok"
+                )
+            else:
+                aerr = str(latest.get("atc_error") or "fail")
+                atc_txt = f"ATC fail ({aerr})" if aerr and aerr != "fail" else "ATC fail"
+            parts.append(atc_txt)
+        self.fly_srs_link.set("  ·  ".join(parts))
+        all_ok = tcp_ok and udp_ok and atc_ok
+        any_ok = tcp_ok or udp_ok or (has_atc and atc_ok)
+        color = C_GREEN if all_ok else (C_AMBER if any_ok else C_RED)
+        if hasattr(self, "_srs_link_status_lbl"):
+            self._srs_link_status_lbl.configure(fg=color)
+
+    def _redraw_srs_link_graph(self) -> None:
+        canvas = getattr(self, "_srs_link_canvas", None)
+        if canvas is None:
+            return
+        try:
+            canvas.delete("all")
+        except tk.TclError:
+            return
+        w = max(int(canvas.winfo_width() or 0), 40)
+        h = max(int(canvas.winfo_height() or 0), 40)
+        samples = srs_radio.srs_link_samples()
+        if not samples:
+            canvas.create_text(
+                w // 2,
+                h // 2,
+                text="—" if not getattr(self, "_srs_link_active", False) else "waiting…",
+                fill=C_MUTED,
+                font=("Segoe UI", 9),
+            )
+            return
+
+        goods: list[float] = []
+        for s in samples:
+            if s.get("tcp_ok") and isinstance(s.get("tcp_rtt_ms"), (int, float)):
+                goods.append(float(s["tcp_rtt_ms"]))
+            if s.get("udp_ok") and isinstance(s.get("udp_age_ms"), (int, float)):
+                goods.append(float(s["udp_age_ms"]))
+            if s.get("atc_ok") and isinstance(s.get("atc_rtt_ms"), (int, float)):
+                goods.append(float(s["atc_rtt_ms"]))
+        y_max = max(goods) * 1.25 if goods else 100.0
+        y_max = max(50.0, min(y_max, 2000.0))
+        fail_y = y_max
+        pad_l, pad_r, pad_t, pad_b = 4, 4, 4, 4
+        plot_w = max(1, w - pad_l - pad_r)
+        plot_h = max(1, h - pad_t - pad_b)
+        n = len(samples)
+        xs = [
+            pad_l + (plot_w * i / max(1, n - 1) if n > 1 else plot_w / 2.0)
+            for i in range(n)
+        ]
+
+        def y_for(ms: float) -> float:
+            return pad_t + plot_h * (1.0 - max(0.0, min(1.0, ms / y_max)))
+
+        # Baseline guide
+        canvas.create_line(
+            pad_l, pad_t + plot_h, pad_l + plot_w, pad_t + plot_h, fill=C_BORDER
+        )
+
+        def draw_series(key: str, ok_key: str, color_ok: str) -> None:
+            # Skip series entirely when no sample carried this key (Solo/Host ATC).
+            if not any(ok_key in s for s in samples):
+                return
+            for i in range(1, n):
+                a, b = samples[i - 1], samples[i]
+                a_ok = bool(a.get(ok_key))
+                b_ok = bool(b.get(ok_key))
+                a_v = a.get(key) if a_ok else None
+                b_v = b.get(key) if b_ok else None
+                ya = y_for(float(a_v) if isinstance(a_v, (int, float)) else fail_y)
+                yb = y_for(float(b_v) if isinstance(b_v, (int, float)) else fail_y)
+                col = color_ok if (a_ok and b_ok) else C_RED
+                canvas.create_line(xs[i - 1], ya, xs[i], yb, fill=col, width=2)
+            if n == 1:
+                s0 = samples[0]
+                ok = bool(s0.get(ok_key))
+                v = s0.get(key) if ok else None
+                yy = y_for(float(v) if isinstance(v, (int, float)) else fail_y)
+                canvas.create_oval(
+                    xs[0] - 2,
+                    yy - 2,
+                    xs[0] + 2,
+                    yy + 2,
+                    fill=color_ok if ok else C_RED,
+                    outline="",
+                )
+
+        draw_series("tcp_rtt_ms", "tcp_ok", C_GREEN)
+        draw_series("udp_age_ms", "udp_ok", C_ACCENT)
+        draw_series("atc_rtt_ms", "atc_ok", C_AMBER)
+        canvas.create_text(
+            pad_l + 2,
+            pad_t + 2,
+            text=f"{y_max:.0f} ms",
+            fill=C_MUTED,
+            font=("Consolas", 7),
+            anchor="nw",
+        )
 
     # --- live aircraft position (CAOC) ----------------------------------
 
@@ -7356,6 +7592,72 @@ class MissionPlanner(tk.Tk):
         )
         self._fly_net_lbl.pack(fill=tk.X, pady=(0, 8))
 
+        # NET LINK — opt-in 1 Hz SRS TCP/UDP (+ ATC Host health when Client).
+        self._srs_link_active = False
+        self._srs_link_probing = False
+        self._srs_link_after_id: str | None = None
+        link_row = tk.Frame(shell, bg=C_BG)
+        link_row.pack(fill=tk.X, pady=(0, 10))
+        head = tk.Frame(link_row, bg=C_BG)
+        head.pack(fill=tk.X)
+        tk.Label(
+            head,
+            text="NET LINK",
+            bg=C_BG,
+            fg=C_MUTED,
+            font=("Segoe UI Semibold", 9),
+            anchor="w",
+        ).pack(side=tk.LEFT)
+        self._srs_link_btn = ttk.Button(
+            head,
+            text="OFF",
+            width=5,
+            command=self._toggle_srs_link_monitor,
+        )
+        self._srs_link_btn.pack(side=tk.LEFT, padx=(8, 8))
+        self.fly_srs_link = tk.StringVar(value="idle — press ON to probe")
+        self._srs_link_status_lbl = tk.Label(
+            head,
+            textvariable=self.fly_srs_link,
+            bg=C_BG,
+            fg=C_MUTED,
+            font=("Consolas", 9),
+            anchor="w",
+        )
+        self._srs_link_status_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        # Pack RIGHT first → rightmost legend entry.
+        tk.Label(
+            head,
+            text="ATC",
+            bg=C_BG,
+            fg=C_AMBER,
+            font=("Segoe UI", 8),
+        ).pack(side=tk.RIGHT, padx=(6, 0))
+        tk.Label(
+            head,
+            text="UDP age",
+            bg=C_BG,
+            fg=C_ACCENT,
+            font=("Segoe UI", 8),
+        ).pack(side=tk.RIGHT, padx=(6, 0))
+        tk.Label(
+            head,
+            text="TCP",
+            bg=C_BG,
+            fg=C_GREEN,
+            font=("Segoe UI", 8),
+        ).pack(side=tk.RIGHT, padx=(0, 2))
+        self._srs_link_canvas = tk.Canvas(
+            link_row,
+            height=52,
+            bg="#0a0e14",
+            highlightthickness=1,
+            highlightbackground=C_BORDER,
+            bd=0,
+        )
+        self._srs_link_canvas.pack(fill=tk.X, pady=(4, 0))
+        self._srs_link_canvas.bind("<Configure>", lambda _e: self._redraw_srs_link_graph())
+
         def _fly_shell_cfg(_event: tk.Event | None = None) -> None:
             self._fly_canvas.configure(scrollregion=self._fly_canvas.bbox("all"))
 
@@ -9399,8 +9701,9 @@ class MissionPlanner(tk.Tk):
                     self.fly_channel.set(display_ch)
                     self.fly_tx_name.set(f"SRS name: {tx}" if tx else "")
                 except Exception:
-                    ch, freq, mod, tx = self._fly_upcoming_radio(step)
+                    ch, local_preset, freq, mod, tx = self._fly_upcoming_radio(step)
                     display_ch = ch
+                    self.fly_local_preset.set(local_preset)
                     self.fly_freq.set(freq)
                     self.fly_mod.set(mod)
                     self.fly_channel.set(display_ch)
@@ -9421,11 +9724,12 @@ class MissionPlanner(tk.Tk):
                     except Exception:
                         painted_hero = False
                 if not painted_hero:
-                    ch, freq, mod, tx = self._fly_upcoming_radio(step)
+                    ch, local_preset, freq, mod, tx = self._fly_upcoming_radio(step)
                     display_ch = ch
                     # Sandbox Flight: hero is the agency on the radio (Bandsaw
                     # while Blackjack still holds). Field sequence still uses the
                     # upcoming step so a Tower handoff does not snap to Ground.
+                    self.fly_local_preset.set(local_preset)
                     self.fly_freq.set(freq)
                     self.fly_mod.set(mod)
                     self.fly_channel.set(display_ch)

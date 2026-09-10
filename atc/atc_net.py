@@ -5,10 +5,14 @@ Shared multi-pilot ATC constants: roles, token header, session keys.
 from __future__ import annotations
 
 import hmac
+import json
 import os
 import re
 import socket
 import subprocess
+import time
+import urllib.error
+import urllib.request
 from typing import Any
 
 TOKEN_HEADER = "X-ATC-Token"
@@ -16,6 +20,8 @@ DEFAULT_ATC_PORT = 8766
 SESSION_TTL_S = 15 * 60
 ROLES = ("solo", "host", "client")
 FIREWALL_RULE_PREFIX = "DCS ATC Host"
+# Fly NET LINK sparkline — health GET must finish before the next 1 Hz tick.
+ATC_HOST_PROBE_TIMEOUT_S = 0.8
 
 
 def role_of(config: dict[str, Any] | None) -> str:
@@ -248,6 +254,79 @@ def describe_connect_failure(
             )
         return f"host unreachable ({hint}) [{url}]"
     return f"host unreachable ({text}) [{url}]"
+
+
+def short_connect_failure(reason: object) -> str:
+    """Compact label for the Fly NET LINK status / sparkline (not the amber strip)."""
+    low = str(reason or "").strip().casefold()
+    if not low:
+        return "fail"
+    if "timed out" in low or "timeout" in low:
+        return "timeout"
+    if "refused" in low or "10061" in low:
+        return "refused"
+    if "10065" in low or "unreachable" in low:
+        return "unreachable"
+    # Keep it short for the Consolas status line.
+    text = str(reason or "").strip()
+    return (text[:32] + "…") if len(text) > 32 else (text or "fail")
+
+
+def atc_host_probe(
+    host: str,
+    port: int = DEFAULT_ATC_PORT,
+    *,
+    timeout_s: float = ATC_HOST_PROBE_TIMEOUT_S,
+) -> dict[str, Any]:
+    """GET /v1/health RTT for the Fly NET LINK sparkline (Client role).
+
+    No token — same lightweight check as AtcClient.probe_health, shorter timeout.
+    """
+    host = (host or "").strip() or "127.0.0.1"
+    try:
+        port_i = int(port)
+    except (TypeError, ValueError):
+        return {"ok": False, "rtt_ms": None, "error": "bad ATC port"}
+    if port_i <= 0 or port_i > 65535:
+        return {"ok": False, "rtt_ms": None, "error": "bad ATC port"}
+    url = f"http://{host}:{port_i}/v1/health"
+    req = urllib.request.Request(url, method="GET")
+    t0 = time.perf_counter()
+    try:
+        with urllib.request.urlopen(req, timeout=float(timeout_s)) as resp:
+            raw = resp.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        return {
+            "ok": False,
+            "rtt_ms": None,
+            "error": short_connect_failure(f"{exc.code}"),
+        }
+    except urllib.error.URLError as exc:
+        return {
+            "ok": False,
+            "rtt_ms": None,
+            "error": short_connect_failure(exc.reason),
+        }
+    except TimeoutError as exc:
+        return {
+            "ok": False,
+            "rtt_ms": None,
+            "error": short_connect_failure(exc),
+        }
+    except OSError as exc:
+        return {
+            "ok": False,
+            "rtt_ms": None,
+            "error": short_connect_failure(exc),
+        }
+    rtt_ms = (time.perf_counter() - t0) * 1000.0
+    try:
+        payload = json.loads(raw or "{}")
+    except json.JSONDecodeError:
+        return {"ok": False, "rtt_ms": None, "error": "bad health JSON"}
+    if not isinstance(payload, dict) or not payload.get("ok"):
+        return {"ok": False, "rtt_ms": None, "error": "health not ok"}
+    return {"ok": True, "rtt_ms": rtt_ms, "error": ""}
 
 
 def ensure_inbound_tcp_firewall(port: int) -> str:
