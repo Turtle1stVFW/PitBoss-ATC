@@ -1,0 +1,58 @@
+---
+description: Mandatory interview → plan → branch → QA → finish-up workflow for all repo work
+alwaysApply: true
+---
+
+# Development workflow
+
+For any work that changes the repo or produces durable artifacts (code, docs, config, rules, scripts), follow this sequence in order. Do not skip gates. Pure Q&A with no file changes may answer directly.
+
+## 1. Interview (before planning)
+
+Ask clarifying questions until the issue, ask, success criteria, constraints, and out-of-scope items are clear. Do not draft a plan or touch files until enough is known.
+
+## 2. Plan (before implementation)
+
+Present a concise plan for tweaking/approval. Include scope, approach, files/areas touched, and risks. **Stop and wait** for explicit approval. Do not implement, branch, or commit until approved.
+
+## 3. Feature branch (after approval)
+
+Create and check out a Git feature branch before making changes. Capture all work on that branch.
+
+- Naming: `feature/<short-kebab-description>` (or `fix/` / `docs/` when more accurate)
+- Do not commit to `main`
+
+## 4. Testing plan (when work is complete)
+
+When implementation is done, present a step-by-step QA/testing plan the user can run. **Stop and wait**. Do not commit, push, merge, or “finish up” until the user says so.
+
+## 5. Finish up (only when user says “Finish up”)
+
+On **Finish up**, run this sequence exactly:
+
+1. Commit all relevant work on the feature branch (follow repo commit rules; no secrets)
+2. Archive the approved plan on that branch under `.cursor/plans/executed/` (descriptive filename; include the plan in the commit if not already)
+3. Push the feature branch to origin over **SSH** (`git push -u origin HEAD`)
+4. Open GitHub PRs as needed (`gh pr create`). **Merge behavior depends on the base repo:**
+   - **Our fork / origin** (`blackrook-io/455AEW-PitBoss`, or this clone’s `origin`): create the PR if needed, then **merge it straightaway** (`gh pr merge` — do not wait for review).
+   - **Upstream** (`Turtle1stVFW/SRS-ExternalAudio-Remote`, or this clone’s `upstream` when that is the Turtle1stVFW repo): **create and populate the PR only**. Do **not** approve it. Do **not** merge it. Return the PR URL and stop the merge step so a human (preferably a different contributor than the submitter) can review.
+5. Check out `main`, pull latest from **origin**
+6. Delete the **local** feature branch. Delete the **remote** feature branch on origin **only** when no open upstream PR still depends on it (if an upstream PR was opened in step 4, leave the remote branch until that PR is merged or closed)
+
+Do not push, merge, or delete branches unless the user said **Finish up** (or explicitly asked for that step).
+
+## Hard stops
+
+| Gate | Do not proceed until |
+|------|----------------------|
+| Interview → Plan | Requirements are clear |
+| Plan → Branch/code | User approves the plan |
+| Code → Finish | User says **Finish up** (after QA plan) |
+
+```text
+✅ Interview → approved plan → feature/* → implement → QA plan → “Finish up” → commit/archive/push/PR/(merge fork only)/pull/delete
+❌ Coding on main
+❌ Implementing before plan approval
+❌ Push/merge before “Finish up”
+❌ Auto-approve or auto-merge PRs into Turtle1stVFW/SRS-ExternalAudio-Remote (upstream)
+```
