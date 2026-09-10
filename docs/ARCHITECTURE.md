@@ -138,6 +138,7 @@ flowchart LR
 | Engine | `FlowEngine.play_step`, `next`, `back`, `reset`, `flip`, `seek*`, `emit_radio`, `_freq_gate_or_raise`; `start_http_server` |
 | Phrases / TX | `atc_phrase.build_flow_step_phrase`, `build_template_text`, `synthesize_tts_wav`, `transmit`, `transmit_file` |
 | Freq gate | `srs_radio.current_radio_state`, `check_freq_gate`, `read_dcs_radios` |
+| SRS / NET link (Fly) | `srs_radio.srs_tcp_probe`, `srs_link_record_sample`, `srs_link_snapshot`; `atc_net.atc_host_probe` (Client) |
 | Multi-pilot | `atc_server.AtcServer`, `PilotSession`; `atc_client.AtcClient`, `ClientEngineProxy`; `atc_net.session_key`, `flow_key`; `channel_tx.ChannelTxHub` |
 | Voice | `voice_engine.VoiceController`, `Transcriber`, `execute_intent`; `voice_intent.evaluate`, `Intent`, `Match` |
 | Position | `runway_position.PositionTracker`, `FlightStatus`, `step_trigger`, `resolve_step_trigger` |
@@ -146,7 +147,7 @@ flowchart LR
 
 ### UI
 
-- **`flow_ui.py`** — Main Tk app (`MissionPlanner`). Owns `FlowEngine`, local `:8765`, optional Host/Client, voice, zone-editor subprocess, and all tabs.
+- **`flow_ui.py`** — Main Tk app (`MissionPlanner`). Owns `FlowEngine`, local `:8765`, optional Host/Client, voice, zone-editor subprocess, and all tabs. Fly **NET LINK** strip: opt-in 1 Hz sparkline (SRS TCP RTT, UDP age, Client ATC Host health).
 - **`atc_ui.py`** — Legacy Ground/Tower phrase board over `atc_phrase`; not the primary entry point.
 - **`kneeboard_pdf.py`** — Kneeboard PDF export from the planned flow.
 - **`hotkeys.py`** — Polled / registered keyboard Next/Back (survives DCS focus when polled).
@@ -160,11 +161,11 @@ flowchart LR
 
 ### Net / TX
 
-- **`atc_net.py`** — Role/token helpers, `session_key` / `flow_key`, LAN URL helpers, inbound firewall helper.
+- **`atc_net.py`** — Role/token helpers, `session_key` / `flow_key`, LAN URL helpers, inbound firewall helper, `atc_host_probe` (`GET /v1/health` RTT for Fly NET LINK).
 - **`atc_server.py`** — Host HTTP API (`AtcServer`, `PilotSession`); shared engines per flight; queues TX.
 - **`atc_client.py`** — Client HTTP + `ClientEngineProxy` so local `:8765` / Stream Deck talk to the Host.
 - **`channel_tx.py`** — `ChannelTxHub` per-agency TX queues and workers.
-- **`srs_radio.py`** — Merges DCS Export, SRS UDP CombinedRadioState, optional EAM strip; implements `check_freq_gate`.
+- **`srs_radio.py`** — Merges DCS Export, SRS UDP CombinedRadioState, optional EAM strip; implements `check_freq_gate`. Opt-in Fly **NET LINK** monitor: `srs_tcp_probe` (SRS host RTT) + UDP age + optional Client **ATC Host** health RTT in one sparkline ring buffer.
 - **`fake_pilots.py`** — Registers fake clients for Host Traffic testing.
 
 ### Phrases

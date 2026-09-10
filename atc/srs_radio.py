@@ -24,6 +24,7 @@ import os
 import socket
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -40,6 +41,9 @@ MOD_INTERCOM = 3
 # Prefer Info (7080) — that is where CombinedRadioState usually lands; Other (7082)
 # is often quiet. We listen on every bindable port from the list.
 DEFAULT_SRS_UDP_PORTS = (7080, 7082)  # OutgoingDCSUDPInfo, OutgoingDCSUDPOther
+# Fly SRS LINK sparkline: ~1.5 min at 1 Hz; TCP connect must finish before next tick.
+SRS_LINK_SAMPLE_MAX = 90
+SRS_TCP_PROBE_TIMEOUT_S = 0.8
 
 # Runtime EAM freqs (MHz) — updated by the Fly UI; also mirrored into config on save.
 # The whole strip is the receive bank; selected index is TX only.
@@ -59,6 +63,10 @@ _srs_udp_ports_bound: list[int] = []
 _srs_udp_error: str = ""
 _srs_udp_thread: threading.Thread | None = None
 _srs_udp_stop = threading.Event()
+
+# Fly-tab SRS link quality ring buffer (TCP RTT + UDP age), filled while toggled on.
+_srs_link_lock = threading.Lock()
+_srs_link_samples: deque[dict[str, Any]] = deque(maxlen=SRS_LINK_SAMPLE_MAX)
 
 MatchResult = Literal["match", "mismatch", "unknown"]
 
@@ -199,6 +207,111 @@ def srs_udp_status() -> dict[str, Any]:
                 and age <= SRS_UDP_STALE_S
             ),
         }
+
+
+def srs_tcp_probe(
+    host: str,
+    port: int,
+    *,
+    timeout_s: float = SRS_TCP_PROBE_TIMEOUT_S,
+) -> dict[str, Any]:
+    """Short-lived TCP connect to the SRS sync port; returns RTT or error.
+
+    Connect+close only — no SRS handshake (avoids ghost clients).
+    """
+    host = (host or "").strip()
+    if not host:
+        return {"ok": False, "rtt_ms": None, "error": "no SRS host"}
+    try:
+        port_i = int(port)
+    except (TypeError, ValueError):
+        return {"ok": False, "rtt_ms": None, "error": "bad SRS port"}
+    if port_i <= 0 or port_i > 65535:
+        return {"ok": False, "rtt_ms": None, "error": "bad SRS port"}
+    t0 = time.perf_counter()
+    try:
+        with socket.create_connection((host, port_i), timeout=float(timeout_s)):
+            pass
+    except OSError as exc:
+        return {"ok": False, "rtt_ms": None, "error": str(exc) or type(exc).__name__}
+    rtt_ms = (time.perf_counter() - t0) * 1000.0
+    return {"ok": True, "rtt_ms": rtt_ms, "error": ""}
+
+
+def srs_link_clear() -> None:
+    """Drop sparkline history (call when the Fly toggle turns off)."""
+    with _srs_link_lock:
+        _srs_link_samples.clear()
+
+
+def srs_link_record_sample(
+    host: str,
+    port: int,
+    *,
+    timeout_s: float = SRS_TCP_PROBE_TIMEOUT_S,
+    atc_host: str | None = None,
+    atc_port: int | None = None,
+    atc_timeout_s: float | None = None,
+) -> dict[str, Any]:
+    """Probe TCP + read UDP freshness (+ optional ATC Host health); append one sample."""
+    ensure_srs_udp_listener()
+    tcp = srs_tcp_probe(host, port, timeout_s=timeout_s)
+    udp = srs_udp_status()
+    age_s = udp.get("age_s")
+    udp_age_ms: float | None
+    if isinstance(age_s, (int, float)):
+        udp_age_ms = float(age_s) * 1000.0
+    else:
+        udp_age_ms = None
+    udp_ok = bool(udp.get("fresh")) and not (udp.get("error") or "")
+    sample: dict[str, Any] = {
+        "t": time.time(),
+        "tcp_rtt_ms": tcp.get("rtt_ms") if tcp.get("ok") else None,
+        "tcp_ok": bool(tcp.get("ok")),
+        "tcp_error": str(tcp.get("error") or ""),
+        "udp_age_ms": udp_age_ms if udp_ok or udp_age_ms is not None else None,
+        "udp_ok": udp_ok,
+        "udp_error": str(udp.get("error") or ""),
+    }
+    # Client-only ATC Host series — omit fields entirely when not requested.
+    if atc_host is not None:
+        try:
+            import atc_net as atc_net_mod
+
+            timeout = (
+                float(atc_timeout_s)
+                if atc_timeout_s is not None
+                else float(atc_net_mod.ATC_HOST_PROBE_TIMEOUT_S)
+            )
+            port_i = (
+                int(atc_port)
+                if atc_port is not None
+                else int(atc_net_mod.DEFAULT_ATC_PORT)
+            )
+            atc = atc_net_mod.atc_host_probe(
+                str(atc_host), port_i, timeout_s=timeout
+            )
+        except Exception as exc:  # noqa: BLE001
+            atc = {"ok": False, "rtt_ms": None, "error": str(exc) or type(exc).__name__}
+        sample["atc_rtt_ms"] = atc.get("rtt_ms") if atc.get("ok") else None
+        sample["atc_ok"] = bool(atc.get("ok"))
+        sample["atc_error"] = str(atc.get("error") or "")
+    with _srs_link_lock:
+        _srs_link_samples.append(sample)
+    return sample
+
+
+def srs_link_samples() -> list[dict[str, Any]]:
+    """Copy of the Fly sparkline ring buffer (oldest → newest)."""
+    with _srs_link_lock:
+        return list(_srs_link_samples)
+
+
+def srs_link_snapshot() -> dict[str, Any]:
+    """Latest sample plus full history for the Fly sparkline redraw."""
+    samples = srs_link_samples()
+    latest = samples[-1] if samples else None
+    return {"samples": samples, "latest": latest}
 
 
 def read_srs_client_selected(*, stale_s: float = SRS_UDP_STALE_S) -> RadioState:
