@@ -10328,11 +10328,14 @@ def pick_departure_runway(
     1. Per-step runway on the mission step (if set) — honored as-is
     2. Pilot-requested runway (Fly) — honored as-is
     3. Manual runway_override from Setup — honored as-is
-    4. Runway coded on the filed Opus route (snapped)
-    5. 11-250: wind component > 10 kt → most aligned; else day calm-wind 21,
+    4. 11-250: wind component > 10 kt → most aligned; else day calm-wind 21,
        or 2200L–0800L split (dep 03 / arr 21) from the CAOC mission clock
 
-    FP/wind results snap to ops runways (21R / 03L), or to instrument
+    A runway coded on the filed Opus route (FLEX03L) names the departure for
+    phraseology only — the active runway is ATC's, so pilots wanting the other
+    end request it on the radio.
+
+    Wind results snap to ops runways (21R / 03L), or to instrument
     runways (21L / 03R) only for instrument-approach phrases. Explicit
     step / pilot / Setup choices are never snapped away.
     """
@@ -10393,18 +10396,16 @@ def pick_departure_runway(
         print(f"Runway (recovery bias): {picked}")
         return picked
 
-    raw: str | None = runway_from_route(opus.fp_route_string if opus else None)
-    if raw is None:
-        # 11-250 §1.12 component + §4.1.4 night dep 03 / arr 21.
-        raw = pick_recovery_runway(
-            airport,
-            weather,
-            instrument=instrument,
-            for_departure=True,
-            config=config,
-            local_minutes=local_minutes,
-        )
-        print(f"Runway (wind/night): {raw}")
+    # 11-250 §1.12 component + §4.1.4 night dep 03 / arr 21.
+    raw = pick_recovery_runway(
+        airport,
+        weather,
+        instrument=instrument,
+        for_departure=True,
+        config=config,
+        local_minutes=local_minutes,
+    )
+    print(f"Runway (wind/night): {raw}")
     aligned = align_runway_to_airport(airport, raw, instrument=instrument)
     if aligned != raw:
         kind = "instrument" if instrument else "ops"
