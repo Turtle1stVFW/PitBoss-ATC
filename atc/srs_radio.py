@@ -393,6 +393,23 @@ def _srs_udp_loop() -> None:
         _srs_udp_ports_bound = list(bound)
         _srs_udp_port = bound[0] if bound else None
         _srs_udp_error = "" if socks else ("; ".join(errors) or "no UDP port")
+    try:
+        import app_diag
+
+        if socks:
+            app_diag.info(
+                app_diag.CAT_NETWORK,
+                "SRS UDP listener bound",
+                ports=bound,
+            )
+        else:
+            app_diag.error(
+                app_diag.CAT_NETWORK,
+                "SRS UDP listener bind failed",
+                error="; ".join(errors) or "no UDP port",
+            )
+    except Exception:
+        pass
     if not socks:
         return
     try:
@@ -406,6 +423,17 @@ def _srs_udp_loop() -> None:
                 except OSError as exc:
                     with _srs_udp_lock:
                         _srs_udp_error = str(exc)
+                    try:
+                        import app_diag
+
+                        app_diag.note_transition(
+                            "srs.udp.recv",
+                            str(exc),
+                            f"SRS UDP recv error: {exc}",
+                            level=app_diag.LEVEL_WARN,
+                        )
+                    except Exception:
+                        pass
                     continue
                 got_any = True
                 # Remember which port last delivered a CombinedRadioState.

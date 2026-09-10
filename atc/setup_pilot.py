@@ -123,6 +123,15 @@ def run_cli(argv: list[str] | None = None) -> int:
     print("=== ATC machine setup (testing) ===")
     print(f"Python  {sys.version.split()[0]}  ({sys.executable})")
     print()
+    try:
+        import app_diag
+
+        app_diag.checkpoint(
+            "setup_pilot_start",
+            python=sys.version.split()[0],
+        )
+    except Exception:
+        pass
 
     failed = False
 
@@ -131,12 +140,30 @@ def run_cli(argv: list[str] | None = None) -> int:
     except ImportError:
         print(_line(False, "tkinter missing — reinstall Python and enable tcl/tk and IDLE"))
         failed = True
+        try:
+            import app_diag
+
+            app_diag.error(app_diag.CAT_LIBRARY, "tkinter missing")
+        except Exception:
+            pass
     else:
         print(_line(True, "tkinter available"))
+        try:
+            import app_diag
+
+            app_diag.info(app_diag.CAT_LIBRARY, "tkinter available")
+        except Exception:
+            pass
 
     ok, msg = ensure_config()
     print(_line(ok, msg))
     failed = failed or (not ok)
+    try:
+        import app_diag
+
+        (app_diag.info if ok else app_diag.error)(app_diag.CAT_CONFIG, msg)
+    except Exception:
+        pass
 
     if args.skip_voice:
         print(_line(True, "voice packages skipped (--skip-voice)"))
@@ -144,6 +171,12 @@ def run_cli(argv: list[str] | None = None) -> int:
         ok, msg = install_voice_packages(warm_model=not args.skip_whisper_warm)
         print(_line(ok, msg))
         failed = failed or (not ok)
+        try:
+            import app_diag
+
+            (app_diag.info if ok else app_diag.error)(app_diag.CAT_LIBRARY, msg)
+        except Exception:
+            pass
 
     if args.skip_radio_export:
         print(_line(True, "DCS radio export skipped (--skip-radio-export)"))
@@ -152,8 +185,20 @@ def run_cli(argv: list[str] | None = None) -> int:
         print(_line(ok, msg))
         if not ok:
             failed = True
+        try:
+            import app_diag
+
+            (app_diag.info if ok else app_diag.warn)(app_diag.CAT_CONFIG, msg)
+        except Exception:
+            pass
 
     print(NEXT_STEPS)
+    try:
+        import app_diag
+
+        app_diag.checkpoint("setup_pilot_done", failed=failed)
+    except Exception:
+        pass
     return 1 if failed else 0
 
 

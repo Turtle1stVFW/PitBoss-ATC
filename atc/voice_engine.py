@@ -115,6 +115,12 @@ class Transcriber:
                 from faster_whisper import WhisperModel
             except ImportError as exc:
                 self.error = f"faster-whisper is not installed ({exc})"
+                try:
+                    import app_diag
+
+                    app_diag.error(app_diag.CAT_LIBRARY, self.error)
+                except Exception:
+                    pass
                 return False
             try:
                 _quiet_huggingface_hub()
@@ -136,9 +142,32 @@ class Transcriber:
                     )
             except Exception as exc:  # noqa: BLE001 — model download/CUDA/etc
                 self.error = f"{type(exc).__name__}: {exc}"
+                try:
+                    import app_diag
+
+                    app_diag.error(
+                        app_diag.CAT_LIBRARY,
+                        f"WhisperModel load failed: {self.error}",
+                        model=self.model_size,
+                        device=self.device,
+                    )
+                except Exception:
+                    pass
                 return False
         self.error = ""
         self.ready.set()
+        try:
+            import app_diag
+
+            app_diag.info(
+                app_diag.CAT_LIBRARY,
+                "WhisperModel loaded",
+                model=self.model_size,
+                device=self.device,
+                compute=self.compute_type,
+            )
+        except Exception:
+            pass
         return True
 
     def warm(self) -> None:
@@ -290,10 +319,22 @@ class VoiceController:
             self.last_error = transcriber.error
             self.on_status(f"Model failed: {transcriber.error}")
         else:
+            elapsed = time.perf_counter() - started
             self.on_status(
                 f"Listening — {transcriber.model_size} ready "
-                f"({time.perf_counter() - started:.1f}s)"
+                f"({elapsed:.1f}s)"
             )
+            try:
+                import app_diag
+
+                app_diag.info(
+                    app_diag.CAT_VOICE,
+                    "Whisper warm complete",
+                    model=transcriber.model_size,
+                    seconds=round(elapsed, 2),
+                )
+            except Exception:
+                pass
 
     def stop(self) -> None:
         self.enabled = False
@@ -363,6 +404,12 @@ class VoiceController:
         except Exception as exc:  # noqa: BLE001
             self.last_error = str(exc)
             self.on_status(f"Transcribe failed: {exc}")
+            try:
+                import app_diag
+
+                app_diag.error(app_diag.CAT_VOICE, f"transcribe failed: {exc}")
+            except Exception:
+                pass
             return
         elapsed = (time.perf_counter() - started) * 1000
 

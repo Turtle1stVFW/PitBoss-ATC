@@ -47,11 +47,28 @@ class AtcClient:
             self.hello()
         except Exception as exc:  # noqa: BLE001
             self.last_error = str(exc)
+            try:
+                import app_diag
+
+                app_diag.warn(app_diag.CAT_NETWORK, f"ATC Client hello failed: {exc}")
+            except Exception:
+                pass
             return f"ATC host: {exc}"
         self._thread = threading.Thread(
             target=self._heartbeat_loop, name="atc-client-hb", daemon=True
         )
         self._thread.start()
+        try:
+            import app_diag
+
+            app_diag.info(
+                app_diag.CAT_NETWORK,
+                "ATC Client hello ok",
+                url=self.base_url,
+                callsign=self.callsign or "",
+            )
+        except Exception:
+            pass
         return ""
 
     def stop(self) -> None:
@@ -141,13 +158,40 @@ class AtcClient:
                 data = self._request("POST", "/v1/heartbeat", body)
                 self.last_status = data
                 self.last_error = ""
+                try:
+                    import app_diag
+
+                    app_diag.note_transition(
+                        "atc.client.heartbeat",
+                        "ok",
+                        "ATC Client heartbeat ok",
+                    )
+                except Exception:
+                    pass
             except Exception as exc:  # noqa: BLE001
                 self.last_error = str(exc)
+                try:
+                    import app_diag
+
+                    app_diag.note_transition(
+                        "atc.client.heartbeat",
+                        str(exc),
+                        f"ATC Client heartbeat failed: {exc}",
+                        level=app_diag.LEVEL_WARN,
+                    )
+                except Exception:
+                    pass
                 if "unknown session" in str(exc).casefold():
                     self.session_id = ""
                     try:
                         self.hello()
                         self.last_error = ""
+                        try:
+                            import app_diag
+
+                            app_diag.info(app_diag.CAT_NETWORK, "ATC Client re-hello ok")
+                        except Exception:
+                            pass
                     except Exception as hello_exc:  # noqa: BLE001
                         self.last_error = str(hello_exc)
 

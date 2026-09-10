@@ -61,8 +61,20 @@ def load_app_config(path: Path | None = None) -> dict[str, Any]:
         try:
             save_json(cfg_path, data)
             print(f"Created {cfg_path.name} from config.example.json", file=sys.stderr)
+            try:
+                import app_diag
+
+                app_diag.info(app_diag.CAT_CONFIG, f"created {cfg_path.name} from example")
+            except Exception:
+                pass
         except OSError as exc:
             print(f"WARNING: could not write {cfg_path.name}: {exc}", file=sys.stderr)
+            try:
+                import app_diag
+
+                app_diag.warn(app_diag.CAT_CONFIG, f"could not write {cfg_path.name}: {exc}")
+            except Exception:
+                pass
         return data
     raise FileNotFoundError(
         f"Missing {cfg_path.name}. Copy config.example.json to config.json."
@@ -1675,6 +1687,12 @@ def start_http_server(engine: FlowEngine, port: int) -> ThreadingHTTPServer:
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     print(f"Flow HTTP listening on http://127.0.0.1:{port}")
+    try:
+        import app_diag
+
+        app_diag.info(app_diag.CAT_HTTP, "Flow HTTP listening", port=port)
+    except Exception:
+        pass
     return server
 
 
