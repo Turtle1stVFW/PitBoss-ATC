@@ -1997,6 +1997,10 @@ class MissionPlanner(tk.Tk):
         step_id = str(step.get("id") or step.get("template") or "step")
         tmpl = str(step.get("template") or "")
 
+        # Approach check-in is voice / Play only — never auto after NATCF.
+        if tmpl == "approach_check_in":
+            return "", "waiting for Approach check-in"
+
         # NATCF → Approach: after check-in, while still inbound to the exit fix.
         if tmpl == "control_handoff":
             ready, waiting = atc_phrase.control_handoff_auto_ready(
@@ -8375,6 +8379,8 @@ class MissionPlanner(tk.Tk):
         "visual_overhead": "Overhead",
         "tactical_overhead": "Tactical",
         "straight_in": "Straight-in",
+        "sfo_overhead": "SFO High Key",
+        "sfo_straight_in": "SFO Straight-in",
         "instrument": "Instrument",
     }
     _FLY_REQUEST_BTN_LABELS: dict[str, str] = {
@@ -8384,6 +8390,7 @@ class MissionPlanner(tk.Tk):
         "request_lineup": "Request LUAW",
         "request_landing": "Gear down full stop",
         "request_low_approach": "The option",
+        "request_sfo": "High Key / SFO",
         "request_go_around": "On the go",
         "request_handoff": "Request handoff",
         "request_tanker": "Request tanker",
@@ -8711,6 +8718,26 @@ class MissionPlanner(tk.Tk):
 
             threading.Thread(target=ga_work, daemon=True).start()
             return
+        if result.get("execute_sfo_approve"):
+            def sfo_work() -> None:
+                try:
+                    played = voice_engine.execute_intent(
+                        voice_intent.Match(
+                            intent="request_sfo",
+                            kind="action",
+                            template="",
+                            confidence=1.0,
+                            slots={"recovery": "sfo_overhead", "channel": "tower"},
+                        ),
+                        self.engine,
+                    )
+                    self._ui_call(lambda p=played: self._on_sfo_request_done(p))
+                except Exception as exc:  # noqa: BLE001
+                    err = str(exc)
+                    self._ui_call(lambda m=err: messagebox.showerror("SFO", m))
+
+            threading.Thread(target=sfo_work, daemon=True).start()
+            return
         if result.get("execute_departure_handoff"):
             def ho_work() -> None:
                 try:
@@ -8928,6 +8955,22 @@ class MissionPlanner(tk.Tk):
         )
         self.fly_log.see(tk.END)
         self._consume_position_fire_clears()
+        self._refresh_fly_status()
+
+    def _on_sfo_request_done(self, played: dict[str, Any] | None) -> None:
+        played = played or {}
+        if played.get("action") == "blocked":
+            self._note_no_tx(
+                str(played.get("detail") or "Blocked"),
+                action="sfo",
+                channel=str(played.get("channel") or "tower"),
+            )
+            self._refresh_fly_status()
+            return
+        freq = played.get("freq") or ""
+        label = played.get("text") or "SFO approved"
+        self.fly_log.insert(tk.END, f"TX  {label}  ·  {freq}  ·  TOWER\n")
+        self.fly_log.see(tk.END)
         self._refresh_fly_status()
 
     def _on_ops_request_done(self, played: dict[str, Any] | None) -> None:

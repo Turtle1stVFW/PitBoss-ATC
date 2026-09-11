@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 import sys
+import time
 
 import atc_phrase
 import runway_position as rp
@@ -770,9 +771,10 @@ def check_trigger_timing() -> int:
     print("ok   dwell restarts when a jet drops out rather than resuming")
 
     trig = rp.step_trigger({"trigger": {"zone": "in_position", "gap_s": 8}})
-    state = {"last_tx_at": t0}
+    # Gap is from when the previous call *finished*, not when it started.
+    state = {"last_tx_at": t0 - 10.0, "last_tx_end_at": t0}
     left = rp.gap_remaining(trig, state, now=t0 + 3.0)
-    print(f"3 s after the last call, {left:.0f}s still to wait")
+    print(f"3 s after the last call finished, {left:.0f}s still to wait")
     if abs(left - 5.0) > 0.01:
         print("  FAIL radio gap arithmetic is wrong")
         bad += 1
@@ -785,6 +787,47 @@ def check_trigger_timing() -> int:
     if rp.gap_remaining(rp.step_trigger({"trigger": {"zone": "eor"}}), state, now=t0) != 0.0:
         print("  FAIL no gap asked for, none should be imposed")
         bad += 1
+
+    # Long deferred check-in: 6s from start is not enough; wait until speech ends.
+    long = (
+        "Fleece one, Nellis Approach, thirty five miles, Nellis landing south, "
+        "expect ILS X-ray runway two one left, Nellis altimeter two niner niner two."
+    )
+    dur = atc_phrase.estimate_spoken_duration_s(long, speed=4)
+    if dur < 6.0:
+        print(f"  FAIL estimate for a long check-in should exceed 6s, got {dur:.1f}")
+        bad += 1
+    st_gap = {
+        "approach_checked_in": True,
+        "last_tx_template": "approach_check_in",
+        "last_tx_text": long,
+        "last_tx_at": t0,
+        "last_tx_end_at": t0 + dur,
+        "approach_plan": {
+            "iaf": "KRYSS",
+            "iaf_say": "Kryss",
+            "iaf_lat": 36.506156,
+            "iaf_lon": -114.736508,
+        },
+        "ownship_ll": [36.645, -114.744],
+    }
+    # Still speaking (end in the future): not ready. After end + 6s: ready.
+    st_gap["last_tx_end_at"] = time.time() + 4.0
+    ready_still, wait_still = atc_phrase.approach_clearance_auto_ready(
+        airport=None, state=st_gap, gap_s=6.0
+    )
+    st_gap["last_tx_end_at"] = time.time() - 7.0
+    ready_done, _ = atc_phrase.approach_clearance_auto_ready(
+        airport=None, state=st_gap, gap_s=6.0
+    )
+    if ready_still or "clearance in" not in wait_still.lower():
+        print(f"  FAIL clearance must wait until speech ends + 6s: {wait_still}")
+        bad += 1
+    elif not ready_done:
+        print("  FAIL clearance should arm 6s after speech ends")
+        bad += 1
+    else:
+        print(f"approach clearance gap — from end of TX (est {dur:.0f}s speech)")
 
     if not tracker.fire_once("fire:a:21R") or tracker.fire_once("fire:a:21R"):
         print("  FAIL a step should fire once per sortie")

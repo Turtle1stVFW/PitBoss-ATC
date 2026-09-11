@@ -52,6 +52,7 @@ SHARED_FLOW_KEYS = (
     "readback_items",
     "last_tx_text",
     "last_tx_at",
+    "last_tx_end_at",
     "last_tx_channel",
     "last_tx_template",
     "last_agency",
@@ -63,6 +64,7 @@ SHARED_FLOW_KEYS = (
     "amended_altitude_ft",
     "assigned_altitude_ft",
     "approach_plan",
+    "approach_checked_in",
     "manual_cursor",
     "manual_step_view",
     "active_takeoff_mode",
@@ -479,6 +481,8 @@ class AtcServer:
         if job:
             job["session_id"] = sess.session_id
             job["callsign"] = sess.callsign
+            # So the channel worker can stamp when speech actually ends.
+            job["flow_state"] = sess.engine.state
             pos = self.hub.submit(job)
             result = dict(result)
             result["queued"] = True

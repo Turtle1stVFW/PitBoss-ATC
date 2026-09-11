@@ -908,19 +908,12 @@ def gap_remaining(
     """
     Seconds still to wait so this call does not tread on the previous transmission.
 
-    Measured from the `last_tx_at` the flow engine stamps on every step it plays,
-    so no new state is needed. Zero when nothing has been said yet.
+    Measured from when the previous call *finishes* speaking (last_tx_end_at),
+    not from when it was queued. Falls back to an estimate from last_tx_text.
     """
     if trigger is None or trigger.gap_s <= 0:
         return 0.0
-    try:
-        last = float((state or {}).get("last_tx_at") or 0.0)
-    except (TypeError, ValueError):
-        return 0.0
-    if last <= 0.0:
-        return 0.0
-    elapsed = (time.time() if now is None else now) - last
-    return max(0.0, trigger.gap_s - elapsed)
+    return atc_phrase.radio_gap_remaining(state, float(trigger.gap_s), now=now)
 
 
 def skip_auto_tx_already_played(
@@ -1537,10 +1530,16 @@ def resolve_step_trigger(
         pattern_nm = atc_phrase.pattern_land_within_nm(state)
         if pattern_nm is not None:
             return _from_raw_or_base(within_nm=float(pattern_nm))
-        # Overhead / TAC: the jet is inside ~2 NM from break through final, so a
-        # field-distance gate would clear right after the break. Voice
-        # "gear down" / Play is the clearance unless a zone or NM is explicit.
-        if rec in ("visual_overhead", "tactical_overhead"):
+        # Overhead / TAC / SFO High Key: the jet is inside ~2 NM from break
+        # through final, so a field-distance gate would clear too early. Voice
+        # reports (gear / Low Key) / Play is the clearance unless a zone or NM
+        # is explicit.
+        if rec in (
+            "visual_overhead",
+            "tactical_overhead",
+            "sfo_overhead",
+            "sfo_straight_in",
+        ):
             if "within_nm" in raw:
                 parsed = _trigger_float(raw.get("within_nm"))
                 if parsed is not None:

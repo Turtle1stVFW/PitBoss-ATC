@@ -6,13 +6,15 @@
     "visual_overhead",
     "tactical_overhead",
     "straight_in",
+    "sfo_overhead",
+    "sfo_straight_in",
     "instrument"
   ],
   "steps": [
     {
       "id": "ops_preflight",
       "phase": "departure",
-      "label": "Ops — tune Backup UHF 269.025 before start",
+      "label": "Ops \u2014 tune Backup UHF 269.025 before start",
       "channel": "ops",
       "mode": "tts",
       "template": "ops_check_in",

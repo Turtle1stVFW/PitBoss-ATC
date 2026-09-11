@@ -54,7 +54,10 @@ Default role is still **Solo** — one PC, same as today. To run ATC for several
 
 **Zone and distance auto-fire** (EOR 2/2, beyond 18 NM, …) is scored on the Client — that PC has the CAOC picture of your jet. The Host still transmits. Only **your Opus flight** counts in the zone (not Viper if you are Fleece). Turn on **Watch live position** on the Host or the flying Client; the dedicated-server box often cannot see you the same way.
 
-Every Client request (including the 1 Hz heartbeat) carries **that PC's own fix**, and the Host gates each seat on it. The Host never scores a Client's jet from its own map inject or CAOC feed — those watch the Host PC, so a parked contact near the field would otherwise fire the 12 NM tower handoff and the 6 NM landing clearance while the jet was still 38 NM out. A Client that cannot resolve its position reports none, which **holds** the Host's distance gates rather than opening them.
+Every Client request (including the 1 Hz heartbeat) carries **that PC's own fix**, and the Host gates each seat on it. The Host never scores a Client's jet from its own map inject or CAOC feed — those watch the Host PC, so a parked contact near the field would otherwise fire the 12 NM tower handoff and the 6 NM landing clearance while the jet was still 38 NM out. A Client that cannot resolve its position reports none, which **holds** the Host's distance gates rather than opening them. Route Tester `drive_fly` still reports through that channel even when Fly's "map is my jet" checkbox is off.
+
+**Approach check-in is voice / Play only.** After NATCF hands you to Approach, Watch waits for you to call ("with you" / "checking in") before the expect recovery and IAF clearance. The procedure clearance auto-fires ~6s after that check-in *finishes speaking* (not from when TX started) while inbound (≤40 NM of the IAF). **Contact Tower** stays gated at ≤12 NM from the field — voice "continue" uses the same gate. Filed **KRYSS** beats a later intermediate **SHEET** on the same plate.
+
 
 **Tanker boom chat** is written on the flying Client (Ollama on that PC still counts) and transmitted only by the Host, so the two copies cannot talk over each other.
 
@@ -229,7 +232,7 @@ those steps `[auto: <zone>]`. The Setup master switch still applies: with
 | inside / leaving | `leaving` is for arrival steps — "clear of the runway" fires once the flight has been in the area and is out of it again. |
 | settled | Stopped, on the deck and lined up with the runway, not merely inside. On by default; turn it off for an airborne area like a tower zone, where heading means nothing. |
 | Hold for | Seconds the condition must hold *continuously*. Blank uses `auto_clearance_dwell_s`. A jet dropping out restarts the clock rather than pausing it. |
-| Radio gap | Minimum seconds since the last transmission, so the call never treads on the one before it. |
+| Radio gap | Minimum seconds after the previous transmission *ends*, so the call never treads on the one before it. |
 
 For line-up-and-wait, where everyone should be lined up before the takeoff
 clearance rather than merely on the runway: `settled` on, hold for 15 s, radio gap
@@ -384,9 +387,11 @@ Calls it understands:
 | "Request vectors to Stryk" / "how far to Beatty" / "bearing to Mormon Mesa" | Magnetic heading and range from where you are to that point. ATC vectors you (*fly heading two eight fife, vectors to Stryk, twenty six miles*); Blackjack and Bandsaw read out bearing and range instead, since C2 does not vector. Resolves VOR/TACAN idents, station names, recovery fixes, plate IAFs and any NTTR named point — including the way Whisper mishears them ("strike" → STRYK). A name it cannot place gets *unable, say again the point* |
 | "Request vectors to the nearest divert" / "closest suitable field" | *…nearest suitable field is Creech, fly heading two fife zero, thirty one miles.* Bearing and range instead from C2. Which fields qualify is `divert_categories` |
 | "Airport in sight, request tower" | Cleared approach / contact Tower |
+| "Request High Key" / "request SFO" / "straight-in SFO" | Tower SFO approved (no canned altitude — say it if you want it echoed); report **High Key** then **Low Key** — cleared for the option at Low Key (or land if you asked full stop). Straight-in SFO: report *N mile simulated flameout final* |
+| "High Key" / "Low Key" / "Base Key" | SFO position reports. Clearance is at Low Key; Base Key + gear/option still clears if Low Key was missed |
 | "Alpha check" | Bullseye position for your aircraft |
 | "We'll take the rolling" / "unable rolling" | Accepts or declines the rolling departure. After Tower asks, **Next / Advance accepts** and **Previous declines** (HOTAS, hotkey, Stream Deck) — no voice or alt-tab needed. |
-| "Gear down full stop" / "going around" / "clear of the runway" | Fires the matching step |
+| "Gear down full stop" / "request the option" / "on the go" / "clear of the runway" | Land / option / go-around / taxi-in. **On the go** is the waveoff after the option (not a request for the option) |
 | "Say again" | Replays the last transmission |
 
 Voice **Understand messy radio (LLM)** (Setup → Controls) uses the same Ollama/Gemini/OpenAI setting as boom chat. The keyword grammar still wins; the model only maps a missed, addressed call onto an allowed intent. It never writes a new clearance. Local Ollama runs with `num_gpu=0` (override `tanker_chat_ollama_num_gpu` only when DCS is not using the card).
@@ -439,6 +444,16 @@ default to the **03s** and arrivals stay on the **21s**, still overridden when
 that component exceeds 10 kt (or by a spoken / Setup runway). You can request a
 different recovery, hold, or vectors. “Airport in sight / request tower”
 clears you to Tower.
+
+**Tower SFO (7110.65 3-10-13):** After a go-around (Flex/Duck/closed traffic) or
+anytime with Tower, “request High Key / SFO” approves a simulated flameout.
+Tower does not invent a high-key altitude — if you say one (“High Key at ten
+thousand”), it is stored and read back on the approval; otherwise just
+“SFO approved, report High Key.” Report **High Key**, then **Low Key** — Tower
+clears for **the option** at Low Key (or to land if you asked full stop).
+Straight-in SFO uses a mile flameout-final report instead. Watch does not
+auto-clear on field distance for SFO (same idea as overhead). **On the go**
+after the option is the waveoff / go-around path.
 
 After an **instrument missed**, Approach sends you back to the IAF (e.g. Arcoe).
 Watch re-arms the approach-clearance gate there (about 8 NM) and will not

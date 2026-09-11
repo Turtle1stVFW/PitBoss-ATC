@@ -747,7 +747,18 @@ class FlowEngine:
         self.state["last_tx_text"] = str(detail.get("text") or "")
         self.state["last_tx_template"] = template
         self.state["last_tx_channel"] = str(detail.get("channel") or "")
-        self.state["last_tx_at"] = time.time()
+        speed = detail.get("tts_speed")
+        if speed is None:
+            try:
+                speed = atc_phrase.tts_speed_for_step(self.config, step=step)
+            except Exception:
+                speed = None
+        atc_phrase.stamp_last_tx(
+            self.state,
+            text=str(detail.get("text") or ""),
+            speed=speed,
+            deferred=bool(getattr(self, "defer_tx", False)),
+        )
         try:
             import agencies as agencies_mod
 
@@ -1073,6 +1084,7 @@ class FlowEngine:
                 "twr_exit",
             ]
         if kind == "instrument_missed":
+            self.state.pop("approach_checked_in", None)
             if not self._seek_template("approach_check_in"):
                 self._seek_template("approach_procedure")
         else:
@@ -1162,7 +1174,11 @@ class FlowEngine:
         self.state["last_tx_text"] = text
         self.state["last_tx_template"] = "bj_continue"
         self.state["last_tx_channel"] = channel
-        self.state["last_tx_at"] = time.time()
+        atc_phrase.stamp_last_tx(
+            self.state,
+            text=text,
+            deferred=bool(getattr(self, "defer_tx", False)),
+        )
         self.save_state()
         return {
             "label": "Blackjack continue",
@@ -1223,7 +1239,11 @@ class FlowEngine:
         self.state["last_tx_text"] = text
         self.state["last_tx_template"] = "bj_range_exit"
         self.state["last_tx_channel"] = channel
-        self.state["last_tx_at"] = time.time()
+        atc_phrase.stamp_last_tx(
+            self.state,
+            text=text,
+            deferred=bool(getattr(self, "defer_tx", False)),
+        )
         self.save_state()
         return {
             "label": step["label"],
@@ -1284,7 +1304,11 @@ class FlowEngine:
             voice_override=voice_name,
             step=step,
         )
-        self.state["last_tx_at"] = time.time()
+        atc_phrase.stamp_last_tx(
+            self.state,
+            text=text,
+            deferred=bool(getattr(self, "defer_tx", False)),
+        )
         self.save_state()
         return {
             "label": "Say again",

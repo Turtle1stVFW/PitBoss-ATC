@@ -798,6 +798,8 @@ def note_tx(
         state["contact_phase"] = "airborne"
         return
     if tmpl in RECOVERY_TEMPLATES or ch == "approach":
+        if tmpl == "approach_check_in":
+            state["approach_checked_in"] = True
         if phase != "field":
             state["contact_phase"] = "recovery"
         return
@@ -816,6 +818,7 @@ def reset_contact(state: dict[str, Any] | None) -> None:
     state.pop("control_checked_in", None)
     state.pop("control_channel", None)
     state.pop("blackjack_checked_in", None)
+    state.pop("approach_checked_in", None)
     state.pop("clearance_amendment_copied", None)
     state.pop("amended_altitude_ft", None)
     state.pop("pending_contact", None)

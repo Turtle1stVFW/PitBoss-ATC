@@ -75,7 +75,8 @@ _BASE_PROMPT = (
     "in position, cleared for takeoff, request handoff, established, initial, with you, "
     "request runway two one left, say winds, say altimeter, "
     "request picture, bogey dope, declare, alpha check, bullseye, angels, rolling departure, "
-    "line up and wait, gear down full stop, tactical overhead, say again. "
+    "line up and wait, gear down full stop, tactical overhead, high key, low key, base key, "
+    "SFO, simulated flameout, the option, on the go, say again. "
     "Bandsaw, Bandsaw, band saw."
 )
 
@@ -809,8 +810,31 @@ def execute_intent(
             config=getattr(engine, "config", None),
         )
         engine.save_state()
+        # On SFO Low Key / SI final, or already due for pattern land — clear
+        # the option now instead of only "expect the option".
+        if _sfo_should_clear_now(engine) or _pattern_option_clear_due(engine):
+            if atc_phrase.is_sfo_recovery(state=engine.state):
+                phase = atc_phrase.sfo_phase(engine.state)
+                if phase in ("high_key", "approved", "low_key"):
+                    atc_phrase.note_sfo_low_key(engine.state)
+            played = _play_sfo_or_pattern_clear_land(engine)
+            if played.get("action") != "none":
+                atc_phrase.note_sfo_cleared(engine.state)
+                engine.save_state()
+                return played
         return _ack(
             "request_low_approach", engine, airport, callsign, match=match
+        )
+
+    if intent in (
+        "request_sfo",
+        "report_high_key",
+        "report_low_key",
+        "report_base_key",
+        "report_sfo_final",
+    ):
+        return _handle_sfo_action(
+            intent, engine, airport, callsign, weather, match, opus=opus
         )
 
     if intent == "going_around":
@@ -1116,10 +1140,10 @@ def execute_intent(
         if intent == "approach_continue" or match.template == "cleared_approach":
             # After instrument missed, stay on Approach until outside the rearm
             # bubble — do not hand to Tower / land early near the field.
+            import runway_position as rp
+
             dist_nm = None
             try:
-                import runway_position as rp
-
                 dist_nm = rp.ownship_distance_nm(
                     airport,
                     config=getattr(engine, "config", None),
@@ -1146,6 +1170,24 @@ def execute_intent(
                     f"{atc_phrase.speak_callsign(callsign)}, "
                     f"{airport['name']} Approach, "
                     f"negative tower, continue to {iaf}."
+                )
+                return _transmit(engine, airport, text, "approach")
+            # Same 12 NM field gate Watch uses — voice must not hand to Tower
+            # at 35 NM just because the pilot said "continue".
+            need_nm = float(rp.CONTACT_TOWER_WITHIN_NM)
+            if dist_nm is None:
+                text = (
+                    f"{atc_phrase.speak_callsign(callsign)}, "
+                    f"{airport['name']} Approach, "
+                    f"negative tower, remain this frequency."
+                )
+                return _transmit(engine, airport, text, "approach")
+            if dist_nm > need_nm:
+                text = (
+                    f"{atc_phrase.speak_callsign(callsign)}, "
+                    f"{airport['name']} Approach, "
+                    f"negative tower, continue inbound, "
+                    f"contact Tower at {int(need_nm)} miles."
                 )
                 return _transmit(engine, airport, text, "approach")
             played = _play_step(engine, match)
@@ -1808,13 +1850,17 @@ def _transmit(
     if isinstance(st, dict) and str(text or "").strip():
         st["last_tx_text"] = text
         st["last_tx_channel"] = str(channel or "")
-        st["last_tx_at"] = time.time()
         tmpl = str(template or "").strip()
         if tmpl:
             st["last_tx_template"] = tmpl
         elif not st.get("awaiting_readback"):
             # Boom / ad-hoc TX is not a clearance hinge — don't invent a template.
             st["last_tx_template"] = ""
+        atc_phrase.stamp_last_tx(
+            st,
+            text=text,
+            deferred=bool(getattr(engine, "defer_tx", False)),
+        )
         try:
             import agencies as agencies_mod
 
@@ -2565,10 +2611,32 @@ def _handle_approach_action(
             "visual_overhead",
             "tactical_overhead",
             "straight_in",
+            "sfo_overhead",
+            "sfo_straight_in",
         )
         to_tower = vfr_ok and (
             addressed == "tower" or (not addressed and step_ch == "tower")
         )
+        if to_tower and recovery in atc_phrase.SFO_RECOVERIES:
+            plan_sfo = atc_phrase.assign_sfo_plan(
+                airport,
+                recovery=recovery,
+                high_key_ft=None,
+                runway=str(plan.get("runway") or ""),
+                mission=engine.mission,
+                state=engine.state,
+            )
+            engine.save_state()
+            text = atc_phrase.build_sfo_approved(
+                airport,
+                callsign,
+                runway=str(plan_sfo.get("runway") or plan.get("runway") or ""),
+                recovery=recovery,
+                high_key_ft=plan_sfo.get("sfo_high_key_ft"),
+            )
+            return _transmit(
+                engine, airport, text, "tower", template="sfo_approve"
+            )
         if to_tower:
             text = atc_phrase.build_tower_check_in(
                 airport,
@@ -2629,6 +2697,190 @@ def _handle_approach_action(
         return _transmit(engine, airport, text, "approach")
 
     return {"action": "none", "detail": f"unhandled approach action {intent}"}
+
+
+def _sfo_should_clear_now(engine: Any) -> bool:
+    st = getattr(engine, "state", None)
+    if not atc_phrase.is_sfo_recovery(state=st):
+        return False
+    phase = atc_phrase.sfo_phase(st)
+    return phase in ("low_key", "sfo_final") or bool(
+        isinstance(st, dict) and st.get("sfo_base_key_pending")
+    )
+
+
+def _pattern_option_clear_due(engine: Any) -> bool:
+    """True after VFR go-around when Tower is waiting to clear on base/final."""
+    st = getattr(engine, "state", None)
+    if not isinstance(st, dict):
+        return False
+    if atc_phrase.landing_already_cleared(st):
+        return False
+    return bool(
+        atc_phrase.closed_traffic_go_around_pending(st)
+        or atc_phrase.reentry_go_around_pending(st)
+    )
+
+
+def _play_sfo_or_pattern_clear_land(engine: Any) -> dict[str, Any]:
+    played = _play_template(engine, "clear_land")
+    if played.get("action") != "none":
+        return played
+    # No flow step — build the clearance ad-hoc.
+    try:
+        airport = engine.airport()
+    except Exception:
+        return {"action": "none", "detail": "no airport"}
+    callsign = atc_phrase.callsign_override(engine.config) or "CALLSIGN"
+    opus, weather = atc_phrase.resolve_opus_and_metar(
+        engine.config, airport.get("icao") or ""
+    )
+    if not opus:
+        opus = atc_phrase.synthetic_flight_context(callsign)
+    rwy = str(
+        (engine.state or {}).get("approach_runway")
+        or (atc_phrase.approach_plan_from_state(engine.state, airport=airport) or {}).get(
+            "runway"
+        )
+        or ""
+    )
+    text = atc_phrase.build_clear_land(
+        airport,
+        callsign,
+        weather,
+        rwy,
+        opus=opus,
+        mission=getattr(engine, "mission", None),
+        state=engine.state,
+    )
+    return _transmit(engine, airport, text, "tower", template="clear_land")
+
+
+def _handle_sfo_action(
+    intent: str,
+    engine: Any,
+    airport: dict[str, Any],
+    callsign: str,
+    weather: Any,
+    match: voice_intent.Match,
+    *,
+    opus: Any = None,
+) -> dict[str, Any]:
+    slots = match.slots or {}
+    st = engine.state if isinstance(engine.state, dict) else {}
+
+    if intent == "request_sfo":
+        recovery = atc_phrase.normalize_recovery_key(
+            slots.get("recovery") or "sfo_overhead", default="sfo_overhead"
+        )
+        if recovery not in atc_phrase.SFO_RECOVERIES:
+            recovery = "sfo_overhead"
+        high_ft = slots.get("high_key_ft")
+        try:
+            high_n = int(high_ft) if high_ft is not None else None
+        except (TypeError, ValueError):
+            high_n = None
+        plan = atc_phrase.assign_sfo_plan(
+            airport,
+            recovery=recovery,
+            high_key_ft=high_n,
+            mission=engine.mission,
+            state=st,
+        )
+        # Seek clear_land so Play / Low Key can fire the option.
+        if hasattr(engine, "_seek_template"):
+            engine._seek_template("clear_land")
+        engine.save_state()
+        text = atc_phrase.build_sfo_approved(
+            airport,
+            callsign,
+            runway=str(plan.get("runway") or ""),
+            recovery=recovery,
+            high_key_ft=plan.get("sfo_high_key_ft"),
+        )
+        return _transmit(engine, airport, text, "tower", template="sfo_approve")
+
+    if intent == "report_high_key":
+        if not atc_phrase.is_sfo_recovery(state=st):
+            # Treat as a late request.
+            return _handle_sfo_action(
+                "request_sfo",
+                engine,
+                airport,
+                callsign,
+                weather,
+                match,
+                opus=opus,
+            )
+        heard = slots.get("high_key_ft")
+        if heard is None:
+            # Optional altitude in the report itself.
+            try:
+                import voice_intent as vi
+
+                alts = vi._heard_altitudes_ft(vi.normalize(match.transcript or ""))
+                if alts:
+                    heard = alts[-1]
+            except Exception:
+                heard = None
+        alt = atc_phrase.normalize_sfo_high_key_ft(heard)
+        if alt is not None:
+            st["sfo_high_key_ft"] = alt
+            plan = dict(st.get("approach_plan") or {})
+            if plan:
+                plan["sfo_high_key_ft"] = alt
+                st["approach_plan"] = plan
+        atc_phrase.note_sfo_high_key(st)
+        engine.save_state()
+        text = atc_phrase.build_sfo_high_key_ack(airport, callsign)
+        return _transmit(engine, airport, text, "tower", template="sfo_high_key")
+
+    landing = str(slots.get("landing_intent") or "").strip().casefold()
+    if landing == "full_stop":
+        atc_phrase.set_landing_intent(
+            atc_phrase.LANDING_INTENT_FULL_STOP,
+            state=st,
+            mission=engine.mission,
+        )
+    elif landing == "low_approach" or not landing:
+        # Default at Low Key / SI final: the option (7110.65).
+        atc_phrase.set_landing_intent(
+            atc_phrase.LANDING_INTENT_LOW_APPROACH,
+            state=st,
+            mission=engine.mission,
+        )
+
+    if intent == "report_low_key":
+        atc_phrase.note_sfo_low_key(st)
+        engine.save_state()
+        played = _play_sfo_or_pattern_clear_land(engine)
+        atc_phrase.note_sfo_cleared(st)
+        engine.save_state()
+        return played
+
+    if intent == "report_sfo_final":
+        atc_phrase.note_sfo_final(st)
+        engine.save_state()
+        played = _play_sfo_or_pattern_clear_land(engine)
+        atc_phrase.note_sfo_cleared(st)
+        engine.save_state()
+        return played
+
+    if intent == "report_base_key":
+        need_clear = atc_phrase.note_sfo_base_key(st)
+        engine.save_state()
+        if need_clear and not atc_phrase.landing_already_cleared(st):
+            # Safety net: missed Low Key — clear now.
+            atc_phrase.note_sfo_low_key(st)
+            played = _play_sfo_or_pattern_clear_land(engine)
+            atc_phrase.note_sfo_cleared(st)
+            engine.save_state()
+            return played
+        # Already cleared at Low Key — roger only.
+        text = f"{atc_phrase.speak_callsign(callsign)}, {airport['name']} Tower, roger."
+        return _transmit(engine, airport, text, "tower", template="sfo_base_key")
+
+    return {"action": "none", "detail": f"unhandled sfo action {intent}"}
 
 
 def _resolve_tx_channel(
