@@ -209,6 +209,15 @@ class ChannelTxHub:
                 done = job.get("done")
                 if isinstance(done, threading.Event):
                     done.set()
+                # Gap timers wait until speech finishes, not until it was queued.
+                flow_state = job.get("flow_state")
+                if isinstance(flow_state, dict):
+                    try:
+                        import atc_phrase as atc_phrase_mod
+
+                        atc_phrase_mod.note_tx_finished(flow_state)
+                    except Exception:
+                        flow_state["last_tx_end_at"] = time.time()
                 with self._lock:
                     self._busy[channel] = None
                 q.task_done()

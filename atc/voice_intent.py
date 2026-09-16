@@ -281,6 +281,23 @@ _AMBIGUOUS_DIGIT_WORDS = {
 _SIDE_WORDS = {"left": "L", "right": "R", "center": "C", "centre": "C", "central": "C"}
 
 _RECOVERY_TERMS = {
+    # SFO before straight_in so "straight in SFO" is not a plain SI recovery.
+    "sfo_straight_in": (
+        "straight in sfo",
+        "straight-in sfo",
+        "straight in flameout",
+        "straight-in flameout",
+        "sfo straight in",
+        "sfo straight-in",
+    ),
+    "sfo_overhead": (
+        "high key",
+        "sfo",
+        "flameout",
+        "simulated flameout",
+        "elp",
+        "emergency landing pattern",
+    ),
     "tactical_overhead": ("tactical overhead", "tac overhead", "tactical"),
     "overhead": ("overhead", "over head", "visual overhead"),
     "straight_in": ("straight in", "straight-in", "straight end"),
@@ -289,7 +306,13 @@ _RECOVERY_TERMS = {
 
 # VFR patterns Tower will approve. Instrument / named IAFs stay on Approach.
 _TOWER_RECOVERY_KEYS = frozenset(
-    {"visual_overhead", "tactical_overhead", "straight_in"}
+    {
+        "visual_overhead",
+        "tactical_overhead",
+        "straight_in",
+        "sfo_overhead",
+        "sfo_straight_in",
+    }
 )
 
 # NellisAFBI 11-250 §4.13.5 VFR recoveries (Whisper-tolerant).
@@ -1724,7 +1747,119 @@ INTENTS: tuple[Intent, ...] = (
             "vectors",
             "altimeter",
             "winds",
+            "high key",
+            "sfo",
+            "flameout",
+            "elp",
+            "low key",
+            "base key",
         ),
+    ),
+    Intent(
+        "request_sfo",
+        (
+            (
+                "high key",
+                "request high key",
+                "requesting high key",
+                "sfo",
+                "request sfo",
+                "requesting sfo",
+                "flameout",
+                "simulated flameout",
+                "request flameout",
+                "elp",
+                "emergency landing pattern",
+                "straight in sfo",
+                "straight-in sfo",
+                "request straight in sfo",
+            ),
+        ),
+        kind="action",
+        channels=("tower",),
+        phases=("approach",),
+        weight=1.35,
+        example="request high key",
+        does="SFO / High Key or straight-in SFO",
+        veto=("low key", "base key", "on the go", "going around"),
+    ),
+    Intent(
+        "report_high_key",
+        (
+            (
+                "high key",
+                "at high key",
+                "reporting high key",
+                "report high key",
+                "we're high key",
+                "we are high key",
+            ),
+        ),
+        kind="action",
+        channels=("tower",),
+        phases=("approach",),
+        weight=1.3,
+        example="high key",
+        does="report High Key",
+        veto=("request high key", "low key", "base key"),
+    ),
+    Intent(
+        "report_low_key",
+        (
+            (
+                "low key",
+                "at low key",
+                "reporting low key",
+                "report low key",
+                "we're low key",
+                "we are low key",
+            ),
+        ),
+        kind="action",
+        channels=("tower",),
+        phases=("approach",),
+        weight=1.35,
+        example="low key",
+        does="report Low Key — option / land clearance",
+        veto=("high key", "base key"),
+    ),
+    Intent(
+        "report_base_key",
+        (
+            (
+                "base key",
+                "at base key",
+                "reporting base key",
+                "report base key",
+                "we're base key",
+                "we are base key",
+            ),
+        ),
+        kind="action",
+        channels=("tower",),
+        phases=("approach",),
+        weight=1.3,
+        example="base key",
+        does="report Base Key (clears if Low Key was missed)",
+        veto=("high key",),
+    ),
+    Intent(
+        "report_sfo_final",
+        (
+            (
+                "simulated flameout final",
+                "sfo final",
+                "flameout final",
+                "mile simulated flameout",
+                "miles simulated flameout",
+            ),
+        ),
+        kind="action",
+        channels=("tower",),
+        phases=("approach",),
+        weight=1.35,
+        example="three mile simulated flameout final",
+        does="straight-in SFO final report — option / land clearance",
     ),
     Intent(
         "request_hold",
@@ -1882,7 +2017,7 @@ INTENTS: tuple[Intent, ...] = (
         phases=("approach",),
         example="gear down full stop",
         does="landing clearance",
-        veto=("low approach", "the option", "low pass", "initial", "with you"),
+        veto=("low approach", "the option", "low pass", "initial", "with you", "high key", "low key", "base key", "sfo", "flameout"),
     ),
     Intent(
         "tower_check_in",
@@ -2744,7 +2879,10 @@ def _expected_now(
     """Is this the call ATC is sitting there waiting for?"""
     # During a readback window the pilot is answering the last clearance — not
     # asking for that step again. Otherwise "taxi via … runway 21R" re-fires taxi.
+    # Amendment offer is the exception: ATC is waiting for "ready to copy".
     if awaiting_readback:
+        if intent.id == "ready_to_copy" and expected == "clearance_amendment":
+            return True
         return intent.id in _ADDRESS_OPTIONAL_INTENTS
     if intent.step_id and current_step_id and intent.step_id == current_step_id:
         return True
@@ -2753,6 +2891,8 @@ def _expected_now(
     if intent.id == "in_position" and expected in _TAKEOFF_CLEAR_TEMPLATES:
         return True
     if expected == "rolling_accept" and intent.id in _ROLLING_OFFER_INTENTS:
+        return True
+    if intent.id == "ready_to_copy" and expected == "clearance_amendment":
         return True
     if expected and intent.template and intent.template == expected:
         return True
@@ -3394,8 +3534,57 @@ def _score_intents(
         if awaiting_readback and intent.id == "ready_taxi":
             continue
         # Reading back the IFR clearance is not a new "request clearance".
-        if awaiting_readback and intent.id in ("ready_clearance", "ready_to_copy"):
+        # Exception: Delivery's amendment offer opens a readback window whose
+        # hinge *is* "ready to copy" — that reply must still match.
+        if awaiting_readback and intent.id == "ready_clearance":
             continue
+        if (
+            awaiting_readback
+            and intent.id == "ready_to_copy"
+            and str(last_tx_template or "").strip().lower() != "clearance_amendment"
+        ):
+            continue
+        last_tmpl = str(last_tx_template or "").strip().lower()
+        # High Key report only after SFO approve (bare "high key" otherwise
+        # is request_sfo). Explicit "at/reporting high key" always OK.
+        if intent.id == "report_high_key":
+            if last_tmpl != "sfo_approve" and not _group_hit(
+                text,
+                ("at high key", "reporting high key", "report high key"),
+                fuzzy=False,
+            ):
+                continue
+        if intent.id == "request_sfo" and last_tmpl == "sfo_approve":
+            # Already approved — bare High Key is the report, not a re-request.
+            if not _group_hit(
+                text,
+                (
+                    "request high key",
+                    "requesting high key",
+                    "request sfo",
+                    "requesting sfo",
+                    "request flameout",
+                ),
+                fuzzy=False,
+            ):
+                continue
+        if intent.id == "report_low_key" and last_tmpl not in (
+            "sfo_high_key",
+            "sfo_approve",
+        ):
+            if not _group_hit(
+                text,
+                ("at low key", "reporting low key", "report low key"),
+                fuzzy=False,
+            ):
+                continue
+        if intent.id == "report_sfo_final" and last_tmpl not in (
+            "sfo_approve",
+            "sfo_high_key",
+        ):
+            # Still allow an explicit mile SFO final call anytime on Tower.
+            if "flameout" not in text and "sfo final" not in text:
+                continue
         # Departure radar contact is an airborne check-in — not weather.
         if expected == "radar_contact" and intent.id in _DEPARTURE_CHECKIN_SKIP_IDS:
             continue
@@ -3441,6 +3630,15 @@ def _score_intents(
             awaiting_readback=awaiting_readback,
             current_step_id=current_step_id,
         )
+        last_tmpl = str(last_tx_template or "").strip().lower()
+        if intent.id == "report_high_key" and last_tmpl == "sfo_approve":
+            expecting = True
+        if intent.id == "report_low_key" and last_tmpl == "sfo_high_key":
+            expecting = True
+        if intent.id == "report_sfo_final" and last_tmpl == "sfo_approve":
+            expecting = True
+        if intent.id == "request_sfo" and last_tmpl == "go_around":
+            expecting = True
         # Mission phrases belong to one step — only when that step is due.
         if intent.step_id and not expecting:
             continue
@@ -3566,8 +3764,42 @@ def _score_intents(
             "inbound_recovery",
             "request_landing",
             "request_approach",
+            "request_sfo",
         ):
             slots["recovery"] = recovery
+        if intent.id == "request_sfo":
+            if recovery in ("sfo_straight_in", "sfo_overhead"):
+                slots["recovery"] = recovery
+            elif any(
+                t in text
+                for t in (
+                    "straight in sfo",
+                    "straight-in sfo",
+                    "straight in flameout",
+                    "sfo straight",
+                )
+            ):
+                slots["recovery"] = "sfo_straight_in"
+            else:
+                slots["recovery"] = "sfo_overhead"
+            heard_alt = _heard_altitudes_ft(text)
+            if heard_alt:
+                slots["high_key_ft"] = heard_alt[-1]
+        if intent.id in (
+            "report_low_key",
+            "report_base_key",
+            "report_sfo_final",
+            "request_landing",
+            "request_low_approach",
+        ):
+            if _group_hit(
+                text, ("low approach", "the option", "low pass"), fuzzy=False
+            ):
+                slots["landing_intent"] = "low_approach"
+            elif _group_hit(
+                text, ("full stop", "gear down", "cleared to land"), fuzzy=False
+            ):
+                slots["landing_intent"] = "full_stop"
         if intent.id in (
             "inbound_recovery",
             "request_approach",
@@ -4074,6 +4306,34 @@ def evaluate(
         and (expected or "").strip().lower() == "clear_land"
     ):
         address_optional = True
+    # Delivery just said "advise ready to copy" — callsign alone is enough.
+    if candidate.intent == "ready_to_copy" and (
+        str(last_tx_template or "").strip().lower() == "clearance_amendment"
+        or (expected or "").strip().lower() == "clearance_amendment"
+    ):
+        address_optional = True
+    # SFO pattern reports — Tower already owns the exchange.
+    if candidate.intent in (
+        "request_sfo",
+        "report_high_key",
+        "report_low_key",
+        "report_base_key",
+        "report_sfo_final",
+    ) and str(last_tx_template or "").strip().lower() in (
+        "go_around",
+        "sfo_approve",
+        "sfo_high_key",
+        "clear_land",
+        "right_break",
+    ):
+        address_optional = True
+    if candidate.intent in (
+        "report_high_key",
+        "report_low_key",
+        "report_base_key",
+        "report_sfo_final",
+    ):
+        address_optional = True
     if require_address and not address_optional and not address.to_atc:
         result.reason = "no agency addressed"
         result.advice = (
@@ -4405,6 +4665,32 @@ def suggestions(
         # Don't tip "ready to copy" until Delivery has offered the amendment.
         if intent.id == "ready_to_copy" and last_tx_template != "clearance_amendment":
             continue
+        # SFO report tips only after the matching Tower call.
+        if intent.id == "report_high_key" and last_tx_template != "sfo_approve":
+            continue
+        if intent.id == "report_low_key" and last_tx_template != "sfo_high_key":
+            continue
+        if intent.id == "report_sfo_final" and last_tx_template != "sfo_approve":
+            continue
+        if intent.id == "report_base_key" and last_tx_template not in (
+            "sfo_high_key",
+            "sfo_approve",
+        ):
+            continue
+        # Tip High Key after a Flex/Duck go-around; hide reports until approved.
+        if intent.id == "request_sfo" and last_tx_template not in (
+            "go_around",
+            "clear_land",
+            "right_break",
+            "",
+        ):
+            if last_tx_template.startswith("sfo_"):
+                continue
+        if intent.id == "request_sfo" and last_tx_template in (
+            "sfo_approve",
+            "sfo_high_key",
+        ):
+            continue
         # Range checkout ends Flight → Approach; tip it on the range-exit step
         # (and allow check-in "continue" after they leave Blackjack).
         if intent.id == "range_exit" and expected_l != "bj_range_exit":
@@ -4467,6 +4753,14 @@ def suggestions(
         ):
             rank = 0
         elif intent.id == "ready_to_copy" and expected_l == "clearance_amendment":
+            rank = 0
+        elif intent.id == "report_high_key" and last_tx_template == "sfo_approve":
+            rank = 0
+        elif intent.id == "report_low_key" and last_tx_template == "sfo_high_key":
+            rank = 0
+        elif intent.id == "report_sfo_final" and last_tx_template == "sfo_approve":
+            rank = 0
+        elif intent.id == "request_sfo" and last_tx_template == "go_around":
             rank = 0
         elif intent.id == "range_entry" and expected_l == "bj_range_exit":
             # Back from Bandsaw / still on the range — tip check-in (continue).

@@ -1747,6 +1747,10 @@ def find_iaf(
                 if re.sub(r"[^A-Z0-9]", "", a.upper()) == want:
                     return entry
         return None
+    # No token: prefer the outer range-gate IAF, else the plate's first fix.
+    for entry in iafs:
+        if _iaf_is_range_gate(entry):
+            return entry
     return iafs[0]
 
 
@@ -2073,7 +2077,9 @@ def match_recovery_from_route(
     whichever the weather calls for.
 
     Within a token list, a range-gate IAF (ARCOE / DUDBE) beats an intermediate
-    (KRYSS on ILS Z). Filed KRYSS with no ARCOE still wins and maps to ILS X.
+    (SHEET / HULPU). An initial plate IAF (KRYSS on ILS X) also beats a later
+    intermediate on the same plate — filing … KRYSS SHEET KLSV stays on KRYSS.
+    Filed KRYSS with no ARCOE still wins and maps to ILS X.
     """
     if not catalog or not route:
         return None
@@ -2109,11 +2115,30 @@ def match_recovery_from_route(
             hit["vfr_id"] = str(vfr.get("id") or "")
         return hit
 
+    def _iaf_route_rank(hit: dict[str, Any]) -> int:
+        """
+        Lower is better when several IAFs sit in the same route tail.
+
+        ARCOE/DUDBE (range gate) beat everything. The plate's first IAF
+        (KRYSS on ILS X) beats an intermediate on that same plate (SHEET).
+        Walking arrival-backward alone would otherwise keep SHEET over KRYSS.
+        """
+        iaf_entry = hit.get("iaf_entry")
+        if not isinstance(iaf_entry, dict):
+            return 3
+        if _iaf_is_range_gate(iaf_entry):
+            return 0
+        inst = hit.get("instrument")
+        if isinstance(inst, dict) and _iaf_is_initial(inst, iaf_entry):
+            return 1
+        return 2
+
     def _scan(tokens: list[str]) -> dict[str, Any] | None:
-        fallback: dict[str, Any] | None = None
+        best: dict[str, Any] | None = None
+        best_rank = 99
         seen: set[str] = set()
-        # Walk from arrival backward so the fix closest to the field wins,
-        # but keep looking for a published outer IAF in this same list.
+        # Walk from arrival backward so nearer fixes are considered first,
+        # but a published outer / initial IAF still outranks an intermediate.
         for tok in reversed(tokens):
             key = str(tok).upper()
             if key in seen:
@@ -2122,14 +2147,16 @@ def match_recovery_from_route(
             hit = _hit_for(tok)
             if not hit:
                 continue
-            iaf_entry = hit.get("iaf_entry")
-            if isinstance(iaf_entry, dict) and _iaf_is_range_gate(iaf_entry):
+            if not hit.get("iaf_id"):
+                # Pure VFR recovery — take the first (nearest arrival) hit.
                 return hit
-            if fallback is None:
-                fallback = hit
-                if not hit.get("iaf_id"):
-                    return hit
-        return fallback
+            rank = _iaf_route_rank(hit)
+            if rank == 0:
+                return hit
+            if best is None or rank < best_rank:
+                best = hit
+                best_rank = rank
+        return best
 
     return _scan(tail) or _scan(everything)
 
@@ -2623,6 +2650,100 @@ APPROACH_CLEARANCE_WITHIN_NM = 40.0
 APPROACH_CLEARANCE_AFTER_MISSED_NM = 8.0
 
 
+def estimate_spoken_duration_s(
+    text: str | None,
+    *,
+    speed: int | float | None = None,
+) -> float:
+    """
+    Rough how-long-this-will-take for Watch radio gaps.
+
+    Gaps must start when the previous call finishes, not when it is queued.
+    Host TX is deferred onto a channel queue, so we estimate from the words
+    until the worker stamps the real end. Solo sync TX stamps the real end
+    after ExternalAudio returns.
+    """
+    blob = " ".join(str(text or "").split())
+    if not blob:
+        return 2.0
+    words = max(1, len(blob.split()))
+    try:
+        rate = float(tts_speed(speed=speed) if speed is not None else DEFAULT_TTS_SPEED_WINDOWS)
+    except Exception:
+        rate = float(DEFAULT_TTS_SPEED_WINDOWS)
+    # ~150 WPM at rate 0; each +1 ≈ 8% faster (Windows default 4 ≈ 200 WPM).
+    wpm = 150.0 * (1.0 + 0.08 * rate)
+    wpm = max(90.0, min(320.0, wpm))
+    return max(2.0, min(120.0, (words / wpm) * 60.0 + 0.5))
+
+
+def stamp_last_tx(
+    state: dict[str, Any] | None,
+    *,
+    text: str = "",
+    speed: int | float | None = None,
+    deferred: bool = False,
+    now: float | None = None,
+) -> None:
+    """
+    Record when the last ATC call started, and when it should finish.
+
+    deferred=True (host channel queue): end is estimated from the spoken text.
+    deferred=False (solo / blocked emit): ExternalAudio already returned, so
+    end is now.
+    """
+    if not isinstance(state, dict):
+        return
+    t = time.time() if now is None else float(now)
+    state["last_tx_at"] = t
+    if deferred:
+        state["last_tx_end_at"] = t + estimate_spoken_duration_s(text, speed=speed)
+    else:
+        state["last_tx_end_at"] = t
+
+
+def note_tx_finished(
+    state: dict[str, Any] | None,
+    *,
+    now: float | None = None,
+) -> None:
+    """Channel worker finished speaking — gap timers start from here."""
+    if not isinstance(state, dict):
+        return
+    state["last_tx_end_at"] = time.time() if now is None else float(now)
+
+
+def radio_gap_remaining(
+    state: dict[str, Any] | None,
+    gap_s: float,
+    *,
+    now: float | None = None,
+) -> float:
+    """
+    Seconds still to wait after the previous call finishes speaking.
+
+    Uses last_tx_end_at when stamped; otherwise estimates from last_tx_text
+    so older state without an end time still waits out the phrase.
+    """
+    if float(gap_s or 0.0) <= 0.0:
+        return 0.0
+    st = state if isinstance(state, dict) else {}
+    tnow = time.time() if now is None else float(now)
+    try:
+        end = float(st.get("last_tx_end_at") or 0.0)
+    except (TypeError, ValueError):
+        end = 0.0
+    if end <= 0.0:
+        try:
+            start = float(st.get("last_tx_at") or 0.0)
+        except (TypeError, ValueError):
+            start = 0.0
+        if start <= 0.0:
+            return 0.0
+        end = start + estimate_spoken_duration_s(str(st.get("last_tx_text") or ""))
+    return max(0.0, float(gap_s) - (tnow - end))
+
+
 def approach_clearance_needs_fix(state: dict[str, Any] | None) -> bool:
     """True after a missed / vectors until the next approach clearance."""
     if not isinstance(state, dict):
@@ -2666,6 +2787,10 @@ def approach_clearance_auto_ready(
     After a normal check-in: wait a short radio gap, then fire while still
     inbound — do not wait until the jet reaches the IAF / exit.
 
+    Approach never speaks first — the pilot must check in (or Play the
+    check-in step) before this auto clearance arms. NATCF's handoff alone
+    does not count.
+
     After an instrument missed or radar vectors back to the IAF: wait until
     the jet is near that fix (ARCOE / DUDBE / …). Otherwise the first-pass
     fire-once latch / an early check-in at the field never re-clears.
@@ -2678,16 +2803,12 @@ def approach_clearance_auto_ready(
         return False, hold
     if st.get("hold_active"):
         return False, "holding - cancel hold for approach clearance"
+    if not approach_check_in_done(st):
+        return False, "waiting for Approach check-in"
     gap = float(APPROACH_CLEARANCE_GAP_S if gap_s is None else gap_s)
-    if gap > 0:
-        try:
-            last = float(st.get("last_tx_at") or 0.0)
-        except (TypeError, ValueError):
-            last = 0.0
-        if last > 0.0:
-            left = gap - (time.time() - last)
-            if left > 0:
-                return False, f"approach clearance in {left:.0f}s"
+    left = radio_gap_remaining(st, gap)
+    if left > 0:
+        return False, f"approach clearance in {left:.0f}s"
 
     plan = approach_plan_from_state(st, airport=airport)
     fix = approach_exit_fix_latlon(plan, airport=airport)
@@ -2724,6 +2845,15 @@ def approach_clearance_auto_ready(
     if dist > APPROACH_CLEARANCE_AT_FIX_NM:
         return True, f"{dist:.1f} NM to {name} — clearance"
     return True, f"{dist:.1f} NM to {name} — clearance (near fix)"
+
+
+def approach_check_in_done(state: dict[str, Any] | None) -> bool:
+    """True once Approach has answered a check-in on this recovery."""
+    st = state if isinstance(state, dict) else {}
+    if st.get("approach_checked_in"):
+        return True
+    last = str(st.get("last_tx_template") or "").strip().lower()
+    return last == "approach_check_in"
 
 
 # NATCF hands the recovery to Approach out around 40-45 NM from the field.
@@ -2813,15 +2943,9 @@ def control_handoff_auto_ready(
     if not _with_nellis_control(st):
         return False, "waiting for Nellis Control"
     gap = float(CONTROL_HANDOFF_GAP_S if gap_s is None else gap_s)
-    if gap > 0:
-        try:
-            last = float(st.get("last_tx_at") or 0.0)
-        except (TypeError, ValueError):
-            last = 0.0
-        if last > 0.0:
-            left = gap - (time.time() - last)
-            if left > 0:
-                return False, f"Approach handoff in {left:.0f}s"
+    left = radio_gap_remaining(st, gap)
+    if left > 0:
+        return False, f"Approach handoff in {left:.0f}s"
 
     plan = approach_plan_from_state(st, airport=airport)
     fix = approach_exit_fix_latlon(plan, airport=airport)
@@ -4198,6 +4322,8 @@ _SORTIE_STATE_CACHE_KEYS = (
     "tanker_tcn",
     "pattern_land_needs_leave",
     "overhead_recovery",
+    "sfo_phase",
+    "sfo_high_key_ft",
     "range_exit_approved",
     "control_checked_in",
     "control_channel",
@@ -4256,6 +4382,7 @@ def clear_flight_session_cache(
             "last_tx_channel",
             "last_tx_text",
             "last_tx_at",
+            "last_tx_end_at",
         ):
             state.pop(key, None)
         state["hold_active"] = False
@@ -4473,6 +4600,8 @@ RECOVERY_CHOICES: list[tuple[str, str]] = [
     ("visual_overhead", "Visual — Overhead"),
     ("tactical_overhead", "Visual — Tactical overhead"),
     ("straight_in", "Visual — Straight-in"),
+    ("sfo_overhead", "SFO — High Key"),
+    ("sfo_straight_in", "SFO — Straight-in"),
     ("instrument", "Instrument"),
 ]
 
@@ -4495,6 +4624,20 @@ _RECOVERY_ALIASES: dict[str, str] = {
     "straight in": "straight_in",
     "visual — straight-in": "straight_in",
     "visual - straight-in": "straight_in",
+    "sfo": "sfo_overhead",
+    "high key": "sfo_overhead",
+    "sfo overhead": "sfo_overhead",
+    "sfo high key": "sfo_overhead",
+    "flameout": "sfo_overhead",
+    "simulated flameout": "sfo_overhead",
+    "elp": "sfo_overhead",
+    "emergency landing pattern": "sfo_overhead",
+    "sfo straight in": "sfo_straight_in",
+    "sfo straight-in": "sfo_straight_in",
+    "straight in sfo": "sfo_straight_in",
+    "straight-in sfo": "sfo_straight_in",
+    "straight in flameout": "sfo_straight_in",
+    "straight-in flameout": "sfo_straight_in",
     "instrument": "instrument",
     "instrument approach": "instrument",
     "insturment": "instrument",  # common typo
@@ -4504,8 +4647,13 @@ APPROACH_PATTERN_CHOICES: list[tuple[str, str]] = [
     ("visual_overhead", "Visual — Overhead"),
     ("tactical_overhead", "Visual — Tactical overhead"),
     ("straight_in", "Visual — Straight-in"),
+    ("sfo_overhead", "SFO — High Key"),
+    ("sfo_straight_in", "SFO — Straight-in"),
     ("instrument", "Instrument"),
 ]
+
+SFO_RECOVERIES = frozenset({"sfo_overhead", "sfo_straight_in"})
+DEFAULT_SFO_STRAIGHT_IN_NM = 3.0
 
 
 def normalize_recovery_key(raw: str | None, *, default: str = DEFAULT_RECOVERY) -> str:
@@ -4544,6 +4692,8 @@ def recovery_spoken(key: str) -> str:
         "visual_overhead": "visual overhead",
         "tactical_overhead": "tactical overhead",
         "straight_in": "straight-in",
+        "sfo_overhead": "SFO",
+        "sfo_straight_in": "straight-in SFO",
         "instrument": "instrument approach",
     }.get(normalize_recovery_key(key), "tactical overhead")
 
@@ -4640,6 +4790,7 @@ _TAKEOFF_REQUEST_KEYS = frozenset(k for k, _ in _TAKEOFF_TOWER_REQUESTS)
 _APPROACH_TOWER_REQUESTS: list[tuple[str, str]] = [
     ("request_landing", "Gear down full stop"),
     ("request_low_approach", "Request the option"),
+    ("request_sfo", "Request High Key / SFO"),
     ("request_go_around", "On the go / go around"),
 ]
 _APPROACH_REQUEST_KEYS = frozenset(k for k, _ in _APPROACH_TOWER_REQUESTS)
@@ -5274,6 +5425,14 @@ def apply_pilot_request(
             "pending_offer": pending_takeoff_offer(state),
             "ack_kind": "request_low_approach",
             "landing_intent": LANDING_INTENT_LOW_APPROACH,
+        }
+    if key == "request_sfo":
+        return {
+            "key": key,
+            "takeoff_mode": resolve_active_takeoff_mode(mission, state),
+            "pending_offer": pending_takeoff_offer(state),
+            "ack_kind": "",
+            "execute_sfo_approve": True,
         }
     if key == "request_go_around":
         # Full go-around / missed is played by FlowEngine.execute_go_around.
@@ -5991,6 +6150,8 @@ def build_tower_check_in(
 
     OHB / TAC OHB → right break approved
     Straight-in → continue straight-in
+    SFO High Key → SFO approved / report High Key
+    Straight-in SFO → report mile SFO final
     Instrument → roger, continue
     """
     name = airport["name"]
@@ -6002,6 +6163,17 @@ def build_tower_check_in(
         body = f"right break approved runway {rwy}" if rwy else "right break approved"
     elif rec_key == "visual_overhead":
         body = f"right break approved runway {rwy}" if rwy else "right break approved"
+    elif rec_key == "sfo_overhead":
+        alt = None
+        if isinstance(p.get("sfo_high_key_ft"), (int, float)):
+            alt = int(p["sfo_high_key_ft"])
+        body = build_sfo_approve_body(
+            airport, runway=str(runway or p.get("runway") or ""), recovery=rec_key, high_key_ft=alt
+        )
+    elif rec_key == "sfo_straight_in":
+        body = build_sfo_approve_body(
+            airport, runway=str(runway or p.get("runway") or ""), recovery=rec_key
+        )
     elif rec_key == "straight_in":
         body = f"continue straight-in runway {rwy}" if rwy else "continue straight-in"
     elif rec_key == "instrument":
@@ -6093,7 +6265,7 @@ def landing_clearance_mode(
         pat = normalize_recovery_key(plan.get("pattern"), default="")
         if pat:
             rec = pat
-    if rec in ("straight_in", "instrument"):
+    if rec in ("straight_in", "instrument", "sfo_straight_in"):
         return "per_ship"
     return "flight"
 
@@ -6385,6 +6557,230 @@ def pattern_work_config(airport: dict[str, Any] | None) -> dict[str, Any]:
     catalog = load_approach_catalog(airport or {})
     raw = (catalog or {}).get("pattern_work") if isinstance(catalog, dict) else None
     return dict(raw) if isinstance(raw, dict) else {}
+
+
+def sfo_config(airport: dict[str, Any] | None) -> dict[str, Any]:
+    raw = pattern_work_config(airport).get("sfo")
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def normalize_sfo_high_key_ft(raw: int | float | None) -> int | None:
+    """Pilot-stated high key feet, or None when they did not say one."""
+    if raw is None or raw == "":
+        return None
+    try:
+        alt = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if alt <= 0:
+        return None
+    # "eight" / angels-style values under 1000 are thousands of feet.
+    if alt < 1000:
+        alt *= 1000
+    return alt
+
+
+def sfo_straight_in_report_nm(airport: dict[str, Any] | None = None) -> float:
+    try:
+        return float(
+            sfo_config(airport).get("straight_in_report_nm") or DEFAULT_SFO_STRAIGHT_IN_NM
+        )
+    except (TypeError, ValueError):
+        return DEFAULT_SFO_STRAIGHT_IN_NM
+
+
+def sfo_phase(state: dict[str, Any] | None) -> str:
+    if not isinstance(state, dict):
+        return ""
+    return str(state.get("sfo_phase") or "").strip().casefold()
+
+
+def is_sfo_recovery(
+    *,
+    recovery: str | None = None,
+    mission: dict[str, Any] | None = None,
+    state: dict[str, Any] | None = None,
+) -> bool:
+    rec = normalize_recovery_key(recovery, default="") if recovery else ""
+    if not rec:
+        rec = resolve_active_recovery(None, mission, state=state)
+    return rec in SFO_RECOVERIES
+
+
+def sfo_clearance_due(state: dict[str, Any] | None) -> bool:
+    """True when Low Key (or SI final) is due / ready for option or land clear."""
+    if not isinstance(state, dict) or not is_sfo_recovery(state=state):
+        return False
+    phase = sfo_phase(state)
+    if phase in ("low_key", "sfo_final", "cleared"):
+        return phase != "cleared" or not landing_already_cleared(state)
+    # Safety net: Base Key without Low Key still needs a clearance.
+    return phase in ("high_key", "approved") and bool(state.get("sfo_base_key_pending"))
+
+
+def build_sfo_approve_body(
+    airport: dict[str, Any],
+    *,
+    runway: str = "",
+    recovery: str | None = None,
+    high_key_ft: int | None = None,
+) -> str:
+    """Spoken body after '… Tower,' for SFO approval (no callsign)."""
+    rec = normalize_recovery_key(recovery or "sfo_overhead")
+    rwy = speak_runway(runway) if runway else ""
+    if rec == "sfo_straight_in":
+        nm = sfo_straight_in_report_nm(airport)
+        nm_i = int(nm) if float(nm).is_integer() else nm
+        mile = speak_digits(str(nm_i)) if isinstance(nm_i, int) else str(nm_i)
+        body = f"straight-in SFO approved, report {mile} mile simulated flameout final"
+        if rwy:
+            body = f"{body} runway {rwy}"
+        return body
+    alt = normalize_sfo_high_key_ft(high_key_ft)
+    if alt is not None:
+        alt_say = speak_altitude_value(str(alt), clarify_chance=0) or str(alt)
+        body = f"SFO approved, high key {alt_say}, report High Key"
+    else:
+        # No canned altitude — pilot states high key when they get there.
+        body = "SFO approved, report High Key"
+    if rwy:
+        body = f"{body} runway {rwy}"
+    return body
+
+
+def build_sfo_approved(
+    airport: dict[str, Any],
+    callsign: str,
+    *,
+    runway: str = "",
+    recovery: str | None = None,
+    high_key_ft: int | None = None,
+) -> str:
+    """Tower: SFO / High Key approval."""
+    name = airport["name"]
+    cs = speak_callsign(callsign)
+    body = build_sfo_approve_body(
+        airport, runway=runway, recovery=recovery, high_key_ft=high_key_ft
+    )
+    return f"{cs}, {name} Tower, {body}."
+
+
+def build_sfo_high_key_ack(airport: dict[str, Any], callsign: str) -> str:
+    """Tower: High Key reported — ask for Low Key."""
+    name = airport["name"]
+    cs = speak_callsign(callsign)
+    return f"{cs}, {name} Tower, roger, report Low Key."
+
+
+def assign_sfo_plan(
+    airport: dict[str, Any],
+    *,
+    recovery: str | None = None,
+    high_key_ft: int | None = None,
+    runway: str | None = None,
+    mission: dict[str, Any] | None = None,
+    state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """
+    Stick an SFO recovery and cancel Flex / Duck straight-in land pressure.
+
+    Overhead SFO: phase approved → wait for High Key report.
+    Straight-in SFO: phase approved → wait for mile SFO final report.
+    High-key altitude is only stored when the pilot said one.
+    """
+    rec = normalize_recovery_key(recovery or "sfo_overhead", default="sfo_overhead")
+    if rec not in SFO_RECOVERIES:
+        rec = "sfo_overhead"
+    alt = normalize_sfo_high_key_ft(high_key_ft)
+    plan_rwy = ""
+    if isinstance(state, dict):
+        ap = approach_plan_from_state(state, airport=airport)
+        plan_rwy = str(ap.get("runway") or state.get("approach_runway") or "")
+    rwy = normalize_runway(runway) or plan_rwy or ""
+    prior = resolve_active_recovery(None, mission, state=state)
+    if prior in _OVERHEAD_RECOVERIES:
+        _remember_overhead_recovery(prior, state=state)
+    for src in (state, mission):
+        if isinstance(src, dict):
+            src["active_recovery"] = rec
+    if isinstance(state, dict):
+        state["sfo_phase"] = "approved"
+        if alt is not None:
+            state["sfo_high_key_ft"] = alt
+        else:
+            state.pop("sfo_high_key_ft", None)
+        state.pop("sfo_base_key_pending", None)
+        state.pop("go_around_plan", None)
+        state.pop("pattern_land_needs_leave", None)
+        state.pop("rearm_tower_outside_nm", None)
+        state.pop("awaiting_on_the_go", None)
+        for key in (
+            "landing_cleared_seats",
+            "landing_ships_total",
+            "_landing_clear_built_seat",
+        ):
+            state.pop(key, None)
+        # Default SFO clearance is the option unless they ask full stop.
+        set_landing_intent(LANDING_INTENT_LOW_APPROACH, state=state, mission=mission)
+        plan = dict(state.get("approach_plan") or {})
+        plan["pattern"] = rec
+        if rwy:
+            plan["runway"] = rwy
+        if alt is not None:
+            plan["sfo_high_key_ft"] = alt
+        else:
+            plan.pop("sfo_high_key_ft", None)
+        state["approach_plan"] = plan
+        if rwy:
+            state["approach_runway"] = rwy
+    return {
+        "recovery": rec,
+        "sfo_phase": "approved",
+        "sfo_high_key_ft": alt,
+        "runway": rwy,
+    }
+
+
+def note_sfo_high_key(state: dict[str, Any] | None = None) -> None:
+    if isinstance(state, dict):
+        state["sfo_phase"] = "high_key"
+        state.pop("sfo_base_key_pending", None)
+
+
+def note_sfo_low_key(state: dict[str, Any] | None = None) -> None:
+    if isinstance(state, dict):
+        state["sfo_phase"] = "low_key"
+        state.pop("sfo_base_key_pending", None)
+
+
+def note_sfo_final(state: dict[str, Any] | None = None) -> None:
+    if isinstance(state, dict):
+        state["sfo_phase"] = "sfo_final"
+
+
+def note_sfo_cleared(state: dict[str, Any] | None = None) -> None:
+    if isinstance(state, dict):
+        state["sfo_phase"] = "cleared"
+        state.pop("sfo_base_key_pending", None)
+
+
+def note_sfo_base_key(state: dict[str, Any] | None = None) -> bool:
+    """
+    Base Key report. Returns True when clearance should fire as a Low Key miss.
+
+    Primary clearance is Low Key; Base Key + uncleared is the safety net.
+    """
+    if not isinstance(state, dict):
+        return False
+    phase = sfo_phase(state)
+    if phase in ("", "approved"):
+        # Skipped High Key too — still treat as needing a clear.
+        state["sfo_base_key_pending"] = True
+        return True
+    if phase == "high_key":
+        state["sfo_base_key_pending"] = True
+        return True
+    return False
 
 
 def closed_traffic_side(runway: str | None, airport: dict[str, Any] | None) -> str:
@@ -10341,11 +10737,14 @@ def pick_departure_runway(
     1. Per-step runway on the mission step (if set) — honored as-is
     2. Pilot-requested runway (Fly) — honored as-is
     3. Manual runway_override from Setup — honored as-is
-    4. Runway coded on the filed Opus route (snapped)
-    5. 11-250: wind component > 10 kt → most aligned; else day calm-wind 21,
+    4. 11-250: wind component > 10 kt → most aligned; else day calm-wind 21,
        or 2200L–0800L split (dep 03 / arr 21) from the CAOC mission clock
 
-    FP/wind results snap to ops runways (21R / 03L), or to instrument
+    A runway coded on the filed Opus route (FLEX03L) names the departure for
+    phraseology only — the active runway is ATC's, so pilots wanting the other
+    end request it on the radio.
+
+    Wind results snap to ops runways (21R / 03L), or to instrument
     runways (21L / 03R) only for instrument-approach phrases. Explicit
     step / pilot / Setup choices are never snapped away.
     """
@@ -10406,18 +10805,16 @@ def pick_departure_runway(
         print(f"Runway (recovery bias): {picked}")
         return picked
 
-    raw: str | None = runway_from_route(opus.fp_route_string if opus else None)
-    if raw is None:
-        # 11-250 §1.12 component + §4.1.4 night dep 03 / arr 21.
-        raw = pick_recovery_runway(
-            airport,
-            weather,
-            instrument=instrument,
-            for_departure=True,
-            config=config,
-            local_minutes=local_minutes,
-        )
-        print(f"Runway (wind/night): {raw}")
+    # 11-250 §1.12 component + §4.1.4 night dep 03 / arr 21.
+    raw = pick_recovery_runway(
+        airport,
+        weather,
+        instrument=instrument,
+        for_departure=True,
+        config=config,
+        local_minutes=local_minutes,
+    )
+    print(f"Runway (wind/night): {raw}")
     aligned = align_runway_to_airport(airport, raw, instrument=instrument)
     if aligned != raw:
         kind = "instrument" if instrument else "ops"

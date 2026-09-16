@@ -357,11 +357,22 @@ def _ownship_payload(config: dict[str, Any]) -> list[float] | None:
     The host owns TX but its own map inject / CAOC feed cannot see this jet, so
     every request carries our fix. None means "we do not know", which holds the
     host's gates rather than letting them read the host's position.
+
+    Route Tester's drive_fly writes ownship_inject.json even when the Fly
+    "map is my jet" checkbox is off — still report that fix so host gates
+    match the client's map.
     """
     try:
         ll = atc_phrase.ownship_latlon(config)
     except Exception:
-        return None
+        ll = None
+    if ll is None:
+        try:
+            inj = atc_phrase.read_ownship_inject()
+            if inj:
+                ll = (float(inj["lat"]), float(inj["lon"]))
+        except Exception:
+            ll = None
     if ll is None:
         return None
     return [float(ll[0]), float(ll[1])]

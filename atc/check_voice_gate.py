@@ -3348,6 +3348,157 @@ def extras() -> int:
         else:
             print("flex/duck reentry — straight-in land on short final (6 NM)")
 
+        # --- SFO / High Key after Flex (must not continue SI / clear land) ---
+        st_sfo = dict(st_flex)
+        sfo_plan = atc_phrase.assign_sfo_plan(
+            nellis, recovery="sfo_overhead", state=st_sfo
+        )
+        trig_sfo_land = rp.resolve_step_trigger(
+            {"template": "clear_land", "trigger": {"gap_s": 5}},
+            state=st_sfo,
+        )
+        approve = atc_phrase.build_sfo_approved(
+            nellis,
+            "Dagger 1",
+            runway="21R",
+            recovery="sfo_overhead",
+            high_key_ft=sfo_plan.get("sfo_high_key_ft"),
+        )
+        approve_alt = atc_phrase.build_sfo_approved(
+            nellis,
+            "Dagger 1",
+            runway="21R",
+            recovery="sfo_overhead",
+            high_key_ft=10000,
+        )
+        hk_ack = atc_phrase.build_sfo_high_key_ack(nellis, "Dagger 1")
+        req_hk = voice_intent.evaluate(
+            "Tower, Dagger 1, request high key",
+            channel="tower",
+            phase="approach",
+            callsign="Dagger 1",
+            last_tx_template="go_around",
+        )
+        steal_si = voice_intent.evaluate(
+            "Tower, Dagger 1, high key",
+            channel="tower",
+            phase="approach",
+            callsign="Dagger 1",
+            last_tx_template="go_around",
+        )
+        req_alt = voice_intent.evaluate(
+            "Tower, Dagger 1, request high key at ten thousand",
+            channel="tower",
+            phase="approach",
+            callsign="Dagger 1",
+            last_tx_template="go_around",
+        )
+        approve_has_alt = "thousand" in approve.lower() or "flight level" in approve.lower()
+        approve_alt_l = approve_alt.lower()
+        approve_alt_ok = (
+            "ten thousand" in approve_alt_l or "one zero thousand" in approve_alt_l
+        )
+        if (
+            st_sfo.get("active_recovery") != "sfo_overhead"
+            or st_sfo.get("sfo_phase") != "approved"
+            or st_sfo.get("sfo_high_key_ft") is not None
+            or st_sfo.get("go_around_plan") is not None
+            or trig_sfo_land is not None
+            or "sfo approved" not in approve.lower()
+            or "report high key" not in approve.lower()
+            or approve_has_alt
+            or not approve_alt_ok
+            or "report low key" not in hk_ack.lower()
+            or not req_hk.match
+            or req_hk.match.intent != "request_sfo"
+            or not steal_si.match
+            or steal_si.match.intent != "request_sfo"
+            or not req_alt.match
+            or req_alt.match.intent != "request_sfo"
+            or (req_alt.match.slots or {}).get("high_key_ft") != 10000
+        ):
+            print(
+                f"  FAIL High Key after Flex must approve SFO (not SI land): "
+                f"state={ {k: st_sfo.get(k) for k in ('active_recovery','sfo_phase','sfo_high_key_ft','go_around_plan')} } "
+                f"trig={trig_sfo_land} approve={approve!r} alt={approve_alt!r} "
+                f"req={req_hk.reason} steal={steal_si.match and steal_si.match.intent} "
+                f"req_alt={req_alt.match.slots if req_alt.match else req_alt.reason}"
+            )
+            bad += 1
+        else:
+            print("SFO after Flex — High Key approve (no canned altitude), no field-NM auto land")
+
+        rep_hk = voice_intent.evaluate(
+            "Dagger 1, high key",
+            channel="tower",
+            phase="approach",
+            callsign="Dagger 1",
+            last_tx_template="sfo_approve",
+        )
+        rep_lk = voice_intent.evaluate(
+            "Dagger 1, low key",
+            channel="tower",
+            phase="approach",
+            callsign="Dagger 1",
+            last_tx_template="sfo_high_key",
+        )
+        on_go = voice_intent.evaluate(
+            "Tower, Dagger 1, on the go",
+            channel="tower",
+            phase="approach",
+            callsign="Dagger 1",
+            last_tx_template="clear_land",
+        )
+        base_miss = voice_intent.evaluate(
+            "Dagger 1, base key, gear down, low approach",
+            channel="tower",
+            phase="approach",
+            callsign="Dagger 1",
+            last_tx_template="sfo_high_key",
+        )
+        si_sfo = voice_intent.evaluate(
+            "Tower, Dagger 1, request straight in SFO",
+            channel="tower",
+            phase="approach",
+            callsign="Dagger 1",
+        )
+        si_body = atc_phrase.build_sfo_approve_body(
+            nellis, runway="21R", recovery="sfo_straight_in"
+        )
+        if (
+            not rep_hk.match
+            or rep_hk.match.intent != "report_high_key"
+            or not rep_lk.match
+            or rep_lk.match.intent != "report_low_key"
+            or not on_go.match
+            or on_go.match.intent != "going_around"
+            or not base_miss.match
+            or base_miss.match.intent
+            not in ("report_base_key", "request_low_approach")
+            or (base_miss.match.slots or {}).get("landing_intent") != "low_approach"
+            or not si_sfo.match
+            or si_sfo.match.intent != "request_sfo"
+            or (si_sfo.match.slots or {}).get("recovery") != "sfo_straight_in"
+            or "simulated flameout final" not in si_body.lower()
+        ):
+            print(
+                f"  FAIL SFO reports / on-the-go / SI SFO: "
+                f"hk={rep_hk.match and rep_hk.match.intent} "
+                f"lk={rep_lk.match and rep_lk.match.intent} "
+                f"go={on_go.match and on_go.match.intent} "
+                f"base={base_miss.match and base_miss.match.intent} "
+                f"slots={base_miss.match.slots if base_miss.match else None} "
+                f"si={si_sfo.match and si_sfo.match.intent} "
+                f"si_slots={si_sfo.match.slots if si_sfo.match else None} "
+                f"body={si_body!r}"
+            )
+            bad += 1
+        else:
+            print(
+                "SFO voice — High/Low Key reports, on the go = waveoff, "
+                "Base Key+option, SI SFO"
+            )
+
         st_closed = {
             "active_recovery": "tactical_overhead",
             "approach_plan": {"pattern": "tactical_overhead", "runway": "21R"},
@@ -3483,6 +3634,7 @@ def extras() -> int:
         )
         st_miss["last_tx_at"] = 0.0
         st_miss["ownship_ll"] = [36.236, -115.034]
+        st_miss["approach_checked_in"] = True
         ready_far, wait_far = atc_phrase.approach_clearance_auto_ready(
             airport=nellis, state=st_miss, gap_s=0
         )
@@ -3494,9 +3646,18 @@ def extras() -> int:
             "approach_plan": dict(st_miss["approach_plan"]),
             "ownship_ll": [36.236, -115.034],
             "last_tx_at": 0.0,
+            "approach_checked_in": True,
         }
         ready_first, _ = atc_phrase.approach_clearance_auto_ready(
             airport=nellis, state=st_first, gap_s=0
+        )
+        st_no_check = {
+            "approach_plan": dict(st_miss["approach_plan"]),
+            "ownship_ll": [36.737683, -114.917067],
+            "last_tx_at": 0.0,
+        }
+        ready_nocheck, wait_nocheck = atc_phrase.approach_clearance_auto_ready(
+            airport=nellis, state=st_no_check, gap_s=0
         )
         if (
             str(ga_miss.get("kind") or "") != "instrument_missed"
@@ -3506,11 +3667,13 @@ def extras() -> int:
             or not ready_near
             or "near fix" not in wait_near.lower()
             or not ready_first
+            or ready_nocheck
+            or "check-in" not in wait_nocheck.lower()
         ):
             print(
                 f"  FAIL missed approach IAF gate: ga={ga_miss} "
                 f"far={ready_far}/{wait_far} near={ready_near}/{wait_near} "
-                f"first={ready_first}"
+                f"first={ready_first} nocheck={ready_nocheck}/{wait_nocheck}"
             )
             bad += 1
         else:
@@ -5514,6 +5677,57 @@ def extras() -> int:
         else:
             print("clearance amendment cues — ready to copy only after CD offers")
 
+        copy_ok = 0
+        for phrase in (
+            "Ready to copy",
+            "Dagger 1, ready to copy",
+            "Ready to copy, Dagger 1",
+            "Delivery, Dagger 1, ready to copy",
+            "go ahead",
+        ):
+            hit = voice_intent.evaluate(
+                phrase,
+                channel="delivery",
+                phase="departure",
+                expected="clearance_amendment",
+                callsign="Dagger 1",
+                last_tx_template="clearance_amendment",
+                awaiting_readback=True,
+                readback_items=amend_rb,
+            )
+            if hit.match and hit.match.intent == "ready_to_copy":
+                copy_ok += 1
+            else:
+                print(
+                    f"  FAIL amendment ready-to-copy should fire on {phrase!r}: "
+                    f"{hit.reason!r} {hit.advice!r}"
+                )
+                bad += 1
+        blocked = voice_intent.evaluate(
+            "Dagger 1, ready to copy",
+            channel="delivery",
+            phase="departure",
+            expected="clearance",
+            callsign="Dagger 1",
+            last_tx_template="clearance",
+            awaiting_readback=True,
+            readback_items=[
+                {
+                    "key": "squawk",
+                    "label": "Squawk",
+                    "value": "0551",
+                    "spoken": "zero five five one",
+                    "highlight": True,
+                    "hinge": True,
+                }
+            ],
+        )
+        if blocked.match and blocked.match.intent == "ready_to_copy":
+            print("  FAIL ready_to_copy must not steal IFR clearance readback")
+            bad += 1
+        elif copy_ok == 5:
+            print("clearance amendment voice — ready to copy with or without callsign")
+
         alias_sq = atc_phrase._opus_mode3_from_fields({"squawk": "4321"})
         if alias_sq != "4321":
             print(f"  FAIL Opus squawk field should map to Mode 3: {alias_sq!r}")
@@ -5931,6 +6145,7 @@ def extras() -> int:
         },
         "ownship_ll": [37.99, -114.92],
         "last_tx_at": 0.0,
+        "approach_checked_in": True,
     }
     ready_75, wait_75 = atc_phrase.approach_clearance_auto_ready(
         airport=nellis, state=st_75, gap_s=0
@@ -5940,6 +6155,23 @@ def extras() -> int:
         bad += 1
     else:
         print("approach clearance — waits outside 40 NM of the IAF")
+
+    # Filing KRYSS then SHEET (or both in the tail) must keep the ILS X start.
+    class _KryssSheetFP:
+        fp_route_string = "KLSV DREAM COYOT KRYSS SHEET KLSV"
+        fp_altitude = "FL240"
+
+    plan_ks = atc_phrase.assign_approach_plan(
+        nellis, ifr, state={}, force=True, opus=_KryssSheetFP()
+    )
+    if plan_ks.get("iaf") != "KRYSS" or plan_ks.get("instrument_id") != "ILS_X_21L":
+        print(f"  FAIL KRYSS+SHEET route must stay on KRYSS/ILS X: {plan_ks}")
+        bad += 1
+    elif int(plan_ks.get("descend_ft") or 0) != 8800:
+        print(f"  FAIL KRYSS+SHEET crossing must be 8800: {plan_ks}")
+        bad += 1
+    else:
+        print("approach route — KRYSS beats intermediate SHEET")
 
     land_bare = voice_intent.evaluate(
         "Gear down, stop 21R",

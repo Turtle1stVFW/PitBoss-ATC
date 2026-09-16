@@ -1221,8 +1221,21 @@ def test_client_sends_its_own_fix() -> list[str]:
     finally:
         atc_phrase.clear_ownship_inject()
 
+    # Route Tester drive_fly still reports when "map is my jet" is off.
+    cfg_off = _host_config(atc_role="client", ownship_from_map=False)
+    atc_phrase.write_ownship_inject(
+        lat=36.79, lon=-114.72, alt_ft_agl=17000, heading_deg=210,
+        speed_kt=400, callsign="Fleece 1", airport=nellis,
+    )
+    try:
+        via_inject = atc_client._radio_payload(cfg_off).get("ownship_ll")
+        if not isinstance(via_inject, list) or abs(via_inject[0] - 36.79) > 0.01:
+            fails.append(f"drive_fly inject should still report to host: {via_inject}")
+    finally:
+        atc_phrase.clear_ownship_inject()
+
     # Unknown position sends an explicit null, not a missing key.
-    blind = atc_client._radio_payload(cfg)
+    blind = atc_client._radio_payload(cfg_off)
     if "ownship_ll" not in blind:
         fails.append("unknown position should still send the key")
     elif blind.get("ownship_ll") is not None:

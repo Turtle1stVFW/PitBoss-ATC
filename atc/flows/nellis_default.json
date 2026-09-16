@@ -6,6 +6,8 @@
     "visual_overhead",
     "tactical_overhead",
     "straight_in",
+    "sfo_overhead",
+    "sfo_straight_in",
     "instrument"
   ],
   "steps": [
@@ -306,8 +308,7 @@
       "template": "approach_check_in",
       "file": null,
       "enabled": true,
-      "text": null,
-      "recovery": "straight_in"
+      "text": null
     },
     {
       "id": "app_procedure",
