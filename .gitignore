@@ -53,5 +53,5 @@ Thumbs.db
 .idea/
 *.user
 
-# Cursor IDE (local rules, plans)
+# Cursor IDE — local only (rules/plans must not overwrite other contributors)
 .cursor/

@@ -173,9 +173,33 @@ class ChannelTxHub:
                 wav_obj = job.get("wav_path")
                 wav = Path(str(wav_obj)) if wav_obj else None
                 job["exit_code"] = int(self._transmit(job) or 0)
+                try:
+                    import app_diag
+
+                    code = int(job.get("exit_code") or 0)
+                    if code != 0:
+                        app_diag.error(
+                            app_diag.CAT_TX,
+                            "channel TX non-zero exit",
+                            channel=channel,
+                            exit_code=code,
+                            prerender_error=str(job.get("prerender_error") or ""),
+                        )
+                except Exception:
+                    pass
             except Exception as exc:  # noqa: BLE001
                 job["error"] = str(exc)
                 job["exit_code"] = 2
+                try:
+                    import app_diag
+
+                    app_diag.error(
+                        app_diag.CAT_TX,
+                        f"channel TX worker failed: {exc}",
+                        channel=channel,
+                    )
+                except Exception:
+                    pass
             finally:
                 if wav is not None:
                     try:

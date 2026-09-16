@@ -245,6 +245,18 @@ class AtcServer:
         if fw:
             print(f"ATC host {fw}")
         self.firewall_status = fw
+        try:
+            import app_diag
+
+            app_diag.info(
+                app_diag.CAT_NETWORK,
+                "ATC Host started",
+                bind=self.bind_host,
+                port=self.port,
+                firewall=fw or "ok",
+            )
+        except Exception:
+            pass
 
     def stop(self) -> None:
         self.hub.stop()

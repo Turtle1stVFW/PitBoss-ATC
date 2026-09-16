@@ -443,8 +443,21 @@ def speak_callsign(callsign: str) -> str:
 
 def http_get_json(url: str, user_agent: str) -> Any:
     req = urllib.request.Request(url, headers={"User-Agent": user_agent})
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:
+        try:
+            import app_diag
+
+            app_diag.warn(
+                app_diag.CAT_NETWORK,
+                f"HTTP GET failed: {exc}",
+                url=url,
+            )
+        except Exception:
+            pass
+        raise
 
 
 def callsign_override(config: dict[str, Any]) -> str | None:
@@ -11396,6 +11409,17 @@ def fetch_metar(
             payload = json.loads(resp.read().decode("utf-8"))
     except urllib.error.URLError as exc:
         print(f"WARNING: Opus METAR fetch failed ({exc}); using calm defaults", file=sys.stderr)
+        try:
+            import app_diag
+
+            app_diag.warn(
+                app_diag.CAT_NETWORK,
+                f"Opus METAR fetch failed: {exc}",
+                url=url,
+                icao=icao,
+            )
+        except Exception:
+            pass
         wx = Weather(None, 0, 29.92, "")
         _METAR_CACHE[cache_key] = {"exp": now + _METAR_CACHE_TTL_SEC, "wx": wx}
         return wx
@@ -14498,18 +14522,49 @@ def _run_external_audio(exe: Path, cmd: list[str], *, timeout_sec: float = 120.0
     if os.name == "nt":
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
+        import app_diag
+
+        app_diag.info(
+            app_diag.CAT_TX,
+            "ExternalAudio launch",
+            exe=exe.name,
+            cmd=cmd,
+            timeout_s=timeout_sec,
+        )
+    except Exception:
+        pass
+    try:
         proc = subprocess.run(
             cmd,
             cwd=str(exe.parent),
             creationflags=creationflags,
             timeout=timeout_sec,
         )
-        return int(proc.returncode)
+        code = int(proc.returncode)
+        try:
+            import app_diag
+
+            if code == 0:
+                app_diag.info(app_diag.CAT_TX, "ExternalAudio exit", exit_code=code)
+            else:
+                app_diag.error(app_diag.CAT_TX, "ExternalAudio failed", exit_code=code)
+        except Exception:
+            pass
+        return code
     except subprocess.TimeoutExpired:
         print(
             f"ERROR: ExternalAudio timed out after {timeout_sec:.0f}s — killing hung process.",
             file=sys.stderr,
         )
+        try:
+            import app_diag
+
+            app_diag.error(
+                app_diag.CAT_TX,
+                f"ExternalAudio timed out after {timeout_sec:.0f}s",
+            )
+        except Exception:
+            pass
         terminate_stale_external_audio(exe)
         return 124
 
@@ -14532,6 +14587,12 @@ def transmit(
     exe = resolve_external_audio_exe(config)
     if not exe.is_file():
         print(f"ExternalAudio not found: {exe}", file=sys.stderr)
+        try:
+            import app_diag
+
+            app_diag.error(app_diag.CAT_LIBRARY, f"ExternalAudio not found: {exe}")
+        except Exception:
+            pass
         return 2
 
     # EAM strip: common PTT → only the selected radio's MHz goes on the wire.
@@ -14553,6 +14614,12 @@ def transmit(
             "Windows voice for this jet to protect the Host key",
             file=sys.stderr,
         )
+        try:
+            import app_diag
+
+            app_diag.warn(app_diag.CAT_TX, "Google TTS cap reached; falling back to Windows", session=sid)
+        except Exception:
+            pass
         provider = "windows"
         voice = windows_fallback_voice()
         gender = voice_gender(voice)
@@ -14566,12 +14633,28 @@ def transmit(
                 "Set the path to your Google service-account JSON in Setup.",
                 file=sys.stderr,
             )
+            try:
+                import app_diag
+
+                app_diag.error(app_diag.CAT_TX, "Google TTS credentials path empty")
+            except Exception:
+                pass
             return 2
         if not google_creds.is_file():
             print(
                 f"ERROR: Google credentials file not found: {google_creds}",
                 file=sys.stderr,
             )
+            try:
+                import app_diag
+
+                app_diag.error(
+                    app_diag.CAT_TX,
+                    "Google TTS credentials file missing",
+                    path=str(google_creds),
+                )
+            except Exception:
+                pass
             return 2
         print("TX:", text)
         print("Spoken:", spoken_radio_preview(text, voice=voice))
@@ -14589,6 +14672,12 @@ def transmit(
             )
         except Exception as exc:  # noqa: BLE001
             print(f"ERROR: Google local synth/TX failed: {exc}", file=sys.stderr)
+            try:
+                import app_diag
+
+                app_diag.error(app_diag.CAT_TX, f"Google local synth/TX failed: {exc}")
+            except Exception:
+                pass
             return 2
         finally:
             if wav_path is not None:
@@ -14621,6 +14710,22 @@ def transmit(
         print("TTS text (flattened):", spoken)
     print(f"TTS: {provider} · speed {speed}")
     print("CMD:", " ".join(cmd))
+    try:
+        import app_diag
+
+        app_diag.info(
+            app_diag.CAT_TX,
+            "TX request",
+            channel=str(channel or ""),
+            freq=freq,
+            mod=mod,
+            provider=provider,
+            srs_host=str(airport.get("srs_host") or ""),
+            srs_port=int(airport.get("srs_port") or 0),
+            cmd=cmd,
+        )
+    except Exception:
+        pass
 
     if config.get("dry_run"):
         print("dry_run=true; not launching ExternalAudio")
@@ -14644,9 +14749,21 @@ def transmit_file(
     path = Path(file_path)
     if not exe.is_file():
         print(f"ExternalAudio not found: {exe}", file=sys.stderr)
+        try:
+            import app_diag
+
+            app_diag.error(app_diag.CAT_LIBRARY, f"ExternalAudio not found: {exe}")
+        except Exception:
+            pass
         return 2
     if not path.is_file():
         print(f"Audio file not found: {path}", file=sys.stderr)
+        try:
+            import app_diag
+
+            app_diag.error(app_diag.CAT_TX, f"Audio file not found: {path.name}")
+        except Exception:
+            pass
         return 2
 
     freq, mod = srs_radio.maybe_force_eam_tx_freq(config, freq, mod, radio=radio)
@@ -14665,6 +14782,21 @@ def transmit_file(
     ]
     print("TX FILE:", path)
     print("CMD:", " ".join(cmd))
+    try:
+        import app_diag
+
+        app_diag.info(
+            app_diag.CAT_TX,
+            "TX file request",
+            file=path.name,
+            freq=freq,
+            mod=mod,
+            srs_host=str(airport.get("srs_host") or ""),
+            srs_port=int(airport.get("srs_port") or 0),
+            cmd=cmd,
+        )
+    except Exception:
+        pass
     if config.get("dry_run"):
         print("dry_run=true; not launching ExternalAudio")
         return 0
