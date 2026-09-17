@@ -164,6 +164,8 @@ CASES = [
     ("Approach, Fleece 1, request handoff", "approach", "approach", True, "approach_continue"),
     ("Approach, Fleece 1, established", "approach", "approach", True, "approach_established"),
     ("Delivery, Fleece 1, request IFR clearance", "delivery", "departure", True, "ready_clearance"),
+    ("Delivery, Fleece 1, clearance on request", "delivery", "departure", True, "ready_clearance"),
+    ("Clearance on request", "delivery", "departure", True, "ready_clearance"),
     ("Nellis Tower, Fleece 1, gear down full stop", "tower", "approach", True, "request_landing"),
     ("Nellis Tower, Fleece 1, with you", "tower", "approach", True, "tower_check_in"),
     ("Tower, Fleece 1, initial", "tower", "approach", True, "tower_initial"),
@@ -2891,8 +2893,23 @@ def extras() -> int:
 
     plan_ohb = {"pattern": "visual_overhead", "runway": "21R"}
     brk = atc_phrase.build_tower_check_in(nellis, "Fleece 1", "21R", plan=plan_ohb)
-    if "right break approved" not in brk.lower():
-        print(f"  FAIL OHB tower check-in should approve right break: {brk}")
+    if "break right at the numbers" not in brk.lower():
+        print(f"  FAIL OHB tower check-in should break right at the numbers: {brk}")
+        bad += 1
+    brk_03 = atc_phrase.build_tower_check_in(
+        nellis, "Fleece 1", "03L", plan={"pattern": "visual_overhead", "runway": "03L"}
+    )
+    if "break left at the numbers" not in brk_03.lower():
+        print(f"  FAIL 03L OHB should break left at the numbers: {brk_03}")
+        bad += 1
+    brk_21l = atc_phrase.build_tower_check_in(
+        nellis, "Fleece 1", "21L", plan={"pattern": "visual_overhead", "runway": "21L"}
+    )
+    if "break left at midfield" not in brk_21l.lower():
+        print(f"  FAIL 21L OHB should break left at midfield: {brk_21l}")
+        bad += 1
+    if "right break approved" in brk.lower():
+        print(f"  FAIL must not say right break approved: {brk}")
         bad += 1
     cont = atc_phrase.build_tower_check_in(
         nellis, "Fleece 1", "21R", plan={"pattern": "straight_in", "runway": "21R"}
@@ -3178,7 +3195,13 @@ def extras() -> int:
         "21L",
         state={"last_tx_template": "clear_land"},
     ).lower()
-    if "hold short" not in taxi_in_missed_exit or "two one right" not in taxi_in_missed_exit:
+    if "alpha south" not in taxi_in_missed_exit and "eor" not in taxi_in_missed_exit:
+        print(
+            f"  FAIL taxi-in after landing should go to landing EOR first: "
+            f"{taxi_in_missed_exit}"
+        )
+        bad += 1
+    elif "hold short" not in taxi_in_missed_exit or "two one right" not in taxi_in_missed_exit:
         print(
             f"  FAIL taxi-in after 21L without Tower exit must hold short 21R: "
             f"{taxi_in_missed_exit}"
@@ -3201,8 +3224,39 @@ def extras() -> int:
             f"{taxi_in_after_exit}"
         )
         bad += 1
+    elif "alpha south" not in taxi_in_after_exit and "eor" not in taxi_in_after_exit:
+        print(
+            f"  FAIL taxi-in after exit should still go to landing EOR: "
+            f"{taxi_in_after_exit}"
+        )
+        bad += 1
     else:
         print(f"ground taxi-in 21L (after exit) — {taxi_in_after_exit}")
+
+    taxi_in_ramp = atc_phrase.build_template_text(
+        nellis,
+        "taxi_in",
+        "Razor 1",
+        wx_exit,
+        "21R",
+        state={"last_tx_template": "taxi_in", "taxi_in_to_ramp": True},
+    ).lower()
+    if "ramp" not in taxi_in_ramp and "parking" not in taxi_in_ramp:
+        # Default parking is "Ramp"
+        if "via" not in taxi_in_ramp:
+            print(f"  FAIL taxi-in after EOR should go to parking: {taxi_in_ramp}")
+            bad += 1
+        else:
+            print(f"ground taxi-in 21R (to ramp) — {taxi_in_ramp}")
+    else:
+        print(f"ground taxi-in 21R (to ramp) — {taxi_in_ramp}")
+
+    taxi_21r_eor = atc_phrase.resolve_taxi_route(nellis, "21R")
+    if str(taxi_21r_eor.get("landing_eor") or "") != "Alpha South":
+        print(f"  FAIL 21R landing EOR should be Alpha South: {taxi_21r_eor}")
+        bad += 1
+    else:
+        print("landing EOR 21R -> Alpha South")
 
     parked_21l = atc_phrase.resolve_taxi_route(nellis, "21L")
     if str(parked_21l.get("departure_cross") or "") != "21R":
@@ -3257,8 +3311,8 @@ def extras() -> int:
             {"template": "clear_land", "trigger": {"gap_s": 5}},
             state=st_land,
         )
-        if trig2 is not None and trig2.within_nm is not None:
-            print(f"  FAIL OHB clear_land must not auto on field distance: {trig2}")
+        if trig2 is None or abs(float(trig2.within_nm or 0) - rp.OVERHEAD_LAND_WITHIN_NM) > 0.01:
+            print(f"  FAIL OHB clear_land should auto on base gate: {trig2}")
             bad += 1
         st_si = {
             "approach_plan": {"pattern": "straight_in", "runway": "21R"},

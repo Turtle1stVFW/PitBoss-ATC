@@ -2112,6 +2112,33 @@ class MissionPlanner(tk.Tk):
             tracker.pending_latch = latch
             return step_id, waiting
 
+        # Approach → Tower: after procedure clearance, ≤12 NM from the field.
+        if tmpl in ("cleared_approach", "contact_tower"):
+            nm = None
+            gap = None
+            if trigger is not None:
+                if trigger.within_nm is not None:
+                    nm = float(trigger.within_nm)
+                if trigger.gap_s:
+                    gap = float(trigger.gap_s)
+            ready, waiting = atc_phrase.approach_tower_handoff_auto_ready(
+                airport=airport,
+                state=state,
+                config=cfg,
+                callsign=callsign or None,
+                opus=opus,
+                within_nm=nm,
+                gap_s=gap,
+            )
+            if not ready:
+                return "", waiting
+            key = f"{step_id}:contact_tower"
+            latch = f"fire:{key}"
+            if not tracker.armed(latch):
+                return "", waiting
+            tracker.pending_latch = latch
+            return step_id, waiting
+
         # Tower check-in is voice / Play only — never auto after the 12 NM handoff.
         if tmpl == "right_break":
             return "", "waiting for tower check-in"
@@ -2171,11 +2198,26 @@ class MissionPlanner(tk.Tk):
 
         # After a go-around: land only on base / short final, and only after
         # they have left the final they waved off from.
+        # Overhead / TAC: same base gate so Tower does not clear on initial.
         pattern_nm = atc_phrase.pattern_land_within_nm(state) if tmpl == "clear_land" else None
-        if pattern_nm is not None:
-            on_final, wait_final = runway_position.on_base_or_short_final(
-                status, within_nm=float(pattern_nm)
+        overhead_land = False
+        if tmpl == "clear_land" and pattern_nm is None:
+            rec = atc_phrase.resolve_active_recovery(step, mission, state=state)
+            overhead_land = rec in ("visual_overhead", "tactical_overhead")
+        if pattern_nm is not None or overhead_land:
+            need_nm = float(
+                pattern_nm
+                if pattern_nm is not None
+                else (trigger.within_nm or runway_position.OVERHEAD_LAND_WITHIN_NM)
             )
+            if overhead_land:
+                on_final, wait_final = runway_position.on_overhead_base_or_final(
+                    status, within_nm=need_nm
+                )
+            else:
+                on_final, wait_final = runway_position.on_base_or_short_final(
+                    status, within_nm=need_nm
+                )
             if state is not None and state.get("pattern_land_needs_leave"):
                 if on_final:
                     return "", "go-around — leave final, then land on base / short final"

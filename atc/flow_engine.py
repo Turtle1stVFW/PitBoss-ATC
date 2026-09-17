@@ -715,6 +715,7 @@ class FlowEngine:
             if str(step.get("template") or "") in ("approach_procedure", "approach_iaf"):
                 self.state.pop("approach_clearance_need_fix", None)
                 self.state["vectors_active"] = False
+                self.state["approach_procedure_done"] = True
 
         detail["exit_code"] = code
         self.state["last_step_id"] = step.get("id")

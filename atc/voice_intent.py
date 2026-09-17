@@ -1512,14 +1512,28 @@ INTENTS: tuple[Intent, ...] = (
     Intent(
         "ready_clearance",
         (
-            ("clearance", "ifr"),
-            ("request", "requesting", "ready", "like", "copy"),
+            (
+                "clearance on request",
+                "clearance on req",
+                "ifr clearance on request",
+                "clearance",
+                "ifr",
+            ),
+            (
+                "on request",
+                "on req",
+                "request",
+                "requesting",
+                "ready",
+                "like",
+                "copy",
+            ),
         ),
         kind="step",
         template="clearance",
         channels=("delivery",),
         phases=("departure",),
-        example="request clearance",
+        example="clearance on request",
         does="IFR clearance",
         veto=("readback", "squawk", "as filed"),
     ),
@@ -2120,7 +2134,30 @@ INTENTS: tuple[Intent, ...] = (
         phases=("approach",),
         weight=1.1,
         example="clear of the runway",
-        does="taxi back to parking",
+        does="taxi to the landing EOR",
+        veto=("taxi to the ramp", "taxi to parking", "request taxi to the ramp"),
+    ),
+    Intent(
+        "request_taxi_ramp",
+        (
+            (
+                "taxi to the ramp",
+                "taxi to parking",
+                "request taxi to the ramp",
+                "request taxi to parking",
+                "ready to taxi to the ramp",
+                "ready to taxi to parking",
+                "taxi to ramp",
+                "request taxi ramp",
+            ),
+        ),
+        kind="step",
+        template="taxi_in",
+        channels=("ground",),
+        phases=("approach",),
+        weight=1.2,
+        example="request taxi to the ramp",
+        does="taxi from the EOR to parking",
     ),
     Intent(
         "range_entry",
@@ -4312,6 +4349,13 @@ def evaluate(
         or (expected or "").strip().lower() == "clearance_amendment"
     ):
         address_optional = True
+    # Already on Delivery with clearance due — "clearance on request" is enough.
+    if candidate.intent == "ready_clearance" and (
+        (channel or "").strip().lower() == "delivery"
+        or (expected or "").strip().lower() in ("clearance", "clearance_readback")
+        or tun == "delivery"
+    ):
+        address_optional = True
     # SFO pattern reports — Tower already owns the exchange.
     if candidate.intent in (
         "request_sfo",
@@ -4639,7 +4683,10 @@ def suggestions(
         if expected_l in ("lineup", "line_up_and_wait") and intent.id == "request_lineup":
             continue
         # Taxi-to-EOR is outbound — don't offer taxi-in / clear-of-runway yet.
-        if expected_l == "taxi" and intent.id == "clear_of_runway":
+        if expected_l == "taxi" and intent.id in (
+            "clear_of_runway",
+            "request_taxi_ramp",
+        ):
             continue
         # Finish the taxi readback before offering "at EOR" / monitor tower.
         if awaiting_readback and intent.id == "at_eor":
@@ -4648,8 +4695,21 @@ def suggestions(
         if expected_l == "monitor_tower" and intent.id in (
             "ready_taxi",
             "clear_of_runway",
+            "request_taxi_ramp",
         ):
             continue
+        # Landing EOR first — tip ramp taxi only after Ground sent them to EOR.
+        if intent.id == "request_taxi_ramp" and last_tx_template not in (
+            "taxi_in",
+            "exit_runway",
+        ):
+            # Still allow when expected is taxi_in after the EOR call.
+            if expected_l not in ("taxi_in", "exit_runway"):
+                continue
+        if intent.id == "clear_of_runway" and expected_l == "taxi_in":
+            # Prefer "request taxi to the ramp" once they already got EOR taxi.
+            if last_tx_template == "taxi_in":
+                continue
         # Departure radar contact: check-in cues only — not winds / altimeter.
         if expected_l == "radar_contact" and intent.id in _DEPARTURE_CHECKIN_SKIP_IDS:
             continue

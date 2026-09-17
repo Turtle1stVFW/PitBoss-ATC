@@ -59,32 +59,48 @@
     "taxi_routes": {
       "21R": {
         "eor": "NW EOR",
+        "landing_eor": "Alpha South",
         "outbound_via": "F, E",
         "inbound_via": "Foxtrot",
+        "landing_eor_via": "Alpha",
         "exit": "right at Alpha",
         "intersection": "Delta"
       },
       "03L": {
         "eor": "Alpha South",
+        "landing_eor": "NW EOR",
         "outbound_via": "Foxtrot",
         "inbound_via": "Foxtrot",
+        "landing_eor_via": "Alpha, Foxtrot",
         "exit": "left at Alpha",
         "intersection": "Bravo"
       },
       "21L": {
         "eor": "NW EOR",
+        "landing_eor": "Alpha South",
         "outbound_via": "F, E",
         "inbound_via": "Alpha, Foxtrot",
+        "landing_eor_via": "Alpha",
         "east_inbound_via": "Alpha",
+        "east_landing_eor": "NE EOR",
         "intersection": "Delta"
       },
       "03R": {
         "eor": "Alpha South",
+        "landing_eor": "NW EOR",
         "outbound_via": "Foxtrot",
         "inbound_via": "Alpha, Foxtrot",
+        "landing_eor_via": "Alpha, Foxtrot",
         "east_inbound_via": "Alpha",
+        "east_landing_eor": "NE EOR",
         "intersection": "Bravo"
       }
+    },
+    "break_by_runway": {
+      "21R": {"side": "right", "point": "numbers"},
+      "21L": {"side": "left", "point": "midfield"},
+      "03L": {"side": "left", "point": "numbers"},
+      "03R": {"side": "right", "point": "midfield"}
     },
     "expect_minutes": 10,
     "departures_file": "departures/nellis.json",
