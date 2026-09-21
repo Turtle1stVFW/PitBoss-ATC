@@ -47,6 +47,7 @@ import voice_actions  # noqa: E402
 import voice_engine  # noqa: E402
 import voice_intent  # noqa: E402
 import setup_welcome  # noqa: E402
+import version  # noqa: E402
 
 CONFIG_PATH = HERE / "config.json"
 AIRPORTS_PATH = HERE / "airports.json"
@@ -135,7 +136,7 @@ def slug_id(label: str) -> str:
 class MissionPlanner(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("PitBoss ATC")
+        self.title(f"PitBoss ATC {version.display()}")
         self.geometry("1240x820")
         self.minsize(1020, 700)
         self.configure(bg=C_BG)
@@ -2112,6 +2113,33 @@ class MissionPlanner(tk.Tk):
             tracker.pending_latch = latch
             return step_id, waiting
 
+        # Approach → Tower: after procedure clearance, ≤12 NM from the field.
+        if tmpl in ("cleared_approach", "contact_tower"):
+            nm = None
+            gap = None
+            if trigger is not None:
+                if trigger.within_nm is not None:
+                    nm = float(trigger.within_nm)
+                if trigger.gap_s:
+                    gap = float(trigger.gap_s)
+            ready, waiting = atc_phrase.approach_tower_handoff_auto_ready(
+                airport=airport,
+                state=state,
+                config=cfg,
+                callsign=callsign or None,
+                opus=opus,
+                within_nm=nm,
+                gap_s=gap,
+            )
+            if not ready:
+                return "", waiting
+            key = f"{step_id}:contact_tower"
+            latch = f"fire:{key}"
+            if not tracker.armed(latch):
+                return "", waiting
+            tracker.pending_latch = latch
+            return step_id, waiting
+
         # Tower check-in is voice / Play only — never auto after the 12 NM handoff.
         if tmpl == "right_break":
             return "", "waiting for tower check-in"
@@ -2171,11 +2199,26 @@ class MissionPlanner(tk.Tk):
 
         # After a go-around: land only on base / short final, and only after
         # they have left the final they waved off from.
+        # Overhead / TAC: same base gate so Tower does not clear on initial.
         pattern_nm = atc_phrase.pattern_land_within_nm(state) if tmpl == "clear_land" else None
-        if pattern_nm is not None:
-            on_final, wait_final = runway_position.on_base_or_short_final(
-                status, within_nm=float(pattern_nm)
+        overhead_land = False
+        if tmpl == "clear_land" and pattern_nm is None:
+            rec = atc_phrase.resolve_active_recovery(step, mission, state=state)
+            overhead_land = rec in ("visual_overhead", "tactical_overhead")
+        if pattern_nm is not None or overhead_land:
+            need_nm = float(
+                pattern_nm
+                if pattern_nm is not None
+                else (trigger.within_nm or runway_position.OVERHEAD_LAND_WITHIN_NM)
             )
+            if overhead_land:
+                on_final, wait_final = runway_position.on_overhead_base_or_final(
+                    status, within_nm=need_nm
+                )
+            else:
+                on_final, wait_final = runway_position.on_base_or_short_final(
+                    status, within_nm=need_nm
+                )
             if state is not None and state.get("pattern_land_needs_leave"):
                 if on_final:
                     return "", "go-around — leave final, then land on base / short final"
@@ -2585,11 +2628,112 @@ class MissionPlanner(tk.Tk):
             self._joystick.stop()
         return warnings
 
+    def _pick_joystick_device(
+        self, *, title: str = "Select controller", allow_any: bool = True
+    ) -> tuple[str, int | None] | None:
+        """
+        Modal list of connected winmm joysticks.
+
+        Returns ("joy", device_id), ("any", None), ("mouse", None), or None if cancelled.
+        When several sticks share the generic Microsoft name, pick the Orion
+        (or whatever) first so Learn only listens on that id.
+        """
+        devices = joystick.list_devices()
+        dialog = tk.Toplevel(self)
+        dialog.title(title)
+        dialog.transient(self)
+        dialog.resizable(False, False)
+        dialog.configure(bg=C_PANEL)
+        result: dict[str, tuple[str, int | None] | None] = {"value": None}
+
+        tk.Label(
+            dialog,
+            text=(
+                "Windows often labels every stick “Microsoft PC-joystick driver”.\n"
+                "Pick the device that owns the button, then press Learn on that stick only."
+            ),
+            bg=C_PANEL,
+            fg=C_MUTED,
+            font=("Segoe UI", 9),
+            justify="left",
+        ).pack(anchor="w", padx=14, pady=(12, 8))
+
+        listbox = tk.Listbox(
+            dialog,
+            height=max(6, min(12, len(devices) + 2)),
+            width=72,
+            font=("Consolas", 9),
+            bg=C_CARD,
+            fg=C_TEXT,
+            selectbackground=C_GREEN,
+            activestyle="dotbox",
+        )
+        listbox.pack(fill=tk.BOTH, expand=True, padx=14, pady=(0, 8))
+
+        entries: list[tuple[str, int | None]] = []
+        if allow_any:
+            listbox.insert(tk.END, "Any connected device (or mouse button)")
+            entries.append(("any", None))
+        if not devices:
+            listbox.insert(tk.END, "(no joysticks reported by Windows)")
+        for dev in devices:
+            label = str(dev.get("label") or dev.get("name") or f"Joystick {dev['id']}")
+            listbox.insert(
+                tk.END,
+                f"{label}   ·  {int(dev.get('buttons') or 0)} buttons  ·  "
+                f"{int(dev.get('axes') or 0)} axes  ·  {dev.get('hwid') or ''}",
+            )
+            entries.append(("joy", int(dev["id"])))
+
+        if entries:
+            listbox.selection_set(0)
+            listbox.see(0)
+
+        btns = tk.Frame(dialog, bg=C_PANEL)
+        btns.pack(fill=tk.X, padx=14, pady=(0, 12))
+
+        def accept(_event: object | None = None) -> None:
+            sel = listbox.curselection()
+            if not sel or not entries:
+                return
+            idx = int(sel[0])
+            if idx >= len(entries):
+                return
+            result["value"] = entries[idx]
+            dialog.destroy()
+
+        def cancel() -> None:
+            result["value"] = None
+            dialog.destroy()
+
+        ttk.Button(btns, text="Cancel", command=cancel).pack(side=tk.RIGHT)
+        ttk.Button(btns, text="Use selected", command=accept).pack(side=tk.RIGHT, padx=(0, 8))
+        listbox.bind("<Double-Button-1>", accept)
+        listbox.bind("<Return>", accept)
+        dialog.protocol("WM_DELETE_WINDOW", cancel)
+        dialog.grab_set()
+        dialog.focus_set()
+        listbox.focus_set()
+        self.wait_window(dialog)
+        return result["value"]
+
     def _learn_joy_button(self, which: str) -> None:
         """Capture the next HOTAS or mouse press and bind it to a Fly action."""
+        picked = self._pick_joystick_device(title="Learn HOTAS / mouse button")
+        if picked is None:
+            return
+        kind, device_id = picked
         var = getattr(self, f"var_joy_{which}")
         previous = var.get()
-        var.set("Press a HOTAS or mouse button…")
+        if kind == "joy" and device_id is not None:
+            devices = {int(d["id"]): d for d in joystick.list_devices()}
+            label = (devices.get(int(device_id)) or {}).get("label") or f"id {device_id}"
+            var.set(f"Press a button on {label}…")
+            allow_mouse = False
+        else:
+            var.set("Press a HOTAS or mouse button…")
+            allow_mouse = True
+            device_id = None
 
         def done(binding: dict[str, Any]) -> None:
             def apply() -> None:
@@ -2600,12 +2744,14 @@ class MissionPlanner(tk.Tk):
             self._ui_call(apply)
 
         def cancel() -> None:
-            if var.get().startswith("Press a HOTAS or mouse"):
+            if "Press" in var.get():
                 self._joystick.learn_next_press(None)
                 var.set(previous)
 
-        self._joystick.learn_next_press(done)
-        self.after(10000, cancel)
+        self._joystick.learn_next_press(
+            done, device_id=device_id, allow_mouse=allow_mouse
+        )
+        self.after(15000, cancel)
 
     def _clear_joy_button(self, which: str) -> None:
         self._joy_bindings[which] = None
@@ -2619,7 +2765,9 @@ class MissionPlanner(tk.Tk):
             messagebox.showinfo(
                 "SRS PTT",
                 "No SRS transmit bindings matched a connected device.\n\n"
-                "Checked the DCS-SimpleRadio-Standalone Client folder for .cfg profiles.",
+                "Checked the DCS-SimpleRadio-Standalone Client folder for .cfg profiles.\n"
+                "If Pit Boss lists sticks as Microsoft PC-joystick driver, use Learn… "
+                "and pick the WinWing device from the list instead.",
             )
             return
         lines = "\n".join(
@@ -3544,6 +3692,13 @@ class MissionPlanner(tk.Tk):
         top = tk.Frame(self, bg=C_BG)
         top.pack(fill=tk.X, padx=16, pady=(10, 4))
         ttk.Label(top, text="PitBoss ATC", style="Title.TLabel").pack(side=tk.LEFT)
+        tk.Label(
+            top,
+            text=version.display(),
+            bg=C_BG,
+            fg=C_MUTED,
+            font=("Segoe UI", 9),
+        ).pack(side=tk.LEFT, padx=(8, 0))
         self.mission_name_var = tk.StringVar(value=self.mission.get("name") or "Untitled")
         name_entry = ttk.Entry(top, textvariable=self.mission_name_var, width=22)
         name_entry.pack(side=tk.LEFT, padx=(16, 8))
@@ -10427,7 +10582,7 @@ class MissionPlanner(tk.Tk):
     def _show_app_log(self) -> None:
         """Live application troubleshooting log (not radio traffic)."""
         dlg = tk.Toplevel(self)
-        dlg.title("App log")
+        dlg.title(f"App log — {version.display()}")
         dlg.geometry("920x560")
         dlg.minsize(640, 360)
         dlg.configure(bg=C_BG)
@@ -10438,7 +10593,7 @@ class MissionPlanner(tk.Tk):
         log_file = app_diag.log_path()
         tk.Label(
             top,
-            text=f"Troubleshooting log  ·  {log_file}",
+            text=f"{version.display()}  ·  Troubleshooting log  ·  {log_file}",
             bg=C_BG,
             fg=C_MUTED,
             font=("Segoe UI", 9),
@@ -10765,6 +10920,7 @@ class MissionPlanner(tk.Tk):
                 [
                     ("heading", "App log (diagnostics)"),
                     ("bullet", "• Help → App log… records launch, library loads, network probes, and failures."),
+                    ("bullet", f"• This copy is {version.display()}. Quote that build when you report an error — it is also the first line of the app log."),
                     ("bullet", "• It does not store radio call text or MIC transcripts — use Fly LAST HEARD for that."),
                     ("bullet", "• File lives under %LOCALAPPDATA%\\PitBossATC\\app.log (Open folder from the dialog)."),
                     ("heading", "No audio on SRS"),
@@ -11492,7 +11648,9 @@ class MissionPlanner(tk.Tk):
             ctrl_inner,
             text=(
                 "Bind a key, a HOTAS or mouse button, or both. Capture… / Learn… take "
-                "whatever you press. Keys are polled so they work while DCS is focused, "
+                "whatever you press. Learn… first asks which controller to watch — "
+                "needed when Windows names every stick “Microsoft PC-joystick driver”. "
+                "Keys are polled so they work while DCS is focused, "
                 "but they are not swallowed — avoid a combo DCS itself uses. "
                 "Step forward / back only move the cursor; they do not transmit. "
                 "Side mouse buttons (4 / 5) work well; avoid your SRS PTT."
@@ -11544,7 +11702,7 @@ class MissionPlanner(tk.Tk):
                 bg=C_CARD,
                 fg=C_TEXT,
                 font=("Consolas", 9),
-                width=28,
+                width=42,
                 anchor="w",
                 padx=6,
             ).pack(side=tk.LEFT, padx=(16, 6), ipady=3)
@@ -12065,8 +12223,20 @@ class MissionPlanner(tk.Tk):
         ).pack(anchor="w", pady=(2, 0))
 
     def _learn_voice_ptt(self) -> None:
+        picked = self._pick_joystick_device(title="Learn voice PTT button", allow_any=True)
+        if picked is None:
+            return
+        kind, device_id = picked
         previous = self.var_voice_ptt.get()
-        self.var_voice_ptt.set("Press your PTT button…")
+        if kind == "joy" and device_id is not None:
+            devices = {int(d["id"]): d for d in joystick.list_devices()}
+            label = (devices.get(int(device_id)) or {}).get("label") or f"id {device_id}"
+            self.var_voice_ptt.set(f"Press PTT on {label}…")
+            allow_mouse = False
+        else:
+            self.var_voice_ptt.set("Press your PTT button…")
+            allow_mouse = True
+            device_id = None
 
         def done(binding: dict[str, Any]) -> None:
             def apply() -> None:
@@ -12078,12 +12248,14 @@ class MissionPlanner(tk.Tk):
             self._ui_call(apply)
 
         def cancel() -> None:
-            if self.var_voice_ptt.get().startswith("Press your PTT"):
+            if "Press" in self.var_voice_ptt.get():
                 self._joystick.learn_next_press(None)
                 self.var_voice_ptt.set(previous)
 
-        self._joystick.learn_next_press(done)
-        self.after(10000, cancel)
+        self._joystick.learn_next_press(
+            done, device_id=device_id, allow_mouse=allow_mouse
+        )
+        self.after(15000, cancel)
 
     def _use_srs_ptt_for_voice(self) -> None:
         found = joystick.discover_srs_ptt()

@@ -715,6 +715,7 @@ class FlowEngine:
             if str(step.get("template") or "") in ("approach_procedure", "approach_iaf"):
                 self.state.pop("approach_clearance_need_fix", None)
                 self.state["vectors_active"] = False
+                self.state["approach_procedure_done"] = True
 
         detail["exit_code"] = code
         self.state["last_step_id"] = step.get("id")
@@ -1437,11 +1438,13 @@ class FlowEngine:
         if not steps:
             raise RuntimeError("No enabled steps")
         target = self._retreat_past_skippable(int(self.state.get("index") or 0) - 1)
+        step = steps[target]
+        # Gate before moving the cursor. Doing it after left Back parked on the
+        # previous step (often still the EOR) when the radio was on Approach.
+        self._freq_gate_or_raise(step, bypass=bypass_freq_gate)
         self.state["index"] = target
         self._clear_landing_progress_if_before_clear_land(target)
         self.save_state()
-        step = steps[target]
-        self._freq_gate_or_raise(step, bypass=bypass_freq_gate)
         # Offer rolling only when backing onto a takeoff step
         self._maybe_roll_takeoff_offer(step)
         result = self.play_step(step)

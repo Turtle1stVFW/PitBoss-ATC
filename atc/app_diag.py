@@ -98,6 +98,15 @@ def log_path() -> Path:
     return _LOG_PATH
 
 
+def _build_label() -> str:
+    try:
+        import version
+
+        return version.label()
+    except Exception:
+        return ""
+
+
 def ensure_started() -> None:
     """Idempotent session banner so the file has a clear launch boundary."""
     global _STARTED
@@ -105,7 +114,12 @@ def ensure_started() -> None:
         if _STARTED:
             return
         _STARTED = True
-    info(CAT_LAUNCH, "diagnostics session start", path=str(log_path()))
+    info(
+        CAT_LAUNCH,
+        "diagnostics session start",
+        path=str(log_path()),
+        version=_build_label(),
+    )
 
 
 def subscribe(callback: Callable[[DiagEntry], None]) -> None:
@@ -185,10 +199,14 @@ def info(category: str, message: str, **fields: Any) -> DiagEntry:
 
 
 def warn(category: str, message: str, **fields: Any) -> DiagEntry:
+    if "version" not in fields:
+        fields["version"] = _build_label()
     return log(LEVEL_WARN, category, message, **fields)
 
 
 def error(category: str, message: str, **fields: Any) -> DiagEntry:
+    if "version" not in fields:
+        fields["version"] = _build_label()
     return log(LEVEL_ERROR, category, message, **fields)
 
 

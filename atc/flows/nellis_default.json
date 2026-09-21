@@ -1,7 +1,7 @@
 {
   "name": "Nellis Default",
   "airport": "nellis",
-  "active_recovery": "straight_in",
+      "active_recovery": "visual_overhead",
   "recovery_options": [
     "visual_overhead",
     "tactical_overhead",
@@ -14,7 +14,7 @@
     {
       "id": "ops_preflight",
       "phase": "departure",
-      "label": "Ops — tune Backup UHF 269.025 before start",
+      "label": "Ops \u2014 tune Backup UHF 269.025 before start",
       "channel": "ops",
       "mode": "tts",
       "template": "ops_check_in",
@@ -320,7 +320,7 @@
       "file": null,
       "enabled": true,
       "text": null,
-      "_comment": "Auto-fires ~6s after check-in while inbound to IAF / VFR exit (before the fix)."
+      "_comment": "Auto-fires ~15s after check-in while inbound to IAF / VFR exit (before the fix)."
     },
     {
       "id": "app_tower",
@@ -337,9 +337,8 @@
         "when": "inside",
         "settled": false,
         "dwell_s": 0,
-        "gap_s": 5
-      },
-      "approach_pattern": "straight_in"
+        "gap_s": 8
+      }
     },
     {
       "id": "twr_right_break",

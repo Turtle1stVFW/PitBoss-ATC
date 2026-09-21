@@ -16,6 +16,7 @@ from typing import Any
 import atc_net
 import atc_phrase
 import srs_radio
+import version
 import voice_intent
 
 class AtcClientError(RuntimeError):
@@ -66,6 +67,7 @@ class AtcClient:
                 "ATC Client hello ok",
                 url=self.base_url,
                 callsign=self.callsign or "",
+                version=version.label(),
             )
         except Exception:
             pass
@@ -77,6 +79,7 @@ class AtcClient:
     def hello(self) -> dict[str, Any]:
         body = _identity_payload(self.config)
         body.update(_radio_payload(self.config))
+        body["client_version"] = version.label()
         data = self._request("POST", "/v1/hello", body)
         self.session_id = str(data.get("session_id") or "")
         self.callsign = str(data.get("callsign") or "")

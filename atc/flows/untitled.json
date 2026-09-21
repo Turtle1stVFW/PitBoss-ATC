@@ -321,7 +321,7 @@
       "file": null,
       "enabled": true,
       "text": null,
-      "_comment": "Auto-fires ~6s after check-in while inbound to IAF / VFR exit (before the fix)."
+      "_comment": "Auto-fires ~15s after check-in while inbound to IAF / VFR exit (before the fix)."
     },
     {
       "id": "app_tower",
@@ -338,9 +338,8 @@
         "when": "inside",
         "settled": false,
         "dwell_s": 0,
-        "gap_s": 5
-      },
-      "approach_pattern": "straight_in"
+        "gap_s": 8
+      }
     },
     {
       "id": "twr_right_break",

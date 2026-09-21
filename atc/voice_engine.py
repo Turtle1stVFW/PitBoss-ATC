@@ -911,12 +911,12 @@ def execute_intent(
                 engine.save_state()
         # Cleared for the option → full stop / clear of runway: no second land clear.
         if atc_phrase.awaiting_option_on_the_go(engine.state) and (
-            intent in ("request_landing", "clear_of_runway")
+            intent in ("request_landing", "clear_of_runway", "request_taxi_ramp")
             or match.template in ("clear_land", "exit_runway", "taxi_in")
         ):
             if hasattr(engine, "accept_option_full_stop"):
                 prefer: tuple[str, ...] = ("exit_runway", "taxi_in")
-                if intent == "clear_of_runway" or match.template == "taxi_in":
+                if intent in ("clear_of_runway", "request_taxi_ramp") or match.template == "taxi_in":
                     prefer = ("taxi_in", "exit_runway")
                 elif match.template == "exit_runway":
                     prefer = ("exit_runway", "taxi_in")
@@ -933,6 +933,29 @@ def execute_intent(
             )
             engine.save_state()
             # Fall through to normal step play (exit / taxi) without re-clearing.
+
+        # After landing EOR: "request taxi to the ramp" → parking clearance.
+        if intent == "request_taxi_ramp" or (
+            match.template == "taxi_in"
+            and intent == "request_taxi_ramp"
+        ):
+            engine.state["taxi_in_to_ramp"] = True
+            engine.state["landing_eor_complete"] = True
+            if hasattr(engine, "save_state"):
+                engine.save_state()
+            played = _play_template(engine, "taxi_in")
+            if played.get("action") != "none":
+                return played
+            return _play_step(engine, match)
+
+        # Clear of runway → landing EOR (not the ramp yet).
+        if intent == "clear_of_runway" or (
+            match.template == "taxi_in" and intent == "clear_of_runway"
+        ):
+            engine.state["taxi_in_to_ramp"] = False
+            engine.state.pop("landing_eor_complete", None)
+            if hasattr(engine, "save_state"):
+                engine.save_state()
 
         # Do not hand to tower until the taxi runway readback is done.
         if (

@@ -121,6 +121,12 @@ def run_cli(argv: list[str] | None = None) -> int:
 
     print()
     print("=== ATC machine setup (testing) ===")
+    try:
+        import version
+
+        print(f"PitBoss ATC  {version.display()}")
+    except Exception:
+        pass
     print(f"Python  {sys.version.split()[0]}  ({sys.executable})")
     print()
     try:

@@ -2196,6 +2196,37 @@ def _route_fix_conflicts_plan(
     return False
 
 
+def _position_vfr_conflicts_plan(
+    plan: dict[str, Any],
+    catalog: dict[str, Any] | None,
+    position: Any,
+    *,
+    vmc: bool,
+) -> bool:
+    """
+    True when the jet is clearly nearer a different VFR recovery than the cache.
+
+    Early Control/Approach assigns (no route yet) stick ARCOE from the
+    runway-side default. Refresh when CAOC shows they are closer to TORYE
+    (or another published fix) so Approach does not keep the wrong recovery.
+    """
+    if not vmc or not plan or not catalog:
+        return False
+    source = str(plan.get("source") or "")
+    if source in ("override", "request", "route"):
+        return False
+    have = str(plan.get("vfr_recovery") or "").strip().upper()
+    if not have:
+        return False
+    nearest = nearest_vfr_recovery_for_position(
+        catalog, position, runway=str(plan.get("runway") or "") or None
+    )
+    if not nearest:
+        return False
+    want = str(nearest.get("id") or "").strip().upper()
+    return bool(want) and want != have
+
+
 def assign_approach_plan(
     airport: dict[str, Any],
     weather: Weather,
@@ -2270,6 +2301,24 @@ def assign_approach_plan(
                 force=True,
                 recovery=str(plan.get("pattern") or "") or None,
                 position=position,
+            )
+        # Early default/position assign kept the wrong VFR fix — refresh when
+        # the jet is clearly nearer another published recovery (TORYE vs ARCOE).
+        sticky_pos = position
+        if sticky_pos is None and _ownship_fix_is_fresh(st):
+            sticky_pos = st.get("ownship_ll")
+        if _position_vfr_conflicts_plan(
+            plan, catalog, sticky_pos, vmc=vmc_now
+        ):
+            return assign_approach_plan(
+                airport,
+                weather,
+                mission=mission,
+                state=state,
+                opus=opus,
+                force=True,
+                recovery=str(plan.get("pattern") or "") or None,
+                position=sticky_pos,
             )
         # Stale plan after a wind shift (e.g. still on 03 with 081/07) — re-pick
         # the runway side unless the pilot/Setup pinned a runway.
@@ -2638,7 +2687,8 @@ def approach_exit_fix_latlon(
 
 
 # Auto approach clearance: shortly after check-in, while still inbound to the fix.
-APPROACH_CLEARANCE_GAP_S = 6.0
+# Keep a real radio pause after the Expect call — 6s felt back-to-back on TTS.
+APPROACH_CLEARANCE_GAP_S = 15.0
 # If closer than this to the IAF / exit fix, still fire (about to arrive) —
 # clearance is meant to come before the fix, not wait until you get there.
 APPROACH_CLEARANCE_AT_FIX_NM = 3.0
@@ -2845,6 +2895,56 @@ def approach_clearance_auto_ready(
     if dist > APPROACH_CLEARANCE_AT_FIX_NM:
         return True, f"{dist:.1f} NM to {name} — clearance"
     return True, f"{dist:.1f} NM to {name} — clearance (near fix)"
+
+
+def approach_procedure_done(state: dict[str, Any] | None) -> bool:
+    """True once Approach has issued the VFR / IAF clearance this recovery."""
+    st = state if isinstance(state, dict) else {}
+    last = str(st.get("last_tx_template") or "").strip().lower()
+    if last in ("approach_procedure", "approach_iaf", "cleared_approach"):
+        return True
+    # Cleared_approach is the handoff; procedure may still be the prior TX.
+    return bool(st.get("approach_procedure_done"))
+
+
+def approach_tower_handoff_auto_ready(
+    *,
+    airport: dict[str, Any] | None,
+    state: dict[str, Any] | None,
+    config: dict[str, Any] | None = None,
+    callsign: str | None = None,
+    opus: OpusFlightContext | None = None,
+    within_nm: float | None = None,
+    gap_s: float | None = None,
+) -> tuple[bool, str]:
+    """
+    True when Approach may auto-hand to Tower (contact tower).
+
+    Requires the procedure clearance first, a short radio gap, then ≤12 NM
+    from the field — same gate as the cleared_approach step trigger.
+    """
+    st = state if isinstance(state, dict) else {}
+    hold = auto_tx_hold_reason(st)
+    if hold:
+        return False, hold
+    if not approach_check_in_done(st):
+        return False, "waiting for Approach check-in"
+    if not approach_procedure_done(st):
+        return False, "waiting for Approach clearance"
+    gap = float(8.0 if gap_s is None else gap_s)
+    left = radio_gap_remaining(st, gap)
+    if left > 0:
+        return False, f"contact tower in {left:.0f}s"
+    need = float(12.0 if within_nm is None else within_nm)
+    pos = _ownship_ll_from_state(st)
+    if pos is None:
+        pos = ownship_latlon(config, callsign=callsign, opus=opus, state=st)
+    dist = field_distance_nm(airport, pos)
+    if dist is None:
+        return False, "waiting for position to the field"
+    if dist > need:
+        return False, f"{dist:.1f} NM from field — contact tower at {need:g} NM"
+    return True, f"{dist:.1f} NM from field — contact tower"
 
 
 def approach_check_in_done(state: dict[str, Any] | None) -> bool:
@@ -3200,6 +3300,9 @@ def resolve_taxi_route(
     Runway-dependent EOR / taxi via for Nellis-style fields.
     21R → NW EOR via F, E; 03L → Alpha South via Foxtrot.
 
+    Landing exit goes to a landing EOR first (Alpha South after 21R), not
+    straight to the ramp — request taxi to parking when done at the EOR.
+
     Parking uses squadron overrides when known (see resolve_parking).
     Landing exit turn / cross comes from resolve_landing_exit.
     """
@@ -3217,8 +3320,10 @@ def resolve_taxi_route(
                     route = val
                     break
     eor = str(route.get("eor") or "").strip()
+    landing_eor = str(route.get("landing_eor") or "").strip()
     outbound = str(route.get("outbound_via") or "").strip()
     inbound = str(route.get("inbound_via") or "").strip()
+    landing_eor_via = str(route.get("landing_eor_via") or "").strip()
     exit_via = str(route.get("exit") or "").strip()
     intersection = str(route.get("intersection") or "").strip()
     legacy = str(airport.get("taxi_via") or "Foxtrot").strip() or "Foxtrot"
@@ -3228,12 +3333,28 @@ def resolve_taxi_route(
     )
     if not eor:
         eor = "NW EOR" if rwy.startswith("21") else "Alpha South"
+    # After landing 21, exit is at Alpha (south); after 03, exit is north (NW EOR).
+    if not landing_eor:
+        if rwy.startswith("21"):
+            landing_eor = "Alpha South"
+        else:
+            landing_eor = "NW EOR"
+    if parking_field_side(airport, parking) == "east":
+        east_land = str(route.get("east_landing_eor") or "").strip()
+        if east_land:
+            landing_eor = east_land
+        inbound = str(route.get("east_inbound_via") or "Alpha").strip() or "Alpha"
+        if not landing_eor_via:
+            landing_eor_via = inbound
     if not outbound:
         outbound = legacy
     if not inbound:
         inbound = legacy
-    if parking_field_side(airport, parking) == "east":
-        inbound = str(route.get("east_inbound_via") or "Alpha").strip() or "Alpha"
+    if not landing_eor_via:
+        landing_eor_via = str(route.get("exit") or "").strip() or "Alpha"
+        # Prefer a taxiway name, not "right at Alpha".
+        if " at " in landing_eor_via.lower():
+            landing_eor_via = landing_eor_via.split(" at ", 1)[-1].strip() or "Alpha"
     if not exit_via:
         bits = [f"{exit_plan['turn']}"]
         if exit_plan.get("cross"):
@@ -3251,8 +3372,10 @@ def resolve_taxi_route(
     )
     return {
         "eor": eor,
+        "landing_eor": landing_eor,
         "outbound_via": outbound,
         "inbound_via": inbound,
+        "landing_eor_via": landing_eor_via,
         "exit": exit_via,
         "exit_turn": str(exit_plan.get("turn") or ""),
         "exit_cross": str(exit_plan.get("cross") or ""),
@@ -4715,10 +4838,19 @@ def resolve_active_recovery(
 ) -> str:
     """
     Active recovery for this sortie.
-    Prefer Fly/state override → mission.active_recovery → step.recovery → default.
+    Prefer Fly/state override → approach plan pattern → mission.active_recovery
+    → step.recovery → default.
+
+    Mission JSON often parks active_recovery on straight_in as a timeline
+    default; once Approach has assigned overhead / instrument, that plan wins
+    so clear_land does not auto at 6 NM on initial.
     """
     if state is not None:
         n = normalize_recovery_key(state.get("active_recovery"), default="")
+        if n:
+            return n
+        plan = approach_plan_from_state(state)
+        n = normalize_recovery_key(plan.get("pattern"), default="")
         if n:
             return n
     if mission is not None:
@@ -6137,6 +6269,53 @@ def build_approach_tower_handoff(
     return with_freq_handoff_closer(f"{cs}, {name} Approach, {contact}")
 
 
+def resolve_overhead_break(
+    airport: dict[str, Any] | None,
+    runway: str,
+) -> dict[str, str]:
+    """
+    Tower overhead break: side + point for this landing runway.
+
+    Nellis AFBI 11-250: standard break west for 03L/21R, east for 03R/21L;
+    initiate over the approach-end numbers unless directed otherwise.
+    Airport JSON may override per runway (e.g. midfield on the east side).
+    """
+    rwy = normalize_runway(runway) or str(runway or "").strip().upper()
+    side = "right"
+    point = "numbers"
+    # West parallel (21R/03L): sunset / west break.
+    # East parallel (21L/03R): sunrise / east break.
+    if rwy.endswith("R") and rwy.startswith("21"):
+        side, point = "right", "numbers"  # 21R west
+    elif rwy.endswith("L") and rwy.startswith("21"):
+        side, point = "left", "midfield"  # 21L east
+    elif rwy.endswith("L") and rwy.startswith("03"):
+        side, point = "left", "numbers"  # 03L west
+    elif rwy.endswith("R") and rwy.startswith("03"):
+        side, point = "right", "midfield"  # 03R east
+    elif rwy.startswith("21"):
+        side, point = "right", "numbers"
+    elif rwy.startswith("03"):
+        side, point = "left", "numbers"
+    raw = (airport or {}).get("break_by_runway")
+    if isinstance(raw, dict) and rwy:
+        entry = raw.get(rwy)
+        if not isinstance(entry, dict):
+            for key, val in raw.items():
+                if normalize_runway(str(key)) == rwy and isinstance(val, dict):
+                    entry = val
+                    break
+        if isinstance(entry, dict):
+            s = str(entry.get("side") or "").strip().lower()
+            p = str(entry.get("point") or "").strip().lower()
+            if s in ("left", "right"):
+                side = s
+            if p in ("numbers", "midfield", "the numbers"):
+                point = "numbers" if "number" in p else "midfield"
+    point_say = "the numbers" if point == "numbers" else "midfield"
+    return {"side": side, "point": point, "point_say": point_say}
+
+
 def build_tower_check_in(
     airport: dict[str, Any],
     callsign: str,
@@ -6148,7 +6327,7 @@ def build_tower_check_in(
     """
     First Tower call after handoff — recovery-aware.
 
-    OHB / TAC OHB → right break approved
+    OHB / TAC OHB → break left/right at the numbers or midfield (by runway)
     Straight-in → continue straight-in
     SFO High Key → SFO approved / report High Key
     Straight-in SFO → report mile SFO final
@@ -6158,21 +6337,27 @@ def build_tower_check_in(
     cs = speak_callsign(callsign)
     p = dict(plan or {})
     rec_key = normalize_recovery_key(recovery or p.get("pattern"))
-    rwy = speak_runway(str(runway or p.get("runway") or ""))
-    if rec_key == "tactical_overhead":
-        body = f"right break approved runway {rwy}" if rwy else "right break approved"
-    elif rec_key == "visual_overhead":
-        body = f"right break approved runway {rwy}" if rwy else "right break approved"
+    rwy_raw = str(runway or p.get("runway") or "")
+    rwy = speak_runway(rwy_raw)
+    if rec_key in ("tactical_overhead", "visual_overhead"):
+        brk = resolve_overhead_break(airport, rwy_raw)
+        side = str(brk.get("side") or "right")
+        point = str(brk.get("point_say") or "the numbers")
+        body = (
+            f"break {side} at {point} runway {rwy}"
+            if rwy
+            else f"break {side} at {point}"
+        )
     elif rec_key == "sfo_overhead":
         alt = None
         if isinstance(p.get("sfo_high_key_ft"), (int, float)):
             alt = int(p["sfo_high_key_ft"])
         body = build_sfo_approve_body(
-            airport, runway=str(runway or p.get("runway") or ""), recovery=rec_key, high_key_ft=alt
+            airport, runway=rwy_raw, recovery=rec_key, high_key_ft=alt
         )
     elif rec_key == "sfo_straight_in":
         body = build_sfo_approve_body(
-            airport, runway=str(runway or p.get("runway") or ""), recovery=rec_key
+            airport, runway=rwy_raw, recovery=rec_key
         )
     elif rec_key == "straight_in":
         body = f"continue straight-in runway {rwy}" if rwy else "continue straight-in"
@@ -12421,15 +12606,40 @@ def build_template_text(
             airport, land_rwy, opus=opus, config=config
         )
         parking = speak_place_label(inbound["parking"])
-        via = speak_taxi_via(inbound["inbound_via"])
+        via_ramp = speak_taxi_via(inbound["inbound_via"])
         last = ""
+        to_ramp = False
         if isinstance(state, dict):
             last = str(state.get("last_tx_template") or "").strip().lower()
+            to_ramp = bool(
+                state.get("landing_eor_complete")
+                or state.get("taxi_in_to_ramp")
+            )
         cross = str(inbound.get("exit_cross") or "").strip()
         hold = ""
-        if cross and last != "exit_runway":
+        if cross and last != "exit_runway" and not to_ramp:
             hold = f", hold short runway {speak_runway(cross)}"
-        return f"{cs}, {name} Ground, taxi to {parking} via {via}{hold}."
+        # First Ground call after landing: taxi to the landing EOR (hot brakes /
+        # arm / de-arm). Ramp only after they request taxi from the EOR.
+        if not to_ramp:
+            eor = speak_place_label(
+                str(inbound.get("landing_eor") or inbound.get("eor") or "EOR")
+            )
+            via_eor = speak_taxi_via(
+                str(inbound.get("landing_eor_via") or inbound.get("inbound_via") or "")
+            )
+            if commit and isinstance(state, dict):
+                state["landing_eor_assigned"] = str(
+                    inbound.get("landing_eor") or inbound.get("eor") or ""
+                )
+                state["taxi_in_to_ramp"] = False
+            if via_eor:
+                return f"{cs}, {name} Ground, taxi to {eor} via {via_eor}{hold}."
+            return f"{cs}, {name} Ground, taxi to {eor}{hold}."
+        if commit and isinstance(state, dict):
+            state["landing_eor_complete"] = True
+            state["taxi_in_to_ramp"] = True
+        return f"{cs}, {name} Ground, taxi to {parking} via {via_ramp}."
     if template == "lineup":
         reply = ""
         if isinstance(state, dict):

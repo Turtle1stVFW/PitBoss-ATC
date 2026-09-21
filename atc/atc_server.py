@@ -32,6 +32,7 @@ import srs_radio  # noqa: E402
 import tanker  # noqa: E402
 import voice_engine  # noqa: E402
 import voice_intent  # noqa: E402
+import version  # noqa: E402
 
 MAX_BODY = 256_000
 
@@ -182,6 +183,7 @@ class PilotSession:
             "tuned_freqs_mhz": list(self.tuned_freqs_mhz),
             "radio_fresh": self.radio_fresh,
             "selected_mhz": self.selected_mhz,
+            "client_version": str(self.identity.get("client_version") or ""),
             "mission": st.get("mission"),
             "index": st.get("index"),
             "step_number": st.get("step_number"),
@@ -254,6 +256,7 @@ class AtcServer:
                 bind=self.bind_host,
                 port=self.port,
                 firewall=fw or "ok",
+                version=version.label(),
             )
         except Exception:
             pass
@@ -305,12 +308,30 @@ class AtcServer:
                 sess.flow_key = flow
         sess.touch()
         sess.apply_radios(body, inject=False)
+        client_ver = str(body.get("client_version") or "").strip()
+        if client_ver:
+            sess.identity["client_version"] = client_ver
         self._align_element_overlay(sess)
+        try:
+            import app_diag
+
+            app_diag.note_transition(
+                f"client-build:{key}",
+                client_ver or "unknown",
+                "ATC client connected",
+                category=app_diag.CAT_NETWORK,
+                client_version=client_ver or "unknown",
+                host_version=version.label(),
+                callsign=str(identity.get("callsign") or ""),
+            )
+        except Exception:
+            pass
         return {"ok": True, "session_id": key, **self._host_status(sess)}
 
     def _host_status(self, sess: PilotSession) -> dict[str, Any]:
         status = sess.public_status(self.hub.snapshot())
         status["auto_clearance_enabled"] = bool(self.config.get("auto_clearance_enabled"))
+        status["host_version"] = version.label()
         return status
 
     def _flow_alive(self, flow: str) -> bool:

@@ -1399,6 +1399,43 @@ def on_base_or_short_final(
         )
     dist_nm = abs(along) / _M_PER_NM
     return True, f"base / short final ({dist_nm:.1f} NM to threshold)"
+
+
+# Overhead land: reject initial (centerline + runway heading at pattern alt).
+_OVERHEAD_INITIAL_LATERAL_M = 450.0
+_OVERHEAD_INITIAL_HDG_DEG = 40.0
+_OVERHEAD_INITIAL_HEIGHT_FT = 1000.0
+OVERHEAD_LAND_WITHIN_NM = 2.5
+
+
+def on_overhead_base_or_final(
+    status: FlightStatus | None,
+    *,
+    within_nm: float = OVERHEAD_LAND_WITHIN_NM,
+) -> tuple[bool, str]:
+    """
+    True when turning base / on final after an overhead break — not on initial.
+
+    Field-distance alone would clear to land while still inbound to the
+    numbers. Require an off-centerline / off-heading break, or a lower final.
+    """
+    fix = own_unit_fix(status)
+    if fix is None:
+        return False, "waiting for position (base after break)"
+    lateral = abs(float(fix.lateral_m))
+    hdg = fix.heading_err_deg
+    aligned = hdg is None or abs(float(hdg)) < _OVERHEAD_INITIAL_HDG_DEG
+    on_line = lateral < _OVERHEAD_INITIAL_LATERAL_M
+    height_ft = None
+    if fix.height_m is not None:
+        try:
+            height_ft = float(fix.height_m) * FT_PER_M
+        except (TypeError, ValueError):
+            height_ft = None
+    still_high = height_ft is None or height_ft > _OVERHEAD_INITIAL_HEIGHT_FT
+    if on_line and aligned and still_high:
+        return False, "on initial — clear to land when turning base"
+    return on_base_or_short_final(status, within_nm=within_nm)
 DEPARTURE_HANDOFF_BEYOND_NM = 18.0
 CRUISE_CLIMB_BEYOND_NM = 10.0
 # Blackjack → Approach only when near the field / APP boundary (not deep NTTR).
@@ -1530,13 +1567,19 @@ def resolve_step_trigger(
         pattern_nm = atc_phrase.pattern_land_within_nm(state)
         if pattern_nm is not None:
             return _from_raw_or_base(within_nm=float(pattern_nm))
-        # Overhead / TAC / SFO High Key: the jet is inside ~2 NM from break
-        # through final, so a field-distance gate would clear too early. Voice
-        # reports (gear / Low Key) / Play is the clearance unless a zone or NM
-        # is explicit.
+        # Overhead / TAC: auto when turning base / short final — never on a
+        # bare field-distance gate (that clears while still on initial).
         if rec in (
             "visual_overhead",
             "tactical_overhead",
+        ):
+            if "within_nm" in raw:
+                parsed = _trigger_float(raw.get("within_nm"))
+                if parsed is not None:
+                    return _from_raw_or_base(within_nm=parsed)
+            return _from_raw_or_base(within_nm=OVERHEAD_LAND_WITHIN_NM)
+        # SFO High Key / straight-in SFO: voice (Low Key / gear) unless explicit.
+        if rec in (
             "sfo_overhead",
             "sfo_straight_in",
         ):
