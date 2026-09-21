@@ -8,11 +8,15 @@ Run from atc\\Pack-Share-Zip.cmd. Output lands next to the repo folder.
 from __future__ import annotations
 
 import datetime as dt
+import sys
 import zipfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
+sys.path.insert(0, str(HERE))
+
+import version  # noqa: E402
 
 SKIP_DIR_NAMES = {
     ".git",
@@ -49,6 +53,9 @@ def _skip(path: Path) -> bool:
     # Real Google / Azure keys only. Keep secrets/README.txt.
     if path.parent.name.lower() == "secrets" and path.suffix.lower() == ".json":
         return True
+    # Rebuilt for this zip so a pilot PC shows the commit that was packed.
+    if path.as_posix().lower() == "atc/build":
+        return True
     return False
 
 
@@ -64,19 +71,34 @@ def iter_files() -> list[Path]:
     return files
 
 
+def _build_stamp() -> str:
+    lines = [f"version={version.version()}"]
+    rev = version.revision()
+    if rev:
+        lines.append(f"revision={rev}")
+    return "\n".join(lines) + "\n"
+
+
 def pack(dest: Path | None = None) -> Path:
     stamp = dt.datetime.now().strftime("%Y%m%d")
-    out = dest or (ROOT.parent / f"PitBoss-ATC-Share-{stamp}.zip")
+    rev = version.revision()
+    name = f"PitBoss-ATC-{version.version()}"
+    if rev:
+        name += f"-{rev}"
+    name += f"-{stamp}.zip"
+    out = dest or (ROOT.parent / name)
     files = iter_files()
     with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for path in files:
             zf.write(path, path.relative_to(ROOT).as_posix())
+        zf.writestr("atc/BUILD", _build_stamp())
     return out
 
 
 def main() -> int:
     out = pack()
     print(f"Wrote {out}")
+    print(f"Build {version.display()}")
     print("Send that zip plus PILOT-SETUP.md, the ATC hostname, and the shared token.")
     print("Do not add config.json or atc/secrets/*.json.")
     return 0

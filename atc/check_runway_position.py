@@ -920,6 +920,34 @@ def check_distance_or_zone() -> int:
     else:
         print("ok   11 NM fires the 12 NM tower gate with no field verdict")
 
+    # Coming home must not inherit the departure EOR pad. That gate is only
+    # Monitor tower. Approach check-in, contact tower, and tower check-in
+    # stay voice / distance — not "at EOR 0/2".
+    home_eor = False
+    for label, step in (
+        ("approach check-in", {"template": "approach_check_in"}),
+        (
+            "contact tower",
+            {
+                "template": "cleared_approach",
+                "trigger": {
+                    "within_nm": 12,
+                    "when": "inside",
+                    "settled": False,
+                },
+            },
+        ),
+        ("tower check-in", {"template": "right_break"}),
+    ):
+        trig = rp.resolve_step_trigger(step)
+        zone = "" if trig is None else str(trig.zone or "")
+        if zone.casefold() == "eor":
+            print(f"  FAIL {label} must not require the EOR, got zone {zone!r}")
+            bad += 1
+            home_eor = True
+    if not home_eor:
+        print("ok   approach / tower coming home are not gated on the EOR")
+
     eor_trig = rp.step_trigger(
         {"template": "monitor_tower", "trigger": {"zone": "eor", "settled": True}}
     )

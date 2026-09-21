@@ -991,7 +991,19 @@ INTENTS: tuple[Intent, ...] = (
     ),
     Intent(
         "request_winds",
-        (_ASKING + ("how",), ("wind", "winds")),
+        (
+            # Bare "check" is not an ask here. "RAM check" mishears as
+            # "wind check" / "win check", and that was answering every agency.
+            tuple(w for w in _ASKING if w != "check")
+            + (
+                "how",
+                "check wind",
+                "check winds",
+                "check the wind",
+                "check the winds",
+            ),
+            ("wind", "winds"),
+        ),
         example="say winds",
         does="current winds",
     ),
@@ -3469,6 +3481,55 @@ def _heard_assigned_squawk(text: str, code: str) -> bool:
     return bool(re.search(rf"(?<!\w){re.escape(code)}(?!\w)", text))
 
 
+# Heads that sit in front of "check" on a radio check, including the
+# Whisper mishear of "ram" as "wind" / "win".
+_RADIO_CHECK_HEADS = frozenset(
+    {
+        "ram",
+        "ramp",
+        "wind",
+        "winds",
+        "win",
+        "wihnd",
+        "wihnds",
+        "radio",
+    }
+)
+
+
+def looks_like_radio_check_not_winds(text: str) -> bool:
+    """
+    True for a radio check, not a winds request.
+
+    Pilots say "RAM check". Whisper often writes "wind check" or "win check",
+    and "check" used to count as asking for the winds — so every agency
+    answered "Nellis, wind …". A real ask puts the request before the wind
+    ("say winds", "check the winds"), not "wind check".
+    """
+    tokens = text.split()
+    if len(tokens) < 2:
+        return False
+    real_ask = (set[str](_ASKING) - {"check"}) | {"how"}
+    for i, tok in enumerate(tokens[:-1]):
+        nxt = tokens[i + 1]
+        if nxt != "check" and not (
+            len(nxt) >= 4 and _within_edits(nxt, "check", 1)
+        ):
+            continue
+        near = tok in _RADIO_CHECK_HEADS
+        if not near and len(tok) >= 3:
+            near = any(
+                abs(len(tok) - len(opt)) <= 1 and _within_edits(tok, opt, 1)
+                for opt in ("wind", "winds", "ram", "ramp")
+            )
+        if not near:
+            continue
+        if set(tokens[:i]) & real_ask:
+            continue
+        return True
+    return False
+
+
 def _score_intents(
     text: str,
     transcript: str,
@@ -3490,6 +3551,10 @@ def _score_intents(
     current_step = step_by_id(steps, current_step_id)
     for intent in tuple(INTENTS) + tuple(extra):
         if intent.veto and _group_hit(text, intent.veto, fuzzy=False):
+            continue
+        # "wind check" still fuzzy-matches "check wind". Reject the radio-check
+        # shape before it can score as request_winds on every agency.
+        if intent.id == "request_winds" and looks_like_radio_check_not_winds(text):
             continue
         if intent.id in _C2_INTENT_IDS and not step_offers_c2(
             current_step, channel=channel

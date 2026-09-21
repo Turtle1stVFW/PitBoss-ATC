@@ -47,6 +47,7 @@ import voice_actions  # noqa: E402
 import voice_engine  # noqa: E402
 import voice_intent  # noqa: E402
 import setup_welcome  # noqa: E402
+import version  # noqa: E402
 
 CONFIG_PATH = HERE / "config.json"
 AIRPORTS_PATH = HERE / "airports.json"
@@ -135,7 +136,7 @@ def slug_id(label: str) -> str:
 class MissionPlanner(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("PitBoss ATC")
+        self.title(f"PitBoss ATC {version.display()}")
         self.geometry("1240x820")
         self.minsize(1020, 700)
         self.configure(bg=C_BG)
@@ -3691,6 +3692,13 @@ class MissionPlanner(tk.Tk):
         top = tk.Frame(self, bg=C_BG)
         top.pack(fill=tk.X, padx=16, pady=(10, 4))
         ttk.Label(top, text="PitBoss ATC", style="Title.TLabel").pack(side=tk.LEFT)
+        tk.Label(
+            top,
+            text=version.display(),
+            bg=C_BG,
+            fg=C_MUTED,
+            font=("Segoe UI", 9),
+        ).pack(side=tk.LEFT, padx=(8, 0))
         self.mission_name_var = tk.StringVar(value=self.mission.get("name") or "Untitled")
         name_entry = ttk.Entry(top, textvariable=self.mission_name_var, width=22)
         name_entry.pack(side=tk.LEFT, padx=(16, 8))
@@ -10574,7 +10582,7 @@ class MissionPlanner(tk.Tk):
     def _show_app_log(self) -> None:
         """Live application troubleshooting log (not radio traffic)."""
         dlg = tk.Toplevel(self)
-        dlg.title("App log")
+        dlg.title(f"App log — {version.display()}")
         dlg.geometry("920x560")
         dlg.minsize(640, 360)
         dlg.configure(bg=C_BG)
@@ -10585,7 +10593,7 @@ class MissionPlanner(tk.Tk):
         log_file = app_diag.log_path()
         tk.Label(
             top,
-            text=f"Troubleshooting log  ·  {log_file}",
+            text=f"{version.display()}  ·  Troubleshooting log  ·  {log_file}",
             bg=C_BG,
             fg=C_MUTED,
             font=("Segoe UI", 9),
@@ -10912,6 +10920,7 @@ class MissionPlanner(tk.Tk):
                 [
                     ("heading", "App log (diagnostics)"),
                     ("bullet", "• Help → App log… records launch, library loads, network probes, and failures."),
+                    ("bullet", f"• This copy is {version.display()}. Quote that build when you report an error — it is also the first line of the app log."),
                     ("bullet", "• It does not store radio call text or MIC transcripts — use Fly LAST HEARD for that."),
                     ("bullet", "• File lives under %LOCALAPPDATA%\\PitBossATC\\app.log (Open folder from the dialog)."),
                     ("heading", "No audio on SRS"),
