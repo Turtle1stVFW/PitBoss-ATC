@@ -8,11 +8,11 @@ One machine runs **PitBoss ATC** as Host and speaks ATC on SRS for the whole hop
 2. Put this repo on the box (or unzip the share pack).
 3. Double-click `atc\Setup-Pilot.cmd` once (same bootstrap as pilots: Python check, voice packages if you want local listen, radio export is optional on a dedicated server that is not in a jet).
 4. Or just `atc\Start-ATC-Host.cmd`.
-5. Setup → Squadron → **Host**. Click **Generate** for a token if the box is empty. **Save setup**.
+5. Setup → Basics → **Host**. Click **Generate** for a token if the box is empty. **Save setup**.
 6. Right-click `atc\Allow-ATC-Host-Firewall.cmd` → Run as administrator (inbound TCP **8766**).
 7. On the DCS server’s router, forward **TCP 8766** to this box the same way SRS **5002** already is.
-8. Setup → Airport — SRS host / port / coalition must be the live squadron SRS (this PC is the one that transmits).
-9. Optional Google voices: Setup → Identity & TTS → Google Cloud TTS. Browse the service-account JSON. The app copies it into `atc\secrets\` (gitignored). **Never** send that file to pilots.
+8. Setup → Airbases — SRS host / port must be the live squadron SRS (this PC is the one that transmits). Sync freqs from Opus.
+9. Optional Google voices: Setup → Basics → Google Cloud TTS. Browse the service-account JSON. The app copies it into `atc\secrets\` (gitignored). **Never** send that file to pilots.
 
 Give each tester:
 

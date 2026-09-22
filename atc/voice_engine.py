@@ -635,6 +635,7 @@ def execute_intent(
         "request_picture",
         "request_bogey_dope",
         "request_declare",
+        "report_vid",
     ):
         return _speak_reply(intent, engine, airport, callsign, weather, opus, match)
 
@@ -1831,11 +1832,14 @@ def _speak_reply(
             "request_picture",
             "request_bogey_dope",
             "request_declare",
+            "report_vid",
         ):
             if intent == "request_bogey_dope":
                 what = "bogey dope"
             elif intent == "request_declare":
                 what = "declare"
+            elif intent == "report_vid":
+                what = "VID"
             else:
                 what = "picture"
             text = atc_phrase.build_blackjack_c2_redirect(airport, callsign, what)
@@ -1863,6 +1867,17 @@ def _speak_reply(
                     transcript=match.normalized or match.transcript or "",
                     state=engine.state,
                 )
+            elif intent == "report_vid":
+                text, _groups = voice_actions.build_vid_affiliation_reply(
+                    engine.config,
+                    airport,
+                    callsign,
+                    agency=agency,
+                    channel=channel,
+                    opus=opus,
+                    transcript=match.normalized or match.transcript or "",
+                    state=engine.state,
+                )
             else:
                 text, _groups = voice_actions.build_picture_reply(
                     engine.config,
@@ -1879,6 +1894,8 @@ def _speak_reply(
                 what = "bogey dope"
             elif intent == "request_declare":
                 what = "declare"
+            elif intent == "report_vid":
+                what = "VID"
             else:
                 what = "picture"
             text = f"{cs}, {agency}, unable {what}, radar is down."

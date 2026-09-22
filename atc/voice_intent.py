@@ -1038,7 +1038,30 @@ INTENTS: tuple[Intent, ...] = (
         phases=("flight",),
         weight=1.25,
         example="declare bullseye 056 67",
-        does="declaration at that bullseye (ELVIS); bare declare = nearest",
+        does="ask C2 what that group is (query only)",
+        veto=("declare as", "vid", "visual id"),
+    ),
+    Intent(
+        "report_vid",
+        (
+            (
+                "vid",
+                "visual id",
+                "visual identification",
+                "declare as",
+                "group is",
+                "that's a",
+                "thats a",
+                "that is a",
+            ),
+            ("bandit", "hostile", "friendly", "bogey", "bogie", "unknown"),
+        ),
+        channels=("blackjack", "bandsaw", "joshua", "ops", "other", "control_east", "control_west", "center"),
+        phases=("flight",),
+        weight=1.45,
+        example="VID hostile",
+        does="set CAOC affiliation after VID",
+        veto=("picture", "pitcher", "bogey dope", "braa"),
     ),
     Intent(
         "request_alpha_check",
@@ -2599,6 +2622,7 @@ _C2_INTENT_IDS = frozenset(
         "request_picture",
         "request_bogey_dope",
         "request_declare",
+        "report_vid",
         "request_alpha_check",
     }
 )
@@ -2807,7 +2831,7 @@ _ADDRESS_OPTIONAL_INTENTS = frozenset(
 )
 
 _PICTURE_INTENT_IDS = frozenset(
-    {"request_picture", "request_bogey_dope", "request_declare"}
+    {"request_picture", "request_bogey_dope", "request_declare", "report_vid"}
 )
 
 

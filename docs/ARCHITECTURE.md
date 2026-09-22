@@ -39,12 +39,12 @@ Launchers live under `atc\`. Setup / Flight Flow / Host all start the same app.
 Tabs inside one process (`flow_ui.MissionPlanner`), not separate executables:
 
 1. **Plan Flight** — author the sortie timeline (template / custom text / audio file)
-2. **Fly** — Next / Back / Reset / Flip, freq gate, voice tips, live position
+2. **Fly** — Play / Back, freq, YOU ARE ON, voice cues; diagnostics behind Show details
 3. **Traffic** — Host-only connected pilots and per-channel TX queues
-4. **Setup** — Opus, airport/SRS, TTS, Squadron role, Controls
+4. **Setup** — Basics (squadron/identity/TTS), Airbases, Controls, Advanced
 5. **Help** — in-app operator docs
 
-**Squadron role** (Setup): `solo` | `host` | `client` (`atc_role` in config). Solo is the default single-PC path.
+**Squadron role** (Setup → Basics): `solo` | `host` | `client` (`atc_role` in config). Solo is the default single-PC path.
 
 Legacy: `atc_ui.py` is an older phrase-board UI; day-to-day use is `flow_ui.py`.
 

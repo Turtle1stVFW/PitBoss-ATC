@@ -178,6 +178,11 @@ def _track_dict(
         "coalition": str(unit.get("coalition") or "").lower(),
         "unit_id": str(uid).strip() if uid is not None else "",
         "object": fix.get("object_name") or unit.get("objectName") or unit.get("object_name") or "",
+        "affiliation": unit.get("affiliation"),
+        "ti_training": pl.caoc_unit_is_ti_training(unit),
+        "display_callsign": str(
+            unit.get("displayCallsign") or unit.get("display_callsign") or ""
+        ).strip(),
     }
 
 
@@ -223,6 +228,17 @@ def _groups_from_tracks(
             max(int(f) for f in feet) if feet else None
         )
         obj = str(lead.get("object") or "")
+        affs = [
+            pl.normalize_opus_affiliation(t.get("affiliation"))
+            for t in cluster
+        ]
+        affs = [a for a in affs if a]
+        cluster_aff = ""
+        if affs:
+            cluster_aff = affs[0]
+            for extra in affs[1:]:
+                cluster_aff = pl.higher_declaration(cluster_aff, extra)
+        ti = any(bool(t.get("ti_training")) for t in cluster)
         decl = book.assign(
             ids,
             brg=int(lead["bearing"]),
@@ -231,7 +247,12 @@ def _groups_from_tracks(
             coalition=coal,
             hostile_side=hostile_side,
             upgrade_hostile=upgrade_hostile,
+            affiliation=cluster_aff or None,
+            ti_training=ti,
         )
+        label = str(
+            lead.get("display_callsign") or lead.get("label") or ""
+        ).strip()
         groups.append(
             pl.FightGroup(
                 bearing=int(lead["bearing"]),
@@ -244,11 +265,13 @@ def _groups_from_tracks(
                 heading_deg=mean_hdg,
                 lat=lead.get("lat"),
                 lon=lead.get("lon"),
-                label=str(lead.get("label") or ""),
+                label=label,
                 object=obj,
                 declaration=decl,
                 unit_ids=ids,
                 coalition=coal,
+                affiliation=cluster_aff or (str(lead.get("affiliation") or "")),
+                ti_training=ti,
             )
         )
     groups.sort(key=lambda g: g.distance_nm)
@@ -267,8 +290,8 @@ def collect_hostile_groups(
     Hostile air groups from the live CAOC feed, nearest first.
 
     Skips fixtures and groups outside picture_max_range_nm. Returns
-    (groups, own_unit, own_ll). Declarations stick across picture / declare /
-    bogey dope until Bandsaw or the flight lead upgrades to hostile.
+    (groups, own_unit, own_ll). OPUS affiliation drives the spoken label;
+    UNKNOWN / TI get a VID cue instead of a random bandit/hostile roll.
     """
     radar = atc_phrase.fetch_caoc_radar(config)
     if not radar:
@@ -288,7 +311,7 @@ def collect_hostile_groups(
     qnh = atc_phrase.metar_altimeter_inhg(config)
     tracks: list[dict[str, Any]] = []
     for unit in air:
-        if str(unit.get("coalition") or "").lower() != hostile_side:
+        if not pl.picture_include_unit(unit, hostile_side):
             continue
         if atc_phrase.caoc_unit_is_picture_fixture(unit):
             continue
@@ -798,7 +821,7 @@ def build_picture_reply(
         clause = pl.core_group_clause(g, include_bullseye=True, include_track=True)
         # SINGLE GROUP folds into one sentence
         body = clause.replace("Single group", "single group", 1)
-        return f"{cs}, {agency}, {body}.", classified.groups
+        return _with_vid_cue(f"{cs}, {agency}, {body}.", classified.groups), classified.groups
 
     sentences = [f"{cs}, {agency}, {classified.head}"]
     shared = classified.shared_track
@@ -814,7 +837,7 @@ def build_picture_reply(
             g, include_bullseye=include_be, include_track=include_track
         )
         sentences.append(clause)
-    return ". ".join(sentences) + ".", classified.groups
+    return _with_vid_cue(". ".join(sentences) + ".", classified.groups), classified.groups
 
 
 def build_bogey_dope_reply(
@@ -859,7 +882,7 @@ def build_bogey_dope_reply(
     bits.append(g.declaration)
     if g.count > 1:
         bits.append(f"{atc_phrase.speak_natural_number(g.count)} contacts")
-    return f"{cs}, {agency}, {', '.join(bits)}.", [g]
+    return _with_vid_cue(f"{cs}, {agency}, {', '.join(bits)}.", [g]), [g]
 
 
 def build_declare_reply(
@@ -874,16 +897,16 @@ def build_declare_reply(
     state: dict[str, Any] | None = None,
 ) -> tuple[str, list[pl.FightGroup]]:
     """
-    Short DECLARE reply: callsign, agency, declaration only.
+    Short DECLARE query: callsign, agency, current affiliation only.
 
     Matching uses the pilot's bullseye and altitude when given; the response
-    does not read the fix back (e.g. 'Fleece 1, Bandsaw, hostile.').
-    Bandsaw declare, or the flight lead saying hostile, upgrades a CAOC
-    enemy-side group only. Neutral tracks stay bogey / bogey spades.
+    does not read the fix back (e.g. 'Fleece 1, Bandsaw, bandit.').
+    Read-only — never PATCH, never auto-upgrade because the agency is Bandsaw
+    or the word hostile appeared on a DECLARE [Elvis] cue.
     """
+    del channel  # query path ignores agency upgrade rules
     cs = atc_phrase.speak_callsign(callsign)
     cue = parse_declare_cue(transcript or "", config=config)
-    hostile_side = _hostile_coalition(airport)
     groups, _own, own_ll = collect_declare_groups(
         config,
         airport,
@@ -899,22 +922,90 @@ def build_declare_reply(
         if cue is not None:
             return f"{cs}, {agency}, unable, say again.", []
         return f"{cs}, {agency}, clean.", []
-    if pl.declare_may_upgrade_hostile(
-        g,
-        agency=agency,
-        channel=channel,
-        transcript=transcript,
-        hostile_side=hostile_side,
-    ):
-        book = pl.DeclarationMemory.from_state(state)
-        g.declaration = book.upgrade_to_hostile(
-            g.unit_ids,
-            brg=g.bearing,
-            rng=g.range_nm,
-            feet=g.feet,
-            coalition=g.coalition,
-            hostile_side=hostile_side,
-        )
-        book.to_state(state)
     decl = str(g.declaration or "bogey").strip() or "bogey"
-    return f"{cs}, {agency}, {decl}.", [g]
+    text = f"{cs}, {agency}, {decl}."
+    return _with_vid_cue(text, [g]), [g]
+
+
+_VID_AFFILIATION_PATTERNS: tuple[tuple[str, str], ...] = (
+    (r"\bhostiles?\b", "hostile"),
+    (r"\bbandits?\b", "bandit"),
+    (r"\bfriend(?:ly)?\b", "friendly"),
+    (r"\bbogey\s+spades\b|\bspades\b", "bogey spades"),
+    (r"\bbogeys?\b|\bbogies?\b|\bunknown\b", "bogey"),
+)
+
+
+def parse_vid_affiliation(transcript: str | None) -> str | None:
+    """Last bandit / hostile / friendly / bogey in a VID / 'declare as' call."""
+    text = re.sub(r"[^a-z0-9\s]", " ", str(transcript or "").casefold())
+    text = re.sub(r"\s+", " ", text).strip()
+    last: str | None = None
+    last_pos = -1
+    for pat, decl in _VID_AFFILIATION_PATTERNS:
+        for match in re.finditer(pat, text):
+            if match.start() >= last_pos:
+                last_pos = match.start()
+                last = decl
+    return last
+
+
+def build_vid_affiliation_reply(
+    config: dict[str, Any],
+    airport: dict[str, Any],
+    callsign: str,
+    *,
+    agency: str = "Bandsaw",
+    channel: str = "",
+    opus: Any = None,
+    transcript: str | None = None,
+    state: dict[str, Any] | None = None,
+) -> tuple[str, list[pl.FightGroup]]:
+    """
+    Crew VID / affiliation set: confirm on radio and PATCH OPUS.
+
+    Distinct from DECLARE (query). Bare 'declare Elvis xxx' never lands here.
+    """
+    del channel
+    cs = atc_phrase.speak_callsign(callsign)
+    target = parse_vid_affiliation(transcript)
+    if not target:
+        return f"{cs}, {agency}, unable, say affiliation.", []
+    cue = parse_declare_cue(transcript or "", config=config)
+    groups, _own, own_ll = collect_declare_groups(
+        config,
+        airport,
+        opus=opus,
+        cue=cue,
+        state=state,
+        upgrade_hostile=False,
+    )
+    if cue is None and own_ll is None:
+        return f"{cs}, {agency}, unable.", []
+    g = prefer_declare_group(groups, cue=cue)
+    if g is None:
+        if cue is not None:
+            return f"{cs}, {agency}, unable, say again.", []
+        return f"{cs}, {agency}, clean.", []
+    g.declaration = target
+    book = pl.DeclarationMemory.from_state(state)
+    book.force(
+        g.unit_ids,
+        target,
+        brg=g.bearing,
+        rng=g.range_nm,
+        feet=g.feet,
+    )
+    book.to_state(state)
+    opus_aff = pl.spoken_to_opus_affiliation(target)
+    for uid in g.unit_ids:
+        if uid:
+            atc_phrase.patch_caoc_unit_affiliation(config, uid, opus_aff)
+    return f"{cs}, {agency}, {target}.", [g]
+
+
+def _with_vid_cue(text: str, groups: list[pl.FightGroup]) -> str:
+    if not any(pl.needs_vid_cue(g) for g in groups):
+        return text
+    body = text[:-1] if text.endswith(".") else text
+    return f"{body}, {pl.VID_INTERCEPT_CUE}."

@@ -8,21 +8,12 @@ RANGE / AZIMUTH / VIC / CHAMPAGNE / WALL / LADDER / BOX calls.
 from __future__ import annotations
 
 import math
-import random
 import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
 import atc_phrase
-
-# Enemy-side declaration pool (AFTTP: BOGEY / BANDIT / HOSTILE; SPADES as bogey fill-in).
-_ENEMY_DECLARATIONS = (
-    "hostile",
-    "bandit",
-    "bogey",
-    "bogey spades",
-)
 
 # AFTTP Ch IV constants
 GROUP_RADIUS_NM = 3.0
@@ -198,6 +189,8 @@ class FightGroup:
     declaration: str = "hostile"
     unit_ids: list[str] = field(default_factory=list)
     coalition: str = ""
+    affiliation: str = ""
+    ti_training: bool = False
     # Filled by classify
     name: str = "group"
     cross_nm: float = 0.0  # + left / − right of threat axis from fighters
@@ -611,8 +604,13 @@ def _name_wall(groups: list[FightGroup], hi: str, lo: str) -> None:
 
 
 def roll_enemy_declaration() -> str:
-    """Random bandit / bogey / hostile / bogey spades for a new enemy-side group."""
-    return random.choice(_ENEMY_DECLARATIONS)
+    """
+    Fallback for enemy-side tracks with no OPUS affiliation.
+
+    Known red air is bandit (not the UNKNOWN VID path). Random rolls
+    used to mix bogey/hostile onto every new group — that is gone.
+    """
+    return "bandit"
 
 
 def normalize_coalition(raw: Any) -> str:
@@ -676,9 +674,122 @@ def normalize_declaration(raw: str | None) -> str:
         return "bandit"
     if text in ("friendly", "friend"):
         return "friendly"
-    if text in ("bogey", "bogie"):
+    if text in ("bogey", "bogie", "unknown", "unk"):
         return "bogey"
     return text or "bogey"
+
+
+_OPUS_AFFILIATION_UNKNOWN = frozenset(
+    {"unknown", "unk", "undeclared", "pending", "u"}
+)
+_TRUTHY = frozenset({True, 1, 1.0, "1", "true", "yes", "on"})
+VID_INTERCEPT_CUE = "recommend intercept for VID"
+_TI_TRAINING_PREFIX = "TI_TRAINING_"
+
+
+def normalize_opus_affiliation(raw: Any) -> str | None:
+    """
+    OPUS CAOC affiliation → spoken declaration, or None if unset.
+
+    UNKNOWN / undeclared → bogey spades (VID training path).
+    """
+    if raw is None or isinstance(raw, bool):
+        return None
+    text = re.sub(r"\s+", " ", str(raw).strip().casefold())
+    if not text:
+        return None
+    if text in _OPUS_AFFILIATION_UNKNOWN:
+        return "bogey spades"
+    if text in ("hostile", "hostiles"):
+        return "hostile"
+    if text in ("bandit", "bandits"):
+        return "bandit"
+    if text in ("friendly", "friend"):
+        return "friendly"
+    if text in ("spades", "bogey spades", "spade"):
+        return "bogey spades"
+    if text in ("bogey", "bogie"):
+        return "bogey"
+    return None
+
+
+def spoken_to_opus_affiliation(raw: str | None) -> str:
+    """Spoken declaration → OPUS affiliation enum."""
+    decl = normalize_declaration(raw)
+    if decl == "hostile":
+        return "HOSTILE"
+    if decl == "bandit":
+        return "BANDIT"
+    if decl == "friendly":
+        return "FRIENDLY"
+    return "UNKNOWN"
+
+
+def caoc_unit_is_ti_training(unit: dict[str, Any] | None = None, **flags: Any) -> bool:
+    """True when OPUS `tiTraining` or a TI_TRAINING_ group/name is present."""
+    if flags.get("ti_training") in _TRUTHY:
+        return True
+    if not isinstance(unit, dict):
+        blob = " ".join(
+            str(flags.get(k) or "")
+            for k in ("name", "group_name", "groupName")
+        )
+        return _TI_TRAINING_PREFIX in blob.upper()
+    for key in ("tiTraining", "ti_training"):
+        if unit.get(key) in _TRUTHY:
+            return True
+    blob = " ".join(
+        str(unit.get(k) or "")
+        for k in (
+            "name",
+            "groupName",
+            "unitName",
+            "flightLabel",
+            "unitCallsign",
+            "displayCallsign",
+        )
+    )
+    extra = " ".join(str(flags.get(k) or "") for k in ("name", "group_name"))
+    return _TI_TRAINING_PREFIX in f"{blob} {extra}".upper()
+
+
+def picture_include_unit(unit: dict[str, Any] | None, hostile_side: str = "red") -> bool:
+    """
+    Whether a CAOC air track belongs on picture / bogey dope.
+
+    Affiliation UNKNOWN/BANDIT/HOSTILE, undeclared TI, or legacy enemy coalition.
+    FRIENDLY is never pictured.
+    """
+    if not isinstance(unit, dict):
+        return False
+    aff = normalize_opus_affiliation(unit.get("affiliation"))
+    if aff == "friendly":
+        return False
+    if aff in ("bogey", "bogey spades", "bandit", "hostile"):
+        return True
+    if caoc_unit_is_ti_training(unit):
+        return True
+    side = normalize_coalition(unit.get("coalition"))
+    host = normalize_coalition(hostile_side) or "red"
+    return bool(side) and side == host
+
+
+def needs_vid_cue(group: FightGroup | None = None, **kwargs: Any) -> bool:
+    """UNKNOWN / undeclared TI only — not known bandit or hostile."""
+    aff_raw = kwargs.get("affiliation")
+    ti = bool(kwargs.get("ti_training"))
+    decl = kwargs.get("declaration")
+    if group is not None:
+        aff_raw = aff_raw if aff_raw is not None else group.affiliation
+        ti = ti or bool(group.ti_training)
+        decl = decl if decl is not None else group.declaration
+    aff = normalize_opus_affiliation(aff_raw)
+    if aff in ("hostile", "bandit", "friendly"):
+        return False
+    if aff in ("bogey", "bogey spades"):
+        return True
+    spoken = normalize_declaration(decl) if decl is not None else ""
+    return ti and spoken in ("bogey", "bogey spades", "")
 
 
 _DECL_RANK = {
@@ -740,11 +851,10 @@ class DeclarationMemory:
     """
     Sticky C2 declarations for the sortie.
 
-    First time a group is spoken it is rolled (bogey / spades / bandit / hostile)
-    and remembered by CAOC unit id, then bullseye. Later picture / declare /
-    bogey-dope calls reuse that label. HOSTILE upgrades apply only to the
-    enemy coalition (Bandsaw declare, or the flight lead saying hostile).
-    CAOC neutrals stay bogey / bogey spades; airframe type does not override side.
+    Prefer OPUS `affiliation` when present. UNKNOWN / TI stay bogey spades
+    until a VID/upgrade intent writes back. Enemy-side tracks with no
+    affiliation default to bandit (not the VID path). Local memory fills
+    the gap until the next CAOC poll.
     """
 
     def __init__(self, rows: list[dict[str, Any]] | None = None) -> None:
@@ -854,9 +964,14 @@ class DeclarationMemory:
         coalition: str | None = None,
         hostile_side: str = "red",
         upgrade_hostile: bool = False,
+        affiliation: Any = None,
+        ti_training: bool = False,
     ) -> str:
         """
-        Return the sticky declaration for this group, rolling only on first sight.
+        Return the declaration for this group.
+
+        OPUS affiliation wins when present. TI / UNKNOWN never invent
+        bandit or hostile from the airframe or group name.
         """
         now = time.time()
         self._prune(now)
@@ -864,8 +979,14 @@ class DeclarationMemory:
         stored = self.lookup(idset, brg=brg, rng=rng, feet=feet)
         friend = is_friendly_side(coalition, hostile_side)
         enemy = is_enemy_side(coalition, hostile_side)
+        opus = normalize_opus_affiliation(affiliation)
+        ti = bool(ti_training)
 
-        if friend:
+        if opus is not None:
+            decl = opus
+        elif ti:
+            decl = stored if stored in ("bogey", "bogey spades") else "bogey spades"
+        elif friend:
             decl = "friendly"
         elif enemy:
             if stored and stored != "friendly":
@@ -970,7 +1091,7 @@ def declaration_for_coalition(
     if is_friendly_side(coalition, hostile_side):
         return "friendly"
     if is_enemy_side(coalition, hostile_side):
-        return roll_enemy_declaration()
+        return "bandit"
     if normalize_coalition(coalition) or not str(coalition or "").strip():
         return "bogey spades"
     return "bogey"

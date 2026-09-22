@@ -16,18 +16,18 @@ as your jet (talk on the Fly tab; tankers still come from CAOC).
 
 ## Tabs
 1. **Plan Flight** — build the full sortie timeline (TTS template, custom text, or MP3/OGG). No JSON editing.
-2. **Fly** — big Next / Back / Reset / Flip for mid-flight.
+2. **Fly** — Play / Back plus frequency, YOU ARE ON, VOICE CUES, and expected response. Show details… for diagnostics.
 3. **Traffic** — connected pilots and per-frequency TX queues (Host role).
-4. **Setup** — Opus username, voice, airport freqs, SRS host, TTS provider, optional runway override, **Squadron** (solo/host/client), and **Controls** (HOTAS / hotkeys / voice).
-5. **Help** — in-app how-tos (Getting started, Google JSON setup, Plan Flight tips, troubleshooting). Also the top-right **Help** button. **App log…** opens the application troubleshooting log (launch / network / failures — not radio call text).
+4. **Setup** — **Basics** (squadron / identity / TTS / this-sortie overrides), **Airbases** (picker + Sync freqs from Opus), **Controls**, **Advanced**.
+5. **Help** — in-app how-tos (Getting started, Google JSON setup, Plan Flight tips, Airbases, troubleshooting). Also the top-right **Help** button. **App log…** opens the application troubleshooting log (launch / network / failures — not radio call text).
 
 ## Multi-pilot (optional, this branch)
 
 Default role is still **Solo** — one PC, same as today. To run ATC for several pilots:
 
-1. Pick **one** machine as Host (the Windows DCS dedicated server is fine). It needs **Python 3.10+ with tcl/tk** — the `.cmd` files find `python.exe` without the `py` launcher. Setup → **Squadron** → Host. Save. Allow Windows inbound on the ATC port (default `8766`). That box needs ExternalAudio + TTS and network to the squadron SRS server. The Host does **not** pick an Opus flight or callsign in the top bar — it only routes each Client’s flight.
+1. Pick **one** machine as Host (the Windows DCS dedicated server is fine). It needs **Python 3.10+ with tcl/tk** — the `.cmd` files find `python.exe` without the `py` launcher. Setup → **Basics** → Host. Save. Allow Windows inbound on the ATC port (default `8766`). That box needs ExternalAudio + TTS and network to the squadron SRS server. The Host does **not** pick an Opus flight or callsign in the top bar — it only routes each Client’s flight.
 2. Put the same **shared token** on every PC.
-3. Each pilot: Setup → Squadron → **Client**, **Address pilots type** = the same IP/hostname they already use for DCS/SRS, ATC port **8766** (not SRS 5002), same token. Click **Test connection**, then Save.
+3. Each pilot: Setup → Basics → **Client**, **Address pilots type** = the same IP/hostname they already use for DCS/SRS, ATC port **8766** (not SRS 5002), same token. Click **Test connection**, then Save.
 4. Off-LAN (flying PC on `10.x`, DCS server on `192.168.50.x`) is expected. Do not join the server LAN. On the **DCS server’s router**, forward/route **TCP 8766** to `192.168.50.20`, the same way SRS 5002 already is. Then point the client at that reachable address (often the SRS host, not the server’s private 192.168.50.20).
 5. Host **Traffic** tab shows who is connected, which frequency is talking, and the per-channel queue.
 
@@ -50,7 +50,7 @@ Do not copy `atc/secrets/` onto pilot PCs.
 You do not need a second computer.
 
 1. Double-click `Open-ATC-Setup.cmd`
-2. Setup → **Squadron** → **Host** → Save
+2. Setup → **Basics** → **Host** → Save
 3. Open the **Traffic** tab
 4. Double-click `Test-Fake-Pilots.cmd` (or `py -3 fake_pilots.py`)
 
@@ -333,9 +333,10 @@ Calls it understands:
 | "Ground, ready to taxi" / "request clearance" / "ready for departure" | Fires the matching flow step |
 | "Request runway two one left" | Sets the runway and reads back the approval |
 | "Say winds" / "say altimeter" | Live METAR answer |
-| "Blackjack, request picture" | AFTTP picture (RANGE/AZIMUTH/VIC/… from live CAOC hostiles within `picture_max_range_nm`) |
-| "Blackjack, bogey dope" / "BRAA" | BRAA to the closest hostile relative to you |
-| "Blackjack, declare bullseye 056 67" | Short declaration only (`Fleece 1, Blackjack, hostile.`); cue picks the contact |
+| "Blackjack, request picture" | AFTTP picture from live CAOC affiliation (UNKNOWN → bogey / recommend VID; BANDIT/HOSTILE spoken as-is) |
+| "Blackjack, bogey dope" / "BRAA" | BRAA to the closest pictured group relative to you |
+| "Blackjack / Bandsaw, declare Elvis 056 67" | **Query only** — current affiliation (`Fleece 1, Bandsaw, bogey spades.`). Never writes CAOC |
+| "Bandsaw, VID hostile" / "declare as bandit" / "group is friendly" | After VID: confirm + PATCH OPUS affiliation |
 | "Bandsaw, checking in" / picture / bogey dope / declare | Optional C2 on Bandsaw |
 | "Bandsaw, checking out / switch Blackjack" | Leave Bandsaw → contact Blackjack (not check-in) |
 | "Blackjack, request Bandsaw" | Push to Bandsaw (optional; you can also self-tune) |

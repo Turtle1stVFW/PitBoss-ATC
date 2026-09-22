@@ -339,6 +339,162 @@ def main() -> int:
     else:
         print("OK shot-down Pilot / wreck tracks are excluded from picture")
 
+    # OPUS affiliation wins over coalition / random rolls.
+    opus_unk = pl.DeclarationMemory().assign(
+        ["ti1"],
+        brg=56,
+        rng=67,
+        feet=24000,
+        coalition="red",
+        hostile_side="red",
+        affiliation="UNKNOWN",
+        ti_training=True,
+    )
+    opus_bandit = pl.DeclarationMemory().assign(
+        ["red1"],
+        brg=10,
+        rng=20,
+        feet=20000,
+        coalition="red",
+        hostile_side="red",
+        affiliation="BANDIT",
+    )
+    opus_hostile = pl.DeclarationMemory().assign(
+        ["red2"],
+        brg=11,
+        rng=21,
+        feet=20100,
+        coalition="red",
+        hostile_side="red",
+        affiliation="HOSTILE",
+    )
+    ti_bare = pl.DeclarationMemory().assign(
+        ["ti2"],
+        brg=80,
+        rng=40,
+        feet=18000,
+        coalition="red",
+        hostile_side="red",
+        ti_training=True,
+    )
+    legacy_enemy = pl.DeclarationMemory().assign(
+        ["legacy"],
+        brg=90,
+        rng=50,
+        feet=22000,
+        coalition="red",
+        hostile_side="red",
+    )
+    if (
+        opus_unk != "bogey spades"
+        or opus_bandit != "bandit"
+        or opus_hostile != "hostile"
+        or ti_bare != "bogey spades"
+        or legacy_enemy != "bandit"
+    ):
+        print(
+            f"FAIL opus affiliation: {opus_unk=} {opus_bandit=} {opus_hostile=} "
+            f"{ti_bare=} {legacy_enemy=}"
+        )
+        bad += 1
+    else:
+        print("OK OPUS affiliation: UNKNOWN/TI bogey spades; BANDIT/HOSTILE as-is")
+
+    unk_g = _g(20, 270, heading=90, feet=24000, bearing=56, range_nm=67)
+    unk_g.declaration = "bogey spades"
+    unk_g.affiliation = "UNKNOWN"
+    unk_g.ti_training = True
+    known = _g(25, 270, heading=90, feet=25000, bearing=40, range_nm=30)
+    known.declaration = "hostile"
+    known.affiliation = "HOSTILE"
+    if not pl.needs_vid_cue(unk_g) or pl.needs_vid_cue(known):
+        print(
+            f"FAIL VID cue: unk={pl.needs_vid_cue(unk_g)} known={pl.needs_vid_cue(known)}"
+        )
+        bad += 1
+    else:
+        print("OK VID cue only on UNKNOWN / undeclared TI")
+
+    ti_unit = {
+        "affiliation": "UNKNOWN",
+        "tiTraining": True,
+        "name": "TI_TRAINING_1",
+        "coalition": "red",
+    }
+    friend_unit = {"affiliation": "FRIENDLY", "coalition": "red", "name": "FLEECE 1"}
+    known_unit = {"affiliation": "HOSTILE", "coalition": "red", "name": "IVAN 11"}
+    if (
+        not pl.picture_include_unit(ti_unit, "red")
+        or pl.picture_include_unit(friend_unit, "red")
+        or not pl.picture_include_unit(known_unit, "red")
+        or not pl.caoc_unit_is_ti_training(ti_unit)
+    ):
+        print("FAIL picture include / TI flag")
+        bad += 1
+    else:
+        print("OK picture includes TI/HOSTILE and skips FRIENDLY")
+
+    if voice_actions.parse_vid_affiliation("Bandsaw Fleece 1 VID hostile") != "hostile":
+        print("FAIL parse VID hostile")
+        bad += 1
+    elif voice_actions.parse_vid_affiliation("declare as bandit") != "bandit":
+        print("FAIL parse declare as bandit")
+        bad += 1
+    elif voice_actions.parse_vid_affiliation("group is friendly") != "friendly":
+        print("FAIL parse group is friendly")
+        bad += 1
+    elif voice_actions.parse_vid_affiliation("declare Elvis 056 67") is not None:
+        print("FAIL declare Elvis should not parse an affiliation")
+        bad += 1
+    else:
+        print("OK VID affiliation parse vs DECLARE query")
+
+    no_key = atc_phrase.patch_caoc_unit_affiliation(
+        {"opus_backend_url": "", "caoc_affiliation_key": ""}, "u9", "BANDIT"
+    )
+    captured: list[tuple[str, dict, dict | None]] = []
+
+    def _fake_http_patch(url, user_agent, body, extra_headers=None):
+        captured.append((url, body, extra_headers))
+        return {}
+
+    orig_http = atc_phrase.http_patch_json
+    atc_phrase.http_patch_json = _fake_http_patch  # type: ignore[method-assign]
+    try:
+        ok = atc_phrase.patch_caoc_unit_affiliation(
+            {
+                "opus_backend_url": "https://opus.example/backend",
+                "caoc_affiliation_key": "test-key",
+                "user_agent": "test",
+            },
+            "unit-42",
+            "BANDIT",
+        )
+    finally:
+        atc_phrase.http_patch_json = orig_http
+    if no_key or not ok or not captured:
+        print(f"FAIL affiliation PATCH helper: {no_key=} {ok=} {captured=}")
+        bad += 1
+    else:
+        url, body, headers = captured[0]
+        if (
+            "/opus/caoc/radar/units/" not in url
+            or not str(url).endswith("/affiliation")
+            or body.get("affiliation") != "BANDIT"
+            or (headers or {}).get("X-Caoc-Affiliation-Key") != "test-key"
+        ):
+            print(f"FAIL PATCH payload: {url=} {body=} {headers=}")
+            bad += 1
+        else:
+            print("OK affiliation PATCH helper (stubbed HTTP)")
+
+    spoken = pl.spoken_to_opus_affiliation("bandit")
+    if spoken != "BANDIT" or pl.spoken_to_opus_affiliation("bogey spades") != "UNKNOWN":
+        print(f"FAIL spoken_to_opus_affiliation: {spoken}")
+        bad += 1
+    else:
+        print("OK spoken declaration maps to OPUS affiliation enum")
+
     print(f"\n{bad} failure(s)" if bad else "\nall picture label checks passed")
     return 1 if bad else 0
 

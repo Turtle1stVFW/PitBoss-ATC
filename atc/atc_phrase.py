@@ -460,6 +460,99 @@ def http_get_json(url: str, user_agent: str) -> Any:
         raise
 
 
+def http_patch_json(
+    url: str,
+    user_agent: str,
+    body: dict[str, Any],
+    extra_headers: dict[str, str] | None = None,
+) -> Any:
+    payload = json.dumps(body).encode("utf-8")
+    headers = {
+        "User-Agent": user_agent,
+        "Content-Type": "application/json",
+    }
+    if extra_headers:
+        headers.update(extra_headers)
+    req = urllib.request.Request(url, data=payload, headers=headers, method="PATCH")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            raw = resp.read().decode("utf-8")
+            if not raw.strip():
+                return {}
+            return json.loads(raw)
+    except Exception as exc:
+        try:
+            import app_diag
+
+            app_diag.warn(
+                app_diag.CAT_NETWORK,
+                f"HTTP PATCH failed: {exc}",
+                url=url,
+            )
+        except Exception:
+            pass
+        raise
+
+
+_OPUS_AFFILIATION_ENUM = frozenset({"FRIENDLY", "BANDIT", "HOSTILE", "UNKNOWN"})
+
+
+def patch_caoc_unit_affiliation(
+    config: dict[str, Any] | None,
+    unit_id: str,
+    affiliation: str,
+) -> bool:
+    """
+    PATCH OPUS CAOC affiliation for one radar unit.
+
+    Soft-fails (returns False) when the backend, key, or unit id is missing,
+    or when the request errors. Mutates the radar cache on success so the
+    next picture call sees the new label before the 5 s TTL.
+    """
+    cfg = config or {}
+    uid = str(unit_id or "").strip()
+    aff = str(affiliation or "").strip().upper()
+    if aff not in _OPUS_AFFILIATION_ENUM:
+        aff = "UNKNOWN"
+    backend = str(cfg.get("opus_backend_url") or "").rstrip("/")
+    key = str(cfg.get("caoc_affiliation_key") or "").strip()
+    if not uid or not backend or not key:
+        try:
+            import app_diag
+
+            app_diag.warn(
+                app_diag.CAT_NETWORK,
+                "CAOC affiliation PATCH skipped (missing backend, key, or unit id)",
+                url=backend or "",
+            )
+        except Exception:
+            pass
+        return False
+    ua = str(cfg.get("user_agent") or "DCS-ATC-Phrase/1.0")
+    safe_id = urllib.parse.quote(uid, safe="")
+    url = f"{backend}/opus/caoc/radar/units/{safe_id}/affiliation"
+    try:
+        http_patch_json(
+            url,
+            ua,
+            {"affiliation": aff},
+            extra_headers={"X-Caoc-Affiliation-Key": key},
+        )
+    except Exception:
+        return False
+    cached = _caoc_radar_cache.get("data")
+    if isinstance(cached, dict):
+        for unit in list(cached.get("units") or []):
+            if not isinstance(unit, dict):
+                continue
+            other = unit.get("id")
+            if other is None:
+                other = unit.get("unitId") or unit.get("unit_id")
+            if str(other or "").strip() == uid:
+                unit["affiliation"] = aff
+    return True
+
+
 def callsign_override(config: dict[str, Any]) -> str | None:
     """Manual flight callsign from config/UI, if set."""
     return _str_or_none(config.get("callsign_override"))

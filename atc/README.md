@@ -21,34 +21,36 @@ as your jet (talk on the Fly tab; tankers still come from CAOC).
 
 ## Tabs
 1. **Plan Flight** — build the full sortie timeline (TTS template, custom text, or MP3/OGG). No JSON editing.
-2. **Fly** — big Next / Back / Reset / Flip for mid-flight.
+2. **Fly** — Play / Back plus frequency, YOU ARE ON, VOICE CUES, and expected response.
 3. **Traffic** — connected pilots and per-frequency TX queues (Host role).
-4. **Setup** — Opus username, voice, airport freqs, SRS host, TTS provider, optional runway override, **Squadron** (solo/host/client), **Controls** (HOTAS / hotkeys / voice), and **Preferences**.
-5. **Help** — in-app how-tos (Getting started, Google JSON setup, Plan Flight tips, troubleshooting). Also the top-right **Help** button.
+4. **Setup** — **Basics** (squadron, identity, TTS, this-sortie runway/parking), **Airbases** (field picker + Sync freqs from Opus), **Controls** (HOTAS / hotkeys / voice / freq gate), **Advanced** (voices, Opus URL, CAOC affiliation key, boom chat, auto-clearances, Fly diagnostics).
+5. **Help** — in-app how-tos (Getting started, Google JSON setup, Plan Flight tips, Airbases, troubleshooting). Also the top-right **Help** button.
 
-### Simplified UI (Setup → Preferences)
+### Simplified Fly (default)
 
-The Fly tab carries a lot of lines that earn their keep while you are wiring the
-app up and prove nothing but clutter once you are strapped in. **Simplified UI**
-hides them: the SRS radio name, the agency name repeated under the frequency,
-`YOU CAN SAY`, the `Radio tune unknown — gate open` line, the READ BACK
-preamble, your own callsign in a readback, and the `TTS · template` line. The
-frequency header reads **FREQUENCY** instead of **NEXT TX FREQUENCY**, and the
-live-position line moves to the bottom of the frequency box as a tip.
+Fly is cockpit-simple unless you turn diagnostics on. Hidden until **Show details…**
+on Fly or Setup → Advanced → **Show full Fly diagnostics**: NET LINK, EAM testing,
+map-is-jet, last-actions log, SRS radio name, the gate line, the READ BACK
+preamble, and the TTS / template line. VOICE CUES stay visible.
 
 What is left is the frequency, one **YOU ARE ON** line — green on frequency, red
 off it, amber while tune is unknown — the cues to say, and what ATC will answer.
-Nothing changes about what transmits or what voice recognition accepts; the
-switch saves itself and takes effect immediately (config key `simple_ui`). Leave
-it off while troubleshooting.
+Nothing changes about what transmits or what voice recognition accepts
+(config key `simple_ui`, default `true`).
+
+### Airbases
+
+`airports.json` is a keyed library. Setup → Airbases picks a field, Sync freqs from
+Opus fills mapped UHF agencies, and **Add airbase…** stubs a new key. Taxi, zones,
+and plates stay in the JSON; Opus does not list airbases.
 
 ## Multi-pilot (optional, this branch)
 
 Default role is still **Solo** — one PC, same as today. To run ATC for several pilots:
 
-1. Pick **one** machine as Host (the Windows DCS dedicated server is fine). It needs **Python 3.10+ with tcl/tk** — the `.cmd` files find `python.exe` without the `py` launcher. Setup → **Squadron** → Host. Save. Allow Windows inbound on the ATC port (default `8766`). That box needs ExternalAudio + TTS and network to the squadron SRS server. The Host does **not** pick an Opus flight or callsign in the top bar — it only routes each Client’s flight.
+1. Pick **one** machine as Host (the Windows DCS dedicated server is fine). It needs **Python 3.10+ with tcl/tk** — the `.cmd` files find `python.exe` without the `py` launcher. Setup → **Basics** → Host. Save. Allow Windows inbound on the ATC port (default `8766`). That box needs ExternalAudio + TTS and network to the squadron SRS server. The Host does **not** pick an Opus flight or callsign in the top bar — it only routes each Client’s flight.
 2. Put the same **shared token** on every PC.
-3. Each pilot: Setup → Squadron → **Client**, **Address pilots type** = the same IP/hostname they already use for DCS/SRS, ATC port **8766** (not SRS 5002), same token. Click **Test connection**, then Save.
+3. Each pilot: Setup → Basics → **Client**, **Address pilots type** = the same IP/hostname they already use for DCS/SRS, ATC port **8766** (not SRS 5002), same token. Click **Test connection**, then Save.
 4. Off-LAN (flying PC on `10.x`, DCS server on `192.168.50.x`) is expected. Do not join the server LAN. On the **DCS server’s router**, forward/route **TCP 8766** to `192.168.50.20`, the same way SRS 5002 already is. Then point the client at that reachable address (often the SRS host, not the server’s private 192.168.50.20).
 5. Host **Traffic** tab shows who is connected, which frequency is talking, and the per-channel queue.
 
@@ -80,7 +82,7 @@ Do not copy `atc/secrets/` onto pilot PCs.
 You do not need a second computer.
 
 1. Double-click `Open-ATC-Setup.cmd`
-2. Setup → **Squadron** → **Host** → Save
+2. Setup → **Basics** → **Host** → Save
 3. Open the **Traffic** tab
 4. Double-click `Test-Fake-Pilots.cmd` (or `py -3 fake_pilots.py`)
 
@@ -365,9 +367,10 @@ Calls it understands:
 | "Ground, ready to taxi" / "request clearance" / "ready for departure" | Fires the matching flow step |
 | "Request runway two one left" | Sets the runway and reads back the approval |
 | "Say winds" / "say altimeter" | Live METAR answer |
-| "Blackjack, request picture" | AFTTP picture (RANGE/AZIMUTH/VIC/… from live CAOC hostiles within `picture_max_range_nm`) |
-| "Blackjack, bogey dope" / "BRAA" | BRAA to the closest hostile relative to you |
-| "Blackjack, declare bullseye 056 67" | Short declaration only (`Fleece 1, Blackjack, hostile.`); cue picks the contact |
+| "Blackjack, request picture" | AFTTP picture from live CAOC affiliation (UNKNOWN → bogey / recommend VID; BANDIT/HOSTILE spoken as-is) |
+| "Blackjack, bogey dope" / "BRAA" | BRAA to the closest pictured group relative to you |
+| "Blackjack / Bandsaw, declare Elvis 056 67" | **Query only** — current affiliation (`Fleece 1, Bandsaw, bogey spades.`). Never writes CAOC |
+| "Bandsaw, VID hostile" / "declare as bandit" / "group is friendly" | After VID: confirm + PATCH OPUS affiliation |
 | "Bandsaw, checking in" / picture / bogey dope / declare | Optional C2 on Bandsaw |
 | "Bandsaw, checking out / switch Blackjack" | Leave Bandsaw → contact Blackjack (not check-in) |
 | "Blackjack, request Bandsaw" | Push to Bandsaw (optional; you can also self-tune) |
