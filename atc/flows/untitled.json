@@ -398,6 +398,17 @@
       "file": null,
       "enabled": true,
       "text": null
+    },
+    {
+      "id": "ops_codes",
+      "phase": "approach",
+      "label": "Ops — codes after parking",
+      "channel": "ops",
+      "mode": "tts",
+      "template": "ops_status",
+      "file": null,
+      "enabled": true,
+      "text": null
     }
   ],
   "active_takeoff_mode": "lineup",

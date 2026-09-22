@@ -683,7 +683,7 @@ _OPUS_AFFILIATION_UNKNOWN = frozenset(
     {"unknown", "unk", "undeclared", "pending", "u"}
 )
 _TRUTHY = frozenset({True, 1, 1.0, "1", "true", "yes", "on"})
-VID_INTERCEPT_CUE = "recommend intercept for VID"
+VID_INTERCEPT_CUE = "recommend intercept for visual ID"
 _TI_TRAINING_PREFIX = "TI_TRAINING_"
 
 

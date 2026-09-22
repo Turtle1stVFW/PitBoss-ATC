@@ -909,7 +909,43 @@ class MissionPlanner(tk.Tk):
             step = self.engine.current_step()
         except Exception:  # noqa: BLE001
             step = None
-        sid = str((step or {}).get("id") or "")
+        # When C2 is remapped (Bandsaw while Blackjack holds), gate against the
+        # live agency — not the held cursor step — so YOU ARE ON stays green.
+        gate_step = step
+        gate_channel = None
+        if tuned and tuned in (
+            "blackjack",
+            "bandsaw",
+            "joshua",
+            "tanker",
+            "ops",
+            "center",
+            "control_east",
+            "control_west",
+        ):
+            try:
+                import agencies as agencies_mod
+
+                remapped = agencies_mod.display_step_for_agency(
+                    list(getattr(self.engine, "steps", None) or []),
+                    tuned,
+                    cursor_index=int(
+                        (getattr(self.engine, "state", None) or {}).get("index") or 0
+                    ),
+                    last_tx_template=str(
+                        (getattr(self.engine, "state", None) or {}).get(
+                            "last_tx_template"
+                        )
+                        or ""
+                    ),
+                )
+                if isinstance(remapped, dict):
+                    gate_step = remapped
+                else:
+                    gate_channel = tuned
+            except Exception:
+                gate_channel = tuned
+        sid = str((gate_step or step or {}).get("id") or "")
         prev_sid = getattr(self, "_last_tip_step_id", None)
         if tuned != prev or sid != prev_sid:
             self._last_tip_tuned_channel = tuned
@@ -919,7 +955,7 @@ class MissionPlanner(tk.Tk):
                 self._refresh_voice_prompts()
             if hasattr(self, "_sync_fly_pilot_request_ui"):
                 self._sync_fly_pilot_request_ui(tuned or None)
-            # YOU ARE WITH follows the radio; NEXT TX stays the upcoming step.
+            # ON FREQ follows the radio; NEXT TX stays the upcoming step.
             if (
                 tuned != prev
                 and hasattr(self, "fly_freq")
@@ -930,12 +966,13 @@ class MissionPlanner(tk.Tk):
         _ok, msg, result = srs_radio.check_freq_gate(
             self.config_data,
             airport,
-            step,
+            gate_step,
+            channel=gate_channel,
             state=getattr(self.engine, "state", None),
         )
         # Richer Fly lines: live tune vs next-step agency / mission phase.
         tuned_line, next_line, gate_line, gate_color = self._fly_radio_status_lines(
-            airport, step, gate_msg=msg, gate_result=result
+            airport, gate_step or step, gate_msg=msg, gate_result=result
         )
         if hasattr(self, "fly_tuned_now"):
             self.fly_tuned_now.set(tuned_line)
@@ -944,17 +981,18 @@ class MissionPlanner(tk.Tk):
         self.fly_freq_gate.set(gate_line)
         if hasattr(self, "_fly_freq_gate_lbl"):
             self._fly_freq_gate_lbl.configure(fg=gate_color)
+        # Always color YOU ARE ON by gate: green on freq, red off it, amber unknown.
+        tuned_color = {
+            "match": C_GREEN,
+            "mismatch": C_RED,
+        }.get(result, C_AMBER)
         if hasattr(self, "_fly_tuned_now_lbl"):
-            if self._simple_ui():
-                # Simplified Fly leans on this one line for "is my radio right":
-                # green on frequency, red off it, amber while tune is unknown.
-                tuned_color = {
-                    "match": C_GREEN,
-                    "mismatch": C_RED,
-                }.get(result, C_AMBER)
-            else:
-                tuned_color = C_GREEN if "YOU ARE ON" in tuned_line else C_MUTED
             self._fly_tuned_now_lbl.configure(fg=tuned_color)
+        if hasattr(self, "_fly_freq_box"):
+            try:
+                self._fly_freq_box.configure(highlightbackground=tuned_color)
+            except Exception:
+                pass
 
     def _maybe_follow_tanker_tune(self, tuned: str) -> None:
         """AAR is a side trip — after tanker UHF, retune Blackjack or Bandsaw to resume C2."""
@@ -1106,7 +1144,7 @@ class MissionPlanner(tk.Tk):
 
         color = (
             C_GREEN if gate_result == "match"
-            else (C_AMBER if gate_result == "mismatch" else C_MUTED)
+            else (C_RED if gate_result == "mismatch" else C_MUTED)
         )
         return tuned_line, next_line, gate_msg, color
 
@@ -1625,9 +1663,28 @@ class MissionPlanner(tk.Tk):
         try:
             import tanker_chat as tanker_chat_mod
 
-            return tanker_chat_mod.fly_boom_caption(
+            cap = tanker_chat_mod.fly_boom_caption(
                 getattr(engine, "state", None), extra
             )
+            mode = str(
+                (getattr(engine, "config", None) or self.config_data or {}).get(
+                    "tanker_chat_llm"
+                )
+                or ""
+            ).strip().lower()
+            if mode in ("ollama", "local"):
+                note = tanker_chat_mod.llm_note(getattr(engine, "state", None))
+                if not note:
+                    try:
+                        if not tanker_chat_mod.resolve_ollama_model(
+                            getattr(engine, "config", None) or self.config_data
+                        ):
+                            note = "ollama: no model — run ollama pull llama3.2"
+                    except Exception:
+                        note = "ollama: not reachable — start ollama serve"
+                if note and note not in (cap or ""):
+                    cap = f"{cap} · {note}" if cap else f"BOOM: {note}"
+            return cap
         except Exception:
             return extra
 
@@ -3397,10 +3454,66 @@ class MissionPlanner(tk.Tk):
                     "tanker_chat_continue",
                 ):
                     self._schedule_tanker_chat(deferred)
+                elif isinstance(deferred, dict) and deferred.get("kind") == "ops_codes":
+                    self._schedule_ops_codes(deferred)
 
             self._ui_call(done)
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _schedule_ops_codes(self, deferred: dict[str, Any]) -> None:
+        """After dashes report codes, wait ≤10s idle then copy codes once."""
+        try:
+            delay_s = float(deferred.get("delay_s") or 10.0)
+        except (TypeError, ValueError):
+            delay_s = 10.0
+        delay_ms = max(1000, int(delay_s * 1000))
+        token = getattr(self, "_ops_codes_token", 0) + 1
+        self._ops_codes_token = token
+
+        def kick() -> None:
+            if getattr(self, "_ops_codes_token", 0) != token:
+                return
+
+            def work() -> None:
+                try:
+                    engine = self._live_engine()
+                    result = voice_engine.execute_ops_action(
+                        engine, "ops_codes_finalize"
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    err = str(exc)
+
+                    def fail() -> None:
+                        self._voice_log(f"VOICE  ops codes failed: {err}")
+
+                    self._ui_call(fail)
+                    return
+
+                def done() -> None:
+                    if result.get("action") == "transmit" and result.get("text"):
+                        self._voice_log(
+                            f"TX   OPS  {result.get('text', '')}"
+                        )
+                        self._append_fly_voice_feed(
+                            f"TX  OPS  {result.get('text', '')}\n"
+                        )
+                    again = result.get("deferred") if isinstance(result, dict) else None
+                    if isinstance(again, dict) and again.get("kind") == "ops_codes":
+                        self._schedule_ops_codes(again)
+                    self._refresh_fly_status()
+
+                self._ui_call(done)
+
+            threading.Thread(target=work, daemon=True).start()
+
+        prev = getattr(self, "_ops_codes_after", None)
+        if prev is not None:
+            try:
+                self.after_cancel(prev)
+            except Exception:
+                pass
+        self._ops_codes_after = self.after(delay_ms, kick)
 
     def _schedule_unrestricted_climb_resolve(self, deferred: dict[str, Any]) -> None:
         """After Tower's 'standby', come back with approve/unable then takeoff."""
@@ -3604,7 +3717,7 @@ class MissionPlanner(tk.Tk):
             end_line = int(float(feed.index("end-1c").split(".")[0]))
         except (TypeError, ValueError):
             end_line = 0
-        max_lines = 8
+        max_lines = 12
         if end_line > max_lines:
             feed.delete("1.0", f"{end_line - max_lines + 1}.0")
         feed.see(tk.END)
@@ -8265,7 +8378,8 @@ class MissionPlanner(tk.Tk):
         self.fly_voice_feed.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
         self.fly_voice_feed.tag_configure("no_tx", foreground=C_AMBER)
         self.fly_voice_feed.tag_configure("texaco", foreground=C_GREEN)
-        self.fly_voice_feed.tag_configure("mic_ignore", foreground=C_MUTED)
+        # Ignored MIC must stay readable — muted gray looked like "nothing heard".
+        self.fly_voice_feed.tag_configure("mic_ignore", foreground=C_AMBER)
         self.fly_voice_feed.insert(
             tk.END,
             "Release PTT to see what Whisper heard. Script Next/Back shows TX or why it did not fire.\n",
@@ -9928,14 +10042,24 @@ class MissionPlanner(tk.Tk):
                 sandbox = False
             # Ops is not a timeline step — without this, a custom Plan (Untitled)
             # keeps painting Delivery over the Ops radio the pilot just selected.
+            # Same for C2 side trips (Bandsaw while Blackjack holds the cursor).
             if not sandbox:
                 try:
-                    if (
+                    live_tune = (
                         srs_radio.channel_for_tuned_freq(
                             self.engine.airport(), self.config_data
                         )
                         or ""
-                    ).strip().lower() == "ops":
+                    ).strip().lower()
+                    if live_tune == "ops" or live_tune in (
+                        "blackjack",
+                        "bandsaw",
+                        "joshua",
+                        "tanker",
+                        "center",
+                        "control_east",
+                        "control_west",
+                    ):
                         sandbox = True
                 except Exception:
                     pass
@@ -10048,7 +10172,7 @@ class MissionPlanner(tk.Tk):
                     ).strip()
                     if d_label:
                         with_name = f"{d_phase} · {d_label}" if d_phase else d_label
-                self.fly_step_num.set("SWITCH TO" if switch_to else "YOU ARE WITH")
+                self.fly_step_num.set("SWITCH TO" if switch_to else "ON FREQ")
                 self.fly_step_name.set(with_name)
             else:
                 self.fly_step_num.set(f"STEP {num} / {total}")
@@ -10056,7 +10180,7 @@ class MissionPlanner(tk.Tk):
             ch, local_preset, freq, mod, tx = self._fly_upcoming_radio(step)
             display_ch = ch
             # NEXT TX FREQUENCY is the upcoming step, not the radio you are
-            # tuned to (that is YOU ARE ON / YOU ARE WITH). Overwriting with
+            # tuned to (that is YOU ARE ON / ON FREQ). Overwriting with
             # live Ground after a Tower handoff left the hero on GND.
             self.fly_local_preset.set(local_preset)
             self.fly_freq.set(freq)
@@ -12398,7 +12522,7 @@ class MissionPlanner(tk.Tk):
         ttk.Label(boom_inner, text="Tanker boom chat", style="Header.TLabel").pack(anchor="w")
         tk.Label(
             boom_inner,
-            text="Texaco small-talk after rejoin. See Help. Ollama/Gemini/OpenAI optional.",
+            text="Texaco small-talk after rejoin. Optional LLM — Off uses the library. Ollama needs a local server (ollama serve) + pulled model; join/rejoin work without it.",
             bg=C_PANEL,
             fg=C_MUTED,
             font=("Segoe UI", 8),

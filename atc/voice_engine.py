@@ -1041,7 +1041,12 @@ def execute_intent(
                 )
             if isinstance(getattr(engine, "state", None), dict):
                 engine.state["bandsaw_checked_in"] = True
-            return _transmit(engine, airport, text, "bandsaw")
+            tmpl = (
+                "bandsaw_continue"
+                if already_in or from_tanker
+                else "bandsaw_check_in"
+            )
+            return _transmit(engine, airport, text, "bandsaw", template=tmpl)
         # Bandsaw checkout advances past the optional Bandsaw steps.
         if intent == "bandsaw_check_out" or match.template == "bandsaw_check_out":
             played = _play_step(engine, match)
@@ -1839,7 +1844,7 @@ def _speak_reply(
             elif intent == "request_declare":
                 what = "declare"
             elif intent == "report_vid":
-                what = "VID"
+                what = "visual ID"
             else:
                 what = "picture"
             text = atc_phrase.build_blackjack_c2_redirect(airport, callsign, what)
@@ -1895,7 +1900,7 @@ def _speak_reply(
             elif intent == "request_declare":
                 what = "declare"
             elif intent == "report_vid":
-                what = "VID"
+                what = "visual ID"
             else:
                 what = "picture"
             text = f"{cs}, {agency}, unable {what}, radar is down."
@@ -2139,14 +2144,35 @@ def execute_ops_action(
 
     if action == "ops_status":
         codes = ops_mod.parse_aircraft_codes(transcript, flight_callsign=callsign)
+        if not codes:
+            return {
+                "action": "none",
+                "detail": "no aircraft codes heard",
+            }
+        merged = ops_mod.merge_pending_codes(state, codes)
+        ready, pending, why = ops_mod.codes_collection_ready(state, opus=opus)
+        if not ready:
+            ack = ops_mod.build_codes_copy_ack(
+                callsign, airport=ap, opus=opus, config=config
+            )
+            result = _transmit(engine, ap, ack, "ops", template="ops_status")
+            result["deferred"] = {
+                "kind": "ops_codes",
+                "delay_s": float(ops_mod.CODES_IDLE_S),
+                "detail": why,
+            }
+            if hasattr(engine, "save_state"):
+                engine.save_state()
+            return result
         sortie = ops_mod.record_status(
             state,
-            codes,
+            pending or merged,
             config=config,
             opus=opus,
             callsign=callsign,
             when=when,
         )
+        ops_mod.mark_codes_done(state)
         text = ops_mod.build_status_reply(
             callsign,
             sortie,
@@ -2157,7 +2183,39 @@ def execute_ops_action(
         )
         if hasattr(engine, "save_state"):
             engine.save_state()
-        return _transmit(engine, ap, text, "ops")
+        return _transmit(engine, ap, text, "ops", template="ops_status")
+
+    if action == "ops_codes_finalize":
+        ready, pending, why = ops_mod.codes_collection_ready(state, opus=opus)
+        if not ready or not pending:
+            result = {"action": "none", "detail": why or "waiting for codes"}
+            if pending and not state.get(ops_mod._CODES_DONE_KEY):
+                result["deferred"] = {
+                    "kind": "ops_codes",
+                    "delay_s": float(ops_mod.CODES_IDLE_S),
+                    "detail": why,
+                }
+            return result
+        sortie = ops_mod.record_status(
+            state,
+            pending,
+            config=config,
+            opus=opus,
+            callsign=callsign,
+            when=when,
+        )
+        ops_mod.mark_codes_done(state)
+        text = ops_mod.build_status_reply(
+            callsign,
+            sortie,
+            airport=ap,
+            when=when,
+            opus=opus,
+            config=config,
+        )
+        if hasattr(engine, "save_state"):
+            engine.save_state()
+        return _transmit(engine, ap, text, "ops", template="ops_status")
 
     return {"action": "none", "detail": f"unknown OPS action {action}"}
 

@@ -1989,6 +1989,10 @@ def coerce_latlon(value: Any) -> tuple[float, float] | None:
 # A cached position outlives the sortie in flow_state.json, so ignore old fixes
 # rather than recovering a fresh flight to where the last one happened to be.
 OWNSHIP_FIX_MAX_AGE_S = 300.0
+# Distance gates must not trust a multi-minute-old stamp (stuck "67 NM" UI).
+OWNSHIP_GATE_FIX_MAX_AGE_S = 45.0
+# Cap how long a radio-gap wait can look after a bad last_tx_end_at estimate.
+RADIO_GAP_WAIT_CAP_S = 25.0
 
 
 def _ownship_fix_is_fresh(state: dict[str, Any] | None) -> bool:
@@ -2882,6 +2886,9 @@ def radio_gap_remaining(
 
     Uses last_tx_end_at when stamped; otherwise estimates from last_tx_text
     so older state without an end time still waits out the phrase.
+
+    Caps inflated end stamps (deferred speech estimate / clock skew) so Fly
+    never shows a ~2‑minute "in Xs" countdown for an 8–15s radio gap.
     """
     if float(gap_s or 0.0) <= 0.0:
         return 0.0
@@ -2899,7 +2906,11 @@ def radio_gap_remaining(
         if start <= 0.0:
             return 0.0
         end = start + estimate_spoken_duration_s(str(st.get("last_tx_text") or ""))
-    return max(0.0, float(gap_s) - (tnow - end))
+    # Still "speaking" per stamp — do not wait more than a short cushion.
+    if end > tnow:
+        end = min(end, tnow + RADIO_GAP_WAIT_CAP_S)
+    left = max(0.0, float(gap_s) - (tnow - end))
+    return min(left, float(gap_s) + RADIO_GAP_WAIT_CAP_S)
 
 
 def approach_clearance_needs_fix(state: dict[str, Any] | None) -> bool:
@@ -2909,7 +2920,11 @@ def approach_clearance_needs_fix(state: dict[str, Any] | None) -> bool:
     return bool(state.get("approach_clearance_need_fix") or state.get("vectors_active"))
 
 
-def _ownship_ll_from_state(state: dict[str, Any] | None) -> tuple[float, float] | None:
+def _ownship_ll_from_state(
+    state: dict[str, Any] | None,
+    *,
+    max_age_s: float | None = None,
+) -> tuple[float, float] | None:
     if not isinstance(state, dict):
         return None
     raw = state.get("ownship_ll")
@@ -2921,13 +2936,30 @@ def _ownship_ll_from_state(state: dict[str, Any] | None) -> tuple[float, float] 
     except (TypeError, ValueError):
         return None
     stamp = state.get("ownship_ll_t")
+    limit = float(
+        OWNSHIP_FIX_MAX_AGE_S if max_age_s is None else max_age_s
+    )
     if stamp is not None:
         try:
-            if (time.time() - float(stamp)) > OWNSHIP_FIX_MAX_AGE_S:
+            if (time.time() - float(stamp)) > limit:
                 return None
         except (TypeError, ValueError):
             pass
     return ll
+
+
+def _gate_ownship_ll(
+    state: dict[str, Any] | None,
+    config: dict[str, Any] | None,
+    *,
+    callsign: str | None = None,
+    opus: OpusFlightContext | None = None,
+) -> tuple[float, float] | None:
+    """Fresh ownship for distance gates (short max-age)."""
+    pos = _ownship_ll_from_state(state, max_age_s=OWNSHIP_GATE_FIX_MAX_AGE_S)
+    if pos is not None:
+        return pos
+    return ownship_latlon(config, callsign=callsign, opus=opus, state=state)
 
 
 def approach_clearance_auto_ready(
@@ -2942,8 +2974,8 @@ def approach_clearance_auto_ready(
     """
     True when Approach may auto-issue the procedure clearance.
 
-    After a normal check-in: wait a short radio gap, then fire while still
-    inbound — do not wait until the jet reaches the IAF / exit.
+    Distance gate first (so Fly shows NM while waiting), then a short radio
+    gap after the previous call finishes.
 
     Approach never speaks first — the pilot must check in (or Play the
     check-in step) before this auto clearance arms. NATCF's handoff alone
@@ -2963,19 +2995,10 @@ def approach_clearance_auto_ready(
         return False, "holding - cancel hold for approach clearance"
     if not approach_check_in_done(st):
         return False, "waiting for Approach check-in"
-    gap = float(APPROACH_CLEARANCE_GAP_S if gap_s is None else gap_s)
-    left = radio_gap_remaining(st, gap)
-    if left > 0:
-        return False, f"approach clearance in {left:.0f}s"
 
     plan = approach_plan_from_state(st, airport=airport)
     fix = approach_exit_fix_latlon(plan, airport=airport)
     need_fix = approach_clearance_needs_fix(st)
-    if fix is None:
-        return True, "after check-in"
-    pos = _ownship_ll_from_state(st)
-    if pos is None:
-        pos = ownship_latlon(config, callsign=callsign, opus=opus, state=st)
     name = str(
         plan.get("iaf_say")
         or plan.get("iaf")
@@ -2984,25 +3007,35 @@ def approach_clearance_auto_ready(
         or plan.get("vfr_recovery")
         or "fix"
     )
-    # No position is not "close enough" — the 40 NM gate below exists so the
-    # procedure is not cleared from 75 NM out.
-    if pos is None:
-        return False, f"waiting for position to {name}"
-    dist = _haversine_nm(pos[0], pos[1], fix[0], fix[1])
+    dist_note = ""
+    if fix is not None:
+        pos = _gate_ownship_ll(st, config, callsign=callsign, opus=opus)
+        if pos is None:
+            return False, f"waiting for position to {name}"
+        dist = _haversine_nm(pos[0], pos[1], fix[0], fix[1])
+        dist_note = f"{dist:.1f} NM to {name}"
+        if need_fix:
+            need = APPROACH_CLEARANCE_AFTER_MISSED_NM
+            if dist > need:
+                return False, f"{dist_note} — need ≤ {need:g} NM for clearance"
+        elif dist > APPROACH_CLEARANCE_WITHIN_NM:
+            return (
+                False,
+                f"{dist_note} — need ≤ {APPROACH_CLEARANCE_WITHIN_NM:g} NM",
+            )
+    gap = float(APPROACH_CLEARANCE_GAP_S if gap_s is None else gap_s)
+    left = radio_gap_remaining(st, gap)
+    if left > 0:
+        if dist_note:
+            return False, f"{dist_note} — clearance in {left:.0f}s"
+        return False, f"approach clearance in {left:.0f}s"
+    if fix is None:
+        return True, "after check-in"
     if need_fix:
-        need = APPROACH_CLEARANCE_AFTER_MISSED_NM
-        if dist > need:
-            return False, f"{dist:.1f} NM to {name} — need ≤ {need:g} NM for clearance"
-        return True, f"{dist:.1f} NM to {name} — clearance (near fix)"
-    # First recovery: clear once they are actually in Approach, not 75 NM out.
-    if dist > APPROACH_CLEARANCE_WITHIN_NM:
-        return (
-            False,
-            f"{dist:.1f} NM to {name} — need ≤ {APPROACH_CLEARANCE_WITHIN_NM:g} NM",
-        )
+        return True, f"{dist_note} — clearance (near fix)"
     if dist > APPROACH_CLEARANCE_AT_FIX_NM:
-        return True, f"{dist:.1f} NM to {name} — clearance"
-    return True, f"{dist:.1f} NM to {name} — clearance (near fix)"
+        return True, f"{dist_note} — clearance"
+    return True, f"{dist_note} — clearance (near fix)"
 
 
 def approach_procedure_done(state: dict[str, Any] | None) -> bool:
@@ -3028,8 +3061,9 @@ def approach_tower_handoff_auto_ready(
     """
     True when Approach may auto-hand to Tower (contact tower).
 
-    Requires the procedure clearance first, a short radio gap, then ≤12 NM
-    from the field — same gate as the cleared_approach step trigger.
+    Requires the procedure clearance first, ≤12 NM from the field, then a
+    short radio gap — distance is shown while waiting so it does not look
+    like a bare countdown timer.
     """
     st = state if isinstance(state, dict) else {}
     hold = auto_tx_hold_reason(st)
@@ -3039,20 +3073,19 @@ def approach_tower_handoff_auto_ready(
         return False, "waiting for Approach check-in"
     if not approach_procedure_done(st):
         return False, "waiting for Approach clearance"
-    gap = float(8.0 if gap_s is None else gap_s)
-    left = radio_gap_remaining(st, gap)
-    if left > 0:
-        return False, f"contact tower in {left:.0f}s"
     need = float(12.0 if within_nm is None else within_nm)
-    pos = _ownship_ll_from_state(st)
-    if pos is None:
-        pos = ownship_latlon(config, callsign=callsign, opus=opus, state=st)
+    pos = _gate_ownship_ll(st, config, callsign=callsign, opus=opus)
     dist = field_distance_nm(airport, pos)
     if dist is None:
         return False, "waiting for position to the field"
+    dist_note = f"{dist:.1f} NM from field"
     if dist > need:
-        return False, f"{dist:.1f} NM from field — contact tower at {need:g} NM"
-    return True, f"{dist:.1f} NM from field — contact tower"
+        return False, f"{dist_note} — contact tower at {need:g} NM"
+    gap = float(8.0 if gap_s is None else gap_s)
+    left = radio_gap_remaining(st, gap)
+    if left > 0:
+        return False, f"{dist_note} — contact tower in {left:.0f}s"
+    return True, f"{dist_note} — contact tower"
 
 
 def approach_check_in_done(state: dict[str, Any] | None) -> bool:
@@ -3138,10 +3171,8 @@ def control_handoff_auto_ready(
     """
     True when Nellis Control may auto-hand to Approach.
 
-    After NATCF check-in (this sortie is actually with Control): wait a short
-    radio gap, then fire once the jet is inside CONTROL_HANDOFF_NM of the
-    field. Range to the field rather than to the exit fix, so it does not
-    matter which recovery is assigned or whether they have already passed it.
+    After NATCF check-in: distance to the field first (so Fly shows NM), then
+    a short radio gap. Range to the field rather than to the exit fix.
     Departure radar near TORYE must not steal this call.
     """
     st = state if isinstance(state, dict) else {}
@@ -3150,16 +3181,10 @@ def control_handoff_auto_ready(
         return False, hold
     if not _with_nellis_control(st):
         return False, "waiting for Nellis Control"
-    gap = float(CONTROL_HANDOFF_GAP_S if gap_s is None else gap_s)
-    left = radio_gap_remaining(st, gap)
-    if left > 0:
-        return False, f"Approach handoff in {left:.0f}s"
 
     plan = approach_plan_from_state(st, airport=airport)
     fix = approach_exit_fix_latlon(plan, airport=airport)
-    pos = _ownship_ll_from_state(st)
-    if pos is None:
-        pos = ownship_latlon(config, callsign=callsign, opus=opus, state=st)
+    pos = _gate_ownship_ll(st, config, callsign=callsign, opus=opus)
     name = str(
         plan.get("iaf_say")
         or plan.get("iaf")
@@ -3170,26 +3195,30 @@ def control_handoff_auto_ready(
     )
     need = control_handoff_nm(config)
     field = _airport_field_latlon(airport)
-    # Never hand off blind. Without a position this used to fire the moment
-    # the pilot checked in, dumping him on Approach ninety miles out; the
-    # pilot can still advance by hand or ask for Approach.
     if pos is None:
         return False, "no position — hand to Approach when radar has you"
+
+    dist_note = ""
     if field is not None:
         field_nm = _haversine_nm(pos[0], pos[1], field[0], field[1])
-        if field_nm <= need:
-            return True, f"{field_nm:.1f} NM — Approach handoff"
-        return (
-            False,
-            f"{field_nm:.1f} NM out — hand to Approach at ≤ {need:g} NM",
-        )
-    # No field to measure against; the exit fix is the only gate left.
-    if fix is None:
-        return False, "no field or exit fix — hand to Approach by hand"
-    dist = _haversine_nm(pos[0], pos[1], fix[0], fix[1])
-    if dist <= need:
-        return True, f"{dist:.1f} NM to {name} — Approach handoff"
-    return False, f"{dist:.1f} NM to {name} — hand to Approach at ≤ {need:g} NM"
+        dist_note = f"{field_nm:.1f} NM"
+        if field_nm > need:
+            return False, f"{dist_note} out — hand to Approach at ≤ {need:g} NM"
+    else:
+        if fix is None:
+            return False, "no field or exit fix — hand to Approach by hand"
+        dist = _haversine_nm(pos[0], pos[1], fix[0], fix[1])
+        dist_note = f"{dist:.1f} NM to {name}"
+        if dist > need:
+            return False, f"{dist_note} — hand to Approach at ≤ {need:g} NM"
+
+    gap = float(CONTROL_HANDOFF_GAP_S if gap_s is None else gap_s)
+    left = radio_gap_remaining(st, gap)
+    if left > 0:
+        return False, f"{dist_note} — Approach handoff in {left:.0f}s"
+    if field is not None:
+        return True, f"{dist_note} — Approach handoff"
+    return True, f"{dist_note} — Approach handoff"
 
 
 def _enroute_tokens(route: str | None, *, dep_icao: str | None = None) -> list[str]:
@@ -4559,6 +4588,9 @@ _SORTIE_STATE_CACHE_KEYS = (
     "control_checked_in",
     "control_channel",
     "ops_sortie",
+    "ops_codes_pending",
+    "ops_codes_last_at",
+    "ops_codes_done",
 )
 
 
@@ -7580,11 +7612,13 @@ def build_bandsaw_check_in(
     *,
     alpha_bullseye: str | None = None,
 ) -> str:
-    """Bandsaw C2 check-in: radar contact, then alpha check."""
+    """Bandsaw C2 check-in: radar contact, then alpha check when coords exist."""
     cs = speak_callsign(callsign)
     if alpha_bullseye:
         return f"{cs}, Bandsaw, radar contact. Alpha check {alpha_bullseye}."
-    return f"{cs}, Bandsaw, radar contact. Alpha check."
+    # Do not say a blank "Alpha check." — that poisons echo detection for a
+    # later real request_alpha_check.
+    return f"{cs}, Bandsaw, radar contact."
 
 
 def build_bandsaw_continue(
@@ -7747,11 +7781,9 @@ def build_control_handoff(
     cs = speak_callsign(callsign)
     del from_channel  # Spoken as Nellis Control on both sectors.
     target = speak_agency_contact_target(airport, handoff_channel or "approach")
+    # No "roger" — auto handoff is not answering a pilot request.
     return with_freq_handoff_closer(
-        _pick(
-            f"{cs}, Nellis Control, contact {target}",
-            f"{cs}, Nellis Control, roger, contact {target}",
-        )
+        f"{cs}, Nellis Control, contact {target}"
     )
 
 
@@ -8980,7 +9012,7 @@ def build_standalone_alpha_check(
     ag = speak_agency_name(agency or "blackjack")
     if alpha_bullseye:
         return f"{cs}, {ag}, alpha check {alpha_bullseye}."
-    return f"{cs}, {ag}, alpha check."
+    return f"{cs}, {ag}, unable alpha check."
 
 
 def list_caoc_air_bullseyes(
@@ -9178,16 +9210,31 @@ def resolve_alpha_bullseye(
     Live alpha-check fix from Opus CAOC radar — same numbers as the unit popup
     when you click an aircraft on /opus/caoc.
     Returns {name, bearing, range_nm, display, spoken, unit_name} or None.
+
+    When Fly's map jet is ownship, fall back to the inject lat/lon if CAOC
+    has no matching unit (offline / unmatched callsign).
     """
     radar = fetch_caoc_radar(config)
-    if not radar:
+    units = list((radar or {}).get("units") or []) if radar else []
+    unit = match_caoc_unit_for_flight(
+        units, callsign=callsign, opus=opus, config=config
+    )
+    if unit is not None:
+        return bullseye_for_caoc_unit(
+            unit,
+            config,
+            opus=opus,
+            weather=weather,
+            altimeter_inhg=altimeter_inhg,
+        )
+    if not ownship_from_map_enabled(config):
         return None
-    units = list(radar.get("units") or [])
-    unit = match_caoc_unit_for_flight(units, callsign=callsign, opus=opus, config=config)
-    if unit is None:
+    inj = read_ownship_inject(config=config)
+    if not inj:
         return None
+    synthetic = ownship_inject_unit(inj, config)
     return bullseye_for_caoc_unit(
-        unit,
+        synthetic,
         config,
         opus=opus,
         weather=weather,
@@ -10935,6 +10982,13 @@ def build_readback_checklist(
                 "Clearance",
                 "cleared to land",
                 "cleared to land",
+                hinge=True,
+            )
+            add(
+                "gear",
+                "Gear",
+                "gear down",
+                "gear down",
                 hinge=True,
             )
         else:

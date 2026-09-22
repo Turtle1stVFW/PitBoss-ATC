@@ -388,11 +388,11 @@ def normalize(text: str) -> str:
         out.append(token)
     if run:
         out.append("".join(run))
-    return _fold_eor(" ".join(out))
+    return _fold_taxi_via(_fold_eor(" ".join(out)))
 
 
 # Whisper almost never writes the acronym "eor". Pilots say the letters;
-# the model writes "E or", "e o r", "ee or", "igor", …
+# the model writes "E or", "e o r", "ee or", "igor", "ER", …
 _EOR_FOLD: tuple[tuple[str, str], ...] = (
     (r"(?<!\w)e\s+o\s+r(?!\w)", "eor"),
     (r"(?<!\w)ee\s+o\s+r(?!\w)", "eor"),
@@ -405,11 +405,39 @@ _EOR_FOLD: tuple[tuple[str, str], ...] = (
     (r"(?<!\w)aor(?!\w)", "eor"),
 )
 
+# Place / via cues that make a bare "er" mean EOR (variable-width, so use finditer).
+_EOR_PLACE_PREFIX = re.compile(
+    r"\b(northwest|northeast|southwest|southeast|north|south|west|east|nw|ne|sw|se|via|taxi|at)\s+er\b"
+)
+_EOR_BEFORE_VIA = re.compile(r"\ber(?=\s+(?:via|runway|hold|for)\b)")
+
 
 def _fold_eor(text: str) -> str:
     """Collapse Whisper's letter-spellings of EOR into the token 'eor'."""
     folded = text
     for pat, repl in _EOR_FOLD:
+        folded = re.sub(pat, repl, folded)
+    folded = _EOR_PLACE_PREFIX.sub(lambda m: f"{m.group(1)} eor", folded)
+    folded = _EOR_BEFORE_VIA.sub("eor", folded)
+    return folded
+
+
+# Taxiway phonetics Whisper mangles (Fox Echo → foxratt / fox echo).
+_TAXI_VIA_FOLD: tuple[tuple[str, str], ...] = (
+    (r"(?<!\w)foxratt(?!\w)", "foxtrot"),
+    (r"(?<!\w)fox\s+rat(?!\w)", "foxtrot"),
+    (r"(?<!\w)fox\s+echo(?!\w)", "foxtrot echo"),
+    (r"(?<!\w)fox\s+e\s+cho(?!\w)", "foxtrot echo"),
+    (r"(?<!\w)foxtrot\s+e\s+cho(?!\w)", "foxtrot echo"),
+    # "Foxratt at go" — Echo misheard after Foxtrot.
+    (r"(?<!\w)foxtrot\s+at\s+go(?!\w)", "foxtrot echo"),
+)
+
+
+def _fold_taxi_via(text: str) -> str:
+    """Repair common Whisper taxiway / NATO alphabet mishears."""
+    folded = text
+    for pat, repl in _TAXI_VIA_FOLD:
         folded = re.sub(pat, repl, folded)
     return folded
 
@@ -1039,7 +1067,14 @@ INTENTS: tuple[Intent, ...] = (
         weight=1.25,
         example="declare bullseye 056 67",
         does="ask C2 what that group is (query only)",
-        veto=("declare as", "vid", "visual id"),
+        veto=(
+            "declare as",
+            "vid",
+            "visual id",
+            "id group",
+            "upgrade",
+            "upgrade group",
+        ),
     ),
     Intent(
         "report_vid",
@@ -1048,19 +1083,38 @@ INTENTS: tuple[Intent, ...] = (
                 "vid",
                 "visual id",
                 "visual identification",
+                "id group",
+                "eye dee",
+                "upgrade",
+                "upgrade group",
                 "declare as",
                 "group is",
                 "that's a",
                 "thats a",
                 "that is a",
+                "north group",
+                "south group",
+                "east group",
+                "west group",
+                "lead group",
+                "trail group",
+                "middle group",
+                "single group",
+                "north lead group",
+                "south lead group",
+                "east lead group",
+                "west lead group",
+                "north trail group",
+                "south trail group",
+                "east trail group",
+                "west trail group",
             ),
-            ("bandit", "hostile", "friendly", "bogey", "bogie", "unknown"),
         ),
         channels=("blackjack", "bandsaw", "joshua", "ops", "other", "control_east", "control_west", "center"),
         phases=("flight",),
         weight=1.45,
-        example="VID hostile",
-        does="set CAOC affiliation after VID",
+        example="ID north group MiG",
+        does="set CAOC affiliation after visual ID (defaults to bandit)",
         veto=("picture", "pitcher", "bogey dope", "braa"),
     ),
     Intent(
@@ -1392,13 +1446,15 @@ INTENTS: tuple[Intent, ...] = (
                 "code four",
                 "code five",
                 "code fife",
+                "parked",
+                "codes",
             ),
         ),
         kind="request",
         channels=("ops",),
         phases=("departure", "flight", "approach"),
         weight=1.25,
-        example="code 1",
+        example="parked, code 1",
         does="postflight aircraft codes",
         veto=("ops check", "words", "start"),
     ),
@@ -2066,7 +2122,7 @@ INTENTS: tuple[Intent, ...] = (
         phases=("approach",),
         example="gear down full stop",
         does="landing clearance",
-        veto=("low approach", "the option", "low pass", "initial", "with you", "high key", "low key", "base key", "sfo", "flameout"),
+        veto=("low approach", "the option", "low pass", "initial", "with you", "high key", "low key", "base key", "sfo", "flameout", "cleared to land", "cleared for land"),
     ),
     Intent(
         "tower_check_in",
@@ -3198,6 +3254,14 @@ def _heard_altitudes_ft(text: str) -> list[int]:
         n = int(m.group(1))
         if 50 <= n <= 600:
             _add_altitude_ft(found, n * 100)
+    # Truncated Whisper: "climb and maintain one seven" → "17" (thousands).
+    for m in re.finditer(
+        r"(?:climb(?:\s+and\s+maintain)?|maintain)\s+(\d{2})\b",
+        text,
+    ):
+        n = int(m.group(1))
+        if 10 <= n <= 60:
+            _add_altitude_ft(found, n * 1000)
 
     return found
 
@@ -3720,6 +3784,14 @@ def _score_intents(
             "request_low_approach",
         ):
             continue
+        # After clear-to-land TX, "gear down" is the readback hinge — not a
+        # fresh landing request (that returns "already cleared to land").
+        if (
+            awaiting_readback
+            and expected == "clear_land"
+            and intent.id == "request_landing"
+        ):
+            continue
         # Contact-tower step: not another Approach check-in.
         if expected in _APPROACH_TOWER_HANDOFF_TEMPLATES and intent.id == "inbound_recovery":
             continue
@@ -4208,6 +4280,15 @@ def echoes_last_atc(
     pending = str(pending_contact or "").strip().lower()
     # Real check-in after a handoff must still fire ("with you" / "checking in").
     if any(cue in text and cue not in last for cue in _CHECKIN_OVERRIDE_ECHO):
+        return False
+    # C2 asks that reuse ATC's own wording (alpha check / picture / dope) are
+    # new requests, not readbacks of the last transmission.
+    if intent is not None and intent.id in (
+        "request_alpha_check",
+        "request_picture",
+        "request_bogey_dope",
+        "request_declare",
+    ):
         return False
     # Contact / switch readback — even after retune to the destination agency.
     if _is_contact_switch_echo(text, last):

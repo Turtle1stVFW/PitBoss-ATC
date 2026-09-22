@@ -443,11 +443,106 @@ def main() -> int:
     elif voice_actions.parse_vid_affiliation("group is friendly") != "friendly":
         print("FAIL parse group is friendly")
         bad += 1
+    elif voice_actions.parse_vid_affiliation("upgrade group hostel") != "hostile":
+        print("FAIL parse hostel as hostile")
+        bad += 1
+    elif (
+        voice_actions.parse_vid_affiliation(
+            "ID group elvis 020 21 21000 mig 23"
+        )
+        != "bandit"
+    ):
+        print("FAIL type-only ID should default to bandit")
+        bad += 1
     elif voice_actions.parse_vid_affiliation("declare Elvis 056 67") is not None:
         print("FAIL declare Elvis should not parse an affiliation")
         bad += 1
     else:
         print("OK VID affiliation parse vs DECLARE query")
+
+    id_cue = voice_actions.parse_declare_cue(
+        "Bandsaw, RAZOR 1. ID group, Elvis 09017-19000. Bandit."
+    )
+    up_cue = voice_actions.parse_declare_cue(
+        "Bandsaw, upgrade group, L. This. 357.005. 9000. Hostel."
+    )
+    if (
+        not id_cue
+        or id_cue.get("bearing") != 90
+        or id_cue.get("range_nm") != 17
+        or id_cue.get("altitude_ft") != 19000
+    ):
+        print(f"FAIL ID group packed cue: {id_cue}")
+        bad += 1
+    elif (
+        not up_cue
+        or up_cue.get("bearing") != 357
+        or up_cue.get("range_nm") != 5
+        or up_cue.get("altitude_ft") != 9000
+    ):
+        print(f"FAIL upgrade packed cue: {up_cue}")
+        bad += 1
+    else:
+        print("OK ID/upgrade packed Elvis cues (skip seat digit)")
+
+    if "visual ID" not in pl.VID_INTERCEPT_CUE:
+        print(f"FAIL VID cue wording: {pl.VID_INTERCEPT_CUE}")
+        bad += 1
+    else:
+        print(f"OK recommend cue says visual ID ({pl.VID_INTERCEPT_CUE})")
+
+    # Last picture labels → ID by name.
+    state = {}
+    north = _g(40, 250, heading=90, feet=21000, bearing=20, range_nm=40)
+    north.name = "north group"
+    north.unit_ids = ["n1"]
+    north.declaration = "bogey spades"
+    south = _g(42, 290, heading=90, feet=22000, bearing=40, range_nm=42)
+    south.name = "south group"
+    south.unit_ids = ["s1"]
+    south.declaration = "bogey spades"
+    voice_actions.remember_picture_groups(state, [north, south])
+    hit = voice_actions.match_picture_group_ref(
+        "Bandsaw Razor 1 ID north group MiG 23", state
+    )
+    miss = voice_actions.match_picture_group_ref(
+        "Bandsaw Razor 1 ID trail group MiG", state
+    )
+    if not hit or hit.get("ids") != ["n1"] or miss is not None:
+        print(f"FAIL picture group name match: {hit=} {miss=}")
+        bad += 1
+    else:
+        print("OK ID resolves north group from last picture")
+
+    patched: list[tuple[str, str]] = []
+    orig_patch = atc_phrase.patch_caoc_unit_affiliation
+
+    def _capture_patch(config, unit_id, affiliation):
+        patched.append((str(unit_id), str(affiliation)))
+        return True
+
+    atc_phrase.patch_caoc_unit_affiliation = _capture_patch  # type: ignore[method-assign]
+    try:
+        text, groups = voice_actions.build_vid_affiliation_reply(
+            {},
+            {"coalition": 2},
+            "RAZOR 1",
+            agency="Bandsaw",
+            transcript="Bandsaw, Razor 1, ID north group, MiG 23.",
+            state=state,
+        )
+    finally:
+        atc_phrase.patch_caoc_unit_affiliation = orig_patch
+    if (
+        "bandit" not in text.casefold()
+        or "north" not in text.casefold()
+        or patched != [("n1", "BANDIT")]
+        or not groups
+    ):
+        print(f"FAIL named-group VID reply: {text=} {patched=} {groups=}")
+        bad += 1
+    else:
+        print(f"OK named-group VID defaults to bandit ({text})")
 
     no_key = atc_phrase.patch_caoc_unit_affiliation(
         {"opus_backend_url": "", "caoc_affiliation_key": ""}, "u9", "BANDIT"

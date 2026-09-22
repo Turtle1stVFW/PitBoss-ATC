@@ -74,6 +74,9 @@ SHARED_FLOW_KEYS = (
     "pending_takeoff_offer",
     "takeoff_offer_rolled",
     "ops_sortie",
+    "ops_codes_pending",
+    "ops_codes_last_at",
+    "ops_codes_done",
 )
 
 
