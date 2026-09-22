@@ -761,7 +761,7 @@ def last_agency(state: dict[str, Any] | None) -> str:
 
 
 def pending_contact(state: dict[str, Any] | None) -> str:
-    """Agency ATC just sent them to, until they tune or check in there."""
+    """Agency ATC just sent them to, until that agency answers a check-in."""
     return str((state or {}).get("pending_contact") or "").strip().lower()
 
 
@@ -782,6 +782,12 @@ def note_tx(
         state["last_agency"] = ch
         if pending_contact(state) == ch:
             state.pop("pending_contact", None)
+    if tmpl in ("bj_check_in", "bj_continue", "bj_alpha_check", "bj_range_entry"):
+        state["blackjack_checked_in"] = True
+    if tmpl == "bandsaw_check_in":
+        state["bandsaw_checked_in"] = True
+    if tmpl == "bandsaw_check_out":
+        state.pop("bandsaw_checked_in", None)
     dest = ""
     if tmpl == "bj_range_exit":
         dest = str(state.get("control_channel") or "control_east").strip().lower()
@@ -818,6 +824,7 @@ def reset_contact(state: dict[str, Any] | None) -> None:
     state.pop("control_checked_in", None)
     state.pop("control_channel", None)
     state.pop("blackjack_checked_in", None)
+    state.pop("bandsaw_checked_in", None)
     state.pop("approach_checked_in", None)
     state.pop("clearance_amendment_copied", None)
     state.pop("amended_altitude_ft", None)

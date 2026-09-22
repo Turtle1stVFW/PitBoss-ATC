@@ -5919,6 +5919,28 @@ def extras() -> int:
         elif atc_phrase.speak_angels(24000) != "angels two four":
             print(f"  FAIL angels 24000: {atc_phrase.speak_angels(24000)!r}")
             bad += 1
+        # High QNH geometric MSL → pressure altitude so Angels matches FL.
+        pa = atc_phrase.pressure_altitude_ft(22380, 30.30)
+        if pa is None or abs(int(pa) - 22000) > 50:
+            print(f"  FAIL pressure altitude QNH 30.30: {pa!r} (want ~22000)")
+            bad += 1
+        else:
+            print(f"pressure altitude — geometric 22380 @ 30.30 → {pa} ft")
+        unit_hi_qnh = {
+            "name": "FLEECE 1",
+            "flightLabel": "FLEECE 1",
+            "xMeters": 0,
+            "zMeters": 0,
+            "altMeters": 22380 / 3.28084,
+            "atcPosition": "ELVIS 305 25",
+        }
+        fix_hi = atc_phrase.bullseye_for_caoc_unit(
+            unit_hi_qnh, {}, altimeter_inhg=30.30
+        )
+        spoken_hi = str((fix_hi or {}).get("spoken") or "")
+        if "angels two two" not in spoken_hi:
+            print(f"  FAIL high-QNH alpha must say angels 22: {spoken_hi!r}")
+            bad += 1
         spoken_alpha = atc_phrase.speak_alpha_bullseye("ELVIS", 305, 25, alt_ft=24000)
         if "angels two four" not in spoken_alpha or "zero" in spoken_alpha.split("angels", 1)[-1]:
             print(f"  FAIL alpha speech angels: {spoken_alpha!r}")
@@ -6136,6 +6158,188 @@ def extras() -> int:
     if not stamped.get("blackjack_checked_in"):
         print(f"  FAIL Blackjack check-in must stamp blackjack_checked_in: {stamped}")
         bad += 1
+
+    # Once stamped, a second "checking in" is continue — not the full VUL script.
+    # A garbled call that NLU maps to range_entry stays silent.
+    class _C2Eng:
+        def __init__(self) -> None:
+            self.config = {
+                "dry_run": True,
+                "freq_gate_enabled": False,
+                "flow_file": "flows/nellis_default.json",
+            }
+            from pathlib import Path as _FlowPath
+
+            self.mission = atc_phrase.load_json(
+                _FlowPath(__file__).resolve().parent / "flows" / "nellis_default.json"
+            )
+            self.steps = [
+                s
+                for s in self.mission.get("steps", [])
+                if str(s.get("template") or "") == "bj_check_in"
+            ] or [
+                {
+                    "id": "bj",
+                    "channel": "blackjack",
+                    "template": "bj_check_in",
+                    "mode": "tts",
+                    "phase": "flight",
+                }
+            ]
+            self.state = {
+                "index": 0,
+                "blackjack_checked_in": True,
+                "last_tx_template": "contact_bandsaw",
+                "last_tx_channel": "blackjack",
+                "last_agency": "blackjack",
+            }
+            self.played_id = None
+            self.tx_text = ""
+            self.airports = atc_phrase.load_json(atc_phrase.AIRPORTS_PATH)
+
+        def airport(self) -> dict:
+            return self.airports["nellis"]
+
+        def current_step(self) -> dict:
+            return self.steps[0]
+
+        def save_state(self) -> None:
+            return None
+
+        def play_id(self, step_id: str, **_k: object) -> dict:
+            self.played_id = step_id
+            return {
+                "text": "FULL CHECK-IN SHOULD NOT PLAY",
+                "channel": "blackjack",
+                "action": "play",
+            }
+
+        def play_template(self, template: str, **_k: object) -> dict:
+            self.played_id = template
+            return {
+                "text": "FULL CHECK-IN SHOULD NOT PLAY",
+                "channel": "blackjack",
+                "action": "play",
+            }
+
+        def acknowledge_blackjack_continue(self, *, seek_range_exit: bool = True) -> dict:
+            text = atc_phrase.build_blackjack_continue("Fleece 1")
+            self.tx_text = text
+            self.state["last_tx_template"] = "bj_continue"
+            return {"text": text, "channel": "blackjack"}
+
+    orig_opus = atc_phrase.resolve_opus_and_metar
+    atc_phrase.resolve_opus_and_metar = lambda *_a, **_k: (
+        atc_phrase.synthetic_flight_context("FLEECE 1"),
+        vmc,
+    )
+    try:
+        bj_eng = _C2Eng()
+        checkin_ev = voice_intent.evaluate(
+            "Blackjack, Fleece 1, checking in",
+            channel="blackjack",
+            phase="flight",
+            expected="bj_check_in",
+            callsign=CALLSIGN,
+        )
+        if not checkin_ev.fired or checkin_ev.match is None:
+            print(f"  FAIL second Blackjack check-in must still parse: {checkin_ev.describe()}")
+            bad += 1
+        else:
+            played = voice_engine.execute_intent(checkin_ev.match, bj_eng)
+            text = str(played.get("text") or bj_eng.tx_text or "").lower()
+            if bj_eng.played_id is not None:
+                print(
+                    f"  FAIL second Blackjack check-in must not Play full step: "
+                    f"{bj_eng.played_id}"
+                )
+                bad += 1
+            elif "cleared tactical" in text or "scheduled airspace" in text:
+                print(f"  FAIL second Blackjack check-in must be continue, not full: {text}")
+                bad += 1
+            elif "continue" not in text and not played.get("blackjack_continue"):
+                print(f"  FAIL second Blackjack check-in should continue: {played}")
+                bad += 1
+            else:
+                print("blackjack second check-in — continue, not full script")
+
+        junk_eng = _C2Eng()
+        junk_match = voice_intent.Match(
+            intent="range_entry",
+            kind="step",
+            template="bj_check_in",
+            confidence=0.7,
+            transcript="Blackjack, Fleece 1, uh request the thing",
+            normalized="blackjack fleece 1 uh request the thing",
+        )
+        junk = voice_engine.execute_intent(junk_match, junk_eng)
+        if junk.get("action") != "none" or not junk.get("blackjack_already_in"):
+            print(f"  FAIL non-check-in while already with BJ must stay silent: {junk}")
+            bad += 1
+        else:
+            print("blackjack already-in garbled call — ignored")
+
+        class _BsEng(_C2Eng):
+            def __init__(self) -> None:
+                super().__init__()
+                self.state = {
+                    "index": 0,
+                    "bandsaw_checked_in": True,
+                    "last_tx_template": "bandsaw_check_in",
+                    "last_tx_channel": "bandsaw",
+                    "last_agency": "bandsaw",
+                }
+                self.steps = [
+                    {
+                        "id": "bs",
+                        "channel": "bandsaw",
+                        "template": "bandsaw_check_in",
+                        "mode": "tts",
+                        "phase": "flight",
+                    }
+                ]
+                self.transmits: list[tuple[str, str]] = []
+
+        # Patch _transmit via execute path: bandsaw uses _transmit directly.
+        bs_eng = _BsEng()
+        bs_ev = voice_intent.evaluate(
+            "Bandsaw, Fleece 1, with you",
+            channel="bandsaw",
+            phase="flight",
+            expected="bandsaw_check_in",
+            callsign=CALLSIGN,
+        )
+        if not bs_ev.fired or bs_ev.match is None:
+            print(f"  FAIL second Bandsaw check-in must parse: {bs_ev.describe()}")
+            bad += 1
+        else:
+            # Dry engine needs emit path — use a stub transmit by patching.
+            orig_tx = voice_engine._transmit
+
+            def _cap_tx(engine, airport, text, channel, **kw):
+                bs_eng.tx_text = text
+                return {
+                    "action": "transmit",
+                    "text": text,
+                    "channel": channel,
+                }
+
+            voice_engine._transmit = _cap_tx  # type: ignore[assignment]
+            try:
+                played_bs = voice_engine.execute_intent(bs_ev.match, bs_eng)
+            finally:
+                voice_engine._transmit = orig_tx  # type: ignore[assignment]
+            text_bs = str(played_bs.get("text") or bs_eng.tx_text or "").lower()
+            if "alpha check" in text_bs and "continue" not in text_bs:
+                print(f"  FAIL second Bandsaw check-in must be continue: {text_bs}")
+                bad += 1
+            elif "continue" not in text_bs:
+                print(f"  FAIL second Bandsaw check-in wording: {played_bs}")
+                bad += 1
+            else:
+                print("bandsaw second check-in — continue, not full script")
+    finally:
+        atc_phrase.resolve_opus_and_metar = orig_opus
 
     pic_tips = voice_intent.suggestions(
         phase="flight",
@@ -7106,6 +7310,68 @@ def instruction_readback_echo() -> int:
         print(f"  FAIL tower-handoff readback must not fire: {tower_echo.describe()}")
         bad += 1
 
+    # After retune to the destination agency, contact/switch is still the
+    # readback — not a check-in and not a re-fire of the handoff.
+    bj_retune = voice_intent.evaluate(
+        "Blackjack, Fleece 1, contact Blackjack 377.8",
+        channel="blackjack",
+        phase="flight",
+        expected="bj_check_in",
+        callsign=CALLSIGN,
+        last_tx_text=last,
+        last_tx_channel="departure",
+        last_tx_template="departure_handoff",
+        tuned_channel="blackjack",
+        pending_contact="blackjack",
+    )
+    if bj_retune.fired:
+        print(
+            f"  FAIL Blackjack contact readback after retune must not fire: "
+            f"{bj_retune.describe()}"
+        )
+        bad += 1
+
+    app_last = (
+        "Fleece one, Nellis Control East, contact Approach 273.55, good day."
+    )
+    app_retune = voice_intent.evaluate(
+        "Approach, Fleece 1, contact Approach 273.55",
+        channel="approach",
+        phase="approach",
+        expected="approach_check_in",
+        callsign=CALLSIGN,
+        last_tx_text=app_last,
+        last_tx_channel="control_east",
+        last_tx_template="control_handoff",
+        tuned_channel="approach",
+        pending_contact="approach",
+    )
+    if app_retune.fired:
+        print(
+            f"  FAIL Approach contact readback after retune must not fire: "
+            f"{app_retune.describe()}"
+        )
+        bad += 1
+
+    tower_retune = voice_intent.evaluate(
+        "Tower, Fleece 1, contact tower",
+        channel="tower",
+        phase="approach",
+        expected="right_break",
+        callsign=CALLSIGN,
+        last_tx_text=tower_last,
+        last_tx_channel="approach",
+        last_tx_template="cleared_approach",
+        tuned_channel="tower",
+        pending_contact="tower",
+    )
+    if tower_retune.fired:
+        print(
+            f"  FAIL Tower contact readback after retune must not fire: "
+            f"{tower_retune.describe()}"
+        )
+        bad += 1
+
     delivery_last = (
         "Fleece one, Nellis Delivery, readback correct, "
         "contact ground when ready for taxi."
@@ -7677,6 +7943,7 @@ def agency_sandbox() -> int:
         bad += 1
     wx_dme = atc_phrase.Weather(210, 8, 29.92, "KLSV 010000Z 21008KT 10SM FEW100 20/05 A2992")
     plan_dme = atc_phrase.assign_approach_plan(nellis, wx_dme, state={}, force=True)
+    nw_ll = (36.45, -115.25)
     phrase_dme = atc_phrase.build_approach_recovery(
         nellis,
         "Fleece 1",
@@ -7684,12 +7951,25 @@ def agency_sandbox() -> int:
         str(plan_dme.get("runway") or "21R"),
         plan=plan_dme,
         distance_nm=22.4,
+        ownship_ll=nw_ll,
     )
-    if "twenty two miles" not in phrase_dme.lower():
-        print(f"  FAIL Approach check-in should include DME: {phrase_dme}")
+    low_dme = phrase_dme.lower()
+    if "twenty two miles" not in low_dme or "of nellis" not in low_dme:
+        print(f"  FAIL Approach DME must name the field with direction: {phrase_dme}")
         bad += 1
-    elif "radar contact" in phrase_dme.lower():
+    elif "radar contact" in low_dme:
         print(f"  FAIL Approach check-in still must not say radar contact: {phrase_dme}")
+        bad += 1
+    bare_dme = atc_phrase.build_approach_recovery(
+        nellis,
+        "Fleece 1",
+        wx_dme,
+        "21R",
+        plan=plan_dme,
+        distance_nm=22.4,
+    )
+    if "from nellis" not in bare_dme.lower():
+        print(f"  FAIL Approach without fix must still say from Nellis: {bare_dme}")
         bad += 1
     chk_w = atc_phrase.build_control_check_in("Fleece 1", channel="control_west")
     if "nellis control" not in chk_w.lower():

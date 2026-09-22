@@ -1243,6 +1243,69 @@ def test_client_sends_its_own_fix() -> list[str]:
     return fails
 
 
+def test_host_config_not_polluted_by_client_flight() -> list[str]:
+    """
+    Host Fly shares its config dict with host_engine. unique_flow_sessions must
+    not stamp a Client Opus flight onto that dict (top bar / 404 probe source).
+    """
+    fails: list[str] = []
+    cfg = _host_config(opus_backend_url="https://opus.example/backend")
+    cfg["opus_user_name"] = "Turtle"
+    host_eng = flow_engine.FlowEngine(
+        config=cfg,
+        persist_state=False,
+        mission=copy.deepcopy(MISSION),
+        airports=AIRPORTS,
+    )
+    server = atc_server.AtcServer(
+        cfg, AIRPORTS, lambda: copy.deepcopy(MISSION), transmit_fn=lambda _j: 0
+    )
+    server.host_engine = host_eng
+    server.hello(
+        {
+            "callsign_override": "RAZOR 1",
+            "opus_flight_id": 909,
+            "opus_seat": 1,
+            "opus_flight_label": "RAZOR 1",
+            "radio_fresh": False,
+        }
+    )
+    reps = server.unique_flow_sessions()
+    if len(reps) != 1:
+        fails.append(f"expected 1 unique flow, got {len(reps)}")
+    if cfg.get("opus_flight_id") not in (None, ""):
+        fails.append(
+            f"Host config should stay flight-less, got opus_flight_id={cfg.get('opus_flight_id')}"
+        )
+    if cfg.get("opus_seat") not in (None, ""):
+        fails.append(f"Host config should not inherit seat, got {cfg.get('opus_seat')}")
+    if str(cfg.get("callsign_override") or "").strip():
+        fails.append(
+            f"Host config should not inherit callsign, got {cfg.get('callsign_override')}"
+        )
+    if atc_net.role_of(cfg) != "host":
+        fails.append(f"Host role should stay host after unique_flow, got {cfg.get('atc_role')}")
+    sess = reps[0] if reps else None
+    if sess is not None:
+        with atc_server._session_engine_binding(sess):
+            if atc_phrase.configured_opus_flight_id(sess.engine.config) != 909:
+                fails.append("bound seat should see client flight_id 909")
+        if cfg.get("opus_flight_id") not in (None, ""):
+            fails.append("Host config flight_id leaked after session bind")
+        if atc_net.role_of(cfg) != "host":
+            fails.append(
+                f"Host role should restore after bind, got {cfg.get('atc_role')}"
+            )
+    # Host without a selected flight must not scan Opus by username.
+    ctx = atc_phrase.resolve_active_opus_flight(cfg)
+    if ctx is None or str(getattr(ctx, "radio_callsign", "") or "") != "HOST":
+        fails.append(
+            f"Host with no flight_id should use synthetic HOST, got "
+            f"{None if ctx is None else ctx.radio_callsign}"
+        )
+    return fails
+
+
 def main() -> int:
     tests = (
         test_session_key,
@@ -1264,6 +1327,7 @@ def main() -> int:
         test_wild6_ownship_and_shared_cursor,
         test_seat_position_beats_host_feed,
         test_client_sends_its_own_fix,
+        test_host_config_not_polluted_by_client_flight,
     )
     bad = 0
     for fn in tests:

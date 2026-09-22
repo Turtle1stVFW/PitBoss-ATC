@@ -4017,6 +4017,35 @@ _CHECKIN_NOT_READBACK = (
     "northwest eor",
     "alpha south",
 )
+# Real check-in openers that must still fire after a handoff — even when the
+# rest of the call also repeats "contact X".
+_CHECKIN_OVERRIDE_ECHO = (
+    "with you",
+    "checking in",
+    "check in",
+    "checkin",
+)
+_CONTACT_SWITCH_VERBS = ("contact", "switch", "push", "monitor")
+# Agency tokens that appear in handoff phraseology (normalized transcripts).
+_HANDOFF_AGENCY_TOKENS = (
+    "blackjack",
+    "bandsaw",
+    "joshua",
+    "approach",
+    "tower",
+    "ground",
+    "departure",
+    "delivery",
+    "center",
+    "control",
+    "natcf",
+    "sally",
+    "lee",
+    "tanker",
+    "texaco",
+    "ops",
+    "local",
+)
 _READBACK_STOP = frozenset(
     {
         "a",
@@ -4065,6 +4094,58 @@ def _trigger_hits_in_text(intent: Intent, text: str) -> list[str]:
     return hits
 
 
+def _contact_destinations(text: str) -> set[str]:
+    """
+    Agency tokens that are the *object* of contact / switch / push / monitor.
+
+    The opener ("Control, Fleece 1, …") must not count — only the destination
+    after the verb ("… contact Approach").
+    """
+    found: set[str] = set()
+    tokens = text.split()
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok in _CONTACT_SWITCH_VERBS:
+            start = i + 1
+            if tok == "switch" and start < len(tokens) and tokens[start] == "to":
+                start += 1
+            for w in tokens[start : start + 4]:
+                if w in _HANDOFF_AGENCY_TOKENS:
+                    found.add(w)
+            i = start
+            continue
+        i += 1
+    return found
+
+
+def _is_contact_switch_echo(text: str, last: str) -> bool:
+    """
+    True when the pilot is repeating ATC's contact / switch / push / monitor.
+
+    Survives retune: "Approach, contact Approach" after NATCF said that must
+    not fire Approach check-in or re-fire the handoff.
+    """
+    if not last or not text:
+        return False
+    if not any(v in last for v in _CONTACT_SWITCH_VERBS):
+        return False
+    if not any(v in text for v in _CONTACT_SWITCH_VERBS):
+        return False
+    last_dests = _contact_destinations(last)
+    text_dests = _contact_destinations(text)
+    if last_dests and text_dests and (last_dests & text_dests):
+        return True
+    # Frequency-only readback ("contact 377.8") — share a contact verb + digits.
+    if last_dests or text_dests:
+        # One side named an agency the other didn't — not a copy of the same
+        # handoff (e.g. last was contact Control, pilot requests Approach).
+        return False
+    last_nums = {t for t in last.split() if any(c.isdigit() for c in t)}
+    text_nums = {t for t in text.split() if any(c.isdigit() for c in t)}
+    return bool(last_nums and text_nums and (last_nums & text_nums))
+
+
 def echoes_last_atc(
     transcript: str,
     last_tx: str,
@@ -4078,6 +4159,7 @@ def echoes_last_atc(
     last_tx_template: str = "",
     candidate_template: str = "",
     callsign: str = "",
+    pending_contact: str = "",
 ) -> bool:
     """
     True when the pilot is reading back the last ATC call, not making a new one.
@@ -4086,6 +4168,10 @@ def echoes_last_atc(
     Repeating “contact Blackjack” on Departure is an echo. Reporting the next
     action named in that instruction (taxi after Delivery, at EOR after taxi)
     is not — those are a different flow step.
+
+    After retune, addressing the *destination* agency still counts as an echo
+    when the call is just the contact/switch instruction — otherwise check-ins
+    and handoffs autofire the moment the pilot copies frequency change.
     """
     last = normalize(last_tx)
     text = normalize(transcript)
@@ -4095,6 +4181,22 @@ def echoes_last_atc(
         return False
     addr = str(addressed or "").strip().lower()
     prev = str(last_tx_channel or "").strip().lower()
+    pending = str(pending_contact or "").strip().lower()
+    # Real check-in after a handoff must still fire ("with you" / "checking in").
+    if any(cue in text and cue not in last for cue in _CHECKIN_OVERRIDE_ECHO):
+        return False
+    # Contact / switch readback — even after retune to the destination agency.
+    if _is_contact_switch_echo(text, last):
+        return True
+    # Tuned / speaking toward the handoff target but only copying "contact X".
+    if pending:
+        pend_keys = {pending}
+        if pending in ("control_east", "control_west"):
+            pend_keys.add("control")
+        if pending == "tower":
+            pend_keys.add("local")
+        if _contact_destinations(text) & pend_keys:
+            return True
     if addr and prev and addr != prev:
         return False
     last_tmpl = str(last_tx_template or "").strip().lower()
@@ -4180,6 +4282,7 @@ def evaluate(
     seat: int | None = None,
     tuned_channel: str | None = None,
     cursor_channel: str = "",
+    pending_contact: str = "",
 ) -> Evaluation:
     """
     Decide whether a transmission is ATC business, and if so what it asks for.
@@ -4259,6 +4362,7 @@ def evaluate(
             last_tx_template=last_tx_template,
             candidate_template=str(candidate.template or ""),
             callsign=callsign,
+            pending_contact=pending_contact,
         )
     ):
         return Evaluation(
@@ -4521,6 +4625,26 @@ _BJ_AWAY_CHANNELS = frozenset(
         "approach",
     }
 )
+_C2_CHECKIN_CUES = (
+    "with you",
+    "checking in",
+    "check in",
+    "checkin",
+    "on frequency",
+    "on station",
+    "with blackjack",
+    "with bandsaw",
+    "checking back in",
+    "check back in",
+)
+
+
+def sounds_like_c2_checkin(text: str) -> bool:
+    """True when the pilot is actually asking to check in / with you on C2."""
+    t = normalize(text)
+    if not t:
+        return False
+    return any(cue in t for cue in _C2_CHECKIN_CUES)
 
 
 def hide_blackjack_checkin_cue(

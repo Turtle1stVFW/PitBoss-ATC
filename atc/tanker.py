@@ -401,7 +401,10 @@ def _enrich_live(
     out = dict(row)
     if unit is None:
         return out
-    fix = atc_phrase.bullseye_for_caoc_unit(unit, config or {}, opus=opus)
+    qnh = atc_phrase.metar_altimeter_inhg(config)
+    fix = atc_phrase.bullseye_for_caoc_unit(
+        unit, config or {}, opus=opus, altimeter_inhg=qnh
+    )
     if fix:
         out["bullseye"] = fix
         out["lat"] = fix.get("lat")
@@ -413,7 +416,9 @@ def _enrich_live(
     try:
         alt_m = float(unit.get("altMeters") or 0)
         if alt_m > 0:
-            out["live_alt_ft"] = int(round(alt_m * 3.28084))
+            out["live_alt_ft"] = atc_phrase.pressure_altitude_ft(
+                alt_m * 3.28084, qnh
+            )
     except (TypeError, ValueError):
         pass
     if own_ll and out.get("lat") is not None and out.get("lon") is not None:
@@ -1171,6 +1176,10 @@ def build_tanker_return_checkin(
     ch = str(agency or "blackjack").strip().lower()
     if ch == "blackjack":
         return atc_phrase.build_blackjack_continue(
+            callsign, alpha_bullseye=alpha_bullseye
+        )
+    if ch == "bandsaw":
+        return atc_phrase.build_bandsaw_continue(
             callsign, alpha_bullseye=alpha_bullseye
         )
     cs = atc_phrase.speak_callsign(callsign)

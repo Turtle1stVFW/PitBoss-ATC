@@ -379,20 +379,23 @@ def check_in_phrases() -> int:
     if "radar contact, remain this frequency" not in bare.lower():
         bad = _fail(bad, f"bare Control check-in should be unchanged, got {bare!r}")
 
-    # Approach deliberately does not say radar contact — leave that alone.
+    # Approach opens with range from the field (with direction when known).
     calm = atc_phrase.Weather(
         wind_dir=210, wind_speed_kt=5, altimeter_inhg=29.92, raw=""
     )
-    if "radar contact" in atc_phrase.build_approach_recovery(
+    app = atc_phrase.build_approach_recovery(
         AIRPORT,
         CALLSIGN,
         calm,
         "21R",
         distance_nm=22,
-    ).lower():
+    )
+    if "radar contact" in app.lower():
         bad = _fail(bad, "Approach check-in must still not say radar contact")
+    if "from nellis" not in app.lower() and "of nellis" not in app.lower():
+        bad = _fail(bad, f"Approach range must name the field: {app!r}")
     if not bad:
-        print("check-ins — position added, closers and Approach untouched")
+        print("check-ins — position added, closers and Approach field range")
     return bad
 
 

@@ -43,6 +43,7 @@ _IDENTITY_CONFIG_KEYS = (
     "opus_seat",
     "opus_flight_label",
     "callsign_override",
+    "atc_role",
 )
 # Client Fly copies these, then drops any key the host omitted so a cache
 # reset does not leave the last sortie (OPS start, pending Delivery, …).
@@ -61,6 +62,7 @@ SHARED_FLOW_KEYS = (
     "control_checked_in",
     "control_channel",
     "blackjack_checked_in",
+    "bandsaw_checked_in",
     "clearance_amendment_copied",
     "amended_altitude_ft",
     "assigned_altitude_ft",
@@ -395,7 +397,14 @@ class AtcServer:
         return None
 
     def unique_flow_sessions(self) -> list[PilotSession]:
-        """One live session per shared timeline (prefer seat 1) for CAOC auto-clearance."""
+        """One live session per shared timeline (prefer seat 1) for CAOC auto-clearance.
+
+        Do not stamp client Opus identity or radios onto the engine here. Host
+        Fly shares this process's config dict — writing a client flight onto it
+        made the top bar adopt that callsign and hammer Opus with 404s after the
+        sortie ended. Callers bind seat identity for the duration of an action
+        via ``_session_engine_binding``.
+        """
         now = time.time()
         groups: dict[str, list[PilotSession]] = {}
         with self._lock:
@@ -414,12 +423,6 @@ class AtcServer:
                         break
                 except (TypeError, ValueError):
                     continue
-            _apply_identity_to_config(pick.engine.config, pick.identity)
-            pick.engine.set_remote_radios(
-                pick.tuned_freqs_mhz,
-                fresh=pick.radio_fresh,
-                selected_mhz=pick.selected_mhz,
-            )
             out.append(pick)
         return out
 
@@ -717,6 +720,7 @@ def _shared_flow_state(state: dict[str, Any] | None) -> dict[str, Any]:
     out.setdefault("index", int(state.get("index") or 0))
     out.setdefault("awaiting_readback", False)
     out.setdefault("blackjack_checked_in", False)
+    out.setdefault("bandsaw_checked_in", False)
     return out
 
 
@@ -782,6 +786,9 @@ def _apply_identity_to_config(config: dict[str, Any], identity: dict[str, Any]) 
     config["opus_seat"] = identity.get("opus_seat")
     config["opus_flight_label"] = identity.get("opus_flight_label") or ""
     config["callsign_override"] = identity.get("callsign_override") or ""
+    # Resolve this jet as a pilot, not as the Host router (Host skips Opus
+    # when it has no flight_id of its own).
+    config["atc_role"] = "solo"
 
 
 @contextmanager

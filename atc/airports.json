@@ -97,10 +97,22 @@
       }
     },
     "break_by_runway": {
-      "21R": {"side": "right", "point": "numbers"},
-      "21L": {"side": "left", "point": "midfield"},
-      "03L": {"side": "left", "point": "numbers"},
-      "03R": {"side": "right", "point": "midfield"}
+      "21R": {
+        "side": "right",
+        "point": "numbers"
+      },
+      "21L": {
+        "side": "left",
+        "point": "midfield"
+      },
+      "03L": {
+        "side": "left",
+        "point": "numbers"
+      },
+      "03R": {
+        "side": "right",
+        "point": "midfield"
+      }
     },
     "expect_minutes": 10,
     "departures_file": "departures/nellis.json",

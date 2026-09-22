@@ -25,7 +25,7 @@ as your jet (talk on the Fly tab; tankers still come from CAOC).
 
 Default role is still **Solo** — one PC, same as today. To run ATC for several pilots:
 
-1. Pick **one** machine as Host (the Windows DCS dedicated server is fine). It needs **Python 3.10+ with tcl/tk** — the `.cmd` files find `python.exe` without the `py` launcher. Setup → **Squadron** → Host. Save. Allow Windows inbound on the ATC port (default `8766`). That box needs ExternalAudio + TTS and network to the squadron SRS server.
+1. Pick **one** machine as Host (the Windows DCS dedicated server is fine). It needs **Python 3.10+ with tcl/tk** — the `.cmd` files find `python.exe` without the `py` launcher. Setup → **Squadron** → Host. Save. Allow Windows inbound on the ATC port (default `8766`). That box needs ExternalAudio + TTS and network to the squadron SRS server. The Host does **not** pick an Opus flight or callsign in the top bar — it only routes each Client’s flight.
 2. Put the same **shared token** on every PC.
 3. Each pilot: Setup → Squadron → **Client**, **Address pilots type** = the same IP/hostname they already use for DCS/SRS, ATC port **8766** (not SRS 5002), same token. Click **Test connection**, then Save.
 4. Off-LAN (flying PC on `10.x`, DCS server on `192.168.50.x`) is expected. Do not join the server LAN. On the **DCS server’s router**, forward/route **TCP 8766** to `192.168.50.20`, the same way SRS 5002 already is. Then point the client at that reachable address (often the SRS host, not the server’s private 192.168.50.20).
@@ -59,8 +59,10 @@ That registers **Fleece 1** and **Viper 3** and has both Advance. Traffic should
 `check_multi_pilot.py` is the offline unit test (no UI, no SRS).
 
 ## Typical workflow
-1. Title bar — type your CAOC name and click the green flight chip to pick the
-   Opus flight (saves immediately; Setup → Save is not required for identity).
+1. Title bar — on Solo/Client, type your CAOC name and click the green flight chip
+   to pick the Opus flight (saves immediately; Setup → Save is not required for
+   identity). On Host the chip reads **Host · routes client flights** — no jet
+   to pick there.
 2. Plan Flight → add/reorder steps → Preview → Save mission  
 3. Fly → Play Next through the full timeline (seek/jump to skip)  
 
@@ -345,7 +347,7 @@ Calls it understands:
 | "Texaco, request rejoin" / "request reform" | Cleared rejoin left, sometimes left observation (tanker does not say *identified*) |
 | Boom / reform small talk | After rejoin, say **how's it going** / **small talk** (or Fly **Texaco starts chat**) to start boom chat — it does not auto-fire. The **first** line is a time-of-day hello (*Good morning, sir*) — later bits are A/B polls, open questions, and riffs. Answer in a word, say anything, or just listen. With Ollama/Gemini/OpenAI on, freeform replies get a **live riff** (not locked to the two buttons). Texaco keeps chatting with short breaks until you **stop talking** / **talk later** / **standing by**, or leave the tanker. LLM falls back to the library if slow. The boom operator is always a woman. |
 | DCS tanker radio | **Ready pre-contact** → DCS *cleared contact* (boom). **Abort refueling** to disconnect. Do not use SRS for those. |
-| "Blackjack / Bandsaw, back from the tanker" / "checking in" after AAR | Radar contact, continue — returns to **whichever C2 freq you tuned** (Blackjack or Bandsaw) |
+| "Blackjack / Bandsaw, back from the tanker" / "checking in" after AAR | Radar contact, continue — returns to **whichever C2 freq you tuned** (Blackjack or Bandsaw). Full Blackjack/Bandsaw check-in plays **once** per sortie; later check-ins (or mis-heard calls) stay continue / silent |
 | "Blackjack, off station / range complete" | Range checkout → **Nellis Control** East (ch 7) or West (ch 8) immediately. NATCF gives proceed-direct, descent, and the recovery clearance; Control hands to Approach **before** the exit fix |
 | "Approach, checking in" / "inbound" | Approach assigns recovery from METAR (VMC → VFR recovery + TAC overhead; IFR → instrument + IAF). Prefers RWY 21 |
 | "Request ARCOE / TORYE / STRYK / MINTT / overhead / instrument" | Change the assigned recovery / approach |

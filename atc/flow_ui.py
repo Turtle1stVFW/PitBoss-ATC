@@ -158,10 +158,20 @@ class MissionPlanner(tk.Tk):
         for note in voice_notes:
             print(note, file=sys.stderr)
             app_diag.info(app_diag.CAT_CONFIG, note)
+        # Host is a router — strip any Solo leftover flight so we do not probe
+        # Opus for a callsign that never belonged to this box.
+        host_cleared = False
+        if atc_net.role_of(self.config_data) == "host":
+            host_cleared = self._strip_host_ownship_flight(persist=False)
+            if host_cleared:
+                app_diag.info(
+                    app_diag.CAT_CONFIG,
+                    "cleared Host ownship Opus flight (clients carry identity)",
+                )
         # Persist a repaired flow_file (or retired-voice remap) so the next launch
         # does not hit the same missing-mission crash.
         repaired = bool(self.config_data.pop("_flow_file_repaired", False))
-        if voice_notes or repaired:
+        if voice_notes or repaired or host_cleared:
             try:
                 save_json(CONFIG_PATH, self.config_data)
             except Exception as exc:
@@ -9772,20 +9782,7 @@ class MissionPlanner(tk.Tk):
 
     def _refresh_fly_status_body(self) -> None:
         self._sync_client_flow_cursor()
-        keep: dict[str, Any] = {}
-        if self._atc_role() == "host":
-            for key in (
-                "opus_flight_id",
-                "opus_seat",
-                "opus_flight_label",
-                "opus_user_name",
-            ):
-                if self.config_data.get(key) in (None, ""):
-                    keep[key] = (self.engine.config or {}).get(key)
         self.engine.config = self.config_data
-        for key, value in keep.items():
-            if value not in (None, ""):
-                self.engine.config[key] = value
         self.engine.airports = self.airports
         self.engine.mission = self.mission
         self._consume_position_fire_clears()
@@ -9891,12 +9888,9 @@ class MissionPlanner(tk.Tk):
                 # start is actually approved on this sortie.
                 if live_ch == "ops" and pending_ch == "delivery" and not ops_start_done:
                     pending_ch = ""
-                if live_ch and pending_ch and live_ch == pending_ch:
-                    try:
-                        (self.engine.state or {}).pop("pending_contact", None)
-                    except Exception:
-                        pass
-                    pending_ch = ""
+                # Keep pending_contact until that agency actually TXes (check-in).
+                # Clearing it on tune alone made contact/switch readbacks look like
+                # fresh calls and let handoff autos arm early.
                 if pending_ch in ("control_east", "control_west"):
                     ll = self._ownship_ll()
                     if ll:
@@ -11044,10 +11038,11 @@ class MissionPlanner(tk.Tk):
             inner,
             text=(
                 "Solo is today's one-PC app. Host is the dedicated ATC box that "
-                "speaks on SRS. Client is a pilot PC: voice recognition stays local, "
-                "the host answers on the radio. Same token on every machine — never "
-                "share the Google JSON key. Default is Solo so this branch does not "
-                "change how you already fly."
+                "speaks on SRS and routes every Client's Opus flight — it does "
+                "not pick its own callsign. Client is a pilot PC: voice recognition "
+                "stays local, the host answers on the radio. Same token on every "
+                "machine — never share the Google JSON key. Default is Solo so this "
+                "branch does not change how you already fly."
             ),
             bg=C_PANEL,
             fg=C_MUTED,
@@ -11206,8 +11201,38 @@ class MissionPlanner(tk.Tk):
         self._set_net_status(f"CLIENT  {health_url}  ·  {cs}")
 
     def _on_atc_role_change(self) -> None:
+        if hasattr(self, "var_atc_role"):
+            role = str(self.var_atc_role.get() or "solo").strip().lower()
+            if role in atc_net.ROLES:
+                self.config_data["atc_role"] = role
         if hasattr(self, "var_tts_provider"):
             self._update_tts_status()
+        # Dedicated Host routes client flights — drop any leftover Solo jet
+        # so the top bar stops prompting and Opus stops 404-spamming.
+        if atc_net.role_of(self.config_data) == "host":
+            self._strip_host_ownship_flight(persist=False)
+            self._update_opus_flight_label()
+            self._refresh_opus_identity_bar()
+
+    def _strip_host_ownship_flight(self, *, persist: bool = True) -> bool:
+        """Clear Host-local Opus jet fields. Returns True if anything changed."""
+        changed = False
+        for key in ("opus_flight_id", "opus_seat", "opus_flight_label", "callsign_override"):
+            if self.config_data.get(key) not in (None, ""):
+                self.config_data.pop(key, None)
+                changed = True
+        if hasattr(self, "var_callsign_override") and self.var_callsign_override.get().strip():
+            self.var_callsign_override.set("")
+            changed = True
+        if hasattr(self, "var_callsign"):
+            self.var_callsign.set("Host · no own jet")
+        if changed and persist:
+            try:
+                save_json(CONFIG_PATH, self.config_data)
+            except OSError:
+                pass
+            atc_phrase.invalidate_opus_cache()
+        return changed
 
     def _build_setup_identity(self) -> None:
         root = self.setup_tab_identity
@@ -13123,6 +13148,8 @@ class MissionPlanner(tk.Tk):
         self.config_data["opus_user_name"] = self.var_user.get().strip()
         self.config_data["opus_backend_url"] = self.var_backend.get().strip()
         self.config_data["callsign_override"] = self.var_callsign_override.get().strip()
+        if role == "host":
+            self._strip_host_ownship_flight(persist=False)
         self.config_data["runway_override"] = self.var_runway_override.get().strip()
         if hasattr(self, "var_parking_override"):
             self.config_data["parking_override"] = self.var_parking_override.get().strip()
@@ -13340,14 +13367,29 @@ class MissionPlanner(tk.Tk):
     def _opus_header_menu(self, event: tk.Event) -> str:
         """Popup: choose / refresh / clear the active Opus flight."""
         menu = tk.Menu(self, tearoff=0)
-        menu.add_command(label="Choose flight…", command=self._choose_opus_flight)
-        menu.add_command(label="Refresh from Opus", command=self._persist_identity)
-        menu.add_command(label="Clear flight", command=self._clear_opus_flight)
+        if self._atc_role() == "host":
+            menu.add_command(
+                label="Host routes client flights (no own jet)",
+                state="disabled",
+            )
+            menu.add_command(
+                label="Clear leftover flight",
+                command=self._host_clear_leftover_flight,
+            )
+        else:
+            menu.add_command(label="Choose flight…", command=self._choose_opus_flight)
+            menu.add_command(label="Refresh from Opus", command=self._persist_identity)
+            menu.add_command(label="Clear flight", command=self._clear_opus_flight)
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
             menu.grab_release()
         return "break"
+
+    def _host_clear_leftover_flight(self) -> None:
+        self._strip_host_ownship_flight(persist=True)
+        self._update_opus_flight_label()
+        self._refresh_opus_identity_bar()
 
     def _persist_identity(self, *, refresh_opus: bool = True) -> None:
         """
@@ -13423,6 +13465,9 @@ class MissionPlanner(tk.Tk):
     def _refresh_opus_identity_bar(self) -> None:
         """Refresh CAOC match hint from current username + flight selection."""
         self._ensure_identity_vars()
+        if self._atc_role() == "host":
+            self.var_identity_match.set("Host routes client flights")
+            return
         user = self.var_user.get().strip() or str(
             self.config_data.get("opus_user_name") or ""
         ).strip()
@@ -13456,6 +13501,9 @@ class MissionPlanner(tk.Tk):
 
     def _update_opus_flight_label(self, row: dict[str, Any] | None = None) -> None:
         """Refresh the header flight chip from config and optional picker row."""
+        if self._atc_role() == "host":
+            self.var_opus_flight.set("Host · routes client flights")
+            return
         if atc_phrase.ownship_from_map_enabled(self.config_data):
             inj = atc_phrase.read_ownship_inject(config=self.config_data)
             if inj:
@@ -13517,6 +13565,14 @@ class MissionPlanner(tk.Tk):
     ) -> None:
         """Modal list of Opus flights — select one for callsign + flight plan."""
         owner = parent or self
+        if self._atc_role() == "host":
+            messagebox.showinfo(
+                "Opus flights",
+                "This PC is the Host. It routes Client flights and does not "
+                "select its own Opus jet. Pick the flight on each pilot PC.",
+                parent=owner,
+            )
+            return
         if hasattr(self, "var_user"):
             self.config_data["opus_user_name"] = self.var_user.get().strip()
         if hasattr(self, "var_backend"):
@@ -13836,6 +13892,11 @@ class MissionPlanner(tk.Tk):
         return presets
 
     def _refresh_callsign(self) -> None:
+        if self._atc_role() == "host":
+            self.var_callsign.set("Host · no own jet")
+            self._update_opus_flight_label()
+            self._refresh_opus_identity_bar()
+            return
         self.config_data["opus_user_name"] = self.var_user.get().strip()
         self.config_data["opus_backend_url"] = self.var_backend.get().strip()
         self.config_data["callsign_override"] = self.var_callsign_override.get().strip()

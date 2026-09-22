@@ -39,11 +39,12 @@ class RadarUnavailable(RuntimeError):
     """No CAOC feed — distinct from a genuinely clean picture."""
 
 
-def _feet(alt_meters: Any) -> int | None:
+def _feet(alt_meters: Any, *, altimeter_inhg: float | None = None) -> int | None:
     try:
-        return int(round(float(alt_meters) * 3.28084))
+        geometric = float(alt_meters) * 3.28084
     except (TypeError, ValueError):
         return None
+    return atc_phrase.pressure_altitude_ft(geometric, altimeter_inhg)
 
 
 def _heading(unit: dict[str, Any]) -> float | None:
@@ -156,6 +157,8 @@ def _track_dict(
     fix: dict[str, Any],
     distance: float,
     declaration: str,
+    *,
+    altimeter_inhg: float | None = None,
 ) -> dict[str, Any]:
     uid = unit.get("id")
     if uid is None:
@@ -167,7 +170,7 @@ def _track_dict(
         "label": fix.get("label") or fix.get("unit_name") or "unknown",
         "lat": fix.get("lat"),
         "lon": fix.get("lon"),
-        "feet": _feet(unit.get("altMeters")),
+        "feet": _feet(unit.get("altMeters"), altimeter_inhg=altimeter_inhg),
         "heading_deg": _heading(unit),
         "speed_mps": _speed_mps(unit),
         "distance_nm": float(distance),
@@ -282,6 +285,7 @@ def collect_hostile_groups(
         return [], own, None
 
     book = pl.DeclarationMemory.from_state(state)
+    qnh = atc_phrase.metar_altimeter_inhg(config)
     tracks: list[dict[str, Any]] = []
     for unit in air:
         if str(unit.get("coalition") or "").lower() != hostile_side:
@@ -290,7 +294,9 @@ def collect_hostile_groups(
             continue
         if not atc_phrase.caoc_unit_is_picture_eligible(unit):
             continue
-        fix = atc_phrase.bullseye_for_caoc_unit(unit, config, opus=opus)
+        fix = atc_phrase.bullseye_for_caoc_unit(
+            unit, config, opus=opus, altimeter_inhg=qnh
+        )
         if not fix:
             continue
         lat, lon = fix.get("lat"), fix.get("lon")
@@ -304,7 +310,9 @@ def collect_hostile_groups(
             continue
         if float(distance) > max_nm:
             continue
-        tracks.append(_track_dict(unit, fix, float(distance), ""))
+        tracks.append(
+            _track_dict(unit, fix, float(distance), "", altimeter_inhg=qnh)
+        )
     if not tracks:
         return [], own, own_ll
 
@@ -667,6 +675,7 @@ def collect_declare_groups(
     if cue is None and own_ll is None:
         return [], own, None
 
+    qnh = atc_phrase.metar_altimeter_inhg(config)
     tracks: list[dict[str, Any]] = []
     for unit in air:
         if atc_phrase.caoc_unit_is_picture_fixture(unit):
@@ -687,7 +696,9 @@ def collect_declare_groups(
         )
         if cue is None and is_own:
             continue
-        fix = atc_phrase.bullseye_for_caoc_unit(unit, config, opus=opus)
+        fix = atc_phrase.bullseye_for_caoc_unit(
+            unit, config, opus=opus, altimeter_inhg=qnh
+        )
         if not fix:
             continue
         try:
@@ -708,7 +719,7 @@ def collect_declare_groups(
             score = declare_cue_score(
                 fix_brg,
                 fix_rng,
-                _feet(unit.get("altMeters")),
+                _feet(unit.get("altMeters"), altimeter_inhg=qnh),
                 cue,
                 is_own=is_own,
             )
@@ -736,7 +747,9 @@ def collect_declare_groups(
                 continue
             distance = float(to_own)
 
-        tracks.append(_track_dict(unit, fix, float(distance), ""))
+        tracks.append(
+            _track_dict(unit, fix, float(distance), "", altimeter_inhg=qnh)
+        )
 
     if not tracks:
         return [], own, own_ll
