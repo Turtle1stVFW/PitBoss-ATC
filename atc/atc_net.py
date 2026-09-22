@@ -22,11 +22,46 @@ ROLES = ("solo", "host", "client")
 FIREWALL_RULE_PREFIX = "DCS ATC Host"
 # Fly NET LINK sparkline — health GET must finish before the next 1 Hz tick.
 ATC_HOST_PROBE_TIMEOUT_S = 0.8
+# ExternalAudio SRS target: Host speaks into local SRS; Solo/Client use squadron.
+SQUADRON_SRS_HOST = "showtime.455aew.com"
+HOST_LOCAL_SRS_HOST = "127.0.0.1"
+_KNOWN_SRS_HOSTS = frozenset(
+    {SQUADRON_SRS_HOST.lower(), HOST_LOCAL_SRS_HOST, "localhost", ""}
+)
 
 
 def role_of(config: dict[str, Any] | None) -> str:
     raw = str((config or {}).get("atc_role") or "solo").strip().lower()
     return raw if raw in ROLES else "solo"
+
+
+def default_srs_host(role: str | None = None, *, config: dict[str, Any] | None = None) -> str:
+    """127.0.0.1 while hosting; squadron hostname for Solo / Client."""
+    r = role_of(config if config is not None else {"atc_role": role or "solo"})
+    return HOST_LOCAL_SRS_HOST if r == "host" else SQUADRON_SRS_HOST
+
+
+def apply_role_srs_host(current: str | None, role: str | None = None, *, config: dict[str, Any] | None = None) -> str:
+    """
+    Swap known defaults when the squadron role changes.
+    Custom hosts (LAN IP, alternate server) are left alone.
+    """
+    want = default_srs_host(role, config=config)
+    cur = str(current or "").strip()
+    if cur.lower() in _KNOWN_SRS_HOSTS:
+        return want
+    return cur or want
+
+
+def effective_srs_host(
+    airport: dict[str, Any] | None,
+    config: dict[str, Any] | None = None,
+) -> str:
+    """SRS host ExternalAudio should use for this role."""
+    return apply_role_srs_host(
+        str((airport or {}).get("srs_host") or ""),
+        config=config,
+    )
 
 
 def token_of(config: dict[str, Any] | None) -> str:

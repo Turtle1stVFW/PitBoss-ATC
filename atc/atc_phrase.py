@@ -15216,13 +15216,19 @@ def transmit(
                     pass
 
     spoken = prepare_radio_tts_text(text, voice=voice)
+    try:
+        import atc_net
+
+        srs_ip = atc_net.effective_srs_host(airport, config)
+    except Exception:
+        srs_ip = str(airport.get("srs_host") or "")
     cmd = [
         str(exe),
         f"--text={spoken}",
         f"--freqs={freq}",
         f"--modulations={mod}",
         f"--coalition={int(airport['coalition'])}",
-        f"--ip={airport['srs_host']}",
+        f"--ip={srs_ip}",
         f"--port={int(airport['srs_port'])}",
         f"--name={tx_name}",
         f"--volume={float(config.get('tts_volume', 0.8))}",
@@ -15249,7 +15255,7 @@ def transmit(
             freq=freq,
             mod=mod,
             provider=provider,
-            srs_host=str(airport.get("srs_host") or ""),
+            srs_host=srs_ip,
             srs_port=int(airport.get("srs_port") or 0),
             cmd=cmd,
         )
@@ -15297,13 +15303,19 @@ def transmit_file(
 
     freq, mod = srs_radio.maybe_force_eam_tx_freq(config, freq, mod, radio=radio)
 
+    try:
+        import atc_net
+
+        srs_ip = atc_net.effective_srs_host(airport, config)
+    except Exception:
+        srs_ip = str(airport.get("srs_host") or "")
     cmd = [
         str(exe),
         f"--file={path}",
         f"--freqs={freq}",
         f"--modulations={mod}",
         f"--coalition={int(airport['coalition'])}",
-        f"--ip={airport['srs_host']}",
+        f"--ip={srs_ip}",
         f"--port={int(airport['srs_port'])}",
         f"--name={tx_name}",
         f"--volume={float(config.get('tts_volume', 0.8))}",
@@ -15320,7 +15332,7 @@ def transmit_file(
             file=path.name,
             freq=freq,
             mod=mod,
-            srs_host=str(airport.get("srs_host") or ""),
+            srs_host=srs_ip,
             srs_port=int(airport.get("srs_port") or 0),
             cmd=cmd,
         )

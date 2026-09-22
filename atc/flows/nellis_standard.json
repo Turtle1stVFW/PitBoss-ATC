@@ -1,7 +1,7 @@
 {
-  "name": "Untitled",
+  "name": "Nellis Standard",
   "airport": "nellis",
-  "active_recovery": "straight_in",
+  "active_recovery": "visual_overhead",
   "recovery_options": [
     "visual_overhead",
     "tactical_overhead",
@@ -308,8 +308,7 @@
       "template": "approach_check_in",
       "file": null,
       "enabled": true,
-      "text": null,
-      "recovery": "straight_in"
+      "text": null
     },
     {
       "id": "app_procedure",

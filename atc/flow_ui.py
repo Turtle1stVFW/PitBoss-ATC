@@ -909,16 +909,38 @@ class MissionPlanner(tk.Tk):
             step = self.engine.current_step()
         except Exception:  # noqa: BLE001
             step = None
-        # When C2 is remapped (Bandsaw while Blackjack holds), gate against the
-        # live agency — not the held cursor step — so YOU ARE ON stays green.
+        # Gate against the agency Fly is nudging you onto:
+        #   SWITCH TO / pending_contact ≠ live → target freq (red until you tune)
+        #   C2 side trip (Bandsaw while Blackjack holds) → live agency (green on freq)
+        #   otherwise → cursor step
         gate_step = step
         gate_channel = None
-        if tuned and tuned in (
+        pending_ch = ""
+        try:
+            import agencies as agencies_mod
+
+            pending_ch = str(
+                agencies_mod.pending_contact(
+                    getattr(self.engine, "state", None)
+                )
+                or ""
+            ).strip().lower()
+        except Exception:
+            pending_ch = str(
+                (getattr(self.engine, "state", None) or {}).get("pending_contact")
+                or ""
+            ).strip().lower()
+        if pending_ch and tuned and pending_ch != tuned:
+            # Ops start → Delivery, Tower handoff → Departure, etc.
+            gate_channel = pending_ch
+            gate_step = None
+        elif tuned and tuned in (
+            # Airborne C2 side trips only — Ops/Delivery/Ground stay gated
+            # against the sequenced step so SWITCH TO paints red.
             "blackjack",
             "bandsaw",
             "joshua",
             "tanker",
-            "ops",
             "center",
             "control_east",
             "control_west",
@@ -945,7 +967,9 @@ class MissionPlanner(tk.Tk):
                     gate_channel = tuned
             except Exception:
                 gate_channel = tuned
-        sid = str((gate_step or step or {}).get("id") or "")
+        sid = str((gate_step or step or {}).get("id") or "") or (
+            f"pending:{gate_channel}" if gate_channel else ""
+        )
         prev_sid = getattr(self, "_last_tip_step_id", None)
         if tuned != prev or sid != prev_sid:
             self._last_tip_tuned_channel = tuned
@@ -971,8 +995,12 @@ class MissionPlanner(tk.Tk):
             state=getattr(self.engine, "state", None),
         )
         # Richer Fly lines: live tune vs next-step agency / mission phase.
+        # Status lines still follow the painted hero step when remapped.
+        status_step = gate_step or step
+        if pending_ch and tuned and pending_ch != tuned and step is not None:
+            status_step = step
         tuned_line, next_line, gate_line, gate_color = self._fly_radio_status_lines(
-            airport, gate_step or step, gate_msg=msg, gate_result=result
+            airport, status_step, gate_msg=msg, gate_result=result
         )
         if hasattr(self, "fly_tuned_now"):
             self.fly_tuned_now.set(tuned_line)
@@ -1211,7 +1239,7 @@ class MissionPlanner(tk.Tk):
         if getattr(self, "_srs_link_probing", False):
             return
         ap = self._airport()
-        host = str(ap.get("srs_host") or "")
+        host = atc_net.effective_srs_host(ap, self.config_data)
         try:
             port = int(ap.get("srs_port") or 5002)
         except (TypeError, ValueError):
@@ -5241,6 +5269,7 @@ class MissionPlanner(tk.Tk):
                 if isinstance(data, dict) and data:
                     self.airports = data
                     self.engine.airports = data
+                    self._apply_role_srs_host()
                     if hasattr(self, "var_trig_zone_lbl"):
                         zone = self.var_trig_zone.get().strip()
                         self.var_trig_zone_lbl.set(self._trigger_zone_label(zone))
@@ -11527,6 +11556,28 @@ class MissionPlanner(tk.Tk):
             self._strip_host_ownship_flight(persist=False)
             self._update_opus_flight_label()
             self._refresh_opus_identity_bar()
+        self._apply_role_srs_host()
+
+    def _apply_role_srs_host(self) -> None:
+        """Host → local SRS; Solo/Client → squadron SRS (known defaults only)."""
+        role = self._atc_role()
+        for ap in self.airports.values():
+            if not isinstance(ap, dict):
+                continue
+            cur = str(ap.get("srs_host") or "").strip()
+            new = atc_net.apply_role_srs_host(cur, role)
+            if new != cur:
+                ap["srs_host"] = new
+        if hasattr(self, "var_host"):
+            cur = self.var_host.get().strip()
+            new = atc_net.apply_role_srs_host(cur, role)
+            if new != cur:
+                self.var_host.set(new)
+        try:
+            if getattr(self, "engine", None) is not None:
+                self.engine.airports = self.airports
+        except Exception:
+            pass
 
     def _strip_host_ownship_flight(self, *, persist: bool = True) -> bool:
         """Clear Host-local Opus jet fields. Returns True if anything changed."""
@@ -11912,7 +11963,12 @@ class MissionPlanner(tk.Tk):
             ap = self.airports.get(key) or {}
             self.var_ap_name.set(ap.get("name", ""))
             self.var_icao.set(ap.get("icao", ""))
-            self.var_host.set(ap.get("srs_host", ""))
+            self.var_host.set(
+                atc_net.apply_role_srs_host(
+                    str(ap.get("srs_host") or ""),
+                    config=self.config_data,
+                )
+            )
             self.var_port.set(str(ap.get("srs_port", 5002)))
             self.var_coalition.set(str(ap.get("coalition", 2)))
             self.var_expect_minutes.set(str(ap.get("expect_minutes") or 10))
@@ -12098,7 +12154,7 @@ class MissionPlanner(tk.Tk):
         ttk.Label(left, text="Squadron SRS", style="Header.TLabel").pack(anchor="w", pady=(12, 4))
         tk.Label(
             left,
-            text="Shared radio server — not unique to this field.",
+            text="Host uses 127.0.0.1; Solo/Client use showtime.455aew.com (auto).",
             bg=C_PANEL,
             fg=C_MUTED,
             font=("Segoe UI", 8),
@@ -13593,6 +13649,7 @@ class MissionPlanner(tk.Tk):
         self._on_tts_provider_change()
         if hasattr(self, "var_setup_airport_key"):
             self._refresh_airbase_picker(select=self._airport_key())
+        self._apply_role_srs_host()
         self._load_setup_airport_form()
         if hasattr(self, "var_hotkey_next"):
             self.var_hotkey_next.set(hotkeys.hotkey_from_config(c, "next"))
@@ -13694,6 +13751,7 @@ class MissionPlanner(tk.Tk):
                     "Client needs the host's shared token. Copy it from the Host PC.",
                 )
                 return
+        self._apply_role_srs_host()
         self.config_data["opus_user_name"] = self.var_user.get().strip()
         self.config_data["opus_backend_url"] = self.var_backend.get().strip()
         if hasattr(self, "var_caoc_affiliation_key"):
