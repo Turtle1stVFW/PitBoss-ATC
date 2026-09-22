@@ -48,10 +48,10 @@ If the first-run window is gone: **Help → First-run setup…**
 ## 4. Before you fly
 
 1. Title bar — confirm the username, then click the green flight chip and pick **your** Opus flight / seat.
-2. Setup → Airport — SRS host should match the server you already use. Clients do not transmit ATC; the Host does.
+2. Setup → Airbases — SRS host should match the server you already use. Sync freqs from Opus. Clients do not transmit ATC; the Host does.
 3. DCS must be restarted once after the radio-export install (Setup-Pilot does the install; restart is on you).
 4. Fly tab — hold your normal **SRS PTT** and talk. The Fly card lists what you can say right now.
-5. Setup → Preferences → **Simplified UI** trims the Fly tab to the frequency, whether you are on it, what to say, and what ATC will answer. Turn it off again if you need the diagnostic lines while troubleshooting.
+5. Fly is already trimmed (frequency, YOU ARE ON, cues, expected response). **Show details…** or Setup → Advanced → **Show full Fly diagnostics** if you need NET LINK / last-actions while troubleshooting.
 
 ## What you do *not* do
 
@@ -62,7 +62,7 @@ If the first-run window is gone: **Help → First-run setup…**
 
 ## Solo try-out (no squadron Host)
 
-Setup → Squadron → **Solo**. This PC will speak on SRS itself (needs `DCS-SR-ExternalAudio.exe` in the folder above `atc\`). Windows voices work with no API key.
+Setup → Basics → **Solo**. This PC will speak on SRS itself (needs `DCS-SR-ExternalAudio.exe` in the folder above `atc\`). Windows voices work with no API key.
 
 ## If something fails
 

@@ -438,6 +438,7 @@ class VoiceController:
             last_tx_at=float(context.get("last_tx_at") or 0.0),
             last_tx_channel=str(context.get("last_tx_channel") or ""),
             last_tx_template=str(context.get("last_tx_template") or ""),
+            pending_contact=str(context.get("pending_contact") or ""),
             tanker_chat_choices=context.get("tanker_chat_choices")
             if isinstance(context.get("tanker_chat_choices"), list)
             else None,
@@ -634,6 +635,7 @@ def execute_intent(
         "request_picture",
         "request_bogey_dope",
         "request_declare",
+        "report_vid",
     ):
         return _speak_reply(intent, engine, airport, callsign, weather, opus, match)
 
@@ -808,7 +810,9 @@ def execute_intent(
         )
 
     if intent == "request_alpha_check":
-        fix = atc_phrase.resolve_alpha_bullseye(config, callsign=callsign, opus=opus)
+        fix = atc_phrase.resolve_alpha_bullseye(
+            config, callsign=callsign, opus=opus, weather=weather
+        )
         channel = _resolve_tx_channel(engine, airport, match)
         if channel not in ("blackjack", "bandsaw", "joshua", "ops", "other"):
             channel = "blackjack"
@@ -1001,9 +1005,20 @@ def execute_intent(
             cur = engine.current_step() or {}
             if voice_intent.step_is_authored(cur):
                 return _play_step(engine, match)
-            if tanker_mod.tanker_needs_c2_checkin(
+            from_tanker = tanker_mod.tanker_needs_c2_checkin(
                 engine.state
-            ) or tanker_mod.tanker_overlay_active(engine.state):
+            ) or tanker_mod.tanker_overlay_active(engine.state)
+            already_in = bool((engine.state or {}).get("bandsaw_checked_in"))
+            heard = str(match.normalized or match.transcript or "")
+            if already_in and not from_tanker and not voice_intent.sounds_like_c2_checkin(
+                heard
+            ):
+                return {
+                    "action": "none",
+                    "detail": "already with Bandsaw — ignored",
+                    "bandsaw_already_in": True,
+                }
+            if from_tanker:
                 tanker_mod.leave_tanker_overlay(
                     engine, "bandsaw", checkin=True
                 )
@@ -1012,17 +1027,26 @@ def execute_intent(
                     engine.save_state()
             alpha_spoken = None
             fix = atc_phrase.resolve_alpha_bullseye(
-                engine.config, callsign=callsign, opus=opus
+                engine.config, callsign=callsign, opus=opus, weather=weather
             )
             if fix and fix.get("spoken"):
                 alpha_spoken = str(fix["spoken"])
-            text = atc_phrase.build_bandsaw_check_in(
-                callsign, alpha_bullseye=alpha_spoken
-            )
+            if already_in or from_tanker:
+                text = atc_phrase.build_bandsaw_continue(
+                    callsign, alpha_bullseye=alpha_spoken
+                )
+            else:
+                text = atc_phrase.build_bandsaw_check_in(
+                    callsign, alpha_bullseye=alpha_spoken
+                )
+            if isinstance(getattr(engine, "state", None), dict):
+                engine.state["bandsaw_checked_in"] = True
             return _transmit(engine, airport, text, "bandsaw")
         # Bandsaw checkout advances past the optional Bandsaw steps.
         if intent == "bandsaw_check_out" or match.template == "bandsaw_check_out":
             played = _play_step(engine, match)
+            if isinstance(getattr(engine, "state", None), dict):
+                engine.state.pop("bandsaw_checked_in", None)
             if played.get("action") != "none":
                 _advance_past_bandsaw(engine)
                 return played
@@ -1030,6 +1054,8 @@ def execute_intent(
             # past any remaining Bandsaw / Joshua cursor.
             text = atc_phrase.build_bandsaw_check_out(airport, callsign)
             result = _transmit(engine, airport, text, "bandsaw")
+            if isinstance(getattr(engine, "state", None), dict):
+                engine.state.pop("bandsaw_checked_in", None)
             if result.get("action") == "transmit":
                 _advance_past_bandsaw(engine)
             return result
@@ -1151,6 +1177,8 @@ def execute_intent(
             return _transmit(engine, airport, text, ch)
         # Back on Blackjack after Bandsaw, the tanker, or still on the range:
         # check-in is "continue", not a second range-entry / Approach handoff.
+        # Full Blackjack check-in plays once per sortie; later "with you" /
+        # mis-heard calls must not re-run the airspace / VUL script.
         if intent == "range_entry" or match.template == "bj_check_in":
             import tanker as tanker_mod
             import tanker_chat as tanker_chat_mod
@@ -1160,11 +1188,23 @@ def execute_intent(
             from_tanker = tanker_mod.tanker_needs_c2_checkin(
                 engine.state
             ) or tanker_mod.tanker_overlay_active(engine.state)
-            already_in = str(engine.state.get("last_tx_template") or "") in (
+            already_in = bool((engine.state or {}).get("blackjack_checked_in")) or str(
+                (engine.state or {}).get("last_tx_template") or ""
+            ) in (
                 "bj_check_in",
                 "bj_continue",
                 "bj_alpha_check",
+                "bj_range_entry",
             )
+            heard = str(match.normalized or match.transcript or "")
+            if already_in and not from_tanker and not voice_intent.sounds_like_c2_checkin(
+                heard
+            ):
+                return {
+                    "action": "none",
+                    "detail": "already with Blackjack — ignored",
+                    "blackjack_already_in": True,
+                }
             if tmpl == "bj_range_exit" or from_tanker or already_in:
                 if from_tanker:
                     tanker_mod.leave_tanker_overlay(
@@ -1184,6 +1224,10 @@ def execute_intent(
                         "detail": detail,
                         "blackjack_continue": True,
                     }
+                text = atc_phrase.build_blackjack_continue(callsign)
+                if isinstance(getattr(engine, "state", None), dict):
+                    engine.state["blackjack_checked_in"] = True
+                return _transmit(engine, airport, text, "blackjack")
             played = _play_step(engine, match)
             if played.get("action") != "none":
                 if isinstance(getattr(engine, "state", None), dict):
@@ -1788,11 +1832,14 @@ def _speak_reply(
             "request_picture",
             "request_bogey_dope",
             "request_declare",
+            "report_vid",
         ):
             if intent == "request_bogey_dope":
                 what = "bogey dope"
             elif intent == "request_declare":
                 what = "declare"
+            elif intent == "report_vid":
+                what = "VID"
             else:
                 what = "picture"
             text = atc_phrase.build_blackjack_c2_redirect(airport, callsign, what)
@@ -1820,6 +1867,17 @@ def _speak_reply(
                     transcript=match.normalized or match.transcript or "",
                     state=engine.state,
                 )
+            elif intent == "report_vid":
+                text, _groups = voice_actions.build_vid_affiliation_reply(
+                    engine.config,
+                    airport,
+                    callsign,
+                    agency=agency,
+                    channel=channel,
+                    opus=opus,
+                    transcript=match.normalized or match.transcript or "",
+                    state=engine.state,
+                )
             else:
                 text, _groups = voice_actions.build_picture_reply(
                     engine.config,
@@ -1836,6 +1894,8 @@ def _speak_reply(
                 what = "bogey dope"
             elif intent == "request_declare":
                 what = "declare"
+            elif intent == "report_vid":
+                what = "VID"
             else:
                 what = "picture"
             text = f"{cs}, {agency}, unable {what}, radar is down."
@@ -2155,7 +2215,7 @@ def execute_tanker_action(
         channel = _c2_channel()
         alpha_spoken = None
         fix = atc_phrase.resolve_alpha_bullseye(
-            engine.config, callsign=callsign, opus=opus
+            engine.config, callsign=callsign, opus=opus, weather=weather
         )
         if fix and fix.get("spoken"):
             alpha_spoken = str(fix["spoken"])
@@ -2626,6 +2686,9 @@ def _approach_check_in(
     played = _play_step(engine, match)
     if played.get("action") != "none":
         return played
+    ll = atc_phrase.ownship_latlon(
+        engine.config, callsign=callsign, opus=opus, state=engine.state
+    )
     text = atc_phrase.build_approach_recovery(
         airport,
         callsign,
@@ -2633,12 +2696,9 @@ def _approach_check_in(
         str(plan.get("runway") or ""),
         recovery=str(plan.get("pattern") or ""),
         plan=plan,
-        distance_nm=atc_phrase.field_distance_nm(
-            airport,
-            atc_phrase.ownship_latlon(
-                engine.config, callsign=callsign, opus=opus, state=engine.state
-            ),
-        ),
+        distance_nm=atc_phrase.field_distance_nm(airport, ll),
+        ownship_ll=ll,
+        config=engine.config,
     )
     return _transmit(engine, airport, text, "approach")
 

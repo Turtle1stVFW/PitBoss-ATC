@@ -460,6 +460,99 @@ def http_get_json(url: str, user_agent: str) -> Any:
         raise
 
 
+def http_patch_json(
+    url: str,
+    user_agent: str,
+    body: dict[str, Any],
+    extra_headers: dict[str, str] | None = None,
+) -> Any:
+    payload = json.dumps(body).encode("utf-8")
+    headers = {
+        "User-Agent": user_agent,
+        "Content-Type": "application/json",
+    }
+    if extra_headers:
+        headers.update(extra_headers)
+    req = urllib.request.Request(url, data=payload, headers=headers, method="PATCH")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            raw = resp.read().decode("utf-8")
+            if not raw.strip():
+                return {}
+            return json.loads(raw)
+    except Exception as exc:
+        try:
+            import app_diag
+
+            app_diag.warn(
+                app_diag.CAT_NETWORK,
+                f"HTTP PATCH failed: {exc}",
+                url=url,
+            )
+        except Exception:
+            pass
+        raise
+
+
+_OPUS_AFFILIATION_ENUM = frozenset({"FRIENDLY", "BANDIT", "HOSTILE", "UNKNOWN"})
+
+
+def patch_caoc_unit_affiliation(
+    config: dict[str, Any] | None,
+    unit_id: str,
+    affiliation: str,
+) -> bool:
+    """
+    PATCH OPUS CAOC affiliation for one radar unit.
+
+    Soft-fails (returns False) when the backend, key, or unit id is missing,
+    or when the request errors. Mutates the radar cache on success so the
+    next picture call sees the new label before the 5 s TTL.
+    """
+    cfg = config or {}
+    uid = str(unit_id or "").strip()
+    aff = str(affiliation or "").strip().upper()
+    if aff not in _OPUS_AFFILIATION_ENUM:
+        aff = "UNKNOWN"
+    backend = str(cfg.get("opus_backend_url") or "").rstrip("/")
+    key = str(cfg.get("caoc_affiliation_key") or "").strip()
+    if not uid or not backend or not key:
+        try:
+            import app_diag
+
+            app_diag.warn(
+                app_diag.CAT_NETWORK,
+                "CAOC affiliation PATCH skipped (missing backend, key, or unit id)",
+                url=backend or "",
+            )
+        except Exception:
+            pass
+        return False
+    ua = str(cfg.get("user_agent") or "DCS-ATC-Phrase/1.0")
+    safe_id = urllib.parse.quote(uid, safe="")
+    url = f"{backend}/opus/caoc/radar/units/{safe_id}/affiliation"
+    try:
+        http_patch_json(
+            url,
+            ua,
+            {"affiliation": aff},
+            extra_headers={"X-Caoc-Affiliation-Key": key},
+        )
+    except Exception:
+        return False
+    cached = _caoc_radar_cache.get("data")
+    if isinstance(cached, dict):
+        for unit in list(cached.get("units") or []):
+            if not isinstance(unit, dict):
+                continue
+            other = unit.get("id")
+            if other is None:
+                other = unit.get("unitId") or unit.get("unit_id")
+            if str(other or "").strip() == uid:
+                unit["affiliation"] = aff
+    return True
+
+
 def callsign_override(config: dict[str, Any]) -> str | None:
     """Manual flight callsign from config/UI, if set."""
     return _str_or_none(config.get("callsign_override"))
@@ -963,6 +1056,13 @@ def resolve_active_opus_flight(config: dict[str, Any]) -> OpusFlightContext | No
     backend = (config.get("opus_backend_url") or "").rstrip("/")
     selected_id = configured_opus_flight_id(config)
     preferred_seat = configured_opus_seat(config)
+    role = ""
+    try:
+        import atc_net
+
+        role = atc_net.role_of(config)
+    except Exception:
+        role = str(config.get("atc_role") or "").strip().lower()
 
     if not backend:
         label = override or "CALLSIGN"
@@ -976,6 +1076,14 @@ def resolve_active_opus_flight(config: dict[str, Any]) -> OpusFlightContext | No
             return synthetic_flight_context(override)
         print("Using offline callsign (no Opus flight/user selected): CALLSIGN")
         return synthetic_flight_context("CALLSIGN")
+
+    # Dedicated Host box only routes client flights. Without a selected
+    # flight_id, do not scan Opus signups by username (404 spam / wrong jet).
+    # Session engines still resolve when the client's opus_flight_id is bound.
+    if role == "host" and selected_id is None:
+        label = override or "HOST"
+        print(f"Host has no Opus flight selected — using {label} (clients carry FP)")
+        return synthetic_flight_context(label)
 
     cache_key = _opus_cache_key(config)
     now = time.time()
@@ -5778,6 +5886,42 @@ def speak_field_miles(distance_nm: float | None) -> str:
     return f"{speak_natural_number(n)} {unit}"
 
 
+def speak_approach_range(
+    airport: dict[str, Any] | None,
+    distance_nm: float | None,
+    *,
+    ownship_ll: tuple[float, float] | None = None,
+    config: dict[str, Any] | None = None,
+) -> str:
+    """
+    Approach check-in range from the field — never a bare 'forty two miles'.
+
+    Prefer 'forty two miles northwest of Nellis' when we know where the jet
+    is; otherwise 'forty two miles from Nellis'.
+    """
+    miles = speak_field_miles(distance_nm)
+    if not miles:
+        return ""
+    name = str((airport or {}).get("name") or "the field").strip() or "the field"
+    if ownship_ll is not None and airport:
+        field = _airport_field_latlon(airport)
+        if field is not None:
+            try:
+                import navaids as navaids_mod
+
+                brg, _rng = navaids_mod.bearing_range_nm(
+                    field[0], field[1], ownship_ll[0], ownship_ll[1], config=config
+                )
+                where = navaids_mod.cardinal(brg)
+            except Exception:
+                where = ""
+            if int(round(float(distance_nm or 0))) < 1:
+                return f"over {name}"
+            if where:
+                return f"{miles} {where} of {name}"
+    return f"{miles} from {name}"
+
+
 def build_approach_recovery(
     airport: dict[str, Any],
     callsign: str,
@@ -5790,10 +5934,12 @@ def build_approach_recovery(
     expect: str | None = None,
     plan: dict[str, Any] | None = None,
     distance_nm: float | None = None,
+    ownship_ll: tuple[float, float] | None = None,
+    config: dict[str, Any] | None = None,
 ) -> str:
     """
     Approach check-in (NATCF style), e.g.:
-    Fleece 1, Nellis Approach, twenty two miles, Nellis landing south,
+    Fleece 1, Nellis Approach, twenty two miles northwest of Nellis, Nellis landing south,
     expect Arcoe recovery for the TAC Overhead runway two one right, …
     """
     name = airport["name"]
@@ -5805,7 +5951,9 @@ def build_approach_recovery(
     rwy_s = speak_runway(rwy) if rwy else ""
 
     bits = [f"{cs}, {name} Approach"]
-    miles = speak_field_miles(distance_nm)
+    miles = speak_approach_range(
+        airport, distance_nm, ownship_ll=ownship_ll, config=config
+    )
     if miles:
         bits.append(miles)
     bits.append(speak_landing_flow(rwy, name))
@@ -7439,6 +7587,18 @@ def build_bandsaw_check_in(
     return f"{cs}, Bandsaw, radar contact. Alpha check."
 
 
+def build_bandsaw_continue(
+    callsign: str,
+    *,
+    alpha_bullseye: str | None = None,
+) -> str:
+    """Back on Bandsaw after tanker (or a second check-in while already in)."""
+    cs = speak_callsign(callsign)
+    if alpha_bullseye:
+        return f"{cs}, Bandsaw, radar contact {alpha_bullseye}. Continue."
+    return f"{cs}, Bandsaw, radar contact. Continue."
+
+
 def build_bandsaw_check_out(
     airport: dict[str, Any],
     callsign: str,
@@ -8115,8 +8275,17 @@ def speak_bullseye_fix(name: str) -> str:
     return text if text else "bullseye"
 
 
-def caoc_unit_alt_ft(unit: dict[str, Any] | None) -> int | None:
-    """CAOC track altitude in feet, or None if the feed has no height."""
+def caoc_unit_alt_ft(
+    unit: dict[str, Any] | None,
+    *,
+    altimeter_inhg: float | None = None,
+) -> int | None:
+    """
+    CAOC track altitude in feet for radio use (FL / angels / Mode C style).
+
+    Opus publishes DCS geometric MSL (`altMeters`). Convert to pressure
+    altitude with the local QNH so Angels/FL match the pilot's 29.92 tape.
+    """
     if not isinstance(unit, dict):
         return None
     raw = unit.get("altMeters")
@@ -8128,7 +8297,75 @@ def caoc_unit_alt_ft(unit: dict[str, Any] | None) -> int | None:
         return None
     if alt_m <= 0:
         return None
-    return int(round(alt_m * 3.28084))
+    geometric_ft = alt_m * 3.28084
+    return pressure_altitude_ft(geometric_ft, altimeter_inhg)
+
+
+STANDARD_SEA_LEVEL_INHG = 29.92
+# Rule of thumb: ~1000 ft per inHg between true/geometric MSL and pressure alt.
+_PRESSURE_ALT_FT_PER_INHG = 1000.0
+
+
+def pressure_altitude_ft(
+    geometric_ft: float | int | None,
+    altimeter_inhg: float | None = None,
+) -> int | None:
+    """
+    DCS/CAOC geometric MSL → pressure altitude (what FL / 29.92 reads).
+
+    PA ≈ geometric − 1000 × (QNH − 29.92). High QNH made Angels read high
+    vs the pilot's flight level; this brings C2 back onto the tape.
+    """
+    if geometric_ft is None:
+        return None
+    try:
+        feet = float(geometric_ft)
+    except (TypeError, ValueError):
+        return None
+    try:
+        qnh = float(altimeter_inhg) if altimeter_inhg is not None else None
+    except (TypeError, ValueError):
+        qnh = None
+    if qnh is None or qnh <= 0:
+        return int(round(feet))
+    return int(round(feet - _PRESSURE_ALT_FT_PER_INHG * (qnh - STANDARD_SEA_LEVEL_INHG)))
+
+
+def metar_altimeter_inhg(
+    config: dict[str, Any] | None = None,
+    *,
+    weather: Weather | None = None,
+    icao: str | None = None,
+) -> float | None:
+    """Best-available QNH for pressure-altitude conversion (cached METAR)."""
+    if weather is not None and weather.altimeter_inhg:
+        try:
+            qnh = float(weather.altimeter_inhg)
+        except (TypeError, ValueError):
+            qnh = None
+        if qnh and qnh > 0:
+            return qnh
+    if not config:
+        return None
+    code = (icao or "").strip().upper()
+    if not code:
+        key = str(config.get("default_airport") or "nellis").strip() or "nellis"
+        try:
+            airports = load_json(AIRPORTS_PATH)
+            code = str((airports.get(key) or {}).get("icao") or "").strip().upper()
+        except Exception:
+            code = ""
+    if not code:
+        return None
+    try:
+        wx = fetch_metar(config, code)
+    except Exception:
+        return None
+    try:
+        qnh = float(wx.altimeter_inhg) if wx and wx.altimeter_inhg else None
+    except (TypeError, ValueError):
+        return None
+    return qnh if qnh and qnh > 0 else None
 
 
 def speak_angels(alt_ft: int | float | None) -> str:
@@ -8649,6 +8886,8 @@ def bullseye_for_caoc_unit(
     config: dict[str, Any],
     *,
     opus: OpusFlightContext | None = None,
+    weather: Weather | None = None,
+    altimeter_inhg: float | None = None,
 ) -> dict[str, Any] | None:
     """
     Bullseye fix for one CAOC unit — same numbers as the /opus/caoc unit popup.
@@ -8660,7 +8899,10 @@ def bullseye_for_caoc_unit(
     radio_cs = radio_callsign_from_caoc_unit(unit)
     unit_name = unit.get("name") or unit.get("groupName")
 
-    alt_ft = caoc_unit_alt_ft(unit)
+    qnh = altimeter_inhg
+    if qnh is None:
+        qnh = metar_altimeter_inhg(config, weather=weather)
+    alt_ft = caoc_unit_alt_ft(unit, altimeter_inhg=qnh)
     unit_lat: float | None = None
     unit_lon: float | None = None
     try:
@@ -8929,6 +9171,8 @@ def resolve_alpha_bullseye(
     *,
     callsign: str | None = None,
     opus: OpusFlightContext | None = None,
+    weather: Weather | None = None,
+    altimeter_inhg: float | None = None,
 ) -> dict[str, Any] | None:
     """
     Live alpha-check fix from Opus CAOC radar — same numbers as the unit popup
@@ -8942,7 +9186,13 @@ def resolve_alpha_bullseye(
     unit = match_caoc_unit_for_flight(units, callsign=callsign, opus=opus, config=config)
     if unit is None:
         return None
-    return bullseye_for_caoc_unit(unit, config, opus=opus)
+    return bullseye_for_caoc_unit(
+        unit,
+        config,
+        opus=opus,
+        weather=weather,
+        altimeter_inhg=altimeter_inhg,
+    )
 
 
 # --- ATC position reference (nearest VOR / TACAN) ----------------------
@@ -9020,8 +9270,13 @@ def ownship_altitude_ft(
     *,
     callsign: str | None = None,
     opus: OpusFlightContext | None = None,
+    weather: Weather | None = None,
+    altimeter_inhg: float | None = None,
 ) -> int | None:
-    """Ownship altitude in feet — map inject when the tester drives, else CAOC."""
+    """Ownship altitude in feet (pressure / FL) — map inject or CAOC."""
+    qnh = altimeter_inhg
+    if qnh is None:
+        qnh = metar_altimeter_inhg(config, weather=weather)
     inj = read_ownship_inject(config=config)
     if inj:
         for key in ("alt_ft", "alt_ft_agl"):
@@ -9029,7 +9284,7 @@ def ownship_altitude_ft(
             if raw is None:
                 continue
             try:
-                return int(round(float(raw)))
+                return pressure_altitude_ft(float(raw), qnh)
             except (TypeError, ValueError):
                 continue
     radar = fetch_caoc_radar(config or {})
@@ -9040,11 +9295,7 @@ def ownship_altitude_ft(
     )
     if unit is None:
         return None
-    alt = caoc_unit_alt_ft(unit)
-    try:
-        return int(round(float(alt))) if alt is not None else None
-    except (TypeError, ValueError):
-        return None
+    return caoc_unit_alt_ft(unit, altimeter_inhg=qnh)
 
 
 # Templates whose phrasing depends on the assigned recovery / approach plate.
@@ -12863,6 +13114,8 @@ def build_template_text(
             speed_kt=speed_kt,
             plan=plan,
             distance_nm=field_distance_nm(airport, pos),
+            ownship_ll=pos,
+            config=config,
         )
     if template == "cleared_approach":
         # Always go through the assigner so a filed route can refresh the plan.
@@ -12898,7 +13151,9 @@ def build_template_text(
             state["blackjack_checked_in"] = True
         alpha_spoken = None
         if config:
-            fix = resolve_alpha_bullseye(config, callsign=callsign, opus=opus)
+            fix = resolve_alpha_bullseye(
+                config, callsign=callsign, opus=opus, weather=weather
+            )
             if fix and fix.get("spoken"):
                 alpha_spoken = str(fix["spoken"])
                 if step is not None:
@@ -12938,7 +13193,9 @@ def build_template_text(
         # Standalone if a plan still uses a separate Alpha step
         alpha_spoken = None
         if config:
-            fix = resolve_alpha_bullseye(config, callsign=callsign, opus=opus)
+            fix = resolve_alpha_bullseye(
+                config, callsign=callsign, opus=opus, weather=weather
+            )
             if fix and fix.get("spoken"):
                 alpha_spoken = str(fix["spoken"])
         return build_standalone_alpha_check(callsign, alpha_spoken)
@@ -12985,7 +13242,9 @@ def build_template_text(
     if template == "bandsaw_check_in":
         alpha_spoken = None
         if config:
-            fix = resolve_alpha_bullseye(config, callsign=callsign, opus=opus)
+            fix = resolve_alpha_bullseye(
+                config, callsign=callsign, opus=opus, weather=weather
+            )
             if fix and fix.get("spoken"):
                 alpha_spoken = str(fix["spoken"])
                 if step is not None:
@@ -12999,8 +13258,12 @@ def build_template_text(
                     }
         elif step and isinstance(step.get("alpha_bullseye"), dict):
             alpha_spoken = str(step["alpha_bullseye"].get("spoken") or "") or None
+        if commit and isinstance(state, dict):
+            state["bandsaw_checked_in"] = True
         return build_bandsaw_check_in(callsign, alpha_bullseye=alpha_spoken)
     if template == "bandsaw_check_out":
+        if commit and isinstance(state, dict):
+            state.pop("bandsaw_checked_in", None)
         handoff = str(
             (step or {}).get("handoff_channel")
             or "blackjack"
@@ -13271,7 +13534,9 @@ def build_flow_step_phrase(
         departure = airport.get("departure") or {"freq_mhz": 350.0}
         alpha = ""
         if config and "{alpha_bullseye}" in custom_text:
-            fix = resolve_alpha_bullseye(config, callsign=callsign, opus=opus)
+            fix = resolve_alpha_bullseye(
+                config, callsign=callsign, opus=opus, weather=weather
+            )
             alpha = str((fix or {}).get("spoken") or "")
         text = (
             custom_text.strip()

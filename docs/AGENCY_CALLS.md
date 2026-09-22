@@ -418,10 +418,19 @@ These are not pinned to a single agency (or are available broadly).
 #### `request_declare`
 
 - **Pilot call:** Blackjack, <Callsign>, declare bullseye 056 67
-- **Does:** declaration at that bullseye (ELVIS); bare declare = nearest
+- **Does:** ask C2 what that group is (query only — never PATCH)
 - **Keywords:** `declare`
-- **Response:** <Callsign>, <Agency>, <hostile|bogey|friendly|clean|unable>.
+- **Veto:** `declare as`, `vid`, `visual id`
+- **Response:** <Callsign>, <Agency>, <hostile|bandit|bogey|friendly|clean|unable>.
 - **Note:** If C2 is Bandsaw-only for the step, Blackjack may redirect: <Callsign>, Blackjack, <picture|bogey dope|declare> is with Bandsaw. Contact Bandsaw <BandsawFreq>.
+
+#### `report_vid`
+
+- **Pilot call:** Bandsaw, <Callsign>, VID hostile
+- **Does:** set CAOC affiliation after VID (PATCH)
+- **Keywords:** `vid` | `declare as` | `group is` | `that's a` **AND** `bandit` | `hostile` | `friendly`
+- **Response:** <Callsign>, <Agency>, <bandit|hostile|friendly>.
+- **Note:** `declare Elvis xxx/xxx` stays `request_declare` even if "hostile" is in the transcript.
 
 #### `request_joshua`
 
@@ -526,9 +535,18 @@ These are not pinned to a single agency (or are available broadly).
 #### `request_declare`
 
 - **Pilot call:** Bandsaw, <Callsign>, declare bullseye 056 67
-- **Does:** declaration at that bullseye (ELVIS); bare declare = nearest
+- **Does:** ask C2 what that group is (query only — never PATCH)
 - **Keywords:** `declare`
-- **Response:** <Callsign>, <Agency>, <hostile|bogey|friendly|clean|unable>.
+- **Veto:** `declare as`, `vid`, `visual id`
+- **Response:** <Callsign>, <Agency>, <hostile|bandit|bogey|friendly|clean|unable>.
+
+#### `report_vid`
+
+- **Pilot call:** Bandsaw, <Callsign>, VID hostile / declare as bandit / group is friendly
+- **Does:** set CAOC affiliation after VID (PATCH)
+- **Keywords:** `vid` | `declare as` | `group is` | `that's a` **AND** `bandit` | `hostile` | `friendly`
+- **Response:** <Callsign>, <Agency>, <bandit|hostile|friendly>.
+- **Note:** DECLARE [Elvis] is a query. VID / "declare as" writes the label.
 
 #### `request_picture`
 

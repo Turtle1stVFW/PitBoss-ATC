@@ -158,10 +158,20 @@ class MissionPlanner(tk.Tk):
         for note in voice_notes:
             print(note, file=sys.stderr)
             app_diag.info(app_diag.CAT_CONFIG, note)
+        # Host is a router — strip any Solo leftover flight so we do not probe
+        # Opus for a callsign that never belonged to this box.
+        host_cleared = False
+        if atc_net.role_of(self.config_data) == "host":
+            host_cleared = self._strip_host_ownship_flight(persist=False)
+            if host_cleared:
+                app_diag.info(
+                    app_diag.CAT_CONFIG,
+                    "cleared Host ownship Opus flight (clients carry identity)",
+                )
         # Persist a repaired flow_file (or retired-voice remap) so the next launch
         # does not hit the same missing-mission crash.
         repaired = bool(self.config_data.pop("_flow_file_repaired", False))
-        if voice_notes or repaired:
+        if voice_notes or repaired or host_cleared:
             try:
                 save_json(CONFIG_PATH, self.config_data)
             except Exception as exc:
@@ -808,7 +818,7 @@ class MissionPlanner(tk.Tk):
             self._fly_eam_box.pack_forget()
         except tk.TclError:
             pass
-        if enabled:
+        if enabled and self._fly_diagnostics_visible():
             if not self._eam_freq_vars:
                 self._rebuild_eam_freq_rows(self._eam_seed_freqs())
             # Keep EAM below the kneeboard prompts (voice cues → expected response
@@ -3702,10 +3712,13 @@ class MissionPlanner(tk.Tk):
         self.mission_name_var = tk.StringVar(value=self.mission.get("name") or "Untitled")
         name_entry = ttk.Entry(top, textvariable=self.mission_name_var, width=22)
         name_entry.pack(side=tk.LEFT, padx=(16, 8))
-        ttk.Button(top, text="Help", command=self._show_help_tab).pack(side=tk.RIGHT)
-        ttk.Button(top, text="First-run setup…", command=self._show_first_run).pack(
-            side=tk.RIGHT, padx=(0, 8)
+        self._help_btn = ttk.Button(top, text="Help", command=self._show_help_tab)
+        self._help_btn.pack(side=tk.RIGHT)
+        self._first_run_btn = ttk.Button(
+            top, text="First-run setup…", command=self._show_first_run
         )
+        if setup_welcome.should_show(self.config_data):
+            self._first_run_btn.pack(side=tk.RIGHT, padx=(0, 8), before=self._help_btn)
         self._ensure_identity_vars()
         # Same title row as Help — click the flight chip to choose / refresh / clear.
         self._build_opus_identity_bar(top, key="header").pack(
@@ -3801,7 +3814,7 @@ class MissionPlanner(tk.Tk):
         if hasattr(self, "_fly_canvas"):
             self._fly_canvas.configure(scrollregion=self._fly_canvas.bbox("all"))
 
-    # ---------- Simplified UI (Setup → Preferences) ----------
+    # ---------- Simplified UI (Setup → Advanced) ----------
 
     # Frequency column when Simplified UI is on: hero freq, the one line that
     # says whether the radio is right, and the live-position tip last.
@@ -3821,7 +3834,13 @@ class MissionPlanner(tk.Tk):
                 return bool(var.get())
             except tk.TclError:
                 pass
-        return bool(self.config_data.get("simple_ui"))
+        return bool(self.config_data.get("simple_ui", True))
+
+    def _fly_diagnostics_visible(self) -> bool:
+        """Full Fly chrome: preference off, or this session's Show details."""
+        if getattr(self, "_fly_details_visible", False):
+            return True
+        return not self._simple_ui()
 
     def _repack_fly_hint(self, *, show: bool) -> None:
         """TTS / template line — keep it above the recovery and request strips."""
@@ -3842,19 +3861,64 @@ class MissionPlanner(tk.Tk):
                 break
         lbl.pack(**kwargs)
 
+    def _pack_fly_diagnostics(self, *, show: bool) -> None:
+        """NET LINK, map-is-jet, last-actions — hidden unless diagnostics are on."""
+        box = getattr(self, "_fly_net_link_box", None)
+        if box is not None:
+            try:
+                box.pack_forget()
+            except tk.TclError:
+                pass
+            if show:
+                after = getattr(self, "_fly_net_lbl", None)
+                if after is not None and after.winfo_manager():
+                    box.pack(fill=tk.X, pady=(0, 10), after=after)
+                else:
+                    box.pack(fill=tk.X, pady=(0, 10))
+        chk = getattr(self, "_fly_map_chk", None)
+        if chk is not None:
+            try:
+                chk.pack_forget()
+            except tk.TclError:
+                pass
+            if show:
+                chk.pack(side=tk.LEFT, padx=(14, 0))
+        log = getattr(self, "_fly_log_box", None)
+        if log is not None:
+            try:
+                log.pack_forget()
+            except tk.TclError:
+                pass
+            if show:
+                log.pack(fill=tk.X, pady=(4, 0))
+        btn = getattr(self, "_fly_details_btn", None)
+        if btn is not None:
+            try:
+                btn.pack_forget()
+            except tk.TclError:
+                pass
+            if self._simple_ui():
+                showing = bool(getattr(self, "_fly_details_visible", False))
+                btn.configure(text="Hide details" if showing else "Show details…")
+                btn.pack(side=tk.LEFT, padx=(14, 0))
+
     def _apply_simple_ui(self) -> None:
         """Repaint the Fly tab for the current Simplified UI preference."""
         rows = getattr(self, "_fly_freq_left_rows", None)
         if not rows:
             return
         simple = self._simple_ui()
+        full = self._fly_diagnostics_visible()
         self._fly_freq_hdr_lbl.configure(
-            text="FREQUENCY" if simple else "NEXT TX FREQUENCY"
+            text="FREQUENCY" if not full else "NEXT TX FREQUENCY"
         )
         opts = dict(rows)
-        order = self._FLY_SIMPLE_FREQ_ROWS if simple else tuple(name for name, _ in rows)
-        if simple:
-            # Live position closes the box as a tip, so it carries the bottom pad.
+        order = (
+            tuple(name for name, _ in rows)
+            if full
+            else self._FLY_SIMPLE_FREQ_ROWS
+        )
+        if not full:
             opts["_fly_boom_lbl"] = {"fill": tk.X, "padx": 14, "pady": (0, 2)}
             opts["_fly_position_lbl"] = {"fill": tk.X, "padx": 14, "pady": (4, 10)}
         for name, _kw in rows:
@@ -3869,20 +3933,35 @@ class MissionPlanner(tk.Tk):
         hint = getattr(self, "_fly_readback_hint_lbl", None)
         if hint is not None:
             hint.pack_forget()
-            if not simple:
+            if full:
                 hint.pack(
                     anchor="w", padx=14, pady=(0, 6), before=self.fly_readback_body
                 )
-        self._repack_fly_hint(show=not simple)
+        self._repack_fly_hint(show=full)
+        self._pack_fly_diagnostics(show=full)
         if hasattr(self, "fly_readback_frame"):
             self._refresh_readback_panel()
         if hasattr(self, "fly_freq_gate"):
             self._update_fly_freq_gate_status()
+        self._sync_fly_eam_ui()
         self.after_idle(self._fly_update_scrollregion)
 
     def _on_simple_ui_changed(self) -> None:
         self.config_data["simple_ui"] = bool(self.var_simple_ui.get())
         save_json(CONFIG_PATH, self.config_data)
+        self._fly_details_visible = False
+        if hasattr(self, "var_show_fly_diag"):
+            self.var_show_fly_diag.set(not self._simple_ui())
+        self._apply_simple_ui()
+
+    def _on_fly_diag_pref_changed(self) -> None:
+        """Setup → Advanced: Show full Fly diagnostics (inverse of simple_ui)."""
+        show = bool(self.var_show_fly_diag.get())
+        self.var_simple_ui.set(not show)
+        self._on_simple_ui_changed()
+
+    def _toggle_fly_details(self) -> None:
+        self._fly_details_visible = not bool(getattr(self, "_fly_details_visible", False))
         self._apply_simple_ui()
 
     # ---------- Plan tab ----------
@@ -3892,20 +3971,30 @@ class MissionPlanner(tk.Tk):
 
         toolbar = tk.Frame(root, bg=C_BG)
         toolbar.pack(fill=tk.X, padx=8, pady=8)
-
+        primary = tk.Frame(toolbar, bg=C_BG)
+        primary.pack(side=tk.LEFT)
+        for text, cmd, style in [
+            ("+ Add step", self.add_step, "Accent.TButton"),
+            ("Edit step…", self._open_step_editor, ""),
+            ("New…", self.new_mission, ""),
+            ("Load mission", self.load_mission, ""),
+            ("Save mission", self.save_mission, "Accent.TButton"),
+        ]:
+            kwargs = {"text": text, "command": cmd}
+            if style:
+                kwargs["style"] = style
+            ttk.Button(primary, **kwargs).pack(side=tk.LEFT, padx=3)
+        secondary = tk.Frame(toolbar, bg=C_BG)
+        secondary.pack(side=tk.RIGHT)
         for text, cmd in [
-            ("+ Add step", self.add_step),
             ("Duplicate", self.duplicate_step),
             ("Delete", self.delete_step),
             ("↑", lambda: self.move_step(-1)),
             ("↓", lambda: self.move_step(1)),
-            ("New…", self.new_mission),
-            ("Load mission", self.load_mission),
-            ("Save mission", self.save_mission),
-            ("Save mission as…", self.save_mission_as),
+            ("Save as…", self.save_mission_as),
             ("Reset flight cache", self.reset_flight_cache),
         ]:
-            ttk.Button(toolbar, text=text, command=cmd).pack(side=tk.LEFT, padx=3)
+            ttk.Button(secondary, text=text, command=cmd).pack(side=tk.LEFT, padx=2)
 
         body = tk.Frame(root, bg=C_BG)
         body.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
@@ -3923,7 +4012,7 @@ class MissionPlanner(tk.Tk):
             selectbackground=C_ACCENT,
             selectforeground="#041018",
             activestyle="none",
-            font=("Consolas", 11),
+            font=("Segoe UI", 11),
             borderwidth=0,
             highlightthickness=0,
             relief=tk.FLAT,
@@ -3984,7 +4073,7 @@ class MissionPlanner(tk.Tk):
         ttk.Label(prev_hdr, text="Preview", style="Header.TLabel").pack(side=tk.LEFT)
         tk.Label(
             prev_hdr,
-            text="Edit step… for settings · Regenerate re-rolls wording",
+            text="Edit step… to change settings",
             bg=C_PANEL,
             fg=C_MUTED,
             font=("Segoe UI", 8),
@@ -5403,7 +5492,7 @@ class MissionPlanner(tk.Tk):
             mod = block.get("mod", "AM")
             self.var_freq_hint.set(f"{airport_mhz:g} {mod}  (from Setup)")
         except (TypeError, ValueError):
-            self.var_freq_hint.set("(set freq in Setup → Airport)")
+            self.var_freq_hint.set("(set freq in Setup → Airbases)")
             airport_mhz = None
 
         self.freq_hint_lbl.pack_forget()
@@ -7814,6 +7903,7 @@ class MissionPlanner(tk.Tk):
         self.always_on_top = tk.BooleanVar(value=False)
         self._fly_phrase_req_id = 0
         self._fly_recovery_loading = False
+        self._fly_details_visible = False
 
         # Scrollable shell — YOU CAN SAY + frequency + play controls no longer
         # fit a single screen, so the whole Fly page scrolls like Plan.
@@ -7847,6 +7937,7 @@ class MissionPlanner(tk.Tk):
         self._srs_link_probing = False
         self._srs_link_after_id: str | None = None
         link_row = tk.Frame(shell, bg=C_BG)
+        self._fly_net_link_box = link_row
         link_row.pack(fill=tk.X, pady=(0, 10))
         head = tk.Frame(link_row, bg=C_BG)
         head.pack(fill=tk.X)
@@ -7955,7 +8046,7 @@ class MissionPlanner(tk.Tk):
         hdr.pack(fill=tk.X, padx=20, pady=(12, 0))
         tk.Label(
             hdr,
-            text="NEXT TRANSMIT",
+            text="NOW",
             bg=C_PANEL,
             fg=C_AMBER,
             font=("Segoe UI Semibold", 12),
@@ -8386,26 +8477,26 @@ class MissionPlanner(tk.Tk):
         )
         self._fly_hint_lbl.pack(fill=tk.X, padx=20, pady=(0, 14))
 
-        nav = tk.Frame(shell, bg=C_PANEL, highlightbackground=C_BORDER, highlightthickness=1)
-        nav.pack(fill=tk.X, pady=(0, 10))
-        inner = tk.Frame(nav, bg=C_PANEL)
-        inner.pack(fill=tk.X, padx=12, pady=10)
+        nav = tk.Frame(shell, bg=C_BG)
+        nav.pack(fill=tk.X, pady=(0, 8))
+        inner = tk.Frame(nav, bg=C_BG)
+        inner.pack(fill=tk.X)
         tk.Label(
             inner,
             text="Jump to step (no transmit)",
-            bg=C_PANEL,
-            fg=C_LABEL,
-            font=("Segoe UI Semibold", 11),
-        ).pack(anchor="w", pady=(0, 6))
-        row = tk.Frame(inner, bg=C_PANEL)
+            bg=C_BG,
+            fg=C_MUTED,
+            font=("Segoe UI", 9),
+        ).pack(anchor="w", pady=(0, 4))
+        row = tk.Frame(inner, bg=C_BG)
         row.pack(fill=tk.X)
         self.var_jump = tk.StringVar()
         self._lbl_jump = tk.Label(
             row,
             textvariable=self.var_jump,
             bg=C_CARD,
-            fg=C_TEXT,
-            font=("Segoe UI", 10),
+            fg=C_MUTED,
+            font=("Segoe UI", 9),
             anchor="w",
             padx=8,
             pady=4,
@@ -8422,19 +8513,24 @@ class MissionPlanner(tk.Tk):
         foot.pack(fill=tk.X, pady=(0, 6))
         ttk.Checkbutton(
             foot,
-            text="Keep window on top (kneeboard)",
+            text="Keep window on top",
             variable=self.always_on_top,
             command=lambda: self.attributes("-topmost", self.always_on_top.get()),
         ).pack(side=tk.LEFT)
         self.var_ownship_from_map = tk.BooleanVar(
             value=bool(self.config_data.get("ownship_from_map"))
         )
-        ttk.Checkbutton(
+        self._fly_map_chk = ttk.Checkbutton(
             foot,
             text="Test: map is my jet + route",
             variable=self.var_ownship_from_map,
             command=self._on_ownship_from_map_changed,
-        ).pack(side=tk.LEFT, padx=(14, 0))
+        )
+        self._fly_map_chk.pack(side=tk.LEFT, padx=(14, 0))
+        self._fly_details_btn = ttk.Button(
+            foot, text="Show details…", command=self._toggle_fly_details
+        )
+        self._fly_details_btn.pack(side=tk.LEFT, padx=(14, 0))
         self.fly_hotkey_hint = tk.StringVar(value="")
         tk.Label(
             foot,
@@ -8444,12 +8540,17 @@ class MissionPlanner(tk.Tk):
             font=("Segoe UI", 9),
         ).pack(side=tk.RIGHT)
 
-        # Compact last-action log (fixed height — shell scrolls, log must not expand)
-        tk.Label(shell, text="Last actions", bg=C_BG, fg=C_MUTED, font=("Segoe UI", 10)).pack(
-            anchor="w", pady=(4, 2)
-        )
+        self._fly_log_box = tk.Frame(shell, bg=C_BG)
+        self._fly_log_box.pack(fill=tk.X, pady=(4, 0))
+        tk.Label(
+            self._fly_log_box,
+            text="Last actions",
+            bg=C_BG,
+            fg=C_MUTED,
+            font=("Segoe UI", 10),
+        ).pack(anchor="w", pady=(0, 2))
         self.fly_log = tk.Text(
-            shell,
+            self._fly_log_box,
             height=4,
             bg=C_CARD,
             fg=C_MUTED,
@@ -9772,20 +9873,7 @@ class MissionPlanner(tk.Tk):
 
     def _refresh_fly_status_body(self) -> None:
         self._sync_client_flow_cursor()
-        keep: dict[str, Any] = {}
-        if self._atc_role() == "host":
-            for key in (
-                "opus_flight_id",
-                "opus_seat",
-                "opus_flight_label",
-                "opus_user_name",
-            ):
-                if self.config_data.get(key) in (None, ""):
-                    keep[key] = (self.engine.config or {}).get(key)
         self.engine.config = self.config_data
-        for key, value in keep.items():
-            if value not in (None, ""):
-                self.engine.config[key] = value
         self.engine.airports = self.airports
         self.engine.mission = self.mission
         self._consume_position_fire_clears()
@@ -9891,12 +9979,9 @@ class MissionPlanner(tk.Tk):
                 # start is actually approved on this sortie.
                 if live_ch == "ops" and pending_ch == "delivery" and not ops_start_done:
                     pending_ch = ""
-                if live_ch and pending_ch and live_ch == pending_ch:
-                    try:
-                        (self.engine.state or {}).pop("pending_contact", None)
-                    except Exception:
-                        pass
-                    pending_ch = ""
+                # Keep pending_contact until that agency actually TXes (check-in).
+                # Clearing it on tune alone made contact/switch readbacks look like
+                # fresh calls and let handoff autos arm early.
                 if pending_ch in ("control_east", "control_west"):
                     ll = self._ownship_ll()
                     if ll:
@@ -10396,7 +10481,7 @@ class MissionPlanner(tk.Tk):
         ttk.Label(hdr, text="Multi-pilot traffic", style="Header.TLabel").pack(side=tk.LEFT)
         ttk.Button(hdr, text="Refresh", command=self._refresh_traffic).pack(side=tk.RIGHT)
         self.var_traffic = tk.StringVar(
-            value="Role is Solo. Setup → Squadron → Host to accept other pilots."
+            value="Solo — this PC only. Setup → Basics → Host to accept other pilots."
         )
         tk.Label(
             panel,
@@ -10430,7 +10515,7 @@ class MissionPlanner(tk.Tk):
                 )
             else:
                 self.var_traffic.set(
-                    "Role is Solo. Setup → Squadron → Host to accept other pilots."
+                    "Solo — this PC only. Setup → Basics → Host if you are the ATC box."
                 )
             return
         data = self._atc_server.traffic()
@@ -10441,7 +10526,7 @@ class MissionPlanner(tk.Tk):
         ] or ["  (no LAN IPv4 — check the Host NIC)"]
         advertised = str(self.config_data.get("atc_host") or "").strip()
         if advertised in {"", "127.0.0.1", "localhost"}:
-            advertised = "(set Setup → Squadron → Address pilots type to your DCS/SRS host)"
+            advertised = "(set Setup → Basics → Address pilots type to your DCS/SRS host)"
         lines = [
             "This box listens on:",
             *ip_lines,
@@ -10578,6 +10663,22 @@ class MissionPlanner(tk.Tk):
 
     def _show_first_run(self) -> None:
         setup_welcome.show(self, force=True)
+        self._refresh_first_run_button()
+
+    def _refresh_first_run_button(self) -> None:
+        btn = getattr(self, "_first_run_btn", None)
+        if btn is None:
+            return
+        try:
+            btn.pack_forget()
+        except tk.TclError:
+            return
+        if setup_welcome.should_show(self.config_data):
+            before = getattr(self, "_help_btn", None)
+            if before is not None:
+                btn.pack(side=tk.RIGHT, padx=(0, 8), before=before)
+            else:
+                btn.pack(side=tk.RIGHT, padx=(0, 8))
 
     def _show_app_log(self) -> None:
         """Live application troubleshooting log (not radio traffic)."""
@@ -10758,14 +10859,14 @@ class MissionPlanner(tk.Tk):
                 [
                     ("heading", "Typical first flight"),
                     ("bullet", "0. New testers: use the First-run setup window (or Help topic “New pilot”)."),
-                    ("bullet", "1. Setup → Identity & TTS — set your Opus username (e.g. Turtle)."),
+                    ("bullet", "1. Setup → Basics — set your Opus username (e.g. Turtle)."),
                     ("bullet", "2. Title bar — type your CAOC name and click the green flight chip to pick the Opus flight. That saves immediately (no Setup Save needed)."),
-                    ("bullet", "3. Setup → Airport & radios — confirm SRS host and freqs (or Pull from Opus)."),
-                    ("bullet", "   Optional: Manual runway overrides flight-plan / wind selection."),
+                    ("bullet", "3. Setup → Airbases — confirm SRS host, then Sync freqs from Opus."),
+                    ("bullet", "   Optional: Basics → Manual runway overrides flight-plan / wind selection."),
                     ("bullet", "4. Plan Flight — New… (base flow + optional Opus), or Load / Save mission."),
                     ("bullet", "5. Fly — use Play and Advance through the sortie (or Stream Deck later)."),
                     ("heading", "Rehearse without DCS"),
-                    ("body", "Fly tab checkbox “Test: map is my jet” (or Setup → Map is my jet…) uses the local map as your aircraft instead of Opus. Drag or Play on the map; talk on the Fly tab. Tankers still come from CAOC. Uncheck the box to go back to Opus position."),
+                    ("body", "Fly → Show details → “Test: map is my jet” (or Setup → Advanced → Map is my jet…) uses the local map as your aircraft instead of Opus. Drag or Play on the map; talk on the Fly tab. Tankers still come from CAOC."),
                     ("heading", "Voice quality"),
                     ("body", "Windows voices work with zero setup (robotic)."),
                     ("body", "Google Cloud TTS is optional and sounds much more natural — see the Google topic."),
@@ -10798,14 +10899,14 @@ class MissionPlanner(tk.Tk):
                     ("bullet", "• If you only see the text: Setup → Paste JSON… and we save the file for you."),
                     ("bullet", f"• Default save location: {secrets}\\google-tts.json"),
                     ("heading", "4. Wire it in this app"),
-                    ("bullet", "• Setup → Identity & TTS → choose Google Cloud TTS."),
+                    ("bullet", "• Setup → Basics → choose Google Cloud TTS."),
                     ("bullet", "• Browse… to the .json file, OR Paste JSON… if you have the text."),
-                    ("bullet", "• Save setup → Voices tab → pick Neural2 / Chirp 3: HD voices."),
+                    ("bullet", "• Save setup → Advanced → Voices → pick Neural2 / Chirp 3: HD voices."),
                     ("bullet", "• Plan Flight → Hear locally to audition on speakers (no SRS)."),
                     ("bullet", "• Voices picker → Preview for a short sample before assigning."),
                     ("bullet", "• TX → SRS / Fly to hear it on the radio."),
                     ("heading", "Free tier / usage"),
-                    ("body", "Setup → Voices shows a local monthly character counter (resets each calendar month)."),
+                    ("body", "Setup → Advanced → Voices shows a local monthly character counter (resets each calendar month)."),
                     ("body", "Chirp / Neural2: 1M free chars/mo. WaveNet: 4M. ATC use is usually tiny."),
                     ("body", "At 90% of a free tier: red warning + auto-fallback Chirp→Neural2→WaveNet→Windows."),
                     ("body", "Host also caps each pilot (~80k chars/month). That jet falls back to Windows; others keep Google."),
@@ -10825,7 +10926,7 @@ class MissionPlanner(tk.Tk):
                     ("bullet", "• Hundreds of Neural2 / WaveNet voices."),
                     ("bullet", "• Hear locally / Voices → Preview play Google audio on speakers (uses API quota)."),
                     ("bullet", "• TX → SRS / Fly still used for radio transmit."),
-                    ("heading", "Setup → Voices"),
+                    ("heading", "Setup → Advanced → Voices"),
                     ("body", "Assign a default voice per agency (delivery, ground, tower, …)."),
                     (
                         "body",
@@ -10855,7 +10956,7 @@ class MissionPlanner(tk.Tk):
                     ("body", "Timeline shows it like: OTH … @255.4"),
                     ("heading", "Voice per step"),
                     ("body", "Choose sets a voice for that step only."),
-                    ("body", "Agency default clears the override and uses Setup → Voices for that channel."),
+                    ("body", "Agency default clears the override and uses Setup → Advanced → Voices for that channel."),
                     ("body", "Timeline marks a custom step voice with [v]."),
                     ("heading", "Runway per step"),
                     ("body", "Shown on taxi / tower / approach templates (and custom text)."),
@@ -10867,6 +10968,7 @@ class MissionPlanner(tk.Tk):
                 "Fly & Stream Deck",
                 [
                     ("heading", "Fly tab"),
+                    ("bullet", "• Cockpit-simple by default: frequency, YOU ARE ON, VOICE CUES, expected response. Show details… (or Setup → Advanced → Show full Fly diagnostics) brings back NET LINK, EAM, and the last-actions log."),
                     ("bullet", "• Play and Advance transmits the next enabled step to SRS. If a readback card is showing, Play closes it instead. Watch will not send the next call until you read back."),
                     ("bullet", "• Back / Reset / seek jump around the timeline."),
                     ("bullet", "• On Approach: recovery buttons (Overhead / Tactical / Straight-in / Instrument)."),
@@ -10889,7 +10991,7 @@ class MissionPlanner(tk.Tk):
                     ("bullet", "• No-keystroke option: http://127.0.0.1:8765/next and /back from a Stream Deck Website action; /seek_next and /seek_prev step the cursor without TX."),
                     ("bullet", "• Last trigger on the Controls tab confirms a press actually reached the app."),
                     ("heading", "Voice control"),
-                    ("bullet", "• Setup → Controls → Voice: tick Enable, then hold your normal SRS PTT and talk. Optional: Understand messy radio (LLM) uses the boom-chat Ollama/API setting — keyword grammar still wins; the model only maps a missed call onto an allowed intent and never writes a new clearance."),
+                    ("bullet", "• Setup → Controls → Voice: tick Enable, then hold your normal SRS PTT and talk. Optional messy-radio LLM is under Setup → Advanced."),
                     ("bullet", "• Mic and PTT are auto-detected from the SRS client config; override either if needed."),
                     ("bullet", "• PTT can be a HOTAS button or a key — whichever you already transmit with."),
                     ("bullet", "• Open with the agency — \u201cNellis Ground, Fleece 1, ready to taxi\u201d — or it stays silent."),
@@ -10916,6 +11018,20 @@ class MissionPlanner(tk.Tk):
                 ],
             ),
             (
+                "Airbases",
+                [
+                    ("heading", "Library, not a Nellis-only form"),
+                    ("bullet", "• Setup → Airbases lists every key in airports.json. Pick one to edit."),
+                    ("bullet", "• Default for new missions is the field New… pre-selects."),
+                    ("bullet", "• Sync freqs from Opus pulls theater UHF presets for this ICAO (Delivery, Ground, Tower, …)."),
+                    ("bullet", "• Compare checks the selected base against Opus. Manual MHz is behind Edit freqs manually…"),
+                    ("bullet", "• Add airbase… creates a skeleton (key + name + ICAO). Sync afterwards. Taxi/zones stay in the JSON for later."),
+                    ("bullet", "• Squadron SRS host/port is the shared radio box, stored on the selected airbase record."),
+                    ("bullet", "• This-sortie runway/parking overrides live on Setup → Basics."),
+                    ("muted", "Opus does not list airbases or taxi graphs — only theater radio presets."),
+                ],
+            ),
+            (
                 "Troubleshooting",
                 [
                     ("heading", "App log (diagnostics)"),
@@ -10924,7 +11040,7 @@ class MissionPlanner(tk.Tk):
                     ("bullet", "• It does not store radio call text or MIC transcripts — use Fly LAST HEARD for that."),
                     ("bullet", "• File lives under %LOCALAPPDATA%\\PitBossATC\\app.log (Open folder from the dialog)."),
                     ("heading", "No audio on SRS"),
-                    ("bullet", "• Confirm SRS client is on the same server (Setup → Airport → SRS host/port)."),
+                    ("bullet", "• Confirm SRS client is on the same server (Setup → Airbases → SRS host/port)."),
                     ("bullet", "• Check the step frequency matches a radio you’re monitoring."),
                     ("bullet", "• Use TX preview → SRS from Plan Flight to isolate one step."),
                     ("heading", "Google TTS errors"),
@@ -10933,7 +11049,7 @@ class MissionPlanner(tk.Tk):
                     ("bullet", "• Wrong voice id — use Neural2 names from the Voices tab or Google’s voice list."),
                     ("heading", "Callsign wrong / blank"),
                     ("bullet", "• Opus username must match your Opus signup."),
-                    ("bullet", "• Or set Manual callsign on Identity & TTS."),
+                    ("bullet", "• Or set Manual callsign on Setup → Basics."),
                     ("heading", "Windows voice list empty / robotic"),
                     ("body", "Install more voices via Windows Settings → Time & language → Speech → Manage voices."),
                     ("muted", "Still need better audio? Switch to Google BYOK (Help topic above)."),
@@ -10943,30 +11059,32 @@ class MissionPlanner(tk.Tk):
 
     # ---------- Setup ----------
     def _build_setup(self) -> None:
-        """Compact Setup: nested tabs so nothing needs scrolling."""
+        """Compact Setup: Basics / Airbases / Controls / Advanced."""
         f = self.tab_setup
 
         bottom = tk.Frame(f, bg=C_BG)
         bottom.pack(side=tk.BOTTOM, fill=tk.X, padx=16, pady=(0, 12))
         ttk.Button(bottom, text="Save setup", style="Accent.TButton", command=self.save_setup).pack(side=tk.LEFT)
-        ttk.Button(bottom, text="Pull freqs from Opus", command=self._pull_opus_freqs).pack(side=tk.LEFT, padx=8)
+        ttk.Button(bottom, text="Sync freqs from Opus", command=self._pull_opus_freqs).pack(side=tk.LEFT, padx=8)
         ttk.Button(bottom, text="Compare to Opus", command=self._compare_opus_freqs).pack(side=tk.LEFT, padx=4)
         ttk.Button(bottom, text="Regenerate kneeboard PDF", command=self._regen_pdf).pack(side=tk.LEFT, padx=8)
 
         self.setup_nb = ttk.Notebook(f)
         self.setup_nb.pack(fill=tk.BOTH, expand=True, padx=12, pady=(8, 8))
-        self.setup_tab_squadron = ttk.Frame(self.setup_nb)
-        self.setup_tab_identity = ttk.Frame(self.setup_nb)
-        self.setup_tab_voices = ttk.Frame(self.setup_nb)
-        self.setup_tab_airport = ttk.Frame(self.setup_nb)
+        self.setup_tab_basics = ttk.Frame(self.setup_nb)
+        self.setup_tab_airbases = ttk.Frame(self.setup_nb)
         self.setup_tab_controls = ttk.Frame(self.setup_nb)
-        self.setup_tab_prefs = ttk.Frame(self.setup_nb)
-        self.setup_nb.add(self.setup_tab_squadron, text="  Squadron  ")
-        self.setup_nb.add(self.setup_tab_identity, text="  Identity & TTS  ")
-        self.setup_nb.add(self.setup_tab_voices, text="  Voices  ")
-        self.setup_nb.add(self.setup_tab_airport, text="  Airport & radios  ")
+        self.setup_tab_advanced = ttk.Frame(self.setup_nb)
+        self.setup_nb.add(self.setup_tab_basics, text="  Basics  ")
+        self.setup_nb.add(self.setup_tab_airbases, text="  Airbases  ")
         self.setup_nb.add(self.setup_tab_controls, text="  Controls  ")
-        self.setup_nb.add(self.setup_tab_prefs, text="  Preferences  ")
+        self.setup_nb.add(self.setup_tab_advanced, text="  Advanced  ")
+        # Aliases so leftover helpers keep a valid parent.
+        self.setup_tab_squadron = self.setup_tab_basics
+        self.setup_tab_identity = self.setup_tab_basics
+        self.setup_tab_airport = self.setup_tab_airbases
+        self.setup_tab_voices = self.setup_tab_advanced
+        self.setup_tab_prefs = self.setup_tab_advanced
 
         self._ensure_identity_vars()
         self.var_volume = tk.DoubleVar(value=0.8)
@@ -10978,77 +11096,147 @@ class MissionPlanner(tk.Tk):
         self.var_google_credentials = tk.StringVar()
         self.var_tts_status = tk.StringVar(value="")
         self.var_voice_status = tk.StringVar(value="")
+        self.var_simple_ui = tk.BooleanVar(
+            value=bool(self.config_data.get("simple_ui", True))
+        )
+        self.var_show_fly_diag = tk.BooleanVar(value=not bool(self.var_simple_ui.get()))
 
         self.var_volume.trace_add("write", lambda *_: self.var_volume_lbl.set(f"{float(self.var_volume.get()):.2f}"))
         self.var_speed.trace_add(
             "write", lambda *_: self.var_speed_lbl.set(str(atc_phrase.tts_speed(speed=self.var_speed.get())))
         )
 
-        self._build_setup_squadron()
-        self._build_setup_identity()
-        self._build_setup_voices()
+        self._build_setup_basics()
         self._build_setup_airport()
         self._build_setup_controls()
-        self._build_setup_prefs()
+        self._build_setup_advanced()
 
-    def _build_setup_prefs(self) -> None:
-        root = self.setup_tab_prefs
-        panel = tk.Frame(root, bg=C_PANEL, highlightbackground=C_BORDER, highlightthickness=1)
-        panel.pack(fill=tk.BOTH, expand=True, padx=12, pady=12)
+    def _build_setup_basics(self) -> None:
+        root = self.setup_tab_basics
+        host = tk.Frame(root, bg=C_BG)
+        host.pack(fill=tk.BOTH, expand=True)
+        canvas = tk.Canvas(host, bg=C_BG, highlightthickness=0, bd=0)
+        vsb = ttk.Scrollbar(host, orient=tk.VERTICAL, command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        inner = tk.Frame(canvas, bg=C_BG)
+        win = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _cfg(_e: tk.Event | None = None) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _cw(event: tk.Event) -> None:
+            canvas.itemconfigure(win, width=event.width)
+
+        inner.bind("<Configure>", _cfg)
+        canvas.bind("<Configure>", _cw)
+        self._setup_basics_canvas = canvas
+        self._bind_setup_tab_wheel(canvas, inner, host, self.setup_tab_basics)
+
+        self._build_setup_squadron(inner)
+        self._build_setup_identity(inner)
+        self._build_setup_sortie_overrides(inner)
+
+    def _build_setup_sortie_overrides(self, parent: tk.Frame) -> None:
+        panel = tk.Frame(parent, bg=C_PANEL, highlightbackground=C_BORDER, highlightthickness=1)
+        panel.pack(fill=tk.X, padx=12, pady=(0, 12))
         inner = tk.Frame(panel, bg=C_PANEL)
-        inner.pack(fill=tk.BOTH, expand=True, padx=14, pady=14)
-        ttk.Label(inner, text="Fly tab display", style="Header.TLabel").pack(anchor="w")
+        inner.pack(fill=tk.X, padx=14, pady=14)
+        ttk.Label(inner, text="This sortie", style="Header.TLabel").pack(anchor="w")
         tk.Label(
             inner,
-            text=(
-                "Simplified UI strips the Fly tab back to what a pilot needs in the "
-                "cockpit: the frequency, whether you are on it, what to say, and what "
-                "ATC will answer. The lines that only matter while setting the app up "
-                "or testing it — SRS radio name, agency name repeated under the "
-                "frequency, YOU CAN SAY, the gate line, the readback preamble, your own "
-                "callsign, and the TTS / template line — are hidden. Nothing changes "
-                "about what transmits or what voice recognizes, and the live-position "
-                "line moves to the bottom of the frequency box as a tip."
-            ),
+            text="Optional overrides for this flight — not stored on the airbase.",
             bg=C_PANEL,
             fg=C_MUTED,
             font=("Segoe UI", 9),
-            wraplength=880,
-            justify="left",
-        ).pack(anchor="w", pady=(4, 12))
-        self.var_simple_ui = tk.BooleanVar(
-            value=bool(self.config_data.get("simple_ui"))
-        )
-        ttk.Checkbutton(
-            inner,
-            text="Simplified UI — hide setup / testing detail on Fly",
-            variable=self.var_simple_ui,
-            command=self._on_simple_ui_changed,
-        ).pack(anchor="w")
+        ).pack(anchor="w", pady=(2, 8))
+        if not hasattr(self, "var_runway_override"):
+            self.var_runway_override = tk.StringVar()
+        if not hasattr(self, "var_parking_override"):
+            self.var_parking_override = tk.StringVar()
+        lf = tk.Frame(inner, bg=C_PANEL)
+        lf.pack(fill=tk.X)
+        self._setup_field(lf, 0, "Manual runway", self.var_runway_override, width=28)
+        rwy_hint = tk.Frame(lf, bg=C_PANEL)
+        rwy_hint.grid(row=1, column=1, sticky="w")
         tk.Label(
-            inner,
-            text="Takes effect immediately and saves on its own — Save setup is not needed.",
+            rwy_hint,
+            text="Blank = flight plan / wind  (e.g. 21R or 03L)",
             bg=C_PANEL,
             fg=C_MUTED,
             font=("Segoe UI", 8),
-        ).pack(anchor="w", pady=(4, 0))
+        ).pack(side=tk.LEFT)
+        ttk.Button(
+            rwy_hint,
+            text="Use winds",
+            width=10,
+            command=self._clear_setup_runway_override,
+        ).pack(side=tk.LEFT, padx=(8, 0))
+        self._setup_field(lf, 2, "Manual parking", self.var_parking_override, width=28)
+        tk.Label(
+            lf,
+            text="Blank = squadron parking (e.g. G Revetments or Ramp)",
+            bg=C_PANEL,
+            fg=C_MUTED,
+            font=("Segoe UI", 8),
+        ).grid(row=3, column=1, sticky="w")
+        lf.columnconfigure(1, weight=1)
 
-    def _build_setup_squadron(self) -> None:
-        root = self.setup_tab_squadron
+    def _bind_setup_tab_wheel(
+        self,
+        canvas: tk.Canvas,
+        panel: tk.Frame,
+        scroll_host: tk.Frame,
+        tab: tk.Misc,
+    ) -> None:
+        def _wheel(event: tk.Event) -> str | None:
+            try:
+                if self.nb.index(self.nb.select()) != self.nb.index(self.tab_setup):
+                    return None
+                if self.setup_nb.index(self.setup_nb.select()) != self.setup_nb.index(tab):
+                    return None
+            except tk.TclError:
+                return None
+            if self._wheel_owned_elsewhere(event):
+                return None
+            delta = int(-1 * (event.delta / 120)) if event.delta else 0
+            if delta:
+                canvas.yview_scroll(delta, "units")
+            return "break"
+
+        def _maybe_unbind(_event: object | None = None) -> None:
+            try:
+                if self.nb.index(self.nb.select()) != self.nb.index(self.tab_setup):
+                    canvas.unbind_all("<MouseWheel>")
+                    return
+                if self.setup_nb.index(self.setup_nb.select()) != self.setup_nb.index(tab):
+                    canvas.unbind_all("<MouseWheel>")
+                    return
+                x, y = self.winfo_pointerxy()
+                widget = self.winfo_containing(x, y)
+                while widget is not None:
+                    if widget in (canvas, panel, scroll_host, tab):
+                        return
+                    widget = getattr(widget, "master", None)
+                canvas.unbind_all("<MouseWheel>")
+            except tk.TclError:
+                pass
+
+        for widget in (canvas, panel, scroll_host):
+            widget.bind("<Enter>", lambda _e: canvas.bind_all("<MouseWheel>", _wheel))
+            widget.bind("<Leave>", _maybe_unbind)
+
+    def _build_setup_squadron(self, root: tk.Misc | None = None) -> None:
+        root = root or self.setup_tab_squadron
         panel = tk.Frame(root, bg=C_PANEL, highlightbackground=C_BORDER, highlightthickness=1)
-        panel.pack(fill=tk.BOTH, expand=True, padx=12, pady=12)
+        panel.pack(fill=tk.X, padx=12, pady=(12, 12))
         inner = tk.Frame(panel, bg=C_PANEL)
-        inner.pack(fill=tk.BOTH, expand=True, padx=14, pady=14)
-        ttk.Label(inner, text="Multi-pilot ATC", style="Header.TLabel").pack(anchor="w")
+        inner.pack(fill=tk.X, padx=14, pady=14)
+        ttk.Label(inner, text="Squadron", style="Header.TLabel").pack(anchor="w")
         tk.Label(
             inner,
-            text=(
-                "Solo is today's one-PC app. Host is the dedicated ATC box that "
-                "speaks on SRS. Client is a pilot PC: voice recognition stays local, "
-                "the host answers on the radio. Same token on every machine — never "
-                "share the Google JSON key. Default is Solo so this branch does not "
-                "change how you already fly."
-            ),
+            text="Solo is one PC. Host speaks on SRS for the squadron. Client is a flying PC. See Help.",
             bg=C_PANEL,
             fg=C_MUTED,
             font=("Segoe UI", 9),
@@ -11100,11 +11288,8 @@ class MissionPlanner(tk.Tk):
         tk.Label(
             lf,
             text=(
-                "Pilots: type the same hostname you already use for SRS "
-                f"(for example showtime.455aew.com), ATC port {atc_net.DEFAULT_ATC_PORT} "
-                "(not SRS 5002). Off-LAN is fine — the Showtime router must forward "
-                "TCP 8766 to the DCS server, same as 5002. "
-                "127.0.0.1 is only for tests on the Host PC. Same token on every machine."
+                f"Same hostname as SRS, ATC port {atc_net.DEFAULT_ATC_PORT} (not 5002). "
+                "Same token on every machine. See Help for off-LAN / Host."
             ),
             bg=C_PANEL,
             fg=C_MUTED,
@@ -11206,13 +11391,43 @@ class MissionPlanner(tk.Tk):
         self._set_net_status(f"CLIENT  {health_url}  ·  {cs}")
 
     def _on_atc_role_change(self) -> None:
+        if hasattr(self, "var_atc_role"):
+            role = str(self.var_atc_role.get() or "solo").strip().lower()
+            if role in atc_net.ROLES:
+                self.config_data["atc_role"] = role
         if hasattr(self, "var_tts_provider"):
             self._update_tts_status()
+        # Dedicated Host routes client flights — drop any leftover Solo jet
+        # so the top bar stops prompting and Opus stops 404-spamming.
+        if atc_net.role_of(self.config_data) == "host":
+            self._strip_host_ownship_flight(persist=False)
+            self._update_opus_flight_label()
+            self._refresh_opus_identity_bar()
 
-    def _build_setup_identity(self) -> None:
-        root = self.setup_tab_identity
+    def _strip_host_ownship_flight(self, *, persist: bool = True) -> bool:
+        """Clear Host-local Opus jet fields. Returns True if anything changed."""
+        changed = False
+        for key in ("opus_flight_id", "opus_seat", "opus_flight_label", "callsign_override"):
+            if self.config_data.get(key) not in (None, ""):
+                self.config_data.pop(key, None)
+                changed = True
+        if hasattr(self, "var_callsign_override") and self.var_callsign_override.get().strip():
+            self.var_callsign_override.set("")
+            changed = True
+        if hasattr(self, "var_callsign"):
+            self.var_callsign.set("Host · no own jet")
+        if changed and persist:
+            try:
+                save_json(CONFIG_PATH, self.config_data)
+            except OSError:
+                pass
+            atc_phrase.invalidate_opus_cache()
+        return changed
+
+    def _build_setup_identity(self, root: tk.Misc | None = None) -> None:
+        root = root or self.setup_tab_identity
         panel = tk.Frame(root, bg=C_PANEL, highlightbackground=C_BORDER, highlightthickness=1)
-        panel.pack(fill=tk.BOTH, expand=True, padx=12, pady=12)
+        panel.pack(fill=tk.X, padx=12, pady=(0, 12))
 
         # Two columns: identity | TTS
         cols = tk.Frame(panel, bg=C_PANEL)
@@ -11231,12 +11446,11 @@ class MissionPlanner(tk.Tk):
         user_setup.bind("<KeyRelease>", self._schedule_identity_user_commit)
         tk.Label(
             lf,
-            text="Saves as you type. Matches your seat on the selected flight when signed up.",
+            text="Saves as you type. Matches your seat on the selected flight.",
             bg=C_PANEL,
             fg=C_MUTED,
             font=("Segoe UI", 8),
         ).grid(row=1, column=1, sticky="w")
-        self._setup_field(lf, 2, "Opus backend URL", self.var_backend)
         tk.Label(lf, text="Selected flight", bg=C_PANEL, fg=C_LABEL).grid(row=3, column=0, sticky="w", pady=6)
         flight_row = tk.Frame(lf, bg=C_PANEL)
         flight_row.grid(row=3, column=1, sticky="we", pady=6)
@@ -11328,7 +11542,7 @@ class MissionPlanner(tk.Tk):
         self._tts_status_windows = tk.Label(
             right,
             text=(
-                "Windows voices — no API key. Assign per agency on Voices. "
+                "Windows voices — no API key. Assign per agency on Advanced → Voices. "
                 "Extra installed voices (Linda / Mark / Richard) need Unlock OneCore… once (admin)."
             ),
             bg=C_PANEL,
@@ -11368,10 +11582,10 @@ class MissionPlanner(tk.Tk):
             anchor="e"
         )
 
-    def _build_setup_voices(self) -> None:
-        root = self.setup_tab_voices
+    def _build_setup_voices(self, root: tk.Misc | None = None) -> None:
+        root = root or self.setup_tab_voices
         panel = tk.Frame(root, bg=C_PANEL, highlightbackground=C_BORDER, highlightthickness=1)
-        panel.pack(fill=tk.BOTH, expand=True, padx=12, pady=12)
+        panel.pack(fill=tk.X, padx=14, pady=(0, 8))
 
         hdr = tk.Frame(panel, bg=C_PANEL)
         hdr.pack(fill=tk.X, padx=14, pady=(12, 6))
@@ -11469,74 +11683,347 @@ class MissionPlanner(tk.Tk):
         grid.columnconfigure(1, weight=1)
         self.voice_labels = []
 
+    def _setup_airport_keys(self) -> list[str]:
+        return sorted(self.airports.keys()) or ["nellis"]
+
+    def _setup_airport_key(self) -> str:
+        var = getattr(self, "var_setup_airport_key", None)
+        if var is not None:
+            key = str(var.get() or "").strip()
+            if key in self.airports:
+                return key
+        return self._airport_key()
+
+    def _airbase_label(self, key: str) -> str:
+        ap = self.airports.get(key) or {}
+        name = str(ap.get("name") or key).strip() or key
+        icao = str(ap.get("icao") or "").strip().upper()
+        return f"{name} ({icao})" if icao else name
+
+    def _refresh_airbase_picker(self, *, select: str | None = None) -> None:
+        keys = self._setup_airport_keys()
+        combo = getattr(self, "_airbase_combo", None)
+        if combo is not None:
+            combo.configure(values=keys)
+        key = select or (self.var_setup_airport_key.get() if hasattr(self, "var_setup_airport_key") else "")
+        if key not in keys:
+            key = self._airport_key() if self._airport_key() in keys else keys[0]
+        if hasattr(self, "var_setup_airport_key"):
+            self.var_setup_airport_key.set(key)
+        self._refresh_airbase_mission_hint()
+
+    def _refresh_airbase_mission_hint(self) -> None:
+        if not hasattr(self, "var_airbase_mission"):
+            return
+        mission_key = self._airport_key()
+        default_key = str(self.config_data.get("default_airport") or mission_key)
+        self.var_airbase_mission.set(
+            f"This mission: {self._airbase_label(mission_key)}   ·   Default for new missions: {self._airbase_label(default_key)}"
+        )
+        if hasattr(self, "var_default_airport"):
+            selected = self._setup_airport_key()
+            self.var_default_airport.set(selected == default_key)
+
+    def _on_setup_airport_key_change(self, _event: object | None = None) -> None:
+        if getattr(self, "_setup_airport_loading", False):
+            return
+        prev = getattr(self, "_setup_airport_prev_key", None)
+        if prev and prev in self.airports:
+            self._flush_setup_airport_form(prev)
+        self._load_setup_airport_form()
+        self._setup_airport_prev_key = self._setup_airport_key()
+
+    def _flush_setup_airport_form(self, key: str | None = None) -> None:
+        """Write form fields into airports[key] without touching runways / SIDs."""
+        if not hasattr(self, "var_ap_name"):
+            return
+        key = key or self._setup_airport_key()
+        ap = self.airports.get(key)
+        if not isinstance(ap, dict):
+            ap = {}
+            self.airports[key] = ap
+        ap["name"] = self.var_ap_name.get().strip() or key.title()
+        ap["icao"] = self.var_icao.get().strip().upper()
+        ap["srs_host"] = self.var_host.get().strip()
+        try:
+            ap["srs_port"] = int(self.var_port.get() or 5002)
+        except ValueError:
+            ap["srs_port"] = 5002
+        if hasattr(self, "var_coalition"):
+            try:
+                ap["coalition"] = int(self.var_coalition.get() or 2)
+            except ValueError:
+                ap["coalition"] = 2
+        if hasattr(self, "var_expect_minutes"):
+            try:
+                ap["expect_minutes"] = int(re.sub(r"\D", "", self.var_expect_minutes.get()) or "10")
+            except ValueError:
+                ap["expect_minutes"] = 10
+        for ch in atc_phrase.CHANNELS:
+            if ch == "tanker":
+                continue
+            try:
+                mhz = float(self.freq_vars[ch].get())
+            except (ValueError, KeyError):
+                continue
+            prev = ap.get(ch) or {}
+            block: dict[str, Any] = {
+                "freq_mhz": mhz,
+                "mod": prev.get("mod") or "AM",
+                "source": prev.get("source") or "local",
+            }
+            if prev.get("local_preset") is not None:
+                try:
+                    block["local_preset"] = int(prev["local_preset"])
+                except (TypeError, ValueError):
+                    pass
+            ap[ch] = block
+
+    def _load_setup_airport_form(self) -> None:
+        if not hasattr(self, "var_ap_name"):
+            return
+        self._setup_airport_loading = True
+        try:
+            key = self._setup_airport_key()
+            ap = self.airports.get(key) or {}
+            self.var_ap_name.set(ap.get("name", ""))
+            self.var_icao.set(ap.get("icao", ""))
+            self.var_host.set(ap.get("srs_host", ""))
+            self.var_port.set(str(ap.get("srs_port", 5002)))
+            self.var_coalition.set(str(ap.get("coalition", 2)))
+            self.var_expect_minutes.set(str(ap.get("expect_minutes") or 10))
+            runways = [str(x).strip() for x in (ap.get("runways") or []) if str(x).strip()]
+            self.var_ops_runways.set(
+                f"Ops runways: {', '.join(runways)}" if runways else "Ops runways: (set in airports.json)"
+            )
+            for ch in atc_phrase.CHANNELS:
+                block = ap.get(ch) or {}
+                if ch in self.freq_vars:
+                    self.freq_vars[ch].set(str(block.get("freq_mhz", "")))
+            self._setup_airport_prev_key = key
+            self._refresh_airbase_mission_hint()
+        finally:
+            self._setup_airport_loading = False
+
+    def _on_default_airport_toggle(self) -> None:
+        if getattr(self, "_setup_airport_loading", False):
+            return
+        if bool(self.var_default_airport.get()):
+            self.config_data["default_airport"] = self._setup_airport_key()
+            try:
+                save_json(CONFIG_PATH, self.config_data)
+            except OSError:
+                pass
+        self._refresh_airbase_mission_hint()
+
+    def _toggle_manual_freqs(self) -> None:
+        show = bool(self.var_manual_freqs.get())
+        box = getattr(self, "_manual_freq_box", None)
+        if box is None:
+            return
+        try:
+            box.pack_forget()
+        except tk.TclError:
+            pass
+        if show:
+            box.pack(fill=tk.X, pady=(6, 0))
+        btn = getattr(self, "_manual_freq_btn", None)
+        if btn is not None:
+            btn.configure(text="Hide manual freqs" if show else "Edit freqs manually…")
+
+    def _add_airbase_dialog(self) -> None:
+        dlg = tk.Toplevel(self)
+        dlg.title("Add airbase")
+        dlg.configure(bg=C_BG)
+        dlg.transient(self)
+        dlg.grab_set()
+        self._place_dialog(dlg, 420, 260)
+        inner = tk.Frame(dlg, bg=C_PANEL, highlightbackground=C_BORDER, highlightthickness=1)
+        inner.pack(fill=tk.BOTH, expand=True, padx=12, pady=12)
+        form = tk.Frame(inner, bg=C_PANEL)
+        form.pack(fill=tk.X, padx=14, pady=14)
+        var_key = tk.StringVar()
+        var_name = tk.StringVar()
+        var_icao = tk.StringVar()
+        for i, (label, var) in enumerate(
+            (("Key (e.g. creech)", var_key), ("Display name", var_name), ("ICAO", var_icao))
+        ):
+            tk.Label(form, text=label, bg=C_PANEL, fg=C_LABEL, font=("Segoe UI", 10)).grid(
+                row=i, column=0, sticky="w", pady=4, padx=(0, 10)
+            )
+            ttk.Entry(form, textvariable=var, width=24).grid(row=i, column=1, sticky="we", pady=4)
+        form.columnconfigure(1, weight=1)
+        tk.Label(
+            inner,
+            text="Creates a skeleton. Sync freqs from Opus after you set ICAO.",
+            bg=C_PANEL,
+            fg=C_MUTED,
+            font=("Segoe UI", 8),
+        ).pack(anchor="w", padx=14, pady=(0, 8))
+
+        def _ok() -> None:
+            key = re.sub(r"[^a-z0-9_]+", "_", var_key.get().strip().lower()).strip("_")
+            if not key:
+                messagebox.showerror("Add airbase", "Need a key.", parent=dlg)
+                return
+            if key in self.airports:
+                messagebox.showerror("Add airbase", f"{key} already exists.", parent=dlg)
+                return
+            src = self.airports.get(self._setup_airport_key()) or {}
+            skeleton: dict[str, Any] = {
+                "name": var_name.get().strip() or key.title(),
+                "icao": var_icao.get().strip().upper(),
+                "srs_host": src.get("srs_host") or "",
+                "srs_port": src.get("srs_port") or 5002,
+                "coalition": src.get("coalition") or 2,
+                "runways": list(src.get("runways") or []),
+                "expect_minutes": src.get("expect_minutes") or 10,
+            }
+            for ch in atc_phrase.CHANNELS:
+                if ch == "tanker":
+                    continue
+                skeleton[ch] = {"freq_mhz": "", "mod": "AM", "source": "local"}
+            self.airports[key] = skeleton
+            self._refresh_airbase_picker(select=key)
+            self._load_setup_airport_form()
+            dlg.destroy()
+
+        btns = tk.Frame(inner, bg=C_PANEL)
+        btns.pack(fill=tk.X, padx=14, pady=(0, 12))
+        ttk.Button(btns, text="Add", style="Accent.TButton", command=_ok).pack(side=tk.RIGHT)
+        ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side=tk.RIGHT, padx=(0, 8))
+
     def _build_setup_airport(self) -> None:
-        root = self.setup_tab_airport
+        root = self.setup_tab_airbases
         panel = tk.Frame(root, bg=C_PANEL, highlightbackground=C_BORDER, highlightthickness=1)
         panel.pack(fill=tk.BOTH, expand=True, padx=12, pady=12)
-
-        ttk.Label(panel, text="Airport & radios", style="Header.TLabel").pack(anchor="w", padx=14, pady=(12, 8))
+        inner = tk.Frame(panel, bg=C_PANEL)
+        inner.pack(fill=tk.BOTH, expand=True, padx=14, pady=14)
 
         self.var_ap_name = tk.StringVar()
         self.var_icao = tk.StringVar()
         self.var_host = tk.StringVar()
         self.var_port = tk.StringVar()
         self.var_coalition = tk.StringVar()
-        self.var_runways = tk.StringVar()
-        self.var_runway_override = tk.StringVar()
-        self.var_parking_override = tk.StringVar()
         self.var_expect_minutes = tk.StringVar()
-        self.var_known_sids = tk.StringVar()
+        self.var_ops_runways = tk.StringVar(value="")
+        self.var_airbase_mission = tk.StringVar(value="")
+        self.var_setup_airport_key = tk.StringVar()
+        self.var_default_airport = tk.BooleanVar(value=False)
+        self.var_manual_freqs = tk.BooleanVar(value=False)
         self.freq_vars = {ch: tk.StringVar() for ch in atc_phrase.CHANNELS}
+        self._setup_airport_loading = False
+        self._setup_airport_prev_key = ""
 
-        body = tk.Frame(panel, bg=C_PANEL)
-        body.pack(fill=tk.BOTH, expand=True, padx=14, pady=(0, 8))
+        ttk.Label(inner, text="Airbases", style="Header.TLabel").pack(anchor="w")
+        tk.Label(
+            inner,
+            text="Pick a field, then sync agency UHF from Opus. SRS is the squadron radio box.",
+            bg=C_PANEL,
+            fg=C_MUTED,
+            font=("Segoe UI", 9),
+        ).pack(anchor="w", pady=(2, 8))
+
+        pick = tk.Frame(inner, bg=C_PANEL)
+        pick.pack(fill=tk.X, pady=(0, 6))
+        tk.Label(pick, text="Airbase", bg=C_PANEL, fg=C_LABEL, font=("Segoe UI", 10)).pack(side=tk.LEFT)
+        self._airbase_combo = ttk.Combobox(
+            pick,
+            textvariable=self.var_setup_airport_key,
+            values=self._setup_airport_keys(),
+            state="readonly",
+            width=22,
+        )
+        self._airbase_combo.pack(side=tk.LEFT, padx=(8, 10))
+        self._airbase_combo.bind("<<ComboboxSelected>>", self._on_setup_airport_key_change)
+        ttk.Checkbutton(
+            pick,
+            text="Default for new missions",
+            variable=self.var_default_airport,
+            command=self._on_default_airport_toggle,
+        ).pack(side=tk.LEFT)
+        ttk.Button(pick, text="Add airbase…", command=self._add_airbase_dialog).pack(side=tk.RIGHT)
+        tk.Label(
+            inner,
+            textvariable=self.var_airbase_mission,
+            bg=C_PANEL,
+            fg=C_MUTED,
+            font=("Segoe UI", 8),
+        ).pack(anchor="w", pady=(0, 10))
+
+        body = tk.Frame(inner, bg=C_PANEL)
+        body.pack(fill=tk.BOTH, expand=True)
         left = tk.Frame(body, bg=C_PANEL)
         right = tk.Frame(body, bg=C_PANEL)
-        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 16))
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 20))
         right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         lf = tk.Frame(left, bg=C_PANEL)
         lf.pack(fill=tk.X)
-        self._setup_field(lf, 0, "Airport name", self.var_ap_name, width=28)
+        self._setup_field(lf, 0, "Name", self.var_ap_name, width=28)
         self._setup_field(lf, 1, "ICAO", self.var_icao, width=28)
-        self._setup_field(lf, 2, "SRS host", self.var_host, width=28)
-        self._setup_field(lf, 3, "SRS port", self.var_port, width=28)
-        self._setup_field(lf, 4, "Coalition (2=blue)", self.var_coalition, width=28)
-        self._setup_field(lf, 5, "Runways", self.var_runways, width=28)
-        self._setup_field(lf, 6, "Manual runway", self.var_runway_override, width=28)
-        rwy_hint = tk.Frame(lf, bg=C_PANEL)
-        rwy_hint.grid(row=7, column=1, sticky="w")
         tk.Label(
-            rwy_hint,
-            text="Blank = flight plan / wind  (e.g. 21R or 03L)",
+            lf,
+            textvariable=self.var_ops_runways,
             bg=C_PANEL,
             fg=C_MUTED,
             font=("Segoe UI", 8),
-        ).pack(side=tk.LEFT)
-        ttk.Button(
-            rwy_hint,
-            text="Use winds",
-            width=10,
-            command=self._clear_setup_runway_override,
-        ).pack(side=tk.LEFT, padx=(8, 0))
-        self._setup_field(lf, 8, "Manual parking", self.var_parking_override, width=28)
-        park_hint = tk.Frame(lf, bg=C_PANEL)
-        park_hint.grid(row=9, column=1, sticky="w")
-        tk.Label(
-            park_hint,
-            text="Blank = squadron (e.g. G Revetments or Ramp)",
-            bg=C_PANEL,
-            fg=C_MUTED,
-            font=("Segoe UI", 8),
-        ).pack(side=tk.LEFT)
-        self._setup_field(lf, 10, "Expect FL (min)", self.var_expect_minutes, width=28)
-        self._setup_field(lf, 11, "Known SIDs", self.var_known_sids, width=28)
+        ).grid(row=2, column=1, sticky="w", pady=(0, 6))
         lf.columnconfigure(1, weight=1)
 
-        tk.Label(right, text="Frequencies (MHz)", bg=C_PANEL, fg=C_LABEL, font=("Segoe UI Semibold", 10)).pack(
-            anchor="w", pady=(0, 6)
+        ttk.Label(left, text="Squadron SRS", style="Header.TLabel").pack(anchor="w", pady=(12, 4))
+        tk.Label(
+            left,
+            text="Shared radio server — not unique to this field.",
+            bg=C_PANEL,
+            fg=C_MUTED,
+            font=("Segoe UI", 8),
+        ).pack(anchor="w", pady=(0, 6))
+        srs = tk.Frame(left, bg=C_PANEL)
+        srs.pack(fill=tk.X)
+        self._setup_field(srs, 0, "SRS host", self.var_host, width=28)
+        self._setup_field(srs, 1, "SRS port", self.var_port, width=10)
+        srs.columnconfigure(1, weight=1)
+
+        adv = tk.Frame(left, bg=C_PANEL)
+        adv.pack(fill=tk.X, pady=(14, 0))
+        ttk.Label(adv, text="This field (advanced)", style="Header.TLabel").pack(anchor="w")
+        extra = tk.Frame(adv, bg=C_PANEL)
+        extra.pack(fill=tk.X, pady=(6, 0))
+        self._setup_field(extra, 0, "Coalition (2=blue)", self.var_coalition, width=10)
+        self._setup_field(extra, 1, "Expect FL (min)", self.var_expect_minutes, width=10)
+        extra.columnconfigure(1, weight=1)
+
+        ttk.Label(right, text="Frequencies", style="Header.TLabel").pack(anchor="w")
+        tk.Label(
+            right,
+            text="Opus theater UHF is the source of truth for mapped agencies.",
+            bg=C_PANEL,
+            fg=C_MUTED,
+            font=("Segoe UI", 8),
+        ).pack(anchor="w", pady=(2, 8))
+        sync = tk.Frame(right, bg=C_PANEL)
+        sync.pack(fill=tk.X)
+        ttk.Button(
+            sync, text="Sync freqs from Opus", style="Accent.TButton", command=self._pull_opus_freqs
+        ).pack(side=tk.LEFT)
+        ttk.Button(sync, text="Compare", command=self._compare_opus_freqs).pack(side=tk.LEFT, padx=(8, 0))
+        self._manual_freq_btn = ttk.Button(
+            sync, text="Edit freqs manually…", command=lambda: self._show_manual_freqs(True)
         )
-        ff = tk.Frame(right, bg=C_PANEL)
+        self._manual_freq_btn.pack(side=tk.LEFT, padx=(8, 0))
+        tk.Label(
+            right,
+            textvariable=self.var_freq_status,
+            bg=C_PANEL,
+            fg=C_MUTED,
+            font=("Segoe UI", 8),
+            wraplength=440,
+            justify="left",
+        ).pack(anchor="w", pady=(8, 0))
+
+        self._manual_freq_box = tk.Frame(right, bg=C_PANEL)
+        ff = tk.Frame(self._manual_freq_box, bg=C_PANEL)
         ff.pack(fill=tk.X)
         freq_channels = [ch for ch in atc_phrase.CHANNELS if ch != "tanker"]
         for i, ch in enumerate(freq_channels):
@@ -11548,15 +12035,14 @@ class MissionPlanner(tk.Tk):
                 row=r, column=c * 2 + 1, sticky="w", pady=3, padx=(0, 16)
             )
 
-        tk.Label(
-            panel,
-            textvariable=self.var_freq_status,
-            bg=C_PANEL,
-            fg=C_MUTED,
-            font=("Segoe UI", 8),
-            wraplength=900,
-            justify="left",
-        ).pack(anchor="w", padx=14, pady=(4, 8))
+        self._refresh_airbase_picker(select=self._airport_key())
+        self._load_setup_airport_form()
+
+    def _show_manual_freqs(self, show: bool | None = None) -> None:
+        if show is None:
+            show = not bool(self.var_manual_freqs.get())
+        self.var_manual_freqs.set(bool(show))
+        self._toggle_manual_freqs()
 
     def _build_setup_controls(self) -> None:
         root = self.setup_tab_controls
@@ -11646,15 +12132,7 @@ class MissionPlanner(tk.Tk):
         ).pack(anchor="w")
         tk.Label(
             ctrl_inner,
-            text=(
-                "Bind a key, a HOTAS or mouse button, or both. Capture… / Learn… take "
-                "whatever you press. Learn… first asks which controller to watch — "
-                "needed when Windows names every stick “Microsoft PC-joystick driver”. "
-                "Keys are polled so they work while DCS is focused, "
-                "but they are not swallowed — avoid a combo DCS itself uses. "
-                "Step forward / back only move the cursor; they do not transmit. "
-                "Side mouse buttons (4 / 5) work well; avoid your SRS PTT."
-            ),
+            text="Learn a key or HOTAS button. See Help if DCS swallows keyboard hotkeys.",
             bg=C_PANEL,
             fg=C_MUTED,
             font=("Segoe UI", 8),
@@ -11758,10 +12236,7 @@ class MissionPlanner(tk.Tk):
                 "External Advance / Previous / voice / Stream Deck URL only fire when you are "
                 "tuned to the step frequency on any radio — not only the one you are keying. "
                 "Talking on intra-flight VHF will not block UHF ATC / C2 triggers. "
-                "On-screen Play is never blocked. "
-                "Tune is read from the DCS radio export (in-jet) and/or the live SRS radio bank "
-                "(common PTT is TX only). External AWACS below is only for the manual Fly EAM strip "
-                "when testing without a jet / without SRS UDP."
+                "On-screen Play is never blocked. See Help for the DCS export / SRS tune path."
             ),
             bg=C_PANEL,
             fg=C_MUTED,
@@ -11781,12 +12256,6 @@ class MissionPlanner(tk.Tk):
             variable=self.var_freq_gate_enabled,
             command=self._on_freq_gate_options_changed,
         ).pack(anchor="w")
-        ttk.Checkbutton(
-            fg_inner,
-            text="External AWACS radio source (testing) — show Fly EAM strip / manual freqs",
-            variable=self.var_freq_gate_eam,
-            command=self._on_freq_gate_options_changed,
-        ).pack(anchor="w", pady=(4, 0))
         fg_btns = tk.Frame(fg_inner, bg=C_PANEL)
         fg_btns.pack(fill=tk.X, pady=(8, 0))
         ttk.Button(
@@ -11800,19 +12269,47 @@ class MissionPlanner(tk.Tk):
             command=self._status_dcs_radio_export,
         ).pack(side=tk.LEFT, padx=(6, 0))
 
-        # --- Picture call range ---
-        pic = tk.Frame(panel, bg=C_PANEL, highlightbackground=C_BORDER, highlightthickness=1)
-        pic.pack(fill=tk.X, padx=14, pady=(0, 8))
-        pic_inner = tk.Frame(pic, bg=C_PANEL)
-        pic_inner.pack(fill=tk.X, padx=12, pady=10)
-        ttk.Label(pic_inner, text="Picture call", style="Header.TLabel").pack(anchor="w")
+        if hasattr(self, "_setup_controls_canvas"):
+            self.after_idle(
+                lambda: self._setup_controls_canvas.configure(
+                    scrollregion=self._setup_controls_canvas.bbox("all")
+                )
+            )
+
+    def _build_setup_advanced(self) -> None:
+        root = self.setup_tab_advanced
+        scroll_host = tk.Frame(root, bg=C_BG)
+        scroll_host.pack(fill=tk.BOTH, expand=True, padx=12, pady=12)
+        canvas = tk.Canvas(scroll_host, bg=C_PANEL, highlightthickness=0, bd=0)
+        vsb = ttk.Scrollbar(scroll_host, orient=tk.VERTICAL, command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        panel = tk.Frame(canvas, bg=C_PANEL, highlightbackground=C_BORDER, highlightthickness=1)
+        panel_win = canvas.create_window((0, 0), window=panel, anchor="nw")
+
+        def _panel_cfg(_event: tk.Event | None = None) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _canvas_cfg(event: tk.Event) -> None:
+            canvas.itemconfigure(panel_win, width=event.width)
+
+        panel.bind("<Configure>", _panel_cfg)
+        canvas.bind("<Configure>", _canvas_cfg)
+        self._setup_advanced_canvas = canvas
+        self._bind_setup_tab_wheel(canvas, panel, scroll_host, self.setup_tab_advanced)
+
+        prefs = tk.Frame(panel, bg=C_PANEL, highlightbackground=C_BORDER, highlightthickness=1)
+        prefs.pack(fill=tk.X, padx=14, pady=(14, 8))
+        prefs_inner = tk.Frame(prefs, bg=C_PANEL)
+        prefs_inner.pack(fill=tk.X, padx=12, pady=10)
+        ttk.Label(prefs_inner, text="Fly display", style="Header.TLabel").pack(anchor="w")
         tk.Label(
-            pic_inner,
+            prefs_inner,
             text=(
-                "Blackjack / Bandsaw picture, bogey dope, and declare only use contacts "
-                "inside this range of your jet (AWACS and tankers are always skipped). "
-                "A group's bogey / bandit / spades / hostile call sticks until Bandsaw "
-                "or you declare it hostile. Raise the range for testing."
+                "Fly stays cockpit-simple by default: frequency, YOU ARE ON, VOICE CUES, "
+                "and expected response. Diagnostics (NET LINK, EAM, last actions) hide "
+                "until you press Show details on Fly, or tick this."
             ),
             bg=C_PANEL,
             fg=C_MUTED,
@@ -11820,6 +12317,60 @@ class MissionPlanner(tk.Tk):
             wraplength=880,
             justify="left",
         ).pack(anchor="w", pady=(2, 8))
+        ttk.Checkbutton(
+            prefs_inner,
+            text="Show full Fly diagnostics",
+            variable=self.var_show_fly_diag,
+            command=self._on_fly_diag_pref_changed,
+        ).pack(anchor="w")
+
+        backend = tk.Frame(panel, bg=C_PANEL, highlightbackground=C_BORDER, highlightthickness=1)
+        backend.pack(fill=tk.X, padx=14, pady=(0, 8))
+        be_inner = tk.Frame(backend, bg=C_PANEL)
+        be_inner.pack(fill=tk.X, padx=12, pady=10)
+        ttk.Label(be_inner, text="Opus backend", style="Header.TLabel").pack(anchor="w")
+        lf = tk.Frame(be_inner, bg=C_PANEL)
+        lf.pack(fill=tk.X, pady=(6, 0))
+        self._setup_field(lf, 0, "Backend URL", self.var_backend, width=44)
+        if not hasattr(self, "var_caoc_affiliation_key"):
+            self.var_caoc_affiliation_key = tk.StringVar()
+        self._setup_field(
+            lf, 1, "CAOC affiliation key", self.var_caoc_affiliation_key, width=44
+        )
+        tk.Label(
+            be_inner,
+            text="Host-only key for VID / affiliation writes. Leave blank on Clients.",
+            bg=C_PANEL,
+            fg=C_MUTED,
+            font=("Segoe UI", 8),
+        ).pack(anchor="w", pady=(4, 0))
+        lf.columnconfigure(1, weight=1)
+
+        self._build_setup_voices(panel)
+
+        eam = tk.Frame(panel, bg=C_PANEL, highlightbackground=C_BORDER, highlightthickness=1)
+        eam.pack(fill=tk.X, padx=14, pady=(0, 8))
+        eam_inner = tk.Frame(eam, bg=C_PANEL)
+        eam_inner.pack(fill=tk.X, padx=12, pady=10)
+        ttk.Label(eam_inner, text="External AWACS (testing)", style="Header.TLabel").pack(
+            anchor="w"
+        )
+        if not hasattr(self, "var_freq_gate_eam"):
+            self.var_freq_gate_eam = tk.BooleanVar(
+                value=bool(self.config_data.get("freq_gate_eam_enabled"))
+            )
+        ttk.Checkbutton(
+            eam_inner,
+            text="Show Fly EAM strip / manual freqs (no jet / no SRS UDP)",
+            variable=self.var_freq_gate_eam,
+            command=self._on_freq_gate_options_changed,
+        ).pack(anchor="w", pady=(6, 0))
+
+        pic = tk.Frame(panel, bg=C_PANEL, highlightbackground=C_BORDER, highlightthickness=1)
+        pic.pack(fill=tk.X, padx=14, pady=(0, 8))
+        pic_inner = tk.Frame(pic, bg=C_PANEL)
+        pic_inner.pack(fill=tk.X, padx=12, pady=10)
+        ttk.Label(pic_inner, text="Picture call", style="Header.TLabel").pack(anchor="w")
         try:
             pic_default = float(
                 self.config_data.get("picture_max_range_nm")
@@ -11829,57 +12380,28 @@ class MissionPlanner(tk.Tk):
             pic_default = float(voice_actions.PICTURE_MAX_RANGE_NM)
         self.var_picture_max_range = tk.StringVar(value=f"{pic_default:g}")
         pic_row = tk.Frame(pic_inner, bg=C_PANEL)
-        pic_row.pack(anchor="w")
-        tk.Label(
-            pic_row,
-            text="Max range (NM)",
-            bg=C_PANEL,
-            fg=C_LABEL,
-            font=("Segoe UI", 9),
-        ).pack(side=tk.LEFT)
+        pic_row.pack(anchor="w", pady=(6, 0))
+        tk.Label(pic_row, text="Max range (NM)", bg=C_PANEL, fg=C_LABEL, font=("Segoe UI", 9)).pack(
+            side=tk.LEFT
+        )
         ttk.Entry(pic_row, textvariable=self.var_picture_max_range, width=8).pack(
             side=tk.LEFT, padx=(8, 6)
         )
-        tk.Label(
-            pic_row,
-            text="default 150",
-            bg=C_PANEL,
-            fg=C_MUTED,
-            font=("Segoe UI", 8),
-        ).pack(side=tk.LEFT)
+        tk.Label(pic_row, text="default 150", bg=C_PANEL, fg=C_MUTED, font=("Segoe UI", 8)).pack(
+            side=tk.LEFT
+        )
 
-        # --- Tanker boom small talk ---
         boom = tk.Frame(panel, bg=C_PANEL, highlightbackground=C_BORDER, highlightthickness=1)
         boom.pack(fill=tk.X, padx=14, pady=(0, 8))
         boom_inner = tk.Frame(boom, bg=C_PANEL)
         boom_inner.pack(fill=tk.X, padx=12, pady=10)
-        ttk.Label(boom_inner, text="Tanker boom chat", style="Header.TLabel").pack(
-            anchor="w"
-        )
+        ttk.Label(boom_inner, text="Tanker boom chat", style="Header.TLabel").pack(anchor="w")
         tk.Label(
             boom_inner,
-            text=(
-                "After you request rejoin, Texaco starts boom chat — you do not ask "
-                "first. Auto-fires after 30–60 seconds at 0.1–0.5 NM from the tanker "
-                "with a jet in that envelope (you count). First call is a hello "
-                "(Good morning / afternoon / evening, sir); later bits mix A/B polls, "
-                "open questions, and random small-talk riffs — answer in a word, say "
-                "anything, or just listen; Texaco keeps going with short breaks until "
-                "you Stop chat / say “talk later”, or leave the tanker. With Ollama / "
-                "Gemini / OpenAI on, you can freestyle past the A/B buttons and Texaco "
-                "riffs live on what you said for a few turns, then rotates. Ollama needs "
-                "a pulled model (e.g. ollama pull llama3.2) — Fly shows when it falls "
-                "back to the library. Ollama is pinned to the CPU (same rule as Whisper) "
-                "so a radio call cannot load a model onto the GPU DCS is using. On a "
-                "Client, this PC writes the line (so Ollama here still counts) and the "
-                "Host transmits — only the Host talks on SRS. Fly Texaco starts chat "
-                "only on tanker frequency."
-            ),
+            text="Texaco small-talk after rejoin. See Help. Ollama/Gemini/OpenAI optional.",
             bg=C_PANEL,
             fg=C_MUTED,
             font=("Segoe UI", 8),
-            wraplength=880,
-            justify="left",
         ).pack(anchor="w", pady=(2, 8))
         self.var_tanker_chat_llm = tk.StringVar(
             value=str(self.config_data.get("tanker_chat_llm") or "off").strip().lower()
@@ -11906,56 +12428,26 @@ class MissionPlanner(tk.Tk):
             ).pack(side=tk.LEFT, padx=(0, 12))
         key_row = tk.Frame(boom_inner, bg=C_PANEL)
         key_row.pack(anchor="w", pady=(8, 0))
-        tk.Label(
-            key_row,
-            text="API key",
-            bg=C_PANEL,
-            fg=C_LABEL,
-            font=("Segoe UI", 9),
-        ).pack(side=tk.LEFT)
+        tk.Label(key_row, text="API key", bg=C_PANEL, fg=C_LABEL, font=("Segoe UI", 9)).pack(
+            side=tk.LEFT
+        )
         ttk.Entry(
-            key_row,
-            textvariable=self.var_tanker_chat_llm_key,
-            width=44,
-            show="*",
+            key_row, textvariable=self.var_tanker_chat_llm_key, width=44, show="*"
         ).pack(side=tk.LEFT, padx=(8, 6))
-        tk.Label(
-            key_row,
-            text="Gemini (AIza…) · OpenAI (sk-…) · Ollama needs none",
-            bg=C_PANEL,
-            fg=C_MUTED,
-            font=("Segoe UI", 8),
-        ).pack(side=tk.LEFT)
 
-        # --- Automatic clearances from live position ---
         ac = tk.Frame(panel, bg=C_PANEL, highlightbackground=C_BORDER, highlightthickness=1)
         ac.pack(fill=tk.X, padx=14, pady=(0, 8))
         ac_inner = tk.Frame(ac, bg=C_PANEL)
         ac_inner.pack(fill=tk.X, padx=12, pady=10)
-        ttk.Label(
-            ac_inner, text="Automatic clearances (live position)", style="Header.TLabel"
-        ).pack(anchor="w")
+        ttk.Label(ac_inner, text="Automatic clearances", style="Header.TLabel").pack(
+            anchor="w"
+        )
         tk.Label(
             ac_inner,
-            text=(
-                "Must be on for anything to auto-fire. On a Client, this PC evaluates "
-                "the Opus CAOC feed (2/2 in zone, beyond 18 NM, …) and asks the Host to "
-                "transmit — the dedicated-server box often cannot see your jet. "
-                "Watch on either this PC or the Host is enough. Fires when the flight is "
-                "where it needs to be — monitor tower at the assigned EOR, takeoff when "
-                "lined up, range exit at 40 NM from Nellis or inside the approach circle, "
-                "contact tower at 12 NM. Tower check-in waits for “with you” / “initial” "
-                "(or Play). Overhead / TAC landing clearance is gear-down / "
-                "Play (not the 2 NM field gate). The Fly tab line shows the live wait "
-                "(NM remaining, in-zone count, or why the feed cannot see you). Distance "
-                "gates work far from the field; EOR / lineup only fire in those drawn "
-                "boxes. Each fires once per sortie and re-arms on Reset."
-            ),
+            text="Watch live position and fire gated calls. See Help for zone / distance rules.",
             bg=C_PANEL,
             fg=C_MUTED,
             font=("Segoe UI", 8),
-            wraplength=880,
-            justify="left",
         ).pack(anchor="w", pady=(2, 8))
         self.var_auto_clearance = tk.BooleanVar(
             value=bool(self.config_data.get("auto_clearance_enabled"))
@@ -11977,33 +12469,30 @@ class MissionPlanner(tk.Tk):
         ).pack(anchor="w")
         ttk.Checkbutton(
             ac_inner,
-            text="Line up and wait / cleared for takeoff when in position on the runway",
+            text="Line up and wait / takeoff when in position",
             variable=self.var_auto_takeoff,
             command=self._on_auto_clearance_changed,
         ).pack(anchor="w", pady=(4, 0))
         ttk.Checkbutton(
             ac_inner,
-            text="Monitor tower when the flight reaches the EOR",
+            text="Monitor tower at the EOR",
             variable=self.var_auto_monitor,
             command=self._on_auto_clearance_changed,
         ).pack(anchor="w", pady=(4, 0))
         ttk.Checkbutton(
             ac_inner,
-            text="Require every flight member (off = your jet alone is enough)",
+            text="Require every flight member",
             variable=self.var_auto_full_flight,
             command=self._on_auto_clearance_changed,
         ).pack(anchor="w", pady=(4, 0))
-
-        # The areas these watch have to be traced once per field, so the way to do
-        # that belongs next to the switches that depend on it.
         zone_row = tk.Frame(ac_inner, bg=C_PANEL)
         zone_row.pack(fill=tk.X, pady=(10, 0))
-        ttk.Button(
-            zone_row, text="Draw zones on a map…", command=self._open_zone_editor
-        ).pack(side=tk.LEFT)
-        ttk.Button(
-            zone_row, text="Map is my jet…", command=self._open_route_tester
-        ).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(zone_row, text="Draw zones on a map…", command=self._open_zone_editor).pack(
+            side=tk.LEFT
+        )
+        ttk.Button(zone_row, text="Map is my jet…", command=self._open_route_tester).pack(
+            side=tk.LEFT, padx=(8, 0)
+        )
         self.var_zone_count = tk.StringVar(value="")
         tk.Label(
             zone_row,
@@ -12012,32 +12501,57 @@ class MissionPlanner(tk.Tk):
             fg=C_MUTED,
             font=("Segoe UI", 8),
         ).pack(side=tk.LEFT, padx=(10, 0))
-        tk.Label(
-            ac_inner,
-            text=(
-                "Opens a satellite map in your browser: trace the runway, the EOR and "
-                "any area of your own, say what each one fires, press Save. Saved areas "
-                "appear here and in Fires when on Plan Flight within a few seconds. "
-                "Open-Zone-Editor.cmd next to this app does the same thing on its own. "
-                "Map is my jet… (or Open-Route-Tester.cmd) opens a map that Fly treats "
-                "as your aircraft when the Fly tab checkbox “Test: map is my jet” is on — "
-                "drag or Play there, talk on the Fly tab. Uncheck that box to use Opus "
-                "position again. Other CAOC traffic (tankers, etc.) stays live."
-            ),
-            bg=C_PANEL,
-            fg=C_MUTED,
-            font=("Segoe UI", 8),
-            wraplength=880,
-            justify="left",
-        ).pack(anchor="w", pady=(4, 0))
         self._update_zone_hint()
 
-        if hasattr(self, "_setup_controls_canvas"):
-            self.after_idle(
-                lambda: self._setup_controls_canvas.configure(
-                    scrollregion=self._setup_controls_canvas.bbox("all")
-                )
+        if hasattr(self, "var_voice_confidence"):
+            voice_adv = tk.Frame(panel, bg=C_PANEL, highlightbackground=C_BORDER, highlightthickness=1)
+            voice_adv.pack(fill=tk.X, padx=14, pady=(0, 14))
+            va = tk.Frame(voice_adv, bg=C_PANEL)
+            va.pack(fill=tk.X, padx=12, pady=10)
+            ttk.Label(va, text="Voice recognition (advanced)", style="Header.TLabel").pack(
+                anchor="w"
             )
+            row4 = tk.Frame(va, bg=C_PANEL)
+            row4.pack(fill=tk.X, pady=(6, 0))
+            tk.Label(row4, text="Min confidence", bg=C_PANEL, fg=C_LABEL, width=16, anchor="w").pack(
+                side=tk.LEFT
+            )
+            if not hasattr(self, "var_voice_confidence_label"):
+                self.var_voice_confidence_label = tk.StringVar(value="")
+            ttk.Scale(
+                row4,
+                from_=0.40,
+                to=0.95,
+                variable=self.var_voice_confidence,
+                length=220,
+                command=self._on_voice_confidence_slide,
+            ).pack(side=tk.LEFT, padx=(8, 6))
+            tk.Label(
+                row4,
+                textvariable=self.var_voice_confidence_label,
+                bg=C_PANEL,
+                fg=C_MUTED,
+                font=("Consolas", 8),
+                width=5,
+                anchor="w",
+            ).pack(side=tk.LEFT)
+            row5 = tk.Frame(va, bg=C_PANEL)
+            row5.pack(fill=tk.X, pady=(6, 0))
+            ttk.Checkbutton(
+                row5,
+                text="Only act on calls addressed to ATC",
+                variable=self.var_voice_require_address,
+            ).pack(side=tk.LEFT)
+            ttk.Checkbutton(
+                row5,
+                text="Understand messy radio (LLM)",
+                variable=self.var_voice_nlu,
+            ).pack(side=tk.LEFT, padx=(18, 0))
+            self._sync_voice_confidence_label()
+
+        self.after_idle(
+            lambda: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
 
     def _build_setup_voice(self, panel: tk.Frame) -> None:
         self.var_voice_enabled = tk.BooleanVar(value=False)
@@ -12061,13 +12575,7 @@ class MissionPlanner(tk.Tk):
         ttk.Label(inner, text="Voice control (Whisper)", style="Header.TLabel").pack(anchor="w")
         tk.Label(
             inner,
-            text=(
-                "Hold your SRS PTT and talk; ATC answers calls made to it. You do not have to "
-                "get the wording right — close counts. The Fly tab lists the calls that fit "
-                "where you are. Runs on the CPU so it does not compete with DCS for the GPU. "
-                "Flight chatter on the same frequency is ignored, and the Fly log shows why "
-                "anything was passed over."
-            ),
+            text="Hold your SRS PTT and talk. Fly lists the calls that fit now. See Help.",
             bg=C_PANEL,
             fg=C_MUTED,
             font=("Segoe UI", 8),
@@ -12148,59 +12656,8 @@ class MissionPlanner(tk.Tk):
         ).pack(side=tk.LEFT, padx=(8, 6), ipady=3)
         ttk.Button(row3b, text="Capture…", command=self._capture_voice_ptt_key).pack(side=tk.LEFT)
         ttk.Button(row3b, text="Clear", command=self._clear_voice_ptt_key).pack(side=tk.LEFT, padx=4)
-
-        row4 = tk.Frame(inner, bg=C_PANEL)
-        row4.pack(fill=tk.X, pady=3)
-        tk.Label(row4, text="Min confidence", bg=C_PANEL, fg=C_LABEL, width=16, anchor="w").pack(side=tk.LEFT)
         self.var_voice_confidence_label = tk.StringVar(value="")
-        ttk.Scale(
-            row4,
-            from_=0.40,
-            to=0.95,
-            variable=self.var_voice_confidence,
-            length=220,
-            command=self._on_voice_confidence_slide,
-        ).pack(side=tk.LEFT, padx=(8, 6))
-        tk.Label(
-            row4,
-            textvariable=self.var_voice_confidence_label,
-            bg=C_PANEL,
-            fg=C_MUTED,
-            font=("Consolas", 8),
-            width=5,
-            anchor="w",
-        ).pack(side=tk.LEFT)
         self._sync_voice_confidence_label()
-
-        row5 = tk.Frame(inner, bg=C_PANEL)
-        row5.pack(fill=tk.X, pady=(6, 0))
-        ttk.Checkbutton(
-            row5,
-            text="Only act on calls addressed to ATC",
-            variable=self.var_voice_require_address,
-        ).pack(side=tk.LEFT)
-        ttk.Checkbutton(
-            row5,
-            text="Understand messy radio (LLM)",
-            variable=self.var_voice_nlu,
-        ).pack(side=tk.LEFT, padx=(18, 0))
-        tk.Label(
-            inner,
-            text=(
-                "The flight shares this frequency. With this on, a transmission only counts "
-                "when you open with the agency (\u201cNellis Tower, \u2026\u201d) or your own callsign — "
-                "so \u201cTwo, go button five\u201d and general chatter never move the timeline. "
-                "Messy radio uses the same Ollama/Gemini/OpenAI setting as boom chat: if the "
-                "keyword matcher misses, the model may pick an allowed call for this freq "
-                "(taxi, picture, \u2026). It never writes a new clearance. Needs boom-chat LLM "
-                "on. Ollama stays on the CPU so that fallback cannot freeze the GPU."
-            ),
-            bg=C_PANEL,
-            fg=C_MUTED,
-            font=("Segoe UI", 8),
-            wraplength=880,
-            justify="left",
-        ).pack(anchor="w", pady=(2, 0))
 
         ttk.Button(inner, text="Apply voice", command=self._apply_voice).pack(anchor="w", pady=(8, 2))
         tk.Label(
@@ -12984,6 +13441,8 @@ class MissionPlanner(tk.Tk):
             self.var_atc_token.set(str(c.get("atc_token") or ""))
         self.var_user.set(c.get("opus_user_name", ""))
         self.var_backend.set(c.get("opus_backend_url", ""))
+        if hasattr(self, "var_caoc_affiliation_key"):
+            self.var_caoc_affiliation_key.set(c.get("caoc_affiliation_key", "") or "")
         self.var_callsign_override.set(c.get("callsign_override", "") or "")
         self._update_opus_flight_label()
         self._refresh_opus_identity_bar()
@@ -13008,18 +13467,9 @@ class MissionPlanner(tk.Tk):
             self._set_agency_voice(ch, str(voices_cfg.get(ch) or default_voice))
         self._setup_fields_loaded = True
         self._on_tts_provider_change()
-        ap = self._airport()
-        self.var_ap_name.set(ap.get("name", ""))
-        self.var_icao.set(ap.get("icao", ""))
-        self.var_host.set(ap.get("srs_host", ""))
-        self.var_port.set(str(ap.get("srs_port", 5002)))
-        self.var_coalition.set(str(ap.get("coalition", 2)))
-        self.var_runways.set(",".join(ap.get("runways") or []))
-        self.var_expect_minutes.set(str(ap.get("expect_minutes") or 10))
-        self.var_known_sids.set(",".join(ap.get("known_sids") or []))
-        for ch in atc_phrase.CHANNELS:
-            block = ap.get(ch) or {}
-            self.freq_vars[ch].set(str(block.get("freq_mhz", "")))
+        if hasattr(self, "var_setup_airport_key"):
+            self._refresh_airbase_picker(select=self._airport_key())
+        self._load_setup_airport_form()
         if hasattr(self, "var_hotkey_next"):
             self.var_hotkey_next.set(hotkeys.hotkey_from_config(c, "next"))
             self.var_hotkey_back.set(hotkeys.hotkey_from_config(c, "back"))
@@ -13122,7 +13572,13 @@ class MissionPlanner(tk.Tk):
                 return
         self.config_data["opus_user_name"] = self.var_user.get().strip()
         self.config_data["opus_backend_url"] = self.var_backend.get().strip()
+        if hasattr(self, "var_caoc_affiliation_key"):
+            self.config_data["caoc_affiliation_key"] = (
+                self.var_caoc_affiliation_key.get().strip()
+            )
         self.config_data["callsign_override"] = self.var_callsign_override.get().strip()
+        if role == "host":
+            self._strip_host_ownship_flight(persist=False)
         self.config_data["runway_override"] = self.var_runway_override.get().strip()
         if hasattr(self, "var_parking_override"):
             self.config_data["parking_override"] = self.var_parking_override.get().strip()
@@ -13221,50 +13677,25 @@ class MissionPlanner(tk.Tk):
         self._apply_voice()
         self._sync_atc_runtime()
 
-        key = self.mission.get("airport") or "nellis"
+        key = self._setup_airport_key()
+        self._flush_setup_airport_form(key)
         ap = self.airports.get(key, {})
-        ap["name"] = self.var_ap_name.get().strip() or key.title()
-        ap["icao"] = self.var_icao.get().strip().upper()
-        ap["srs_host"] = self.var_host.get().strip()
-        ap["srs_port"] = int(self.var_port.get() or 5002)
-        ap["coalition"] = int(self.var_coalition.get() or 2)
-        ap["runways"] = [x.strip() for x in self.var_runways.get().split(",") if x.strip()]
-        try:
-            ap["expect_minutes"] = int(re.sub(r"\D", "", self.var_expect_minutes.get()) or "10")
-        except ValueError:
-            ap["expect_minutes"] = 10
         ap.pop("initial_climb", None)
         ap.pop("expect_after", None)
-        ap["known_sids"] = [x.strip().upper() for x in self.var_known_sids.get().split(",") if x.strip()]
         # Delivery is a separate freq at Nellis — speak "Delivery", not "Ground"
         ap["clearance_consolidated_with_ground"] = False
-        for ch in atc_phrase.CHANNELS:
-            if ch == "tanker":
-                continue
-            try:
-                mhz = float(self.freq_vars[ch].get())
-            except ValueError:
-                continue
-            prev = ap.get(ch) or {}
-            block: dict[str, Any] = {
-                "freq_mhz": mhz,
-                "mod": prev.get("mod") or "AM",
-                "source": prev.get("source") or "local",
-            }
-            # Keep Opus UHF Local N so clearance says "departure Local five"
-            if prev.get("local_preset") is not None:
-                try:
-                    block["local_preset"] = int(prev["local_preset"])
-                except (TypeError, ValueError):
-                    pass
-            ap[ch] = block
         self.airports[key] = ap
+        if hasattr(self, "var_default_airport") and bool(self.var_default_airport.get()):
+            self.config_data["default_airport"] = key
+            save_json(CONFIG_PATH, self.config_data)
         save_json(AIRPORTS_PATH, self.airports)
         self.engine.config = self.config_data
         self.engine.airports = self.airports
+        self._refresh_first_run_button()
         messagebox.showinfo("Setup", "Setup saved.")
         self._update_freq_hint()
         self._refresh_opus_identity_bar()
+        self._refresh_airbase_mission_hint()
 
     def _ensure_identity_vars(self) -> None:
         """Shared Opus / CAOC identity vars (Plan, Fly, and Setup)."""
@@ -13272,6 +13703,7 @@ class MissionPlanner(tk.Tk):
             return
         self.var_user = tk.StringVar()
         self.var_backend = tk.StringVar()
+        self.var_caoc_affiliation_key = tk.StringVar()
         self.var_callsign_override = tk.StringVar()
         self.var_opus_flight = tk.StringVar(value="(choose an Opus flight)")
         self.var_callsign = tk.StringVar(value="(refresh to resolve)")
@@ -13340,14 +13772,29 @@ class MissionPlanner(tk.Tk):
     def _opus_header_menu(self, event: tk.Event) -> str:
         """Popup: choose / refresh / clear the active Opus flight."""
         menu = tk.Menu(self, tearoff=0)
-        menu.add_command(label="Choose flight…", command=self._choose_opus_flight)
-        menu.add_command(label="Refresh from Opus", command=self._persist_identity)
-        menu.add_command(label="Clear flight", command=self._clear_opus_flight)
+        if self._atc_role() == "host":
+            menu.add_command(
+                label="Host routes client flights (no own jet)",
+                state="disabled",
+            )
+            menu.add_command(
+                label="Clear leftover flight",
+                command=self._host_clear_leftover_flight,
+            )
+        else:
+            menu.add_command(label="Choose flight…", command=self._choose_opus_flight)
+            menu.add_command(label="Refresh from Opus", command=self._persist_identity)
+            menu.add_command(label="Clear flight", command=self._clear_opus_flight)
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
             menu.grab_release()
         return "break"
+
+    def _host_clear_leftover_flight(self) -> None:
+        self._strip_host_ownship_flight(persist=True)
+        self._update_opus_flight_label()
+        self._refresh_opus_identity_bar()
 
     def _persist_identity(self, *, refresh_opus: bool = True) -> None:
         """
@@ -13423,6 +13870,9 @@ class MissionPlanner(tk.Tk):
     def _refresh_opus_identity_bar(self) -> None:
         """Refresh CAOC match hint from current username + flight selection."""
         self._ensure_identity_vars()
+        if self._atc_role() == "host":
+            self.var_identity_match.set("Host routes client flights")
+            return
         user = self.var_user.get().strip() or str(
             self.config_data.get("opus_user_name") or ""
         ).strip()
@@ -13456,6 +13906,9 @@ class MissionPlanner(tk.Tk):
 
     def _update_opus_flight_label(self, row: dict[str, Any] | None = None) -> None:
         """Refresh the header flight chip from config and optional picker row."""
+        if self._atc_role() == "host":
+            self.var_opus_flight.set("Host · routes client flights")
+            return
         if atc_phrase.ownship_from_map_enabled(self.config_data):
             inj = atc_phrase.read_ownship_inject(config=self.config_data)
             if inj:
@@ -13517,6 +13970,14 @@ class MissionPlanner(tk.Tk):
     ) -> None:
         """Modal list of Opus flights — select one for callsign + flight plan."""
         owner = parent or self
+        if self._atc_role() == "host":
+            messagebox.showinfo(
+                "Opus flights",
+                "This PC is the Host. It routes Client flights and does not "
+                "select its own Opus jet. Pick the flight on each pilot PC.",
+                parent=owner,
+            )
+            return
         if hasattr(self, "var_user"):
             self.config_data["opus_user_name"] = self.var_user.get().strip()
         if hasattr(self, "var_backend"):
@@ -13836,6 +14297,11 @@ class MissionPlanner(tk.Tk):
         return presets
 
     def _refresh_callsign(self) -> None:
+        if self._atc_role() == "host":
+            self.var_callsign.set("Host · no own jet")
+            self._update_opus_flight_label()
+            self._refresh_opus_identity_bar()
+            return
         self.config_data["opus_user_name"] = self.var_user.get().strip()
         self.config_data["opus_backend_url"] = self.var_backend.get().strip()
         self.config_data["callsign_override"] = self.var_callsign_override.get().strip()
@@ -13893,7 +14359,7 @@ class MissionPlanner(tk.Tk):
 
     def _airport_from_form(self) -> dict[str, Any]:
         """Snapshot of airport fields currently shown in Setup (unsaved OK)."""
-        key = self.mission.get("airport") or "nellis"
+        key = self._setup_airport_key()
         ap = dict(self.airports.get(key, {}))
         ap["name"] = self.var_ap_name.get().strip() or key.title()
         ap["icao"] = self.var_icao.get().strip().upper()
@@ -13930,10 +14396,10 @@ class MissionPlanner(tk.Tk):
                         for m in result.get("matched") or []
                     ]
                     self.var_freq_status.set(
-                        f"Pulled Opus theater {result.get('theater_id')} UHF defaults "
-                        f"({len(freqs)} channels). Save setup to keep.\n" + "\n".join(lines)
+                        f"Synced Opus theater {result.get('theater_id')} UHF "
+                        f"({len(freqs)} channels).\n" + "\n".join(lines)
                     )
-                    key = self.mission.get("airport") or "nellis"
+                    key = self._setup_airport_key()
                     ap = self.airports.get(key, {})
                     atc_phrase.apply_opus_freqs_to_airport(ap, freqs, presets=presets)
                     self.airports[key] = ap
@@ -13942,7 +14408,7 @@ class MissionPlanner(tk.Tk):
                     dep = presets.get("departure")
                     msg = (
                         f"Loaded {len(freqs)} UHF presets from Opus theater "
-                        f"{result.get('theater_id')}."
+                        f"{result.get('theater_id')} into {self._airbase_label(key)}."
                     )
                     if dep is not None:
                         msg += f"\n\nDeparture will speak as Local {dep}."

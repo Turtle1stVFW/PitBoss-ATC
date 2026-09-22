@@ -21,34 +21,36 @@ as your jet (talk on the Fly tab; tankers still come from CAOC).
 
 ## Tabs
 1. **Plan Flight** — build the full sortie timeline (TTS template, custom text, or MP3/OGG). No JSON editing.
-2. **Fly** — big Next / Back / Reset / Flip for mid-flight.
+2. **Fly** — Play / Back plus frequency, YOU ARE ON, VOICE CUES, and expected response.
 3. **Traffic** — connected pilots and per-frequency TX queues (Host role).
-4. **Setup** — Opus username, voice, airport freqs, SRS host, TTS provider, optional runway override, **Squadron** (solo/host/client), **Controls** (HOTAS / hotkeys / voice), and **Preferences**.
-5. **Help** — in-app how-tos (Getting started, Google JSON setup, Plan Flight tips, troubleshooting). Also the top-right **Help** button.
+4. **Setup** — **Basics** (squadron, identity, TTS, this-sortie runway/parking), **Airbases** (field picker + Sync freqs from Opus), **Controls** (HOTAS / hotkeys / voice / freq gate), **Advanced** (voices, Opus URL, CAOC affiliation key, boom chat, auto-clearances, Fly diagnostics).
+5. **Help** — in-app how-tos (Getting started, Google JSON setup, Plan Flight tips, Airbases, troubleshooting). Also the top-right **Help** button.
 
-### Simplified UI (Setup → Preferences)
+### Simplified Fly (default)
 
-The Fly tab carries a lot of lines that earn their keep while you are wiring the
-app up and prove nothing but clutter once you are strapped in. **Simplified UI**
-hides them: the SRS radio name, the agency name repeated under the frequency,
-`YOU CAN SAY`, the `Radio tune unknown — gate open` line, the READ BACK
-preamble, your own callsign in a readback, and the `TTS · template` line. The
-frequency header reads **FREQUENCY** instead of **NEXT TX FREQUENCY**, and the
-live-position line moves to the bottom of the frequency box as a tip.
+Fly is cockpit-simple unless you turn diagnostics on. Hidden until **Show details…**
+on Fly or Setup → Advanced → **Show full Fly diagnostics**: NET LINK, EAM testing,
+map-is-jet, last-actions log, SRS radio name, the gate line, the READ BACK
+preamble, and the TTS / template line. VOICE CUES stay visible.
 
 What is left is the frequency, one **YOU ARE ON** line — green on frequency, red
 off it, amber while tune is unknown — the cues to say, and what ATC will answer.
-Nothing changes about what transmits or what voice recognition accepts; the
-switch saves itself and takes effect immediately (config key `simple_ui`). Leave
-it off while troubleshooting.
+Nothing changes about what transmits or what voice recognition accepts
+(config key `simple_ui`, default `true`).
+
+### Airbases
+
+`airports.json` is a keyed library. Setup → Airbases picks a field, Sync freqs from
+Opus fills mapped UHF agencies, and **Add airbase…** stubs a new key. Taxi, zones,
+and plates stay in the JSON; Opus does not list airbases.
 
 ## Multi-pilot (optional, this branch)
 
 Default role is still **Solo** — one PC, same as today. To run ATC for several pilots:
 
-1. Pick **one** machine as Host (the Windows DCS dedicated server is fine). It needs **Python 3.10+ with tcl/tk** — the `.cmd` files find `python.exe` without the `py` launcher. Setup → **Squadron** → Host. Save. Allow Windows inbound on the ATC port (default `8766`). That box needs ExternalAudio + TTS and network to the squadron SRS server.
+1. Pick **one** machine as Host (the Windows DCS dedicated server is fine). It needs **Python 3.10+ with tcl/tk** — the `.cmd` files find `python.exe` without the `py` launcher. Setup → **Basics** → Host. Save. Allow Windows inbound on the ATC port (default `8766`). That box needs ExternalAudio + TTS and network to the squadron SRS server. The Host does **not** pick an Opus flight or callsign in the top bar — it only routes each Client’s flight.
 2. Put the same **shared token** on every PC.
-3. Each pilot: Setup → Squadron → **Client**, **Address pilots type** = the same IP/hostname they already use for DCS/SRS, ATC port **8766** (not SRS 5002), same token. Click **Test connection**, then Save.
+3. Each pilot: Setup → Basics → **Client**, **Address pilots type** = the same IP/hostname they already use for DCS/SRS, ATC port **8766** (not SRS 5002), same token. Click **Test connection**, then Save.
 4. Off-LAN (flying PC on `10.x`, DCS server on `192.168.50.x`) is expected. Do not join the server LAN. On the **DCS server’s router**, forward/route **TCP 8766** to `192.168.50.20`, the same way SRS 5002 already is. Then point the client at that reachable address (often the SRS host, not the server’s private 192.168.50.20).
 5. Host **Traffic** tab shows who is connected, which frequency is talking, and the per-channel queue.
 
@@ -80,7 +82,7 @@ Do not copy `atc/secrets/` onto pilot PCs.
 You do not need a second computer.
 
 1. Double-click `Open-ATC-Setup.cmd`
-2. Setup → **Squadron** → **Host** → Save
+2. Setup → **Basics** → **Host** → Save
 3. Open the **Traffic** tab
 4. Double-click `Test-Fake-Pilots.cmd` (or `py -3 fake_pilots.py`)
 
@@ -89,8 +91,10 @@ That registers **Fleece 1** and **Viper 3** and has both Advance. Traffic should
 `check_multi_pilot.py` is the offline unit test (no UI, no SRS).
 
 ## Typical workflow
-1. Title bar — type your CAOC name and click the green flight chip to pick the
-   Opus flight (saves immediately; Setup → Save is not required for identity).
+1. Title bar — on Solo/Client, type your CAOC name and click the green flight chip
+   to pick the Opus flight (saves immediately; Setup → Save is not required for
+   identity). On Host the chip reads **Host · routes client flights** — no jet
+   to pick there.
 2. Plan Flight → add/reorder steps → Preview → Save mission  
 3. Fly → Play Next through the full timeline (seek/jump to skip)  
 
@@ -351,9 +355,9 @@ the wrong code, does nothing.
 Taxi / takeoff / landing readbacks have no scripted reply, so your ack simply closes the
 window and the strip clears. Outside a readback window a bare “roger” means nothing and
 is ignored. Repeating the last instruction (for example “contact Blackjack” after a
-handoff) is treated as a readback and does **not** fire the next step — check in with
-“with you” / “checking in” when you are ready. Flight chatter on the same PTT stays
-silent throughout.
+handoff) is treated as a readback and does **not** fire the next step — including after
+you retune and address the new agency. Check in with “with you” / “checking in” when you
+are ready. Flight chatter on the same PTT stays silent throughout.
 
 Calls it understands:
 
@@ -363,9 +367,10 @@ Calls it understands:
 | "Ground, ready to taxi" / "request clearance" / "ready for departure" | Fires the matching flow step |
 | "Request runway two one left" | Sets the runway and reads back the approval |
 | "Say winds" / "say altimeter" | Live METAR answer |
-| "Blackjack, request picture" | AFTTP picture (RANGE/AZIMUTH/VIC/… from live CAOC hostiles within `picture_max_range_nm`) |
-| "Blackjack, bogey dope" / "BRAA" | BRAA to the closest hostile relative to you |
-| "Blackjack, declare bullseye 056 67" | Short declaration only (`Fleece 1, Blackjack, hostile.`); cue picks the contact |
+| "Blackjack, request picture" | AFTTP picture from live CAOC affiliation (UNKNOWN → bogey / recommend VID; BANDIT/HOSTILE spoken as-is) |
+| "Blackjack, bogey dope" / "BRAA" | BRAA to the closest pictured group relative to you |
+| "Blackjack / Bandsaw, declare Elvis 056 67" | **Query only** — current affiliation (`Fleece 1, Bandsaw, bogey spades.`). Never writes CAOC |
+| "Bandsaw, VID hostile" / "declare as bandit" / "group is friendly" | After VID: confirm + PATCH OPUS affiliation |
 | "Bandsaw, checking in" / picture / bogey dope / declare | Optional C2 on Bandsaw |
 | "Bandsaw, checking out / switch Blackjack" | Leave Bandsaw → contact Blackjack (not check-in) |
 | "Blackjack, request Bandsaw" | Push to Bandsaw (optional; you can also self-tune) |
@@ -377,7 +382,7 @@ Calls it understands:
 | "Texaco, request rejoin" / "request reform" | Cleared rejoin left, sometimes left observation (tanker does not say *identified*) |
 | Boom / reform small talk | After rejoin, say **how's it going** / **small talk** (or Fly **Texaco starts chat**) to start boom chat — it does not auto-fire. The **first** line is a time-of-day hello (*Good morning, sir*) — later bits are A/B polls, open questions, and riffs. Answer in a word, say anything, or just listen. With Ollama/Gemini/OpenAI on, freeform replies get a **live riff** (not locked to the two buttons). Texaco keeps chatting with short breaks until you **stop talking** / **talk later** / **standing by**, or leave the tanker. LLM falls back to the library if slow. The boom operator is always a woman. |
 | DCS tanker radio | **Ready pre-contact** → DCS *cleared contact* (boom). **Abort refueling** to disconnect. Do not use SRS for those. |
-| "Blackjack / Bandsaw, back from the tanker" / "checking in" after AAR | Radar contact, continue — returns to **whichever C2 freq you tuned** (Blackjack or Bandsaw) |
+| "Blackjack / Bandsaw, back from the tanker" / "checking in" after AAR | Radar contact, continue — returns to **whichever C2 freq you tuned** (Blackjack or Bandsaw). Full Blackjack/Bandsaw check-in plays **once** per sortie; later check-ins (or mis-heard calls) stay continue / silent |
 | "Blackjack, off station / range complete" | Range checkout → **Nellis Control** East (ch 7) or West (ch 8) immediately. NATCF gives proceed-direct, descent, and the recovery clearance, then hands you to Approach around **42 NM** from the field (`control_handoff_nm`) |
 | "Approach, checking in" / "inbound" | Approach assigns recovery from METAR (VMC → VFR recovery + TAC overhead; IFR → instrument + IAF). Prefers RWY 21 |
 | "Request ARCOE / TORYE / STRYK / MINTT / overhead / instrument" | Change the assigned recovery / approach |
@@ -482,9 +487,9 @@ controller actually says it. Under a mile you just get *over Mormon Mesa*.
 are unchanged, and so is the tanker. The split is by agency kind, so a mission that adds
 its own C2 agency gets bullseye and a new radar agency gets the station reference.
 
-**Approach is deliberately left alone.** Its check-in already opens with range from the
-field (*Fleece one, Nellis Approach, twenty two miles, Nellis landing south, …*) and
-never said "radar contact" in the first place.
+**Approach** opens with range from the field — with a compass direction when the
+jet's position is known (*Fleece one, Nellis Approach, twenty two miles northwest
+of Nellis, …*), or *from Nellis* when it is not. It still never says "radar contact".
 
 The station catalog is `atc/navaids.json` — 24 stations (civil VOR/VORTAC plus the
 military TACANs at Nellis, Indian Springs, Groom Lake, Mercury and Tonopah Test Range)
