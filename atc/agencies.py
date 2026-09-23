@@ -859,11 +859,22 @@ def field_agency(engine: Any) -> str:
     """Current sequenced field agency from the cursor (or last_agency)."""
     step = engine.current_step() if engine is not None and hasattr(engine, "current_step") else None
     ch = str((step or {}).get("channel") or "").strip().lower()
+    state = getattr(engine, "state", None) if engine is not None else None
+    phase = contact_phase(state)
+    # Approach / Tower recovery is not the departure sequence. Defaulting to
+    # Delivery made Tower answer "contact Delivery" on the initial call.
+    if phase in ("airborne", "recovery") or ch in ("approach", "tower"):
+        if ch in FIELD:
+            return ch
+        if phase in ("airborne", "recovery") or ch == "approach":
+            return ""
     if ch in FIELD:
         return ch
-    last = last_agency(getattr(engine, "state", None))
-    if last in FIELD:
+    last = last_agency(state)
+    if last in FIELD and phase == "field":
         return last
+    if phase in ("airborne", "recovery"):
+        return ""
     return "delivery"
 
 
@@ -993,6 +1004,10 @@ def sandbox_mission_phase(
     if phase == "airborne":
         if tuned == "approach" or cursor_ch == "approach":
             return "approach"
+        # Still on Departure after takeoff — keep the radar-contact cue.
+        # Flight phase hides it and the kneeboard goes blank.
+        if tuned == "departure" or (not tuned and cursor_ch == "departure"):
+            return "departure"
         return "flight"
     return cursor_p
 

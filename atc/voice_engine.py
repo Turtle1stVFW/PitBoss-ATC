@@ -615,6 +615,8 @@ def execute_intent(
                 "say_again",
                 "request_winds",
                 "request_altimeter",
+                "tower_check_in",
+                "tower_initial",
             )
         ):
             text = agencies_mod.build_field_redirect(

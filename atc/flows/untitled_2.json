@@ -1,0 +1,415 @@
+{
+  "name": "Untitled",
+  "airport": "nellis",
+  "active_recovery": "visual_overhead",
+  "recovery_options": [
+    "visual_overhead",
+    "tactical_overhead",
+    "straight_in",
+    "sfo_overhead",
+    "sfo_straight_in",
+    "instrument"
+  ],
+  "steps": [
+    {
+      "id": "ops_preflight",
+      "phase": "departure",
+      "label": "Ops \u2014 tune Backup UHF 269.025 before start",
+      "channel": "ops",
+      "mode": "tts",
+      "template": "ops_check_in",
+      "file": null,
+      "enabled": true,
+      "text": null,
+      "_comment": "Preflight Ops on Backup UHF. Request WORDS or start, then switch to Delivery. Play issues start+WORDS and advances."
+    },
+    {
+      "id": "del_clearance",
+      "phase": "departure",
+      "label": "Clearance delivery",
+      "channel": "delivery",
+      "mode": "tts",
+      "template": "clearance",
+      "file": null,
+      "enabled": true,
+      "text": null
+    },
+    {
+      "id": "del_readback",
+      "phase": "departure",
+      "label": "Readback correct",
+      "channel": "delivery",
+      "mode": "tts",
+      "template": "clearance_readback",
+      "file": null,
+      "enabled": true,
+      "text": null
+    },
+    {
+      "id": "gnd_taxi",
+      "phase": "departure",
+      "label": "Taxi to EOR",
+      "channel": "ground",
+      "mode": "tts",
+      "template": "taxi",
+      "file": null,
+      "enabled": true,
+      "text": null
+    },
+    {
+      "id": "gnd_monitor_tower",
+      "phase": "departure",
+      "label": "Monitor tower",
+      "channel": "ground",
+      "mode": "tts",
+      "template": "monitor_tower",
+      "file": null,
+      "enabled": true,
+      "text": null,
+      "trigger": {
+        "zone": "eor",
+        "when": "inside",
+        "settled": true
+      }
+    },
+    {
+      "id": "twr_lineup",
+      "phase": "departure",
+      "label": "Line up and wait",
+      "channel": "tower",
+      "mode": "tts",
+      "template": "lineup",
+      "file": null,
+      "enabled": true,
+      "text": null,
+      "trigger": {
+        "zone": "in_position",
+        "when": "inside",
+        "settled": true,
+        "dwell_s": 3,
+        "gap_s": 5
+      }
+    },
+    {
+      "id": "twr_clear_takeoff",
+      "phase": "departure",
+      "label": "Cleared takeoff",
+      "channel": "tower",
+      "mode": "tts",
+      "template": "clear_takeoff",
+      "file": null,
+      "enabled": true,
+      "text": null,
+      "trigger": {
+        "zone": "in_position",
+        "when": "inside",
+        "settled": true,
+        "dwell_s": 15,
+        "gap_s": 8
+      }
+    },
+    {
+      "id": "dep_radar",
+      "phase": "departure",
+      "label": "Departure radar contact",
+      "channel": "departure",
+      "mode": "tts",
+      "template": "radar_contact",
+      "file": null,
+      "enabled": true,
+      "text": null
+    },
+    {
+      "id": "dep_cruise",
+      "phase": "departure",
+      "label": "Climb to cruise",
+      "channel": "departure",
+      "mode": "tts",
+      "template": "climb_cruise",
+      "file": null,
+      "enabled": true,
+      "text": null,
+      "trigger": {
+        "within_nm": 10,
+        "when": "leaving",
+        "settled": false,
+        "dwell_s": 0,
+        "gap_s": 8
+      }
+    },
+    {
+      "id": "dep_handoff",
+      "phase": "departure",
+      "label": "Departure handoff",
+      "channel": "departure",
+      "mode": "tts",
+      "template": "departure_handoff",
+      "file": null,
+      "enabled": true,
+      "text": null,
+      "trigger": {
+        "within_nm": 18,
+        "when": "leaving",
+        "settled": false,
+        "dwell_s": 0,
+        "gap_s": 5
+      }
+    },
+    {
+      "id": "bj_checkin",
+      "phase": "flight",
+      "label": "Blackjack check-in / alpha",
+      "channel": "blackjack",
+      "mode": "tts",
+      "template": "bj_check_in",
+      "file": null,
+      "enabled": true,
+      "text": null,
+      "voice": "en-US-Chirp3-HD-Kore"
+    },
+    {
+      "id": "bs_checkin",
+      "phase": "flight",
+      "label": "Bandsaw check-in (optional sandbox)",
+      "channel": "bandsaw",
+      "mode": "tts",
+      "template": "bandsaw_check_in",
+      "file": null,
+      "enabled": true,
+      "text": null
+    },
+    {
+      "id": "new_step_3b0a8c",
+      "phase": "flight",
+      "label": "Tanker (optional sandbox)",
+      "channel": "tanker",
+      "mode": "tts",
+      "template": "radio_check",
+      "file": null,
+      "text": null,
+      "enabled": true,
+      "locked": false,
+      "c2": false,
+      "hold": false
+    },
+    {
+      "id": "bs_checkout",
+      "phase": "flight",
+      "label": "Bandsaw check-out \u2192 Blackjack",
+      "channel": "bandsaw",
+      "mode": "tts",
+      "template": "bandsaw_check_out",
+      "file": null,
+      "enabled": true,
+      "text": null
+    },
+    {
+      "id": "joshua_checkin",
+      "phase": "flight",
+      "label": "Joshua check-in (R-2508)",
+      "channel": "joshua",
+      "mode": "tts",
+      "template": "joshua_check_in",
+      "file": null,
+      "enabled": true,
+      "text": null,
+      "c2": false,
+      "hold": true
+    },
+    {
+      "id": "joshua_checkout",
+      "phase": "flight",
+      "label": "Joshua check-out \u2192 Nellis Control",
+      "channel": "joshua",
+      "mode": "tts",
+      "template": "joshua_check_out",
+      "file": null,
+      "enabled": true,
+      "text": null,
+      "handoff_channel": "blackjack",
+      "c2": false,
+      "hold": false
+    },
+    {
+      "id": "center_checkin",
+      "phase": "flight",
+      "label": "LA Center check-in (optional sandbox)",
+      "channel": "center",
+      "mode": "tts",
+      "template": "center_check_in",
+      "file": null,
+      "enabled": true,
+      "text": null,
+      "c2": false,
+      "hold": true
+    },
+    {
+      "id": "bj_range_exit",
+      "phase": "flight",
+      "label": "Blackjack range exit \u2192 Control",
+      "channel": "blackjack",
+      "mode": "tts",
+      "template": "bj_range_exit",
+      "file": null,
+      "enabled": true,
+      "text": null,
+      "handoff_channel": "control_east",
+      "trigger": {
+        "zone": "blackjack",
+        "when": "leaving",
+        "settled": false,
+        "dwell_s": 0,
+        "gap_s": 5
+      }
+    },
+    {
+      "id": "control_east_checkin",
+      "phase": "flight",
+      "label": "Nellis Control East check-in (NATCF)",
+      "channel": "control_east",
+      "mode": "tts",
+      "template": "control_check_in",
+      "file": null,
+      "enabled": true,
+      "text": null,
+      "hold": false
+    },
+    {
+      "id": "control_west_checkin",
+      "phase": "flight",
+      "label": "Nellis Control West check-in (optional)",
+      "channel": "control_west",
+      "mode": "tts",
+      "template": "control_check_in",
+      "file": null,
+      "enabled": true,
+      "text": null,
+      "hold": false
+    },
+    {
+      "id": "control_to_approach",
+      "phase": "flight",
+      "label": "Nellis Control \u2192 Approach",
+      "channel": "control_east",
+      "mode": "tts",
+      "template": "control_handoff",
+      "file": null,
+      "enabled": true,
+      "text": null,
+      "handoff_channel": "approach",
+      "_comment": "Auto-fires once inside control_handoff_nm of the field (default 45). The 18 NM on dep_handoff is the other end of the flight: Departure letting go to Blackjack."
+    },
+    {
+      "id": "app_checkin",
+      "phase": "approach",
+      "label": "Approach check-in (expect recovery)",
+      "channel": "approach",
+      "mode": "tts",
+      "template": "approach_check_in",
+      "file": null,
+      "enabled": true,
+      "text": null
+    },
+    {
+      "id": "app_procedure",
+      "phase": "approach",
+      "label": "Approach clearance (VFR / IAF)",
+      "channel": "approach",
+      "mode": "tts",
+      "template": "approach_procedure",
+      "file": null,
+      "enabled": true,
+      "text": null,
+      "_comment": "Auto-fires ~15s after check-in while inbound to IAF / VFR exit (before the fix)."
+    },
+    {
+      "id": "app_tower",
+      "phase": "approach",
+      "label": "Contact tower",
+      "channel": "approach",
+      "mode": "tts",
+      "template": "cleared_approach",
+      "file": null,
+      "enabled": true,
+      "text": null,
+      "trigger": {
+        "within_nm": 12,
+        "when": "inside",
+        "settled": false,
+        "dwell_s": 0,
+        "gap_s": 8
+      }
+    },
+    {
+      "id": "twr_right_break",
+      "phase": "approach",
+      "label": "Tower check-in",
+      "channel": "tower",
+      "mode": "tts",
+      "template": "right_break",
+      "file": null,
+      "enabled": true,
+      "text": null
+    },
+    {
+      "id": "twr_clear_land",
+      "phase": "approach",
+      "label": "Cleared to land",
+      "channel": "tower",
+      "mode": "tts",
+      "template": "clear_land",
+      "file": null,
+      "enabled": true,
+      "text": null,
+      "trigger": {
+        "when": "inside",
+        "settled": false,
+        "dwell_s": 0,
+        "gap_s": 5
+      }
+    },
+    {
+      "id": "twr_exit",
+      "phase": "approach",
+      "label": "Exit runway",
+      "channel": "tower",
+      "mode": "tts",
+      "template": "exit_runway",
+      "file": null,
+      "enabled": true,
+      "text": null,
+      "trigger": {
+        "zone": "runway_end",
+        "when": "inside",
+        "flight": "me",
+        "settled": false,
+        "dwell_s": 0,
+        "gap_s": 5
+      }
+    },
+    {
+      "id": "gnd_taxi_in",
+      "phase": "approach",
+      "label": "Taxi in",
+      "channel": "ground",
+      "mode": "tts",
+      "template": "taxi_in",
+      "file": null,
+      "enabled": true,
+      "text": null
+    },
+    {
+      "id": "ops_codes",
+      "phase": "approach",
+      "label": "Ops \u00e2\u20ac\u201d codes after parking",
+      "channel": "ops",
+      "mode": "tts",
+      "template": "ops_status",
+      "file": null,
+      "enabled": true,
+      "text": null
+    }
+  ],
+  "active_takeoff_mode": "lineup",
+  "landing_intent": "full_stop"
+}
