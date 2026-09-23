@@ -3120,11 +3120,18 @@ class MissionPlanner(tk.Tk):
         context["last_tx_channel"] = str(state.get("last_tx_channel") or "")
         context["last_tx_template"] = str(state.get("last_tx_template") or "")
         try:
+            ga = state.get("go_around_plan") if isinstance(state, dict) else None
+            ga_kind = (
+                str((ga or {}).get("kind") or "")
+                if isinstance(ga, dict)
+                else ""
+            )
             context["sfo_active"] = bool(
-                atc_phrase.is_sfo_recovery(
+                atc_phrase.sfo_pattern_is_open(state)
+                or atc_phrase.is_sfo_recovery(
                     mission=self.mission, state=state
                 )
-                or atc_phrase.sfo_phase(state)
+                or ga_kind == "sfo_continue"
             )
         except Exception:
             context["sfo_active"] = False

@@ -3108,7 +3108,7 @@ def _handle_sfo_action(
             engine.save_state()
             return played
         # Already cleared at Low Key — roger only.
-        text = f"{atc_phrase.speak_callsign(callsign)}, {airport['name']} Tower, roger."
+        text = f"{atc_phrase.speak_callsign(callsign)}, roger."
         return _transmit(engine, airport, text, "tower", template="sfo_base_key")
 
     return {"action": "none", "detail": f"unhandled sfo action {intent}"}

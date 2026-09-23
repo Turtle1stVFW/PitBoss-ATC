@@ -3754,6 +3754,63 @@ def extras() -> int:
                 "High Key / closed, option still for pattern"
             )
 
+        # After SFO on-the-go, High Key must stay a report (not re-approve).
+        after_go = voice_intent.evaluate(
+            "Raise your one one high key",
+            channel="tower",
+            phase="approach",
+            callsign="Razor 1",
+            last_tx_template="go_around",
+            sfo_active=True,
+        )
+        flex_go = voice_intent.evaluate(
+            "Razor 1 high key",
+            channel="tower",
+            phase="approach",
+            callsign="Razor 1",
+            last_tx_template="go_around",
+            sfo_active=False,
+        )
+        ga_items = atc_phrase.build_readback_checklist(
+            "go_around",
+            nellis,
+            atc_phrase.synthetic_flight_context("Razor 1"),
+            type("W", (), {"wind_dir": 210, "wind_speed_kt": 8})(),
+            "21R",
+            state={"go_around_plan": {"kind": "sfo_continue", "runway": "21R"}},
+        )
+        cs_only = voice_intent.evaluate(
+            "Razor 1",
+            channel="tower",
+            phase="approach",
+            callsign="Razor 1",
+            expected="go_around",
+            awaiting_readback=True,
+            last_tx_template="go_around",
+            readback_items=ga_items,
+        )
+        if (
+            not after_go.match
+            or after_go.match.intent != "report_high_key"
+            or not flex_go.match
+            or flex_go.match.intent != "request_sfo"
+            or not any(
+                str(i.get("key") or "") == "callsign" and i.get("hinge")
+                for i in ga_items
+            )
+            or not cs_only.match
+            or cs_only.match.intent != "acknowledge_readback"
+        ):
+            print(
+                f"  FAIL SFO continue High Key / callsign readback: "
+                f"after={after_go.match and after_go.match.intent} "
+                f"flex={flex_go.match and flex_go.match.intent} "
+                f"items={ga_items} cs={cs_only.match and cs_only.match.intent}"
+            )
+            bad += 1
+        else:
+            print("SFO continue — High Key stays report; callsign closes go-around card")
+
         st_closed = {
             "active_recovery": "tactical_overhead",
             "approach_plan": {"pattern": "tactical_overhead", "runway": "21R"},

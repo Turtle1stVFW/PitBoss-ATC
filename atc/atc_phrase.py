@@ -4595,6 +4595,8 @@ _SORTIE_STATE_CACHE_KEYS = (
     "overhead_recovery",
     "sfo_phase",
     "sfo_high_key_ft",
+    "sfo_pattern_open",
+    "sfo_base_key_pending",
     "range_exit_approved",
     "control_checked_in",
     "control_channel",
@@ -5832,7 +5834,7 @@ def build_pilot_request_ack(
     if kind == "request_low_approach":
         return f"{cs}, {name} {agency}, roger, expect the option."
     if kind == "request_go_around":
-        return f"{cs}, {name} Tower, go around."
+        return f"{cs}, go around."
     if kind == "request_runway":
         rwy = speak_runway(runway) if runway else "requested"
         return f"{cs}, {name} {agency}, runway {rwy} approved."
@@ -6799,7 +6801,6 @@ def build_clear_land(
     Straight-in / instrument: one ship per transmission; remaining ships are
     tracked in state and cleared on later Play / auto / voice calls.
     """
-    name = airport["name"]
     wind = speak_wind(weather.wind_dir, weather.wind_speed_kt)
     rwy = speak_runway(runway)
     mode = landing_clearance_mode(
@@ -6842,14 +6843,8 @@ def build_clear_land(
             clear_say = "cleared low approach"
         else:
             clear_say = "cleared for the option"
-        return (
-            f"{cs}, {name} Tower, {wind}, runway {rwy}, "
-            f"{clear_say}."
-        )
-    return (
-        f"{cs}, {name} Tower, {wind}, runway {rwy}, "
-        f"cleared to land, check gear down."
-    )
+        return f"{cs}, {wind}, runway {rwy}, {clear_say}."
+    return f"{cs}, {wind}, runway {rwy}, cleared to land, check gear down."
 
 
 # --- Go-around / missed approach / VFR pattern work ------------------------
@@ -6989,7 +6984,29 @@ def is_sfo_recovery(
     rec = normalize_recovery_key(recovery, default="") if recovery else ""
     if not rec:
         rec = resolve_active_recovery(None, mission, state=state)
-    return rec in SFO_RECOVERIES
+    if rec in SFO_RECOVERIES:
+        return True
+    # Sticky while the jet is still flying SFO patterns (UI recovery may drift).
+    return bool(isinstance(state, dict) and state.get("sfo_pattern_open"))
+
+
+def sfo_pattern_is_open(state: dict[str, Any] | None = None) -> bool:
+    """True from SFO approve until closed-traffic exit / full stop ends the pattern."""
+    if not isinstance(state, dict):
+        return False
+    if state.get("sfo_pattern_open"):
+        return True
+    if sfo_phase(state) in (
+        "approved",
+        "high_key",
+        "low_key",
+        "base_key",
+        "cleared",
+        "sfo_final",
+    ):
+        return True
+    ga = state.get("go_around_plan")
+    return bool(isinstance(ga, dict) and str(ga.get("kind") or "") == "sfo_continue")
 
 
 def sfo_clearance_due(state: dict[str, Any] | None) -> bool:
@@ -7043,27 +7060,26 @@ def build_sfo_approved(
     recovery: str | None = None,
     high_key_ft: int | None = None,
 ) -> str:
-    """Tower: SFO / High Key approval."""
-    name = airport["name"]
+    """Tower: SFO / High Key approval — callsign + body (no agency every time)."""
     cs = speak_callsign(callsign)
     body = build_sfo_approve_body(
         airport, runway=runway, recovery=recovery, high_key_ft=high_key_ft
     )
-    return f"{cs}, {name} Tower, {body}."
+    return f"{cs}, {body}."
 
 
 def build_sfo_high_key_ack(airport: dict[str, Any], callsign: str) -> str:
     """Tower: High Key reported — ask for Low Key (7110.65 3-10-13)."""
-    name = airport["name"]
+    del airport  # agency already known on Tower
     cs = speak_callsign(callsign)
-    return f"{cs}, {name} Tower, roger, report low key."
+    return f"{cs}, roger, report low key."
 
 
 def build_sfo_low_key_ack(airport: dict[str, Any], callsign: str) -> str:
     """Fallback Low Key roger when clearance cannot be built."""
-    name = airport["name"]
+    del airport
     cs = speak_callsign(callsign)
-    return f"{cs}, {name} Tower, roger."
+    return f"{cs}, roger."
 
 
 def assign_sfo_plan(
@@ -7099,6 +7115,7 @@ def assign_sfo_plan(
             src["active_recovery"] = rec
     if isinstance(state, dict):
         state["sfo_phase"] = "approved"
+        state["sfo_pattern_open"] = True
         if alt is not None:
             state["sfo_high_key_ft"] = alt
         else:
@@ -7114,7 +7131,7 @@ def assign_sfo_plan(
             "_landing_clear_built_seat",
         ):
             state.pop(key, None)
-        # Default SFO clearance is the option unless they ask full stop.
+        # Default SFO clearance is low approach unless they ask full stop.
         set_landing_intent(LANDING_INTENT_LOW_APPROACH, state=state, mission=mission)
         plan = dict(state.get("approach_plan") or {})
         plan["pattern"] = rec
@@ -7199,6 +7216,7 @@ def note_sfo_continue_after_go_around(
         if isinstance(src, dict):
             src["active_recovery"] = rec
     state["sfo_phase"] = "approved"
+    state["sfo_pattern_open"] = True
     state.pop("sfo_base_key_pending", None)
     state.pop("awaiting_on_the_go", None)
     state.pop("pattern_land_needs_leave", None)
@@ -7221,15 +7239,12 @@ def build_closed_traffic_approved(
     runway: str | None = None,
 ) -> str:
     """7110.65 3-10-11 — closed traffic for full-stop / pattern work."""
-    name = airport["name"]
     cs = speak_callsign(callsign)
     side = closed_traffic_side(runway, airport)
     rwy = speak_runway(runway) if runway else ""
     if rwy:
-        return (
-            f"{cs}, {name} Tower, {side} closed traffic approved runway {rwy}."
-        )
-    return f"{cs}, {name} Tower, {side} closed traffic approved."
+        return f"{cs}, {side} closed traffic approved runway {rwy}."
+    return f"{cs}, {side} closed traffic approved."
 
 
 def exit_sfo_for_closed_traffic(
@@ -7246,6 +7261,7 @@ def exit_sfo_for_closed_traffic(
     """
     if isinstance(state, dict):
         state.pop("sfo_phase", None)
+        state.pop("sfo_pattern_open", None)
         state.pop("sfo_base_key_pending", None)
         state.pop("sfo_high_key_ft", None)
         state.pop("awaiting_on_the_go", None)
@@ -7458,8 +7474,7 @@ def assign_go_around_plan(
     was_sfo = (
         rec in SFO_RECOVERIES
         or plan_pat in SFO_RECOVERIES
-        or sfo_phase(state)
-        in ("approved", "high_key", "low_key", "base_key", "cleared", "sfo_final")
+        or sfo_pattern_is_open(state)
     )
     prefer_l = str(prefer or "").strip().casefold().replace("-", "_").replace(" ", "_")
     want_closed = prefer_l in (
@@ -7764,33 +7779,24 @@ def build_go_around(
         reentry = str(ga.get("reentry_say") or "reentry")
         if pilot_waveoff:
             if rwy:
-                return (
-                    f"{cs}, {name} Tower, roger, {reentry} approved runway {rwy}."
-                )
-            return f"{cs}, {name} Tower, roger, {reentry} approved."
+                return f"{cs}, roger, {reentry} approved runway {rwy}."
+            return f"{cs}, roger, {reentry} approved."
         if rwy:
-            return (
-                f"{cs}, {name} Tower, go around, {reentry} approved runway {rwy}."
-            )
-        return f"{cs}, {name} Tower, go around, {reentry} approved."
+            return f"{cs}, go around, {reentry} approved runway {rwy}."
+        return f"{cs}, go around, {reentry} approved."
     if kind == "sfo_continue":
         # Multiple SFOs: climb back out and call High Key again — no re-approval.
         if pilot_waveoff:
-            return f"{cs}, {name} Tower, roger, report high key."
-        return f"{cs}, {name} Tower, report high key."
+            return f"{cs}, roger, report high key."
+        return f"{cs}, report high key."
     side = str(ga.get("side") or closed_traffic_side(runway, airport))
     if pilot_waveoff:
         if rwy:
-            return (
-                f"{cs}, {name} Tower, roger, make {side} closed traffic "
-                f"runway {rwy}."
-            )
-        return f"{cs}, {name} Tower, roger, make {side} closed traffic."
+            return f"{cs}, roger, make {side} closed traffic runway {rwy}."
+        return f"{cs}, roger, make {side} closed traffic."
     if rwy:
-        return (
-            f"{cs}, {name} Tower, go around, make {side} closed traffic runway {rwy}."
-        )
-    return f"{cs}, {name} Tower, go around, make {side} closed traffic."
+        return f"{cs}, go around, make {side} closed traffic runway {rwy}."
+    return f"{cs}, go around, make {side} closed traffic."
 
 
 def build_blackjack_range_exit(
@@ -11294,13 +11300,28 @@ def build_readback_checklist(
                 hinge=True,
             )
         elif kind == "sfo_continue":
-            add(
-                "instruction",
-                "High Key",
-                "report high key",
-                "report high key",
-                hinge=True,
-            )
+            # Callsign alone closes the card — they report High Key when there.
+            cs_raw = ""
+            if opus and getattr(opus, "radio_callsign", None):
+                cs_raw = str(opus.radio_callsign or "").strip()
+            if not cs_raw and isinstance(state, dict):
+                cs_raw = str(state.get("callsign") or "").strip()
+            if cs_raw:
+                add(
+                    "callsign",
+                    "Callsign",
+                    cs_raw,
+                    speak_callsign(cs_raw),
+                    hinge=True,
+                )
+            else:
+                add(
+                    "instruction",
+                    "High Key",
+                    "report high key",
+                    "report high key",
+                    hinge=True,
+                )
         else:
             side = str(ga.get("side") or closed_traffic_side(rwy, airport) or "right")
             phrase = f"{side} closed traffic"
