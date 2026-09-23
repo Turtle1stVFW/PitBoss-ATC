@@ -1650,6 +1650,35 @@ def extras() -> int:
     elif any("tune" in s and "ops" in s for s in ahead_says):
         print(f"  FAIL must not tip tune Ops after switching to Delivery: {ahead}")
         bad += 1
+    # Nellis Standard is the squadron plan — must sandbox like Nellis Default.
+    if not __import__("agencies").is_default_sandbox(
+        {"flow_file": "flows/nellis_standard.json"}
+    ):
+        print("  FAIL nellis_standard.json must be an agency sandbox flow")
+        bad += 1
+    # Delivery dialed in the bank while Ops is still keyed — tip Delivery.
+    import json
+    from pathlib import Path
+
+    import srs_radio as srs_radio_mod
+
+    ap = json.loads(Path("airports.json").read_text(encoding="utf-8-sig"))["nellis"]
+    bank = srs_radio_mod.RadioState(
+        source="srs",
+        freqs_mhz=[269.025, 289.4, 251.0],
+        selected_mhz=269.025,
+        fresh=True,
+    )
+    tip = srs_radio_mod.tip_radio_channel(
+        ap,
+        {},
+        pending_contact="delivery",
+        ops_start_done=True,
+        state=bank,
+    )
+    if tip != "delivery":
+        print(f"  FAIL tip_radio_channel should prefer pending Delivery in bank, got {tip!r}")
+        bad += 1
     cue_flight = voice_intent.cue_channel(
         mission_phase="flight",
         cursor_channel="blackjack",

@@ -1040,6 +1040,80 @@ def channel_for_tuned_freq(
     return None
 
 
+def bank_has_agency(
+    airport: dict[str, Any],
+    channel: str,
+    config: dict[str, Any] | None = None,
+    *,
+    state: RadioState | None = None,
+    tol_mhz: float | None = None,
+) -> bool:
+    """True when any tuned radio matches this agency's published freq."""
+    import atc_phrase
+
+    ch = str(channel or "").strip().lower()
+    if not ch:
+        return False
+    cfg = config or {}
+    tol = float(
+        tol_mhz if tol_mhz is not None else cfg.get("freq_gate_tolerance_mhz") or DEFAULT_TOL_MHZ
+    )
+    st = state if state is not None else current_radio_state(cfg)
+    if not st.freqs_mhz:
+        return False
+    try:
+        want, _mod, _name = atc_phrase.channel_radio(airport, ch)
+    except Exception:
+        return False
+    if want is None:
+        return False
+    try:
+        target = float(want)
+    except (TypeError, ValueError):
+        return False
+    return any(abs(float(freq) - target) <= tol for freq in st.freqs_mhz)
+
+
+def tip_radio_channel(
+    airport: dict[str, Any],
+    config: dict[str, Any] | None = None,
+    *,
+    pending_contact: str = "",
+    ops_start_done: bool = False,
+    state: RadioState | None = None,
+) -> str | None:
+    """
+    Agency Fly tips should follow.
+
+    Prefer the keyed radio, but after OPS start (or a Delivery→Ground handoff)
+    if the pending agency is already dialed in the bank while an earlier field
+    radio is still selected, tip the pending agency — pilots often load
+    Delivery on COM2 and leave Ops keyed.
+    """
+    cfg = config or {}
+    pending = str(pending_contact or "").strip().lower()
+    selected = channel_for_tuned_freq(airport, cfg, state=state)
+    field = frozenset({"ops", "delivery", "ground", "tower", "departure"})
+    if (
+        pending
+        and pending in field
+        and pending != (selected or "")
+        and bank_has_agency(airport, pending, cfg, state=state)
+    ):
+        # Don't steal the tip before start is approved (pending Delivery while
+        # still on Ops for WORDS / start).
+        if pending == "delivery" and not ops_start_done and (selected or "") == "ops":
+            return selected
+        if (selected or "") in field:
+            try:
+                order = ("ops", "delivery", "ground", "tower", "departure")
+                if order.index(selected or "ops") < order.index(pending):
+                    return pending
+            except ValueError:
+                return pending
+    return selected
+
+
 def try_seed_from_srs_awacs() -> list[float]:
     """Optional seed from SRS awacs-radios*.json under Client install dirs."""
     roots = [

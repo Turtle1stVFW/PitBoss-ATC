@@ -37,6 +37,14 @@ AIRBORNE: frozenset[str] = frozenset(
     }
 )
 DEFAULT_FLOW_NAME = "nellis_default.json"
+# Packaged Nellis plans — agency sandbox (tune Delivery → Delivery cues).
+# Custom / Untitled plans stay cursor-locked so Plan Flight authorship wins.
+_SANDBOX_FLOW_NAMES = frozenset(
+    {
+        "nellis_default.json",
+        "nellis_standard.json",
+    }
+)
 
 # kind: field | natcf | control | c2 | tanker | center | gci | ops
 _CORE: dict[str, dict[str, Any]] = {
@@ -223,9 +231,9 @@ def is_control(channel: str) -> bool:
 
 
 def is_default_sandbox(config: dict[str, Any] | None) -> bool:
-    """True when the Host is on Nellis Default (agency sandbox, not a custom Plan)."""
+    """True for packaged Nellis plans (agency sandbox), not a custom Plan."""
     raw = str((config or {}).get("flow_file") or "").strip() or DEFAULT_FLOW_NAME
-    return Path(raw).name.lower() == DEFAULT_FLOW_NAME
+    return Path(raw).name.lower() in _SANDBOX_FLOW_NAMES
 
 
 # After these, Fly should show the next call on that agency (checkout / handoff).

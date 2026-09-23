@@ -19,6 +19,7 @@ sys.path.insert(0, str(HERE))
 import atc_net
 import atc_phrase
 import atc_server
+import agencies
 import channel_tx
 import flow_engine
 import runway_position
@@ -306,6 +307,10 @@ def test_session_key() -> list[str]:
         opus_flight_id=55, opus_seat=1
     ):
         fails.append("flight/seat ids must normalize int vs float")
+    if not agencies.is_default_sandbox({"flow_file": "flows/nellis_standard.json"}):
+        fails.append("Nellis Standard must use the agency sandbox")
+    if agencies.is_default_sandbox({"flow_file": "flows/untitled.json"}):
+        fails.append("custom Untitled plans must not use the agency sandbox")
     f1 = atc_net.flow_key(opus_flight_id=1, callsign="Fleece 1")
     f2 = atc_net.flow_key(opus_flight_id=1, callsign="Fleece 1")
     f3 = atc_net.flow_key(opus_flight_id=2, callsign="Viper 3")

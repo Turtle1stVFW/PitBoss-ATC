@@ -900,9 +900,46 @@ class MissionPlanner(tk.Tk):
         except Exception:  # noqa: BLE001
             pass
         try:
-            tuned = srs_radio.channel_for_tuned_freq(airport, self.config_data) or ""
+            pending_ch = ""
+            try:
+                import agencies as agencies_mod
+
+                pending_ch = str(
+                    agencies_mod.pending_contact(
+                        getattr(self.engine, "state", None)
+                    )
+                    or ""
+                ).strip().lower()
+            except Exception:
+                pending_ch = str(
+                    (getattr(self.engine, "state", None) or {}).get("pending_contact")
+                    or ""
+                ).strip().lower()
+            ops_done = False
+            try:
+                import ops as ops_mod
+
+                sortie = ops_mod.sortie_from_state(
+                    getattr(self.engine, "state", None)
+                )
+                ops_done = bool(sortie and sortie.start_utc)
+            except Exception:
+                ops_done = False
+            tuned = (
+                srs_radio.tip_radio_channel(
+                    airport,
+                    self.config_data,
+                    pending_contact=pending_ch,
+                    ops_start_done=ops_done,
+                )
+                or ""
+            )
         except Exception:  # noqa: BLE001
-            tuned = ""
+            try:
+                tuned = srs_radio.channel_for_tuned_freq(airport, self.config_data) or ""
+            except Exception:
+                tuned = ""
+            pending_ch = ""
         prev = getattr(self, "_last_tip_tuned_channel", None)
         step = None
         try:
@@ -915,21 +952,6 @@ class MissionPlanner(tk.Tk):
         #   otherwise → cursor step
         gate_step = step
         gate_channel = None
-        pending_ch = ""
-        try:
-            import agencies as agencies_mod
-
-            pending_ch = str(
-                agencies_mod.pending_contact(
-                    getattr(self.engine, "state", None)
-                )
-                or ""
-            ).strip().lower()
-        except Exception:
-            pending_ch = str(
-                (getattr(self.engine, "state", None) or {}).get("pending_contact")
-                or ""
-            ).strip().lower()
         if pending_ch and tuned and pending_ch != tuned:
             # Ops start → Delivery, Tower handoff → Departure, etc.
             gate_channel = pending_ch
@@ -3069,14 +3091,47 @@ class MissionPlanner(tk.Tk):
             pass
         # Tips / voice scoring follow the live radio when it is an agency in
         # this mission phase (Blackjack vs Control vs Joshua during Flight).
+        # After OPS start, prefer pending Delivery/Ground when that freq is
+        # already in the bank even if Ops is still the keyed radio.
         tuned = None
         try:
-            tuned = srs_radio.channel_for_tuned_freq(
-                context.get("airport") or self.engine.airport(),
+            airport_for_tune = context.get("airport") or self.engine.airport()
+            pending_early = ""
+            try:
+                import agencies as agencies_mod
+
+                pending_early = agencies_mod.pending_contact(
+                    getattr(self.engine, "state", None)
+                )
+            except Exception:
+                pending_early = str(
+                    (getattr(self.engine, "state", None) or {}).get("pending_contact")
+                    or ""
+                )
+            ops_done_early = False
+            try:
+                import ops as ops_mod
+
+                sortie_early = ops_mod.sortie_from_state(
+                    getattr(self.engine, "state", None)
+                )
+                ops_done_early = bool(sortie_early and sortie_early.start_utc)
+            except Exception:
+                ops_done_early = False
+            tuned = srs_radio.tip_radio_channel(
+                airport_for_tune,
                 self.config_data,
+                pending_contact=pending_early,
+                ops_start_done=ops_done_early,
             )
         except Exception:  # noqa: BLE001
-            tuned = None
+            try:
+                tuned = srs_radio.channel_for_tuned_freq(
+                    context.get("airport") or self.engine.airport(),
+                    self.config_data,
+                )
+            except Exception:
+                tuned = None
         try:
             import agencies as agencies_mod
 
@@ -10112,7 +10167,12 @@ class MissionPlanner(tk.Tk):
                         )
                         or ""
                     ).strip().lower()
-                    if live_tune == "ops" or live_tune in (
+                    if live_tune in (
+                        "ops",
+                        "delivery",
+                        "ground",
+                        "tower",
+                        "departure",
                         "blackjack",
                         "bandsaw",
                         "joshua",
@@ -10130,36 +10190,45 @@ class MissionPlanner(tk.Tk):
             switch_to = False
             if sandbox:
                 try:
-                    live_ch = srs_radio.channel_for_tuned_freq(
-                        self.engine.airport(), self.config_data
-                    ) or ""
-                except Exception:
-                    live_ch = ""
-                try:
-                    import agencies as agencies_mod
+                    pending_ch = ""
+                    try:
+                        import agencies as agencies_mod
 
-                    pending_ch = agencies_mod.pending_contact(
-                        getattr(self.engine, "state", None)
-                    )
-                except Exception:
-                    pending_ch = str(
-                        (getattr(self.engine, "state", None) or {}).get(
-                            "pending_contact"
+                        pending_ch = agencies_mod.pending_contact(
+                            getattr(self.engine, "state", None)
+                        )
+                    except Exception:
+                        pending_ch = str(
+                            (getattr(self.engine, "state", None) or {}).get(
+                                "pending_contact"
+                            )
+                            or ""
+                        ).strip().lower()
+                    ops_start_done = False
+                    try:
+                        import ops as ops_mod
+
+                        sortie = ops_mod.sortie_from_state(
+                            getattr(self.engine, "state", None)
+                        )
+                        ops_start_done = bool(sortie and sortie.start_utc)
+                    except Exception:
+                        ops_start_done = False
+                    live_ch = (
+                        srs_radio.tip_radio_channel(
+                            self.engine.airport(),
+                            self.config_data,
+                            pending_contact=pending_ch,
+                            ops_start_done=ops_start_done,
                         )
                         or ""
-                    ).strip().lower()
+                    )
+                except Exception:
+                    live_ch = ""
+                    pending_ch = ""
+                    ops_start_done = False
                 live_ch = str(live_ch or "").strip().lower()
                 owning_ch = self._map_owning_agency()
-                ops_start_done = False
-                try:
-                    import ops as ops_mod
-
-                    sortie = ops_mod.sortie_from_state(
-                        getattr(self.engine, "state", None)
-                    )
-                    ops_start_done = bool(sortie and sortie.start_utc)
-                except Exception:
-                    ops_start_done = False
                 # WORDS/start leftover must not steal the OPS hero before
                 # start is actually approved on this sortie.
                 if live_ch == "ops" and pending_ch == "delivery" and not ops_start_done:
