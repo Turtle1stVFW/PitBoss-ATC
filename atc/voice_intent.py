@@ -196,6 +196,10 @@ def retune_destination(
 
     OPS starts the card: WORDS / start stay the advance until start is
     approved. The Delivery cursor must not steal that with a tune tip.
+
+    Once the pilot is already on the pending handoff radio (Delivery after
+    start, Ground after taxi clearance, …), do not tip them back to an
+    earlier cursor agency — tip that radio's call instead.
     """
     here_l = (here or "").strip().lower()
     cursor_l = (cursor or "").strip().lower()
@@ -204,7 +208,12 @@ def retune_destination(
         return ""
     if pending_l and pending_l != here_l:
         return pending_l
-    return cursor_l
+    # Arrived on the handoff target — stay; suggestions tip this agency's call.
+    if pending_l and pending_l == here_l:
+        return ""
+    if cursor_l and cursor_l != here_l:
+        return cursor_l
+    return ""
 
 
 def cue_channel(
@@ -5428,7 +5437,36 @@ def suggestions(
         # Requests and actions → optional (even when ranked high for visibility).
         # OPS step 1 and tanker side-trip: the speakable requests *are* the card.
         if intent.kind == "step" or intent.step_id:
-            role = "advance" if rank == 0 else ""
+            if rank == 0:
+                role = "advance"
+            elif (
+                # Tuned to this agency while the shared cursor still names an
+                # earlier template (Ops → Delivery, Delivery → Ground, …).
+                # Tip only the next timeline call for this radio — not every
+                # Ground step (taxi + at EOR) at once.
+                not should_tip_retune(here_l, dest_l)
+                and hide_cursor_phrases
+                and intent.channels
+                and channel_l in intent.channels
+            ):
+                next_tmpl = ""
+                for st in steps or []:
+                    if not isinstance(st, dict) or st.get("enabled", True) is False:
+                        continue
+                    if str(st.get("channel") or "").strip().lower() != channel_l:
+                        continue
+                    next_tmpl = str(st.get("template") or "").strip().lower()
+                    break
+                if next_tmpl:
+                    role = (
+                        "advance"
+                        if intent.template and intent.template == next_tmpl
+                        else ""
+                    )
+                else:
+                    role = "advance"
+            else:
+                role = ""
         elif channel_l == "ops" and intent.id in (
             "ops_request_words",
             "ops_request_start",

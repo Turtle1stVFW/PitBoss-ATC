@@ -9790,7 +9790,10 @@ class MissionPlanner(tk.Tk):
             last_tx_channel=str(context.get("last_tx_channel") or ""),
             blackjack_checked_in=bool(context.get("blackjack_checked_in")),
             tuned_channel=tuned_now,
-            next_channel=dest_ch,
+            # Pass the timeline cursor — suggestions() recomputes the retune
+            # target. Passing dest_ch here used to tip "tune Ops" after the
+            # pilot had already switched to Delivery.
+            next_channel=cursor_now,
             next_freq_mhz=next_mhz,
             sfo_active=bool(context.get("sfo_active")),
         )

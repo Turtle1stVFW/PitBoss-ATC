@@ -1607,6 +1607,49 @@ def extras() -> int:
     ):
         print(f"  FAIL off-freq cues must tip tune Ground, not taxi: {off_freq}")
         bad += 1
+    # Tuned ahead of the shared cursor (still on Ops) — tip Delivery's call,
+    # not "tune Ops" and not an empty VOICE CUES card.
+    ahead = voice_intent.suggestions(
+        phase="departure",
+        channel="delivery",
+        expected="ops_check_in",
+        callsign=CALLSIGN,
+        airport_name="Nellis",
+        steps=[
+            {
+                "id": "ops_preflight",
+                "channel": "ops",
+                "phase": "departure",
+                "template": "ops_check_in",
+            }
+        ],
+        current_step_id="ops_preflight",
+        pending_contact="delivery",
+        ops_start_done=True,
+        tuned_channel="delivery",
+        next_channel="ops",
+        last_tx_template="ops_start",
+        last_tx_channel="ops",
+        limit=5,
+        advance_limit=2,
+        optional_limit=3,
+    )
+    ahead_adv = [str(s).casefold() for s, _d, r, *_ in ahead if r == "advance"]
+    ahead_says = [str(s).casefold() for s, *_ in ahead]
+    if voice_intent.retune_destination(
+        here="delivery", cursor="ops", pending="delivery", ops_start_done=True
+    ):
+        print(
+            "  FAIL retune must stay empty once tuned to pending Delivery, "
+            f"got {voice_intent.retune_destination(here='delivery', cursor='ops', pending='delivery', ops_start_done=True)!r}"
+        )
+        bad += 1
+    elif not ahead_adv or "clearance on request" not in ahead_adv[0]:
+        print(f"  FAIL Delivery tune with Ops cursor must tip clearance: {ahead}")
+        bad += 1
+    elif any("tune" in s and "ops" in s for s in ahead_says):
+        print(f"  FAIL must not tip tune Ops after switching to Delivery: {ahead}")
+        bad += 1
     cue_flight = voice_intent.cue_channel(
         mission_phase="flight",
         cursor_channel="blackjack",
