@@ -2010,6 +2010,7 @@ def _ownship_fix_is_fresh(state: dict[str, Any] | None) -> bool:
 # position for it — "no fix" must stay None so distance gates hold.
 OWNSHIP_SEAT_BOUND_KEY = "_ownship_seat_bound"
 OWNSHIP_SEAT_LL_KEY = "_ownship_seat_ll"
+OWNSHIP_SEAT_ALT_KEY = "_ownship_seat_alt_ft"
 
 
 def ownship_seat_bound(config: dict[str, Any] | None) -> bool:
@@ -9462,6 +9463,27 @@ def match_caoc_unit_for_flight(
     return scored[0][1]
 
 
+def _seat_inject_fields(
+    config: dict[str, Any] | None,
+    ll: tuple[float, float],
+    callsign: str | None,
+) -> dict[str, Any]:
+    """Lat/lon (and altitude, when the flying PC sent it) for a bound seat."""
+    fields: dict[str, Any] = {
+        "lat": ll[0],
+        "lon": ll[1],
+        "callsign": callsign or "MAP",
+    }
+    raw = (config or {}).get(OWNSHIP_SEAT_ALT_KEY)
+    try:
+        alt_ft = float(raw) if raw not in (None, "") else None
+    except (TypeError, ValueError):
+        alt_ft = None
+    if alt_ft is not None and alt_ft > 0:
+        fields["alt_m"] = alt_ft / 3.28084
+    return fields
+
+
 def resolve_alpha_bullseye(
     config: dict[str, Any],
     *,
@@ -9469,15 +9491,33 @@ def resolve_alpha_bullseye(
     opus: OpusFlightContext | None = None,
     weather: Weather | None = None,
     altimeter_inhg: float | None = None,
+    state: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """
     Live alpha-check fix from Opus CAOC radar — same numbers as the unit popup
     when you click an aircraft on /opus/caoc.
     Returns {name, bearing, range_nm, display, spoken, unit_name} or None.
 
-    When Fly's map jet is ownship, fall back to the inject lat/lon if CAOC
-    has no matching unit (offline / unmatched callsign).
+    A bound client seat (map-is-jet on the flying PC) is authoritative: the
+    Host's CAOC feed and local inject file cannot see that jet, which is how
+    Blackjack/Bandsaw said "radar contact" / "unable alpha check" with no
+    bullseye. Otherwise fall back to the map inject, then a fresh ownship fix.
     """
+    if ownship_seat_bound(config):
+        ll = seat_ownship_latlon(config)
+        if ll is None:
+            return None
+        synthetic = ownship_inject_unit(
+            _seat_inject_fields(config, ll, callsign),
+            config,
+        )
+        return bullseye_for_caoc_unit(
+            synthetic,
+            config,
+            opus=opus,
+            weather=weather,
+            altimeter_inhg=altimeter_inhg,
+        )
     radar = fetch_caoc_radar(config)
     units = list((radar or {}).get("units") or []) if radar else []
     unit = match_caoc_unit_for_flight(
@@ -9491,12 +9531,24 @@ def resolve_alpha_bullseye(
             weather=weather,
             altimeter_inhg=altimeter_inhg,
         )
-    if not ownship_from_map_enabled(config):
+    if ownship_from_map_enabled(config):
+        inj = read_ownship_inject(config=config)
+        if inj:
+            synthetic = ownship_inject_unit(inj, config)
+            return bullseye_for_caoc_unit(
+                synthetic,
+                config,
+                opus=opus,
+                weather=weather,
+                altimeter_inhg=altimeter_inhg,
+            )
+    ll = _ownship_ll_from_state(state)
+    if ll is None:
         return None
-    inj = read_ownship_inject(config=config)
-    if not inj:
-        return None
-    synthetic = ownship_inject_unit(inj, config)
+    synthetic = ownship_inject_unit(
+        {"lat": ll[0], "lon": ll[1], "callsign": callsign or "MAP"},
+        config,
+    )
     return bullseye_for_caoc_unit(
         synthetic,
         config,
@@ -9550,12 +9602,16 @@ def resolve_agency_position(
     import agencies as agencies_mod
 
     if agencies_mod.uses_bullseye(agency):
-        return resolve_alpha_bullseye(config or {}, callsign=callsign, opus=opus)
+        return resolve_alpha_bullseye(
+            config or {}, callsign=callsign, opus=opus, state=state
+        )
     mode = atc_position_reference(config)
     if mode == "off":
         return None
     if mode == "bullseye":
-        return resolve_alpha_bullseye(config or {}, callsign=callsign, opus=opus)
+        return resolve_alpha_bullseye(
+            config or {}, callsign=callsign, opus=opus, state=state
+        )
     return resolve_navaid_position(
         config, callsign=callsign, opus=opus, state=state
     )
@@ -13515,7 +13571,11 @@ def build_template_text(
         alpha_spoken = None
         if config:
             fix = resolve_alpha_bullseye(
-                config, callsign=callsign, opus=opus, weather=weather
+                config,
+                callsign=callsign,
+                opus=opus,
+                weather=weather,
+                state=state,
             )
             if fix and fix.get("spoken"):
                 alpha_spoken = str(fix["spoken"])
@@ -13557,7 +13617,11 @@ def build_template_text(
         alpha_spoken = None
         if config:
             fix = resolve_alpha_bullseye(
-                config, callsign=callsign, opus=opus, weather=weather
+                config,
+                callsign=callsign,
+                opus=opus,
+                weather=weather,
+                state=state,
             )
             if fix and fix.get("spoken"):
                 alpha_spoken = str(fix["spoken"])
@@ -13606,7 +13670,11 @@ def build_template_text(
         alpha_spoken = None
         if config:
             fix = resolve_alpha_bullseye(
-                config, callsign=callsign, opus=opus, weather=weather
+                config,
+                callsign=callsign,
+                opus=opus,
+                weather=weather,
+                state=state,
             )
             if fix and fix.get("spoken"):
                 alpha_spoken = str(fix["spoken"])
@@ -13898,7 +13966,11 @@ def build_flow_step_phrase(
         alpha = ""
         if config and "{alpha_bullseye}" in custom_text:
             fix = resolve_alpha_bullseye(
-                config, callsign=callsign, opus=opus, weather=weather
+                config,
+                callsign=callsign,
+                opus=opus,
+                weather=weather,
+                state=state,
             )
             alpha = str((fix or {}).get("spoken") or "")
         text = (

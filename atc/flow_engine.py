@@ -1159,7 +1159,10 @@ class FlowEngine:
         alpha_spoken = None
         try:
             fix = atc_phrase.resolve_alpha_bullseye(
-                self.config, callsign=callsign, opus=opus
+                self.config,
+                callsign=callsign,
+                opus=opus,
+                state=self.state,
             )
             if fix and fix.get("spoken"):
                 alpha_spoken = str(fix["spoken"])

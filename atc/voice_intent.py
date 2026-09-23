@@ -3216,6 +3216,12 @@ def _go_around_instruction_hit(text: str, item: dict[str, Any] | None) -> bool:
             return True
         if re.search(r"(?<!\w)(?:left|right)\s+close[d]?(?!\w)", text):
             return True
+        # "right" / "left" alone when that side is the closed pattern.
+        for side in ("right", "left"):
+            if side not in blob:
+                continue
+            if re.search(rf"(?<!\w){side}(?!\w)", text):
+                return True
     if "high key" in blob and re.search(
         r"(?<!\w)(?:report\s+)?high\s+key(?!\w)", text
     ):
@@ -5061,6 +5067,9 @@ def suggestions(
                         "“squawk”/“squawking” + code, code alone, or roger "
                         "· agency optional"
                     )
+                elif "closed" in hinge_says[0].casefold() or "close traffic" in hinge_says[0].casefold():
+                    side = "right" if "right" in hinge_says[0].casefold() else "left"
+                    tip = f"“{side}” is enough · agency optional"
                 elif hinge_key == "climb":
                     tip = "altitude alone is enough · agency optional"
                 elif hinge_key == "callsign":

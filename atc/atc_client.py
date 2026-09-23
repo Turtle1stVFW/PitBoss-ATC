@@ -364,6 +364,9 @@ def _radio_payload(config: dict[str, Any]) -> dict[str, Any]:
     except Exception:
         out["radio_fresh"] = False
     out["ownship_ll"] = _ownship_payload(config)
+    alt = _ownship_alt_ft(config)
+    if alt is not None:
+        out["ownship_alt_ft"] = alt
     return out
 
 
@@ -393,3 +396,24 @@ def _ownship_payload(config: dict[str, Any]) -> list[float] | None:
     if ll is None:
         return None
     return [float(ll[0]), float(ll[1])]
+
+
+def _ownship_alt_ft(config: dict[str, Any]) -> float | None:
+    """Map-jet altitude in feet, so Host alpha checks can say angels."""
+    try:
+        inj = atc_phrase.read_ownship_inject(config=config)
+    except Exception:
+        inj = None
+    if not isinstance(inj, dict):
+        return None
+    for key in ("alt_ft", "alt_ft_msl"):
+        raw = inj.get(key)
+        if raw in (None, ""):
+            continue
+        try:
+            alt = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if alt > 0:
+            return alt
+    return None

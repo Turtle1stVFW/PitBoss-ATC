@@ -519,6 +519,25 @@ def _ingest_srs_udp_payload(data: bytes) -> None:
         _srs_udp_error = ""
 
 
+def _bank_contains_mhz(
+    freqs: list[float] | None,
+    mhz: float,
+    config: dict[str, Any] | None,
+) -> bool:
+    tol = float((config or {}).get("freq_gate_tolerance_mhz") or DEFAULT_TOL_MHZ)
+    try:
+        want = float(mhz)
+    except (TypeError, ValueError):
+        return False
+    for raw in freqs or []:
+        try:
+            if abs(float(raw) - want) <= tol:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
 def maybe_force_eam_tx_freq(
     config: dict[str, Any] | None,
     freq: float,
@@ -534,6 +553,16 @@ def maybe_force_eam_tx_freq(
     """
     apply_config(config)
     if not _eam_enabled:
+        return float(freq), mod
+    # The agency frequency is what the pilot is listening for. Forcing every
+    # scripted call onto whichever radio is selected drops Monitor Tower /
+    # Departure / Control on a radio they already left — Fly still advances,
+    # and only Play Previous (now on the right radio) is heard.
+    # Keep the agency freq when it is already in this seat's bank. Fall back
+    # to the selected radio only for a single-radio common-PTT tune.
+    if radio is not None and radio.fresh and _bank_contains_mhz(
+        radio.freqs_mhz, float(freq), config
+    ):
         return float(freq), mod
     if radio is not None and radio.fresh:
         if radio.selected_mhz is not None:

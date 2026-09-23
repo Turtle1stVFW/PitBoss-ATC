@@ -895,6 +895,20 @@ def test_injected_radio_gate() -> list[str]:
     )
     if abs(forced - 123.625) > 0.01:
         fails.append(f"EAM host TX should use client selected 123.625, got {forced}")
+    banked = srs_radio.RadioState(
+        source="client",
+        freqs_mhz=[275.8, 289.4],
+        selected_mhz=275.8,
+        fresh=True,
+        age_s=0.0,
+    )
+    kept, _mod_kept = srs_radio.maybe_force_eam_tx_freq(
+        eam_cfg, 289.4, "AM", radio=banked
+    )
+    if abs(kept - 289.4) > 0.01:
+        fails.append(
+            f"EAM should keep agency 289.4 when it is in the bank, got {kept}"
+        )
     srs_radio.apply_config(_host_config(freq_gate_eam_enabled=False))
     return fails
 

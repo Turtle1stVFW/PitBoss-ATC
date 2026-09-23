@@ -1982,7 +1982,13 @@ class MissionPlanner(tk.Tk):
             return ""
         if not isinstance(result, dict):
             return sid
-        if result.get("action") == "blocked":
+        action = str(result.get("action") or "")
+        text = str(result.get("text") or "").strip()
+        detail = result.get("detail")
+        if not text and isinstance(detail, dict):
+            text = str(detail.get("text") or "").strip()
+        self._last_auto_phrase = text
+        if action == "blocked" or result.get("action") == "blocked":
             detail = str(result.get("detail") or "").strip()
             low = detail.casefold()
             if "already played" in low:
@@ -1997,6 +2003,12 @@ class MissionPlanner(tk.Tk):
                     )
                 )
             return ""
+        if not text or action not in ("queued", "transmit", "play"):
+            missing = "Host did not queue audio"
+            self._ui_call(
+                lambda d=missing, st=step: self._note_no_tx(d, action="auto", step=st)
+            )
+            return ""
         return sid
 
     def _host_position_work(self) -> None:
@@ -2008,7 +2020,7 @@ class MissionPlanner(tk.Tk):
                 try:
                     bind = getattr(atc_server, "_session_engine_binding", None)
                     if bind is not None:
-                        with bind(sess):
+                        with bind(sess, inject_radios=True):
                             self._position_work(
                                 engine=sess.engine,
                                 tracker=self._position_tracker_for(sess.session_id),
@@ -2450,7 +2462,11 @@ class MissionPlanner(tk.Tk):
             latch = tracker.pending_latch or f"fire:{fire}:{status.runway or 'field'}"
             tracker.fire_once(latch)
             tracker.pending_latch = ""
-            spoken = label or fire
+            spoken = (
+                str(getattr(self, "_last_auto_phrase", "") or "").strip()
+                or label
+                or fire
+            )
             self._voice_log(f"AUTO  {spoken} — {summary}")
             self._on_trigger_received(f"AUTO {spoken} (position)")
             self._refresh_client_fly()

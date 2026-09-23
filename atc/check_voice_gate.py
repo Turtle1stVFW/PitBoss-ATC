@@ -2513,6 +2513,7 @@ def extras() -> int:
         ("on the go", closed_items, "repeat on the go"),
         ("right closed traffic", closed_items, "right closed traffic"),
         ("right closed", closed_items, "right closed"),
+        ("right", closed_items, "right"),
         ("right close traffic", closed_items, "right close traffic"),
         ("Right, close traffic, FLEECE 1.", closed_items, "STT close traffic"),
         ("close traffic", closed_items, "close traffic"),
@@ -2530,6 +2531,10 @@ def extras() -> int:
                 f"{text!r} — {result.describe()}"
             )
             bad += 1
+    wrong_side = ga_rb("left", closed_items)
+    if wrong_side.fired and wrong_side.match and wrong_side.match.intent == "acknowledge_readback":
+        print(f"  FAIL left must not close a right pattern: {wrong_side.describe()}")
+        bad += 1
     still_waveoff = land_ga("going around")
     if not still_waveoff.fired or still_waveoff.match.intent != "going_around":
         print(

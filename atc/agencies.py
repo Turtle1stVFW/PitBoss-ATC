@@ -292,6 +292,10 @@ def display_step_for_agency(
             pick = step
             break
     last = str(last_tx_template or "").strip().lower()
+    if last in ("bandsaw_check_out", "joshua_check_out"):
+        for _i, step in matches:
+            if str(step.get("template") or "").strip().lower() == "bj_range_exit":
+                return step
     if not last:
         return pick
     for i, step in matches:

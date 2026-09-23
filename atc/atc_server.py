@@ -102,6 +102,7 @@ class PilotSession:
         self.local_state: dict[str, Any] = {}
         self.ownship_ll: tuple[float, float] | None = None
         self.ownship_ll_t: float = 0.0
+        self.ownship_alt_ft: float | None = None
 
     @property
     def callsign(self) -> str:
@@ -128,6 +129,13 @@ class PilotSession:
                 ll = None
         self.ownship_ll = ll
         self.ownship_ll_t = time.time() if ll is not None else 0.0
+        raw_alt = body.get("ownship_alt_ft")
+        try:
+            self.ownship_alt_ft = (
+                float(raw_alt) if raw_alt not in (None, "") else None
+            )
+        except (TypeError, ValueError):
+            self.ownship_alt_ft = None
 
     def fresh_ownship_ll(self) -> tuple[float, float] | None:
         """This seat's fix while it is recent enough to gate on."""
@@ -919,6 +927,7 @@ def _session_engine_binding(
 _SEAT_POSITION_CONFIG_KEYS = (
     atc_phrase.OWNSHIP_SEAT_BOUND_KEY,
     atc_phrase.OWNSHIP_SEAT_LL_KEY,
+    atc_phrase.OWNSHIP_SEAT_ALT_KEY,
 )
 
 
@@ -942,11 +951,17 @@ def _bind_seat_position(
     state = engine.state if isinstance(getattr(engine, "state", None), dict) else None
     if ll is None:
         cfg.pop(atc_phrase.OWNSHIP_SEAT_LL_KEY, None)
+        cfg.pop(atc_phrase.OWNSHIP_SEAT_ALT_KEY, None)
         if state is not None:
             state.pop("ownship_ll", None)
             state.pop("ownship_ll_t", None)
         return
     cfg[atc_phrase.OWNSHIP_SEAT_LL_KEY] = [ll[0], ll[1]]
+    alt = getattr(sess, "ownship_alt_ft", None)
+    if alt is not None:
+        cfg[atc_phrase.OWNSHIP_SEAT_ALT_KEY] = alt
+    else:
+        cfg.pop(atc_phrase.OWNSHIP_SEAT_ALT_KEY, None)
     if state is not None:
         state["ownship_ll"] = [ll[0], ll[1]]
         state["ownship_ll_t"] = sess.ownship_ll_t

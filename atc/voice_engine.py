@@ -812,7 +812,11 @@ def execute_intent(
 
     if intent == "request_alpha_check":
         fix = atc_phrase.resolve_alpha_bullseye(
-            config, callsign=callsign, opus=opus, weather=weather
+            config,
+            callsign=callsign,
+            opus=opus,
+            weather=weather,
+            state=getattr(engine, "state", None),
         )
         channel = _resolve_tx_channel(engine, airport, match)
         if channel not in ("blackjack", "bandsaw", "joshua", "ops", "other"):
@@ -1044,7 +1048,11 @@ def execute_intent(
                     engine.save_state()
             alpha_spoken = None
             fix = atc_phrase.resolve_alpha_bullseye(
-                engine.config, callsign=callsign, opus=opus, weather=weather
+                engine.config,
+                callsign=callsign,
+                opus=opus,
+                weather=weather,
+                state=getattr(engine, "state", None),
             )
             if fix and fix.get("spoken"):
                 alpha_spoken = str(fix["spoken"])
@@ -2302,7 +2310,11 @@ def execute_tanker_action(
         channel = _c2_channel()
         alpha_spoken = None
         fix = atc_phrase.resolve_alpha_bullseye(
-            engine.config, callsign=callsign, opus=opus, weather=weather
+            engine.config,
+            callsign=callsign,
+            opus=opus,
+            weather=weather,
+            state=getattr(engine, "state", None),
         )
         if fix and fix.get("spoken"):
             alpha_spoken = str(fix["spoken"])
@@ -2708,6 +2720,19 @@ def _advance_past_bandsaw(engine: Any) -> None:
             idx += 1
             continue
         break
+    # Checkout hands back to Blackjack range exit. Check-in holds the cursor
+    # for the whole range, so stopping on the next non-C2 step left Fly on
+    # "Blackjack check-in" (or Center) instead of range exit.
+    exit_i = next(
+        (
+            i
+            for i, row in enumerate(steps)
+            if str(row.get("template") or "") == "bj_range_exit"
+        ),
+        None,
+    )
+    if exit_i is not None and idx < exit_i:
+        idx = exit_i
     engine.state["index"] = idx
     if hasattr(engine, "_advance_past_skippable"):
         engine._advance_past_skippable()
