@@ -30,7 +30,7 @@ STATE_PATH = HERE / "flow_state.json"
 
 
 def load_json(path: Path) -> Any:
-    with path.open(encoding="utf-8") as f:
+    with path.open(encoding="utf-8-sig") as f:
         return json.load(f)
 
 

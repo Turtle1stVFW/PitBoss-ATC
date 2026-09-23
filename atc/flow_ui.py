@@ -118,7 +118,7 @@ CHANNEL_COLORS = {
 
 
 def load_json(path: Path) -> dict:
-    with path.open(encoding="utf-8") as f:
+    with path.open(encoding="utf-8-sig") as f:
         return json.load(f)
 
 
