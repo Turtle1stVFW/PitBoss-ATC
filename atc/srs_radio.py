@@ -519,23 +519,13 @@ def _ingest_srs_udp_payload(data: bytes) -> None:
         _srs_udp_error = ""
 
 
-def _bank_contains_mhz(
-    freqs: list[float] | None,
-    mhz: float,
-    config: dict[str, Any] | None,
-) -> bool:
-    tol = float((config or {}).get("freq_gate_tolerance_mhz") or DEFAULT_TOL_MHZ)
+def is_uhf_mhz(mhz: float | None) -> bool:
+    """Military UHF airband (225.000–399.975). VHF airband and intra-flight are not."""
     try:
-        want = float(mhz)
+        freq = float(mhz)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return False
-    for raw in freqs or []:
-        try:
-            if abs(float(raw) - want) <= tol:
-                return True
-        except (TypeError, ValueError):
-            continue
-    return False
+    return 225.0 <= freq < 400.0
 
 
 def maybe_force_eam_tx_freq(
@@ -545,40 +535,20 @@ def maybe_force_eam_tx_freq(
     radio: RadioState | None = None,
 ) -> tuple[float, str]:
     """
-    Common-PTT EAM mode: ExternalAudio must TX only on the selected radio.
+    Frequency ExternalAudio transmits on.
 
-    Prefer the calling pilot's radios (host session), then this PC's SRS
-    client, then the manual EAM strip. A dedicated host must not steal the
-    TX frequency from its own (or empty) radio bank.
+    Agency calls are UHF. They stay on that UHF frequency. The selected radio
+    is only the pilot's PTT — keying intra-flight VHF must not move the call
+    onto VHF, and the Host PC's own radio must not replace it.
     """
+    del radio
     apply_config(config)
+    agency = float(freq)
     if not _eam_enabled:
-        return float(freq), mod
-    # The agency frequency is what the pilot is listening for. Forcing every
-    # scripted call onto whichever radio is selected drops Monitor Tower /
-    # Departure / Control on a radio they already left — Fly still advances,
-    # and only Play Previous (now on the right radio) is heard.
-    # Keep the agency freq when it is already in this seat's bank. Fall back
-    # to the selected radio only for a single-radio common-PTT tune.
-    if radio is not None and radio.fresh and _bank_contains_mhz(
-        radio.freqs_mhz, float(freq), config
-    ):
-        return float(freq), mod
-    if radio is not None and radio.fresh:
-        if radio.selected_mhz is not None:
-            return float(radio.selected_mhz), mod
-        if radio.freqs_mhz:
-            return float(radio.freqs_mhz[0]), mod
-    srs = read_srs_client_selected()
-    if srs.fresh:
-        if srs.selected_mhz is not None:
-            return float(srs.selected_mhz), mod
-        if srs.freqs_mhz:
-            return float(srs.freqs_mhz[0]), mod
-    active = eam_active_mhz()
-    if active is None:
-        return float(freq), mod
-    return float(active), mod
+        return agency, mod
+    if is_uhf_mhz(agency):
+        return agency, mod
+    return agency, mod
 
 
 def apply_config(config: dict[str, Any] | None) -> None:

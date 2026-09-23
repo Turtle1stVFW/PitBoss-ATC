@@ -893,21 +893,35 @@ def test_injected_radio_gate() -> list[str]:
     forced, _mod = srs_radio.maybe_force_eam_tx_freq(
         eam_cfg, 289.4, "AM", radio=client_sel
     )
-    if abs(forced - 123.625) > 0.01:
-        fails.append(f"EAM host TX should use client selected 123.625, got {forced}")
+    if abs(forced - 289.4) > 0.01:
+        fails.append(f"VHF selected must not steal UHF TX, got {forced}")
     banked = srs_radio.RadioState(
         source="client",
-        freqs_mhz=[275.8, 289.4],
-        selected_mhz=275.8,
+        freqs_mhz=[327.0, 132.65],
+        selected_mhz=132.65,
         fresh=True,
         age_s=0.0,
     )
     kept, _mod_kept = srs_radio.maybe_force_eam_tx_freq(
-        eam_cfg, 289.4, "AM", radio=banked
+        eam_cfg, 327.0, "AM", radio=banked
     )
-    if abs(kept - 289.4) > 0.01:
+    if abs(kept - 327.0) > 0.01:
         fails.append(
-            f"EAM should keep agency 289.4 when it is in the bank, got {kept}"
+            f"Tower TX must stay on UHF 327.0 while VHF is keyed, got {kept}"
+        )
+    stale = srs_radio.RadioState(
+        source="client",
+        freqs_mhz=[132.65],
+        selected_mhz=132.65,
+        fresh=False,
+        age_s=2.0,
+    )
+    stale_tx, _mod_stale = srs_radio.maybe_force_eam_tx_freq(
+        eam_cfg, 327.0, "AM", radio=stale
+    )
+    if abs(stale_tx - 327.0) > 0.01:
+        fails.append(
+            f"UHF agency freq must win over a stale VHF selection, got {stale_tx}"
         )
     srs_radio.apply_config(_host_config(freq_gate_eam_enabled=False))
     return fails
