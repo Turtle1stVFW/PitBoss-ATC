@@ -452,6 +452,7 @@ class VoiceController:
             seat=_context_seat(context),
             tuned_channel=str(context.get("tuned_channel") or "") or None,
             cursor_channel=str(context.get("cursor_channel") or ""),
+            sfo_active=bool(context.get("sfo_active")),
         )
         if evaluation.match is None:
             try:
@@ -851,6 +852,13 @@ def execute_intent(
         return _play_clear_takeoff(engine)
 
     if intent == "request_low_approach":
+        # Readback of option / low-approach clearance — not a fresh request.
+        if atc_phrase.awaiting_option_on_the_go(engine.state) or (
+            atc_phrase.landing_already_cleared(engine.state)
+            and atc_phrase.resolve_landing_intent(engine.state)
+            == atc_phrase.LANDING_INTENT_LOW_APPROACH
+        ):
+            return _acknowledge(engine, match)
         atc_phrase.apply_pilot_request(
             "request_low_approach",
             mission=engine.mission,
@@ -861,13 +869,13 @@ def execute_intent(
             config=getattr(engine, "config", None),
         )
         engine.save_state()
-        # On SFO Low Key / SI final, or already due for pattern land — clear
+        # On SFO Base Key / SI final, or already due for pattern land — clear
         # the option now instead of only "expect the option".
         if _sfo_should_clear_now(engine) or _pattern_option_clear_due(engine):
             if atc_phrase.is_sfo_recovery(state=engine.state):
                 phase = atc_phrase.sfo_phase(engine.state)
-                if phase in ("high_key", "approved", "low_key"):
-                    atc_phrase.note_sfo_low_key(engine.state)
+                if phase in ("high_key", "approved", "low_key", "base_key"):
+                    atc_phrase.note_sfo_base_key(engine.state)
             played = _play_sfo_or_pattern_clear_land(engine)
             if played.get("action") != "none":
                 atc_phrase.note_sfo_cleared(engine.state)
@@ -883,6 +891,7 @@ def execute_intent(
         "report_low_key",
         "report_base_key",
         "report_sfo_final",
+        "request_closed_traffic",
     ):
         return _handle_sfo_action(
             intent, engine, airport, callsign, weather, match, opus=opus
@@ -890,7 +899,15 @@ def execute_intent(
 
     if intent == "going_around":
         if hasattr(engine, "execute_go_around"):
-            detail = engine.execute_go_around()
+            slots = match.slots or {}
+            after = str(slots.get("after") or "").strip().casefold()
+            prefer = None
+            if after in ("high_key", "sfo_continue"):
+                prefer = "sfo_continue"
+            elif after in ("closed_traffic", "closed"):
+                prefer = "closed_traffic"
+            slot_rwy = str(slots.get("runway") or "").strip() or None
+            detail = engine.execute_go_around(prefer=prefer, runway=slot_rwy)
             if detail.get("acknowledged"):
                 return {
                     "action": "acknowledged",
@@ -2892,7 +2909,7 @@ def _sfo_should_clear_now(engine: Any) -> bool:
     if not atc_phrase.is_sfo_recovery(state=st):
         return False
     phase = atc_phrase.sfo_phase(st)
-    return phase in ("low_key", "sfo_final") or bool(
+    return phase in ("low_key", "base_key", "sfo_final") or bool(
         isinstance(st, dict) and st.get("sfo_base_key_pending")
     )
 
@@ -3030,21 +3047,49 @@ def _handle_sfo_action(
             state=st,
             mission=engine.mission,
         )
-    elif landing == "low_approach" or not landing:
-        # Default at Low Key / SI final: the option (7110.65).
+    elif landing == "low_approach" or (
+        intent in ("report_low_key", "report_base_key", "report_sfo_final")
+        and not landing
+    ):
+        # Default at Low Key / SI final: low approach (7110.65 3-10-13).
         atc_phrase.set_landing_intent(
             atc_phrase.LANDING_INTENT_LOW_APPROACH,
             state=st,
             mission=engine.mission,
         )
 
+    if intent == "request_closed_traffic":
+        rwy = str(
+            st.get("approach_runway")
+            or (atc_phrase.approach_plan_from_state(st, airport=airport) or {}).get(
+                "runway"
+            )
+            or ""
+        )
+        atc_phrase.exit_sfo_for_closed_traffic(
+            airport,
+            mission=engine.mission,
+            state=st,
+            runway=rwy,
+        )
+        if hasattr(engine, "_seek_template"):
+            engine._seek_template("clear_land")
+        engine.save_state()
+        text = atc_phrase.build_closed_traffic_approved(
+            airport, callsign, runway=rwy
+        )
+        return _transmit(engine, airport, text, "tower", template="closed_traffic")
+
     if intent == "report_low_key":
         atc_phrase.note_sfo_low_key(st)
         engine.save_state()
         played = _play_sfo_or_pattern_clear_land(engine)
-        atc_phrase.note_sfo_cleared(st)
-        engine.save_state()
-        return played
+        if played.get("action") != "none":
+            atc_phrase.note_sfo_cleared(st)
+            engine.save_state()
+            return played
+        text = atc_phrase.build_sfo_low_key_ack(airport, callsign)
+        return _transmit(engine, airport, text, "tower", template="sfo_low_key")
 
     if intent == "report_sfo_final":
         atc_phrase.note_sfo_final(st)
@@ -3057,9 +3102,7 @@ def _handle_sfo_action(
     if intent == "report_base_key":
         need_clear = atc_phrase.note_sfo_base_key(st)
         engine.save_state()
-        if need_clear and not atc_phrase.landing_already_cleared(st):
-            # Safety net: missed Low Key — clear now.
-            atc_phrase.note_sfo_low_key(st)
+        if need_clear:
             played = _play_sfo_or_pattern_clear_land(engine)
             atc_phrase.note_sfo_cleared(st)
             engine.save_state()

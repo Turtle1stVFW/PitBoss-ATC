@@ -3119,6 +3119,15 @@ class MissionPlanner(tk.Tk):
         context["last_tx_text"] = str(state.get("last_tx_text") or "")
         context["last_tx_channel"] = str(state.get("last_tx_channel") or "")
         context["last_tx_template"] = str(state.get("last_tx_template") or "")
+        try:
+            context["sfo_active"] = bool(
+                atc_phrase.is_sfo_recovery(
+                    mission=self.mission, state=state
+                )
+                or atc_phrase.sfo_phase(state)
+            )
+        except Exception:
+            context["sfo_active"] = False
         if (
             str(context.get("expected") or "") == "clearance"
             and str(state.get("last_tx_template") or "") == "clearance_amendment"
@@ -8884,6 +8893,7 @@ class MissionPlanner(tk.Tk):
         "request_landing": "Gear down full stop",
         "request_low_approach": "The option",
         "request_sfo": "High Key / SFO",
+        "request_closed_traffic": "Closed traffic / full stop",
         "request_go_around": "On the go",
         "request_handoff": "Request handoff",
         "request_tanker": "Request tanker",
@@ -9767,6 +9777,7 @@ class MissionPlanner(tk.Tk):
             tuned_channel=tuned_now,
             next_channel=dest_ch,
             next_freq_mhz=next_mhz,
+            sfo_active=bool(context.get("sfo_active")),
         )
         if not lines:
             self.fly_say_frame.pack_forget()

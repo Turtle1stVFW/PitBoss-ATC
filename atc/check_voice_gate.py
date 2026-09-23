@@ -3483,6 +3483,7 @@ def extras() -> int:
             or approve_has_alt
             or not approve_alt_ok
             or "report low key" not in hk_ack.lower()
+            or "roger" not in hk_ack.lower()
             or not req_hk.match
             or req_hk.match.intent != "request_sfo"
             or not steal_si.match
@@ -3494,7 +3495,7 @@ def extras() -> int:
             print(
                 f"  FAIL High Key after Flex must approve SFO (not SI land): "
                 f"state={ {k: st_sfo.get(k) for k in ('active_recovery','sfo_phase','sfo_high_key_ft','go_around_plan')} } "
-                f"trig={trig_sfo_land} approve={approve!r} alt={approve_alt!r} "
+                f"trig={trig_sfo_land} approve={approve!r} alt={approve_alt!r} hk_ack={hk_ack!r} "
                 f"req={req_hk.reason} steal={steal_si.match and steal_si.match.intent} "
                 f"req_alt={req_alt.match.slots if req_alt.match else req_alt.reason}"
             )
@@ -3570,7 +3571,187 @@ def extras() -> int:
         else:
             print(
                 "SFO voice — High/Low Key reports, on the go = waveoff, "
-                "Base Key+option, SI SFO"
+                "Base Key safety net, SI SFO"
+            )
+
+        # Multiple SFOs: after on-the-go, High Key is a report (not re-approval).
+        st_multi = {
+            "active_recovery": "sfo_overhead",
+            "sfo_phase": "cleared",
+            "approach_plan": {"pattern": "sfo_overhead", "runway": "21R"},
+            "approach_runway": "21R",
+            "awaiting_on_the_go": True,
+            "landing_intent": "low_approach",
+            "last_tx_template": "clear_land",
+        }
+        ga_sfo = atc_phrase.assign_go_around_plan(
+            nellis, runway="21R", state=st_multi
+        )
+        ga_text = atc_phrase.build_go_around(
+            nellis,
+            "Dagger 1",
+            "21R",
+            state={
+                "active_recovery": "sfo_overhead",
+                "sfo_phase": "cleared",
+                "approach_plan": {"pattern": "sfo_overhead", "runway": "21R"},
+                "approach_runway": "21R",
+                "awaiting_on_the_go": True,
+                "landing_intent": "low_approach",
+                "last_tx_template": "clear_land",
+            },
+        )
+        rep_again = voice_intent.evaluate(
+            "Dagger 1, high key",
+            channel="tower",
+            phase="approach",
+            callsign="Dagger 1",
+            last_tx_template="go_around",
+            sfo_active=True,
+        )
+        steal_flex = voice_intent.evaluate(
+            "Dagger 1, high key",
+            channel="tower",
+            phase="approach",
+            callsign="Dagger 1",
+            last_tx_template="go_around",
+            sfo_active=False,
+        )
+        closed_req = voice_intent.evaluate(
+            "Tower, Dagger 1, request closed traffic",
+            channel="tower",
+            phase="approach",
+            callsign="Dagger 1",
+            sfo_active=True,
+        )
+        on_go_hk = voice_intent.evaluate(
+            "Tower, Dagger 1, on the go, two one right, high key",
+            channel="tower",
+            phase="approach",
+            callsign="Dagger 1",
+            sfo_active=True,
+            last_tx_template="clear_land",
+        )
+        on_go_cl = voice_intent.evaluate(
+            "Tower, Dagger 1, on the go, two one right, request closed",
+            channel="tower",
+            phase="approach",
+            callsign="Dagger 1",
+            sfo_active=True,
+            last_tx_template="clear_land",
+        )
+        st_closed_go = {
+            "active_recovery": "sfo_overhead",
+            "sfo_phase": "cleared",
+            "approach_plan": {"pattern": "sfo_overhead", "runway": "21R"},
+            "approach_runway": "21R",
+            "awaiting_on_the_go": True,
+            "landing_intent": "low_approach",
+        }
+        ga_closed = atc_phrase.assign_go_around_plan(
+            nellis, runway="21R", state=st_closed_go, prefer="closed_traffic"
+        )
+        ga_closed_text = atc_phrase.build_go_around(
+            nellis,
+            "Dagger 1",
+            "21R",
+            state={
+                "active_recovery": "sfo_overhead",
+                "sfo_phase": "cleared",
+                "approach_plan": {"pattern": "sfo_overhead", "runway": "21R"},
+                "approach_runway": "21R",
+                "awaiting_on_the_go": True,
+                "landing_intent": "low_approach",
+                "last_tx_template": "clear_land",
+            },
+            prefer="closed_traffic",
+        )
+        sfo_clear = atc_phrase.build_clear_land(
+            nellis,
+            "Dagger 1",
+            type("W", (), {"wind_dir": 210, "wind_speed_kt": 8})(),
+            "21R",
+            state={
+                "active_recovery": "sfo_overhead",
+                "landing_intent": "low_approach",
+            },
+        )
+        opt_clear = atc_phrase.build_clear_land(
+            nellis,
+            "Dagger 1",
+            type("W", (), {"wind_dir": 210, "wind_speed_kt": 8})(),
+            "21R",
+            state={
+                "active_recovery": "tactical_overhead",
+                "landing_intent": "low_approach",
+            },
+        )
+        opt_rb = voice_intent.evaluate(
+            "Dagger 1 cleared low approach",
+            channel="tower",
+            phase="approach",
+            callsign="Dagger 1",
+            expected="clear_land",
+            awaiting_readback=True,
+            last_tx_template="clear_land",
+            readback_items=[
+                {
+                    "key": "clearance",
+                    "value": "cleared low approach",
+                    "spoken": "cleared low approach",
+                    "hinge": True,
+                }
+            ],
+        )
+        hk_ack2 = atc_phrase.build_sfo_high_key_ack(nellis, "Dagger 1")
+        if (
+            str(ga_sfo.get("kind") or "") != "sfo_continue"
+            or st_multi.get("sfo_phase") != "approved"
+            or st_multi.get("active_recovery") != "sfo_overhead"
+            or "report high key" not in ga_text.lower()
+            or "go around" in ga_text.lower()
+            or "closed traffic" in ga_text.lower()
+            or not rep_again.match
+            or rep_again.match.intent != "report_high_key"
+            or not steal_flex.match
+            or steal_flex.match.intent != "request_sfo"
+            or not closed_req.match
+            or closed_req.match.intent != "request_closed_traffic"
+            or not on_go_hk.match
+            or on_go_hk.match.intent != "going_around"
+            or (on_go_hk.match.slots or {}).get("after") != "high_key"
+            or (on_go_hk.match.slots or {}).get("runway") != "21R"
+            or not on_go_cl.match
+            or on_go_cl.match.intent != "going_around"
+            or (on_go_cl.match.slots or {}).get("after") != "closed_traffic"
+            or str(ga_closed.get("kind") or "") != "closed_traffic"
+            or "closed traffic" not in ga_closed_text.lower()
+            or "go around" in ga_closed_text.lower()
+            or "report high key" in ga_closed_text.lower()
+            or "cleared low approach" not in sfo_clear.lower()
+            or "option" in sfo_clear.lower()
+            or "cleared for the option" not in opt_clear.lower()
+            or not opt_rb.match
+            or opt_rb.match.intent != "acknowledge_readback"
+            or "report low key" not in hk_ack2.lower()
+        ):
+            print(
+                f"  FAIL SFO multi-pattern / low approach / on-the-go: "
+                f"ga={ga_sfo} text={ga_text!r} phase={st_multi.get('sfo_phase')} "
+                f"again={rep_again.match and rep_again.match.intent} "
+                f"flex={steal_flex.match and steal_flex.match.intent} "
+                f"closed={closed_req.match and closed_req.match.intent} "
+                f"go_hk={on_go_hk.match and (on_go_hk.match.intent, on_go_hk.match.slots)} "
+                f"go_cl={on_go_cl.match and (on_go_cl.match.intent, on_go_cl.match.slots)} "
+                f"ga_cl={ga_closed} text_cl={ga_closed_text!r} "
+                f"sfo_clear={sfo_clear!r} opt_clear={opt_clear!r} "
+                f"rb={opt_rb.match and opt_rb.match.intent} hk_ack={hk_ack2!r}"
+            )
+            bad += 1
+        else:
+            print(
+                "SFO multi — low approach clear, on the go (no GO AROUND), "
+                "High Key / closed, option still for pattern"
             )
 
         st_closed = {

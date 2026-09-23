@@ -477,6 +477,37 @@ def extract_runway(text: str, known: list[str] | None = None) -> str | None:
     return candidate
 
 
+def extract_runway_loose(text: str, known: list[str] | None = None) -> str | None:
+    """
+    Runway even without the word 'runway' — 'on the go, 21 right, high key'.
+
+    Prefers an explicit 'runway …' match; otherwise bare '21 right' / '21R'.
+    """
+    hit = extract_runway(text, known)
+    if hit:
+        return hit
+    match = re.search(
+        r"\b(\d{1,2})\s*(left|right|center|centre|l|r|c)\b", text
+    )
+    if not match:
+        match = re.search(r"\b(\d{1,2})([lrc])\b", text)
+    if not match:
+        return None
+    digits, side = match.group(1), (match.group(2) or "")
+    number = digits.zfill(2)
+    suffix = _SIDE_WORDS.get(side, side.upper() if side else "")
+    candidate = f"{number}{suffix}"
+    if known:
+        options = {r.upper(): r for r in known}
+        if candidate.upper() in options:
+            return options[candidate.upper()]
+        siblings = [r for r in known if re.match(rf"^0*{int(number)}[LRC]?$", r.upper())]
+        if siblings:
+            return siblings[0]
+        return None
+    return candidate
+
+
 # Whisper often mangles Bandsaw (ANSA, and saw, bansaw, …). Keep aliases shared
 # for agency detection and "request Bandsaw" intents.
 _BANDSAW_TERMS: tuple[str, ...] = (
@@ -1908,7 +1939,7 @@ INTENTS: tuple[Intent, ...] = (
         weight=1.3,
         example="high key",
         does="report High Key",
-        veto=("request high key", "low key", "base key"),
+        veto=("request high key", "low key", "base key", "on the go", "going around"),
     ),
     Intent(
         "report_low_key",
@@ -1927,7 +1958,7 @@ INTENTS: tuple[Intent, ...] = (
         phases=("approach",),
         weight=1.35,
         example="low key",
-        does="report Low Key — option / land clearance",
+        does="report Low Key — cleared low approach",
         veto=("high key", "base key"),
     ),
     Intent(
@@ -1947,8 +1978,32 @@ INTENTS: tuple[Intent, ...] = (
         phases=("approach",),
         weight=1.3,
         example="base key",
-        does="report Base Key (clears if Low Key was missed)",
+        does="report Base Key (safety net if Low Key missed)",
         veto=("high key",),
+    ),
+    Intent(
+        "request_closed_traffic",
+        (
+            (
+                "closed traffic",
+                "request closed traffic",
+                "requesting closed traffic",
+                "request closed",
+                "requesting closed",
+                "close traffic",
+                "closed stop",
+                "close stop",
+                "request closed stop",
+                "full stop closed",
+            ),
+        ),
+        kind="action",
+        channels=("tower",),
+        phases=("approach",),
+        weight=1.28,
+        example="request closed traffic",
+        does="leave SFO — closed traffic / full stop",
+        veto=("high key", "low key", "on the go", "going around"),
     ),
     Intent(
         "report_sfo_final",
@@ -2180,7 +2235,15 @@ INTENTS: tuple[Intent, ...] = (
         weight=1.25,
         example="request low approach",
         does="expect the option (then on the go)",
-        veto=("cleared to land", "full stop"),
+        veto=(
+            "cleared to land",
+            "full stop",
+            "cleared for the option",
+            "cleared the option",
+            "clear for the option",
+            "cleared low approach",
+            "clear low approach",
+        ),
     ),
     Intent(
         "going_around",
@@ -2213,8 +2276,8 @@ INTENTS: tuple[Intent, ...] = (
         channels=("tower",),
         phases=("approach",),
         weight=1.35,
-        example="going around",
-        does="go-around / missed approach / pattern reentry",
+        example="on the go high key",
+        does="on the go — High Key again, or request closed",
     ),
     Intent(
         "clear_of_runway",
@@ -3102,6 +3165,21 @@ def _clearance_phrase_hit(text: str, item: dict[str, Any] | None) -> bool:
             "cleared for landing",
             "clear for landing",
         ),
+        "cleared for the option": (
+            "cleared for the option",
+            "cleared the option",
+            "clear for the option",
+            "clear the option",
+            "for the option",
+            "the option",
+        ),
+        "cleared low approach": (
+            "cleared low approach",
+            "clear low approach",
+            "cleared for low approach",
+            "clear for low approach",
+            "low approach",
+        ),
         "line up and wait": ("line up and wait", "line up", "luaw"),
     }
     for full, alts in key_bits.items():
@@ -3129,6 +3207,10 @@ def _go_around_instruction_hit(text: str, item: dict[str, Any] | None) -> bool:
             return True
         if re.search(r"(?<!\w)(?:left|right)\s+close[d]?(?!\w)", text):
             return True
+    if "high key" in blob and re.search(
+        r"(?<!\w)(?:report\s+)?high\s+key(?!\w)", text
+    ):
+        return True
     if "flex" in blob and re.search(r"(?<!\w)flex(?:\s+reentry|\s+entry)?(?!\w)", text):
         return True
     if "duck" in blob and re.search(r"(?<!\w)duck(?:\s+reentry|\s+entry)?(?!\w)", text):
@@ -3635,6 +3717,7 @@ def _score_intents(
     current_step_id: str = "",
     steps: list[dict[str, Any]] | None = None,
     last_tx_template: str = "",
+    sfo_active: bool = False,
 ) -> Match | None:
     """Highest-scoring intent for a transcript, before any addressing gate."""
     best: Match | None = None
@@ -3737,17 +3820,21 @@ def _score_intents(
         ):
             continue
         last_tmpl = str(last_tx_template or "").strip().lower()
-        # High Key report only after SFO approve (bare "high key" otherwise
-        # is request_sfo). Explicit "at/reporting high key" always OK.
+        # High Key report after SFO approve, or while still on an SFO pattern
+        # (another High Key after on-the-go). Explicit "at/reporting high key"
+        # always OK. Bare "high key" otherwise is request_sfo (e.g. after Flex).
         if intent.id == "report_high_key":
-            if last_tmpl != "sfo_approve" and not _group_hit(
+            explicit_hk = _group_hit(
                 text,
                 ("at high key", "reporting high key", "report high key"),
                 fuzzy=False,
-            ):
+            )
+            if not (sfo_active or last_tmpl == "sfo_approve" or explicit_hk):
                 continue
-        if intent.id == "request_sfo" and last_tmpl == "sfo_approve":
-            # Already approved — bare High Key is the report, not a re-request.
+        if intent.id == "request_sfo" and (
+            last_tmpl == "sfo_approve" or sfo_active
+        ):
+            # Already approved / still on SFO — bare High Key is the report.
             if not _group_hit(
                 text,
                 (
@@ -3764,9 +3851,44 @@ def _score_intents(
             "sfo_high_key",
             "sfo_approve",
         ):
-            if not _group_hit(
+            if not sfo_active and not _group_hit(
                 text,
                 ("at low key", "reporting low key", "report low key"),
+                fuzzy=False,
+            ):
+                continue
+        if intent.id == "report_base_key" and last_tmpl not in (
+            "sfo_low_key",
+            "sfo_high_key",
+            "sfo_approve",
+            "clear_land",
+        ):
+            if not sfo_active and not _group_hit(
+                text,
+                ("at base key", "reporting base key", "report base key"),
+                fuzzy=False,
+            ):
+                continue
+        if intent.id == "request_closed_traffic" and not (
+            sfo_active
+            or last_tmpl
+            in (
+                "sfo_approve",
+                "sfo_high_key",
+                "sfo_low_key",
+                "clear_land",
+                "go_around",
+                "closed_traffic",
+            )
+        ):
+            if not _group_hit(
+                text,
+                (
+                    "closed traffic",
+                    "request closed traffic",
+                    "closed stop",
+                    "close stop",
+                ),
                 fuzzy=False,
             ):
                 continue
@@ -3786,12 +3908,11 @@ def _score_intents(
             "request_low_approach",
         ):
             continue
-        # After clear-to-land TX, "gear down" is the readback hinge — not a
-        # fresh landing request (that returns "already cleared to land").
+        # After clear-to-land / option TX, the readback is not a new request.
         if (
             awaiting_readback
             and expected == "clear_land"
-            and intent.id == "request_landing"
+            and intent.id in ("request_landing", "request_low_approach")
         ):
             continue
         # Contact-tower step: not another Approach check-in.
@@ -3831,13 +3952,28 @@ def _score_intents(
             current_step_id=current_step_id,
         )
         last_tmpl = str(last_tx_template or "").strip().lower()
-        if intent.id == "report_high_key" and last_tmpl == "sfo_approve":
+        if intent.id == "report_high_key" and (
+            last_tmpl == "sfo_approve" or sfo_active
+        ):
             expecting = True
-        if intent.id == "report_low_key" and last_tmpl == "sfo_high_key":
+        if intent.id == "report_low_key" and (
+            last_tmpl == "sfo_high_key" or sfo_active
+        ):
+            expecting = True
+        if intent.id == "report_base_key" and last_tmpl in (
+            "sfo_low_key",
+            "sfo_high_key",
+            "sfo_approve",
+            "clear_land",
+        ):
             expecting = True
         if intent.id == "report_sfo_final" and last_tmpl == "sfo_approve":
             expecting = True
-        if intent.id == "request_sfo" and last_tmpl == "go_around":
+        if intent.id == "request_sfo" and last_tmpl == "go_around" and not sfo_active:
+            expecting = True
+        if intent.id == "request_closed_traffic" and (
+            sfo_active or last_tmpl.startswith("sfo_") or last_tmpl == "go_around"
+        ):
             expecting = True
         # Mission phrases belong to one step — only when that step is due.
         if intent.step_id and not expecting:
@@ -4000,6 +4136,31 @@ def _score_intents(
                 text, ("full stop", "gear down", "cleared to land"), fuzzy=False
             ):
                 slots["landing_intent"] = "full_stop"
+        if intent.id == "going_around":
+            # "On the go, 21R, High key" vs "On the go, 21R, request closed"
+            if _group_hit(
+                text,
+                (
+                    "request closed",
+                    "requesting closed",
+                    "closed traffic",
+                    "close traffic",
+                    "closed stop",
+                    "close stop",
+                    "request closed traffic",
+                ),
+                fuzzy=False,
+            ):
+                slots["after"] = "closed_traffic"
+            elif _group_hit(
+                text,
+                ("high key", "report high key", "for high key"),
+                fuzzy=False,
+            ):
+                slots["after"] = "high_key"
+            heard_rwy = extract_runway_loose(text, runways)
+            if heard_rwy:
+                slots["runway"] = heard_rwy
         if intent.id in (
             "inbound_recovery",
             "request_approach",
@@ -4392,6 +4553,7 @@ def evaluate(
     tuned_channel: str | None = None,
     cursor_channel: str = "",
     pending_contact: str = "",
+    sfo_active: bool = False,
 ) -> Evaluation:
     """
     Decide whether a transmission is ATC business, and if so what it asks for.
@@ -4450,6 +4612,7 @@ def evaluate(
         current_step_id=current_step_id,
         steps=steps,
         last_tx_template=last_tx_template,
+        sfo_active=bool(sfo_active),
     )
     if (
         candidate is not None
@@ -4641,12 +4804,15 @@ def evaluate(
         "report_low_key",
         "report_base_key",
         "report_sfo_final",
+        "request_closed_traffic",
     ) and str(last_tx_template or "").strip().lower() in (
         "go_around",
         "sfo_approve",
         "sfo_high_key",
+        "sfo_low_key",
         "clear_land",
         "right_break",
+        "closed_traffic",
     ):
         address_optional = True
     if candidate.intent in (
@@ -4654,6 +4820,14 @@ def evaluate(
         "report_low_key",
         "report_base_key",
         "report_sfo_final",
+        "request_closed_traffic",
+    ):
+        address_optional = True
+    # Option / SFO waveoff — "on the go, 21R, high key" needs no Tower opener.
+    if candidate.intent == "going_around" and (
+        sfo_active
+        or str(last_tx_template or "").strip().lower()
+        in ("clear_land", "go_around", "sfo_low_key", "sfo_high_key", "sfo_approve")
     ):
         address_optional = True
     if require_address and not address_optional and not address.to_atc:
@@ -4798,6 +4972,7 @@ def suggestions(
     tuned_channel: str = "",
     next_channel: str = "",
     next_freq_mhz: float | None = None,
+    sfo_active: bool = False,
 ) -> list[tuple[str, str, str, bool]]:
     """
     Fly kneeboard cues: (payload, what it does, role, agency_required).
@@ -5023,30 +5198,43 @@ def suggestions(
         # Don't tip "ready to copy" until Delivery has offered the amendment.
         if intent.id == "ready_to_copy" and last_tx_template != "clearance_amendment":
             continue
-        # SFO report tips only after the matching Tower call.
-        if intent.id == "report_high_key" and last_tx_template != "sfo_approve":
+        # SFO report tips only after the matching Tower call / while still on SFO.
+        if intent.id == "report_high_key" and not (
+            last_tx_template == "sfo_approve" or sfo_active
+        ):
             continue
-        if intent.id == "report_low_key" and last_tx_template != "sfo_high_key":
+        if intent.id == "report_low_key" and last_tx_template not in (
+            "sfo_high_key",
+            "sfo_approve",
+        ) and not sfo_active:
             continue
         if intent.id == "report_sfo_final" and last_tx_template != "sfo_approve":
             continue
         if intent.id == "report_base_key" and last_tx_template not in (
             "sfo_high_key",
+            "sfo_low_key",
             "sfo_approve",
+            "clear_land",
+        ) and not sfo_active:
+            continue
+        if intent.id == "request_closed_traffic" and not (
+            sfo_active
+            or last_tx_template.startswith("sfo_")
+            or last_tx_template in ("go_around", "clear_land", "closed_traffic")
         ):
             continue
         # Tip High Key after a Flex/Duck go-around; hide reports until approved.
+        # While still on SFO, tip High Key report — not a fresh SFO request.
         if intent.id == "request_sfo" and last_tx_template not in (
             "go_around",
             "clear_land",
             "right_break",
             "",
         ):
-            if last_tx_template.startswith("sfo_"):
+            if last_tx_template.startswith("sfo_") or sfo_active:
                 continue
-        if intent.id == "request_sfo" and last_tx_template in (
-            "sfo_approve",
-            "sfo_high_key",
+        if intent.id == "request_sfo" and (
+            last_tx_template in ("sfo_approve", "sfo_high_key") or sfo_active
         ):
             continue
         # Range checkout ends Flight → Approach; tip it on the range-exit step
@@ -5112,13 +5300,29 @@ def suggestions(
             rank = 0
         elif intent.id == "ready_to_copy" and expected_l == "clearance_amendment":
             rank = 0
-        elif intent.id == "report_high_key" and last_tx_template == "sfo_approve":
+        elif intent.id == "report_high_key" and (
+            last_tx_template == "sfo_approve" or sfo_active
+        ):
             rank = 0
-        elif intent.id == "report_low_key" and last_tx_template == "sfo_high_key":
+        elif intent.id == "report_low_key" and last_tx_template in (
+            "sfo_high_key",
+            "sfo_approve",
+        ):
+            rank = 0
+        elif intent.id == "report_base_key" and last_tx_template in (
+            "sfo_low_key",
+            "sfo_high_key",
+            "sfo_approve",
+            "clear_land",
+        ):
             rank = 0
         elif intent.id == "report_sfo_final" and last_tx_template == "sfo_approve":
             rank = 0
-        elif intent.id == "request_sfo" and last_tx_template == "go_around":
+        elif intent.id == "request_sfo" and last_tx_template == "go_around" and not sfo_active:
+            rank = 0
+        elif intent.id == "request_closed_traffic" and (
+            sfo_active or last_tx_template.startswith("sfo_") or last_tx_template == "go_around"
+        ):
             rank = 0
         elif intent.id == "range_entry" and expected_l == "bj_range_exit":
             # Back from Bandsaw / still on the range — tip check-in (continue).

@@ -998,6 +998,7 @@ class FlowEngine:
         self,
         *,
         prefer: str | None = None,
+        runway: str | None = None,
         bypass_freq_gate: bool = False,
     ) -> dict[str, Any]:
         """
@@ -1008,6 +1009,9 @@ class FlowEngine:
         Instrument → published missed, seek Approach check-in, arm
         rearm_tower_outside_nm so contact-tower / land cannot auto-fire while
         still near the field.
+
+        SFO: prefer \"sfo_continue\" / \"high_key\" → report High Key again;
+        prefer \"closed_traffic\" → leave SFO for closed traffic.
 
         Repeating “going around” while the instruction readback is open
         acknowledges (closed traffic / Flex / missed) — it does not re-issue.
@@ -1031,19 +1035,21 @@ class FlowEngine:
                 atc_phrase.callsign_override(self.config) or "CALLSIGN"
             )
         callsign = opus.radio_callsign
-        runway = atc_phrase.pick_departure_runway(
-            airport,
-            weather,
-            opus,
-            self.config,
-            mission=self.mission,
-            state=self.state,
-            template="go_around",
-        )
+        rwy = atc_phrase.normalize_runway(runway) if runway else ""
+        if not rwy:
+            rwy = atc_phrase.pick_departure_runway(
+                airport,
+                weather,
+                opus,
+                self.config,
+                mission=self.mission,
+                state=self.state,
+                template="go_around",
+            )
         text = atc_phrase.build_go_around(
             airport,
             callsign,
-            runway,
+            rwy,
             mission=self.mission,
             state=self.state,
             prefer=prefer,
@@ -1101,8 +1107,13 @@ class FlowEngine:
             if not self._seek_template("approach_check_in"):
                 self._seek_template("approach_procedure")
         else:
-            # Already with Tower — skip check-in / initial; wait for land.
-            if not seek or not self._seek_template(seek):
+            # Already with Tower — skip check-in / initial; wait for land
+            # (or High Key again on SFO continue).
+            if seek and hasattr(self, "_seek_template"):
+                if not self._seek_template(seek):
+                    if kind != "sfo_continue":
+                        self._seek_template("clear_land")
+            elif kind != "sfo_continue":
                 self._seek_template("clear_land")
         # Replace the land readback with the go-around instruction card.
         self._record_readback_expectation(
