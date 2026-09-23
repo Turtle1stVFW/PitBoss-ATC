@@ -1506,7 +1506,7 @@ class FlowEngine:
             agencies_mod.reset_contact(self.state)
         except Exception:
             self.state["contact_phase"] = "field"
-            self.state["last_agency"] = "delivery"
+            self.state["last_agency"] = "ops"
         self._clear_readback_state()
         try:
             import tanker as tanker_mod
@@ -1551,7 +1551,7 @@ class FlowEngine:
             agencies_mod.reset_contact(self.state)
         except Exception:
             self.state["contact_phase"] = "field"
-            self.state["last_agency"] = "delivery"
+            self.state["last_agency"] = "ops"
         self._clear_readback_state()
         try:
             import tanker as tanker_mod

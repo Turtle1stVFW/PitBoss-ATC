@@ -828,7 +828,8 @@ def reset_contact(state: dict[str, Any] | None) -> None:
     if not isinstance(state, dict):
         return
     state["contact_phase"] = "field"
-    state["last_agency"] = "delivery"
+    # Ops is timeline step 1 — not Delivery.
+    state["last_agency"] = "ops"
     state.pop("control_checked_in", None)
     state.pop("control_channel", None)
     state.pop("blackjack_checked_in", None)

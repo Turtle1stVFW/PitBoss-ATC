@@ -1679,6 +1679,18 @@ def extras() -> int:
     if tip != "delivery":
         print(f"  FAIL tip_radio_channel should prefer pending Delivery in bank, got {tip!r}")
         bad += 1
+    tip_pre = srs_radio_mod.tip_radio_channel(
+        ap,
+        {},
+        pending_contact="delivery",
+        ops_start_done=False,
+        state=bank,
+    )
+    if tip_pre != "ops":
+        print(
+            f"  FAIL before start, tip must stay Ops even with Delivery keyed, got {tip_pre!r}"
+        )
+        bad += 1
     cue_flight = voice_intent.cue_channel(
         mission_phase="flight",
         cursor_channel="blackjack",

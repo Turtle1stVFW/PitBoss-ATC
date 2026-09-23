@@ -58,6 +58,7 @@ SHARED_FLOW_KEYS = (
     "last_tx_channel",
     "last_tx_template",
     "last_agency",
+    "contact_phase",
     "pending_contact",
     "control_checked_in",
     "control_channel",
@@ -779,6 +780,7 @@ def _shared_flow_state(state: dict[str, Any] | None) -> dict[str, Any]:
     out.setdefault("awaiting_readback", False)
     out.setdefault("blackjack_checked_in", False)
     out.setdefault("bandsaw_checked_in", False)
+    out.setdefault("contact_phase", "field")
     return out
 
 

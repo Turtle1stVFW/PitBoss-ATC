@@ -1083,16 +1083,22 @@ def tip_radio_channel(
     state: RadioState | None = None,
 ) -> str | None:
     """
-    Agency Fly tips should follow.
+    Agency Fly tips / ON FREQ hero should follow.
 
-    Prefer the keyed radio, but after OPS start (or a Delivery→Ground handoff)
-    if the pending agency is already dialed in the bank while an earlier field
-    radio is still selected, tip the pending agency — pilots often load
-    Delivery on COM2 and leave Ops keyed.
+    Ops is timeline step 1 — until start is approved, stay on Ops even if
+    Delivery is already keyed (otherwise Fly jumps to Clearance and Back
+    cannot reach step 1 because the cursor never left Ops).
+
+    After start, if the pending handoff agency is already in the radio bank
+    while an earlier field radio is still selected, tip the pending agency.
     """
     cfg = config or {}
     pending = str(pending_contact or "").strip().lower()
     selected = channel_for_tuned_freq(airport, cfg, state=state)
+    # Preflight: Ops owns the card until start. Delivery keyed early must not
+    # remount Clearance or tip "tune Ops" in a loop.
+    if not ops_start_done:
+        return "ops"
     field = frozenset({"ops", "delivery", "ground", "tower", "departure"})
     if (
         pending
@@ -1100,10 +1106,6 @@ def tip_radio_channel(
         and pending != (selected or "")
         and bank_has_agency(airport, pending, cfg, state=state)
     ):
-        # Don't steal the tip before start is approved (pending Delivery while
-        # still on Ops for WORDS / start).
-        if pending == "delivery" and not ops_start_done and (selected or "") == "ops":
-            return selected
         if (selected or "") in field:
             try:
                 order = ("ops", "delivery", "ground", "tower", "departure")
@@ -1111,6 +1113,7 @@ def tip_radio_channel(
                     return pending
             except ValueError:
                 return pending
+        return pending
     return selected
 
 
