@@ -65,7 +65,9 @@
       <button type="button" id="play" class="nudge go-nudge">Play</button>
       <button type="button" id="pause" class="nudge">Pause</button>
     </div>
-    <p class="hint">Drag the red jet, or click the map to teleport. Heading slider (or Shift+wheel) turns the nose — EOR / lineup need you pointed down the runway (Face runway). Leave altitude and speed at 0 to park. Raise them to Play the route — NW EOR only counts below 100 ft AGL, settled below ~4 kt.</p>
+    <label for="scrub">Route scrub <span class="opt" id="scrubVal">—</span></label>
+    <input id="scrub" type="range" min="0" max="1000" step="1" value="0" disabled>
+    <p class="hint">Drag the red jet, or click the map to teleport. Scrub jumps along the plotted route (map only — Fly is not affected). Heading slider (or Shift+wheel) turns the nose — EOR / lineup need you pointed down the runway (Face runway). Leave altitude and speed at 0 to park. Raise them to Play the route — NW EOR only counts below 100 ft AGL, settled below ~4 kt.</p>
   </section>
 
   <section>

@@ -2800,11 +2800,14 @@ def approach_exit_fix_latlon(
 
 
 # Auto approach clearance: shortly after check-in, while still inbound to the fix.
-# Keep a real radio pause after the Expect call — 6s felt back-to-back on TTS.
-APPROACH_CLEARANCE_GAP_S = 15.0
+# Short pause after Expect so clearance is not back-to-back on TTS.
+APPROACH_CLEARANCE_GAP_S = 8.0
 # If closer than this to the IAF / exit fix, still fire (about to arrive) —
 # clearance is meant to come before the fix, not wait until you get there.
 APPROACH_CLEARANCE_AT_FIX_NM = 3.0
+# Inside this range, skip the radio-gap wait so the jet does not fly past the
+# IAF while Fly is still counting down after Expect.
+APPROACH_CLEARANCE_SKIP_GAP_NM = 12.0
 
 # First-pass auto-clearance: inbound, but not 75 NM out in Control's airspace.
 APPROACH_CLEARANCE_WITHIN_NM = 40.0
@@ -2888,8 +2891,8 @@ def radio_gap_remaining(
     Uses last_tx_end_at when stamped; otherwise estimates from last_tx_text
     so older state without an end time still waits out the phrase.
 
-    Caps inflated end stamps (deferred speech estimate / clock skew) so Fly
-    never shows a multi-tens-of-seconds countdown for a short radio gap.
+    Clamps deferred end stamps to start + spoken estimate so a missed
+    note_tx_finished cannot leave Fly on a ~27s "clearance in Ns" clock.
     """
     if float(gap_s or 0.0) <= 0.0:
         return 0.0
@@ -2899,15 +2902,19 @@ def radio_gap_remaining(
         end = float(st.get("last_tx_end_at") or 0.0)
     except (TypeError, ValueError):
         end = 0.0
+    try:
+        start = float(st.get("last_tx_at") or 0.0)
+    except (TypeError, ValueError):
+        start = 0.0
+    est = estimate_spoken_duration_s(str(st.get("last_tx_text") or ""))
     if end <= 0.0:
-        try:
-            start = float(st.get("last_tx_at") or 0.0)
-        except (TypeError, ValueError):
-            start = 0.0
         if start <= 0.0:
             return 0.0
-        end = start + estimate_spoken_duration_s(str(st.get("last_tx_text") or ""))
-    # Still "speaking" per stamp — only a short cushion, then the gap.
+        end = start + est
+    elif start > 0.0:
+        # Deferred Host TX estimates end at queue time; never wait past the
+        # spoken length of that call even if note_tx_finished never arrived.
+        end = min(end, start + est + 1.0)
     if end > tnow:
         end = min(end, tnow + RADIO_GAP_WAIT_CAP_S)
     left = max(0.0, (end + float(gap_s)) - tnow)
@@ -2957,6 +2964,10 @@ def _gate_ownship_ll(
     opus: OpusFlightContext | None = None,
 ) -> tuple[float, float] | None:
     """Fresh ownship for distance gates (short max-age)."""
+    # Map jet moves every scrub/play tick — never prefer a sticky state fix
+    # over the live inject (that froze Fly at e.g. 8.5 NM for up to 45 s).
+    if ownship_from_map_enabled(config):
+        return ownship_latlon(config, callsign=callsign, opus=opus, state=state)
     pos = _ownship_ll_from_state(state, max_age_s=OWNSHIP_GATE_FIX_MAX_AGE_S)
     if pos is not None:
         return pos
@@ -3009,6 +3020,7 @@ def approach_clearance_auto_ready(
         or "fix"
     )
     dist_note = ""
+    dist = None
     if fix is not None:
         pos = _gate_ownship_ll(st, config, callsign=callsign, opus=opus)
         if pos is None:
@@ -3025,6 +3037,9 @@ def approach_clearance_auto_ready(
                 f"{dist_note} — need ≤ {APPROACH_CLEARANCE_WITHIN_NM:g} NM",
             )
     gap = float(APPROACH_CLEARANCE_GAP_S if gap_s is None else gap_s)
+    # Near the IAF: skip silence wait so clearance is not late past the fix.
+    if dist is not None and dist <= APPROACH_CLEARANCE_SKIP_GAP_NM:
+        gap = 0.0
     left = radio_gap_remaining(st, gap)
     if left > 0:
         if dist_note:
@@ -3034,7 +3049,7 @@ def approach_clearance_auto_ready(
         return True, "after check-in"
     if need_fix:
         return True, f"{dist_note} — clearance (near fix)"
-    if dist > APPROACH_CLEARANCE_AT_FIX_NM:
+    if dist is not None and dist > APPROACH_CLEARANCE_AT_FIX_NM:
         return True, f"{dist_note} — clearance"
     return True, f"{dist_note} — clearance (near fix)"
 
@@ -3099,7 +3114,7 @@ def approach_check_in_done(state: dict[str, Any] | None) -> bool:
 # Not to be confused with the 18 NM on the dep_handoff step, which is where
 # Departure lets go to Blackjack. Every Nellis recovery fix sits inside 37 NM,
 # so gating on the field also keeps the handoff ahead of the exit fix.
-CONTROL_HANDOFF_NM = 42.0
+CONTROL_HANDOFF_NM = 45.0
 CONTROL_HANDOFF_GAP_S = 8.0
 
 

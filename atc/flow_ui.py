@@ -1454,7 +1454,13 @@ class MissionPlanner(tk.Tk):
             self._position_tick()
         except Exception:  # noqa: BLE001
             pass
-        self.after(2000, self._schedule_position_poll)
+        # Map jet moves every scrub/play tick — poll faster so Fly NM stays live.
+        period_ms = (
+            1000
+            if atc_phrase.ownship_from_map_enabled(self.config_data)
+            else 2000
+        )
+        self.after(period_ms, self._schedule_position_poll)
 
     def _position_tracker(self) -> runway_position.PositionTracker:
         tracker = getattr(self, "_pos_tracker", None)

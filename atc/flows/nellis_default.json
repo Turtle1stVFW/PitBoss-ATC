@@ -1,4 +1,4 @@
-{
+﻿{
   "name": "Nellis Default",
   "airport": "nellis",
       "active_recovery": "visual_overhead",
@@ -297,7 +297,7 @@
       "enabled": true,
       "text": null,
       "handoff_channel": "approach",
-      "_comment": "Auto-fires once inside control_handoff_nm of the field (default 42). The 18 NM on dep_handoff is the other end of the flight: Departure letting go to Blackjack."
+      "_comment": "Auto-fires once inside control_handoff_nm of the field (default 45). The 18 NM on dep_handoff is the other end of the flight: Departure letting go to Blackjack."
     },
     {
       "id": "app_checkin",
@@ -401,7 +401,7 @@
     {
       "id": "ops_codes",
       "phase": "approach",
-      "label": "Ops — codes after parking",
+      "label": "Ops â€” codes after parking",
       "channel": "ops",
       "mode": "tts",
       "template": "ops_status",

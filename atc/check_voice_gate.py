@@ -7680,7 +7680,7 @@ def agency_sandbox() -> int:
         },
         gap_s=0,
     )
-    # 74 NM out should wait; inside the 42 NM handoff range should fire.
+    # 74 NM out should wait; inside the 45 NM handoff range should fire.
     ready_near, wait_near = atc_phrase.control_handoff_auto_ready(
         airport=nellis,
         state={
@@ -7712,7 +7712,7 @@ def agency_sandbox() -> int:
         print(f"  FAIL Control handoff should wait 74 NM out: {wait_far}")
         bad += 1
     elif not ready_near:
-        print(f"  FAIL Control handoff should fire inside 42 NM: {wait_near}")
+        print(f"  FAIL Control handoff should fire inside 45 NM: {wait_near}")
         bad += 1
     elif ready_dep:
         print(
@@ -7821,11 +7821,11 @@ def agency_sandbox() -> int:
         bad += 1
     else:
         print("control handoff gate — no fix / no position waits, field still fires")
-    # NATCF lets go in the 40-45 NM band. The 18 NM further out belongs to the
+    # NATCF lets go around 45 NM. The 18 NM further out belongs to the
     # Departure → Blackjack handoff and must not creep back in here.
     fld = atc_phrase._airport_field_latlon(nellis)
     band = []
-    for want_nm in (50.0, 44.0, 41.0, 30.0):
+    for want_nm in (50.0, 47.0, 44.0, 30.0):
         # Due north of the field at the requested range.
         lat = fld[0] + want_nm / 60.0
         st_band = {
@@ -7840,12 +7840,12 @@ def agency_sandbox() -> int:
         )
         band.append((want_nm, rdy))
     if [r for _n, r in band] != [False, False, True, True]:
-        print(f"  FAIL Control handoff should open in the 40-45 NM band: {band}")
+        print(f"  FAIL Control handoff should open near 45 NM: {band}")
         bad += 1
-    elif abs(atc_phrase.control_handoff_nm({}) - 42.0) > 0.01:
-        print("  FAIL default Control handoff range should be 42 NM")
+    elif abs(atc_phrase.control_handoff_nm({}) - 45.0) > 0.01:
+        print("  FAIL default Control handoff range should be 45 NM")
         bad += 1
-    elif abs(atc_phrase.control_handoff_nm({"control_handoff_nm": 45}) - 45.0) > 0.01:
+    elif abs(atc_phrase.control_handoff_nm({"control_handoff_nm": 40}) - 40.0) > 0.01:
         print("  FAIL control_handoff_nm should be configurable")
         bad += 1
     else:
@@ -7872,7 +7872,7 @@ def agency_sandbox() -> int:
             print(f"  FAIL Departure → Blackjack should still be 18 NM, got {dep_nm}")
             bad += 1
         else:
-            print("handoff ranges — NATCF at 42 NM, Departure → Blackjack at 18 NM")
+            print("handoff ranges — NATCF at 45 NM, Departure → Blackjack at 18 NM")
     # Fly must tip the call that is due. It used to hide the check-in and show
     # "contact Approach" while the pilot was still trying to check in.
     def _advance_cue(expected: str) -> str:

@@ -36,6 +36,7 @@ const state = {
   playT: 0,
   lastTickMs: 0,
   lastSendMs: 0,
+  scrubbing: false,
   heading: 210,
   lat: 36.236,
   lon: -115.034,
@@ -164,6 +165,86 @@ function lerp(a, b, t) {
   return a + (b - a) * t;
 }
 
+/** Cumulative NM along the plotted route (index 0 = 0). */
+function routeCumNm() {
+  const wps = state.waypoints || [];
+  const cum = [0];
+  for (let i = 1; i < wps.length; i++) {
+    cum.push(
+      cum[i - 1] +
+        haversineNm([wps[i - 1].lat, wps[i - 1].lon], [wps[i].lat, wps[i].lon])
+    );
+  }
+  return cum;
+}
+
+function routeProgressNm() {
+  const cum = routeCumNm();
+  const total = cum.length ? cum[cum.length - 1] : 0;
+  if (total <= 0 || !state.waypoints.length) return { at: 0, total: 0, name: "" };
+  const idx = Math.max(0, Math.min(state.playIdx, state.waypoints.length - 1));
+  let at = cum[idx] || 0;
+  if (idx < state.waypoints.length - 1) {
+    at += (state.playT || 0) * (cum[idx + 1] - cum[idx]);
+  } else {
+    at = total;
+  }
+  const wp = state.waypoints[idx] || {};
+  const name = String(wp.id || wp.say || "").trim();
+  return { at, total, name };
+}
+
+function setJetAtRouteNm(nm, { tick } = { tick: true }) {
+  const wps = state.waypoints || [];
+  if (wps.length < 2) return;
+  const cum = routeCumNm();
+  const total = cum[cum.length - 1] || 0;
+  const target = Math.max(0, Math.min(total, Number(nm) || 0));
+  if (target >= total - 1e-9) {
+    const last = wps[wps.length - 1];
+    const prev = wps[wps.length - 2];
+    state.playIdx = wps.length - 1;
+    state.playT = 0;
+    jet.setLatLng([last.lat, last.lon]);
+    setJetHeading(bearingDeg([prev.lat, prev.lon], [last.lat, last.lon]));
+    syncScrubUi();
+    if (tick) sendTick();
+    return;
+  }
+  let i = 0;
+  while (i < cum.length - 1 && cum[i + 1] < target - 1e-9) i += 1;
+  const seg = Math.max(1e-9, cum[i + 1] - cum[i]);
+  const t = (target - cum[i]) / seg;
+  const a = wps[i];
+  const b = wps[i + 1];
+  state.playIdx = i;
+  state.playT = Math.max(0, Math.min(1, t));
+  jet.setLatLng([lerp(a.lat, b.lat, state.playT), lerp(a.lon, b.lon, state.playT)]);
+  setJetHeading(bearingDeg([a.lat, a.lon], [b.lat, b.lon]));
+  syncScrubUi();
+  if (tick) sendTick();
+}
+
+function syncScrubUi() {
+  const scrub = el("scrub");
+  const label = el("scrubVal");
+  if (!scrub || !label) return;
+  const { at, total, name } = routeProgressNm();
+  const ready = total > 0 && (state.waypoints || []).length >= 2;
+  scrub.disabled = !ready;
+  if (!ready) {
+    label.textContent = "plot a route";
+    if (!state.scrubbing) scrub.value = "0";
+    return;
+  }
+  const frac = Math.max(0, Math.min(1, at / total));
+  if (!state.scrubbing) {
+    scrub.value = String(Math.round(frac * 1000));
+  }
+  const near = name ? ` · ${name}` : "";
+  label.textContent = `${at.toFixed(1)} / ${total.toFixed(1)} NM${near}`;
+}
+
 function qsAirport() {
   return new URLSearchParams(location.search).get("airport") || "";
 }
@@ -177,6 +258,7 @@ function syncSliders() {
   if (el("trafficAltVal")) {
     el("trafficAltVal").textContent = `${el("trafficAlt").value} ft AGL`;
   }
+  syncScrubUi();
 }
 
 function renderHud(out) {
@@ -318,6 +400,7 @@ function drawRoute(plotted) {
     : wps.length
       ? `${wps.length} waypoint(s)`
       : "No waypoints — type a route and Plot.";
+  syncScrubUi();
   if (latlngs.length >= 2) {
     map.fitBounds(routeLine.getBounds().pad(0.2));
   }
@@ -384,6 +467,7 @@ async function plotRoute() {
     if (out.waypoints.length > 1) {
       setJetHeading(bearingDeg([first.lat, first.lon], [out.waypoints[1].lat, out.waypoints[1].lon]));
     }
+    syncScrubUi();
   }
   await sendTick();
 }
@@ -425,9 +509,11 @@ function playFrame(ts) {
     const last = wps[wps.length - 1];
     jet.setLatLng([last.lat, last.lon]);
     state.playing = false;
+    syncScrubUi();
     sendTick();
     return;
   }
+  syncScrubUi();
   if (!state.lastSendMs || ts - state.lastSendMs > 900) {
     state.lastSendMs = ts;
     sendTick();
@@ -553,6 +639,44 @@ el("play").addEventListener("click", () => {
 el("pause").addEventListener("click", () => {
   state.playing = false;
 });
+function scrubFromSlider() {
+  const scrub = el("scrub");
+  if (!scrub || scrub.disabled) return;
+  const { total } = routeProgressNm();
+  if (total <= 0) return;
+  state.playing = false;
+  const frac = Number(scrub.value) / 1000;
+  setJetAtRouteNm(frac * total, { tick: true });
+}
+if (el("scrub")) {
+  el("scrub").addEventListener("pointerdown", () => {
+    state.scrubbing = true;
+    state.playing = false;
+  });
+  el("scrub").addEventListener("pointerup", () => {
+    state.scrubbing = false;
+    scrubFromSlider();
+  });
+  el("scrub").addEventListener("input", () => {
+    state.scrubbing = true;
+    state.playing = false;
+    const scrub = el("scrub");
+    const { total } = routeProgressNm();
+    if (total <= 0) return;
+    const frac = Number(scrub.value) / 1000;
+    // Live preview while dragging — tick less often so Fly isn't hammered.
+    setJetAtRouteNm(frac * total, { tick: false });
+    const now = performance.now();
+    if (!state.lastSendMs || now - state.lastSendMs > 250) {
+      state.lastSendMs = now;
+      sendTick();
+    }
+  });
+  el("scrub").addEventListener("change", () => {
+    state.scrubbing = false;
+    scrubFromSlider();
+  });
+}
 el("alt").addEventListener("input", () => {
   syncSliders();
   sendTick();
