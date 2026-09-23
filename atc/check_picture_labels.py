@@ -339,6 +339,24 @@ def main() -> int:
     else:
         print("OK shot-down Pilot / wreck tracks are excluded from picture")
 
+    f5 = {"objectName": "F-5E-3", "name": "Aggro 1", "coalition": "red"}
+    e3 = {"objectName": "E-3A", "name": "Overlord", "coalition": "blue"}
+    kc = {"objectName": "KC-135", "name": "Texaco", "coalition": "blue"}
+    if (
+        atc_phrase.caoc_unit_is_picture_fixture(f5)
+        or not atc_phrase.caoc_unit_is_picture_fixture(e3)
+        or not atc_phrase.caoc_unit_is_picture_fixture(kc)
+    ):
+        print(
+            f"FAIL fixture token boundaries: "
+            f"f5={atc_phrase.caoc_unit_is_picture_fixture(f5)} "
+            f"e3={atc_phrase.caoc_unit_is_picture_fixture(e3)} "
+            f"kc={atc_phrase.caoc_unit_is_picture_fixture(kc)}"
+        )
+        bad += 1
+    else:
+        print("OK F-5E-3 is pictured; E-3 / KC-135 stay fixtures")
+
     # OPUS affiliation wins over coalition / random rolls.
     opus_unk = pl.DeclarationMemory().assign(
         ["ti1"],
@@ -485,11 +503,11 @@ def main() -> int:
     else:
         print("OK ID/upgrade packed Elvis cues (skip seat digit)")
 
-    if "visual ID" not in pl.VID_INTERCEPT_CUE:
+    if "visual i-d" not in pl.VID_INTERCEPT_CUE.casefold() and "i-d" not in pl.VID_INTERCEPT_CUE.casefold():
         print(f"FAIL VID cue wording: {pl.VID_INTERCEPT_CUE}")
         bad += 1
     else:
-        print(f"OK recommend cue says visual ID ({pl.VID_INTERCEPT_CUE})")
+        print(f"OK recommend cue says visual I-D ({pl.VID_INTERCEPT_CUE})")
 
     # Last picture labels → ID by name.
     state = {}

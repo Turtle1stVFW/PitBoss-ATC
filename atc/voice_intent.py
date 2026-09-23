@@ -1071,6 +1071,7 @@ INTENTS: tuple[Intent, ...] = (
             "declare as",
             "vid",
             "visual id",
+            "visual i-d",
             "id group",
             "upgrade",
             "upgrade group",
@@ -1082,6 +1083,7 @@ INTENTS: tuple[Intent, ...] = (
             (
                 "vid",
                 "visual id",
+                "visual i-d",
                 "visual identification",
                 "id group",
                 "eye dee",
@@ -4281,13 +4283,15 @@ def echoes_last_atc(
     # Real check-in after a handoff must still fire ("with you" / "checking in").
     if any(cue in text and cue not in last for cue in _CHECKIN_OVERRIDE_ECHO):
         return False
-    # C2 asks that reuse ATC's own wording (alpha check / picture / dope) are
-    # new requests, not readbacks of the last transmission.
+    # C2 asks that reuse ATC's own wording (alpha check / picture / dope /
+    # declare / VID after a picture that named "east group") are new requests,
+    # not readbacks of the last transmission.
     if intent is not None and intent.id in (
         "request_alpha_check",
         "request_picture",
         "request_bogey_dope",
         "request_declare",
+        "report_vid",
     ):
         return False
     # Contact / switch readback — even after retune to the destination agency.

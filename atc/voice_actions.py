@@ -1039,6 +1039,7 @@ _VID_AFFILIATION_PATTERNS: tuple[tuple[str, str], ...] = (
 _VID_SET_MARKERS = (
     "vid",
     "visual id",
+    "visual i-d",
     "visual identification",
     "id group",
     "eye dee",

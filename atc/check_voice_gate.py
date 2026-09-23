@@ -7526,6 +7526,30 @@ def instruction_readback_echo() -> int:
         )
         bad += 1
 
+    # Picture names "east group" and ends with visual-ID advice — pilot ID of
+    # that group must fire, not look like a readback of the picture.
+    pic_last = (
+        "Razor one, Bandsaw, two groups azimuth forty six, echelon west. "
+        "East group, ELVIS zero four fife, forty one, thirty seven thousand, "
+        "track south, bogey spades. West group, ELVIS tree two four, forty one, "
+        "thirty nine thousand, track southeast, bogey spades, "
+        "recommend intercept for visual I-D."
+    )
+    vid_after_pic = voice_intent.evaluate(
+        "Bandsaw, ID, East Group, hostile.",
+        channel="bandsaw",
+        phase="flight",
+        callsign="RAZOR 1",
+        last_tx_text=pic_last,
+        last_tx_channel="bandsaw",
+    )
+    if not vid_after_pic.fired or vid_after_pic.match.intent != "report_vid":
+        print(
+            f"  FAIL ID east group after picture must fire report_vid, not echo: "
+            f"{vid_after_pic.describe()} reason={vid_after_pic.reason}"
+        )
+        bad += 1
+
     if bad:
         print(f"instruction readback echo — {bad} problem(s)")
     else:

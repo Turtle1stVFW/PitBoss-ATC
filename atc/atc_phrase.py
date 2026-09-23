@@ -1991,8 +1991,9 @@ def coerce_latlon(value: Any) -> tuple[float, float] | None:
 OWNSHIP_FIX_MAX_AGE_S = 300.0
 # Distance gates must not trust a multi-minute-old stamp (stuck "67 NM" UI).
 OWNSHIP_GATE_FIX_MAX_AGE_S = 45.0
-# Cap how long a radio-gap wait can look after a bad last_tx_end_at estimate.
-RADIO_GAP_WAIT_CAP_S = 25.0
+# Cap inflated "still speaking" stamps so a bad last_tx_end_at cannot add
+# a long fake wait on top of the intended radio gap.
+RADIO_GAP_WAIT_CAP_S = 12.0
 
 
 def _ownship_fix_is_fresh(state: dict[str, Any] | None) -> bool:
@@ -2888,7 +2889,7 @@ def radio_gap_remaining(
     so older state without an end time still waits out the phrase.
 
     Caps inflated end stamps (deferred speech estimate / clock skew) so Fly
-    never shows a ~2‑minute "in Xs" countdown for an 8–15s radio gap.
+    never shows a multi-tens-of-seconds countdown for a short radio gap.
     """
     if float(gap_s or 0.0) <= 0.0:
         return 0.0
@@ -2906,10 +2907,10 @@ def radio_gap_remaining(
         if start <= 0.0:
             return 0.0
         end = start + estimate_spoken_duration_s(str(st.get("last_tx_text") or ""))
-    # Still "speaking" per stamp — do not wait more than a short cushion.
+    # Still "speaking" per stamp — only a short cushion, then the gap.
     if end > tnow:
         end = min(end, tnow + RADIO_GAP_WAIT_CAP_S)
-    left = max(0.0, float(gap_s) - (tnow - end))
+    left = max(0.0, (end + float(gap_s)) - tnow)
     return min(left, float(gap_s) + RADIO_GAP_WAIT_CAP_S)
 
 
@@ -3061,9 +3062,8 @@ def approach_tower_handoff_auto_ready(
     """
     True when Approach may auto-hand to Tower (contact tower).
 
-    Requires the procedure clearance first, ≤12 NM from the field, then a
-    short radio gap — distance is shown while waiting so it does not look
-    like a bare countdown timer.
+    Requires the procedure clearance first, ≤12 NM from the field — then fire.
+    No forced radio gap (only Approach expect→cleared keeps one).
     """
     st = state if isinstance(state, dict) else {}
     hold = auto_tx_hold_reason(st)
@@ -3081,10 +3081,8 @@ def approach_tower_handoff_auto_ready(
     dist_note = f"{dist:.1f} NM from field"
     if dist > need:
         return False, f"{dist_note} — contact tower at {need:g} NM"
-    gap = float(8.0 if gap_s is None else gap_s)
-    left = radio_gap_remaining(st, gap)
-    if left > 0:
-        return False, f"{dist_note} — contact tower in {left:.0f}s"
+    # gap_s kept for callers / flow JSON; intentionally unused (no forced wait).
+    _ = gap_s
     return True, f"{dist_note} — contact tower"
 
 
@@ -3171,8 +3169,8 @@ def control_handoff_auto_ready(
     """
     True when Nellis Control may auto-hand to Approach.
 
-    After NATCF check-in: distance to the field first (so Fly shows NM), then
-    a short radio gap. Range to the field rather than to the exit fix.
+    After NATCF check-in: distance to the field first (so Fly shows NM).
+    No forced radio gap — fires when range is met.
     Departure radar near TORYE must not steal this call.
     """
     st = state if isinstance(state, dict) else {}
@@ -3212,10 +3210,8 @@ def control_handoff_auto_ready(
         if dist > need:
             return False, f"{dist_note} — hand to Approach at ≤ {need:g} NM"
 
-    gap = float(CONTROL_HANDOFF_GAP_S if gap_s is None else gap_s)
-    left = radio_gap_remaining(st, gap)
-    if left > 0:
-        return False, f"{dist_note} — Approach handoff in {left:.0f}s"
+    # gap_s kept for callers / flow JSON; intentionally unused (no forced wait).
+    _ = gap_s
     if field is not None:
         return True, f"{dist_note} — Approach handoff"
     return True, f"{dist_note} — Approach handoff"
@@ -4646,6 +4642,9 @@ def clear_flight_session_cache(
             "last_tx_text",
             "last_tx_at",
             "last_tx_end_at",
+            # C2 picture labels / declarations — next sortie starts clean.
+            "picture_groups",
+            "picture_declarations",
         ):
             state.pop(key, None)
         state["hold_active"] = False
@@ -8841,13 +8840,30 @@ def caoc_unit_is_picture_fixture(unit: dict[str, Any]) -> bool:
     True for always-present support tracks (AWACS / tankers).
 
     These stay on the CAOC feed all sortie and should not fill a picture call.
+    Token match is boundary-aware so F-5E-3 is not treated as an E-3.
     """
     obj_raw = str(unit.get("objectName") or unit.get("object_name") or "")
     obj_u = obj_raw.upper()
     obj_compact = re.sub(r"[\s_\-]+", "", obj_u)
+
+    def _token_hit(haystack: str, needle: str) -> bool:
+        if not needle:
+            return False
+        return bool(
+            re.search(
+                rf"(?<![A-Z0-9]){re.escape(needle)}(?![A-Z0-9])",
+                haystack,
+            )
+        )
+
     for tok in _PICTURE_FIXTURE_OBJECT_TOKENS:
         t = tok.upper()
-        if t in obj_u or re.sub(r"[\s_\-]+", "", t) in obj_compact:
+        if _token_hit(obj_u, t):
+            return True
+        t_compact = re.sub(r"[\s_\-]+", "", t)
+        if t_compact != t and _token_hit(obj_compact, t_compact):
+            return True
+        if t_compact == t and _token_hit(obj_compact, t_compact):
             return True
     blob = " ".join(
         str(unit.get(k) or "")
@@ -11596,6 +11612,9 @@ _RADIO_WORD_PRONUNCIATION: dict[str, str] = {
 _RADIO_PHRASE_PRONUNCIATION: tuple[tuple[str, str], ...] = (
     (r"\bsee\s+ya\b", "seeyuh"),
     (r"\bsee\s+yah\b", "seeyuh"),
+    # Visual ID — not "id" as in identity card.
+    (r"\bI-D\b", "eye dee"),
+    (r"\bvisual\s+id\b", "visual eye dee"),
 )
 
 # Microsoft SAPI often reads weather "wind" as /waɪnd/ (whined). Respell for Speak().

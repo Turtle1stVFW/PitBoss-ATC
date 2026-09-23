@@ -1121,7 +1121,7 @@ def dump_live_triggers() -> int:
         )
         print(f"would hold now: {held}  ({_ascii(waiting) or 'ready'})")
         if held:
-            print("  dwell / radio gap still apply before AUTO actually transmits")
+            print("  dwell still applies before AUTO transmits (no forced radio gap)")
         elif not auto:
             print("  even if this held, AUTO is off so Fly will not transmit")
 

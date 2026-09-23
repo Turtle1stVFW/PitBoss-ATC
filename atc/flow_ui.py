@@ -2328,12 +2328,9 @@ class MissionPlanner(tk.Tk):
                 waiting += f"  ·  settling, {max(0.0, left):.0f}s to go"
             return "", waiting
 
-        # Pacing against the radio rather than the aircraft: a clearance that
-        # steps on the transmission before it is worse than a late one.
-        gap_left = runway_position.gap_remaining(trigger, state)
-        if gap_left > 0:
-            return "", f"{waiting}  ·  holding {gap_left:.0f}s for radio gap"
-
+        # Radio gap only for Approach expect→cleared (handled in
+        # approach_clearance_auto_ready). Zone / distance auto-TX fires as soon
+        # as the aircraft condition is met — no forced silence after settle.
         latch = f"fire:{key}"
         if not tracker.armed(latch):
             return "", waiting
