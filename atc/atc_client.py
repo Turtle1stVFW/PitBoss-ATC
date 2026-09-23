@@ -111,7 +111,7 @@ class AtcClient:
             "summarised": match.summarised,
         }
         body.update(_radio_payload(self.config))
-        data = self._request("POST", "/v1/intent", body)
+        data = self._request("POST", "/v1/intent", body, timeout=100)
         if isinstance(data, dict):
             fly = {
                 key: data[key]
@@ -142,7 +142,7 @@ class AtcClient:
         body.update(fields)
         body.update(_radio_payload(self.config))
         path = f"/v1/{command.strip().lower()}"
-        data = self._request("POST", path, body)
+        data = self._request("POST", path, body, timeout=100)
         if isinstance(data, dict):
             self.last_status = {**self.last_status, **data}
         return data
@@ -209,6 +209,7 @@ class AtcClient:
         body: dict[str, Any] | None = None,
         *,
         headers: dict[str, str] | None = None,
+        timeout: float = 8,
     ) -> dict[str, Any]:
         token = atc_net.token_of(self.config)
         hdrs = {
@@ -221,7 +222,7 @@ class AtcClient:
         url = self.base_url + path
         req = urllib.request.Request(url, data=data, method=method, headers=hdrs)
         try:
-            with urllib.request.urlopen(req, timeout=8) as resp:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 raw = resp.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")[:400]
@@ -242,7 +243,9 @@ class AtcClient:
                     self.hello()
                     if body is not None:
                         body["session_id"] = self.session_id
-                    return self._request(method, path, body, headers=headers)
+                    return self._request(
+                        method, path, body, headers=headers, timeout=timeout
+                    )
                 finally:
                     self._rehello_guard = False
             raise AtcClientError(f"{exc.code} {msg} [{url}]") from exc

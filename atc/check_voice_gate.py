@@ -3860,6 +3860,16 @@ def extras() -> int:
             last_tx_template="go_around",
             sfo_active=False,
         )
+        # Client may not have sfo_active yet; Tower already said report High Key.
+        asked_hk = voice_intent.evaluate(
+            "Raise your one high key",
+            channel="tower",
+            phase="approach",
+            callsign="Razor 1",
+            last_tx_template="go_around",
+            last_tx_text="Razor one, roger, report high key.",
+            sfo_active=False,
+        )
         ga_items = atc_phrase.build_readback_checklist(
             "go_around",
             nellis,
@@ -3883,6 +3893,8 @@ def extras() -> int:
             or after_go.match.intent != "report_high_key"
             or not flex_go.match
             or flex_go.match.intent != "request_sfo"
+            or not asked_hk.match
+            or asked_hk.match.intent != "report_high_key"
             or not any(
                 str(i.get("key") or "") == "callsign" and i.get("hinge")
                 for i in ga_items
@@ -3894,6 +3906,7 @@ def extras() -> int:
                 f"  FAIL SFO continue High Key / callsign readback: "
                 f"after={after_go.match and after_go.match.intent} "
                 f"flex={flex_go.match and flex_go.match.intent} "
+                f"asked={asked_hk.match and asked_hk.match.intent} "
                 f"items={ga_items} cs={cs_only.match and cs_only.match.intent}"
             )
             bad += 1

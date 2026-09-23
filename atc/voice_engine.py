@@ -3045,7 +3045,9 @@ def _handle_sfo_action(
         return _transmit(engine, airport, text, "tower", template="sfo_approve")
 
     if intent == "report_high_key":
-        if not atc_phrase.is_sfo_recovery(state=st):
+        ga = st.get("go_around_plan") if isinstance(st, dict) else None
+        continuing = isinstance(ga, dict) and str(ga.get("kind") or "") == "sfo_continue"
+        if not atc_phrase.is_sfo_recovery(state=st) and not continuing:
             # Treat as a late request.
             return _handle_sfo_action(
                 "request_sfo",
@@ -3055,6 +3057,10 @@ def _handle_sfo_action(
                 weather,
                 match,
                 opus=opus,
+            )
+        if continuing and not atc_phrase.is_sfo_recovery(state=st):
+            atc_phrase.note_sfo_continue_after_go_around(
+                st, mission=engine.mission
             )
         heard = slots.get("high_key_ft")
         if heard is None:
@@ -3120,6 +3126,15 @@ def _handle_sfo_action(
         return _transmit(engine, airport, text, "tower", template="closed_traffic")
 
     if intent == "report_low_key":
+        if not atc_phrase.is_sfo_recovery(state=st):
+            atc_phrase.note_sfo_continue_after_go_around(
+                st, mission=engine.mission
+            )
+        atc_phrase.set_landing_intent(
+            atc_phrase.LANDING_INTENT_LOW_APPROACH,
+            state=st,
+            mission=engine.mission,
+        )
         atc_phrase.note_sfo_low_key(st)
         engine.save_state()
         played = _play_sfo_or_pattern_clear_land(engine)

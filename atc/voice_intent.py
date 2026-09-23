@@ -3716,6 +3716,11 @@ def looks_like_radio_check_not_winds(text: str) -> bool:
     return False
 
 
+def _tower_asked_report_high_key(last_tx_text: str = "") -> bool:
+    """Tower already said 'report high key' — the next High Key is the report."""
+    return "report high key" in str(last_tx_text or "").lower()
+
+
 def _score_intents(
     text: str,
     transcript: str,
@@ -3731,6 +3736,7 @@ def _score_intents(
     current_step_id: str = "",
     steps: list[dict[str, Any]] | None = None,
     last_tx_template: str = "",
+    last_tx_text: str = "",
     sfo_active: bool = False,
 ) -> Match | None:
     """Highest-scoring intent for a transcript, before any addressing gate."""
@@ -3834,6 +3840,7 @@ def _score_intents(
         ):
             continue
         last_tmpl = str(last_tx_template or "").strip().lower()
+        asked_hk = _tower_asked_report_high_key(last_tx_text)
         # High Key report after SFO approve, while the SFO pattern is still open
         # (another High Key after on-the-go), or after Tower said report High Key.
         # Bare "high key" otherwise is request_sfo (e.g. after Flex).
@@ -3845,6 +3852,7 @@ def _score_intents(
             )
             sfo_report_ok = bool(
                 sfo_active
+                or asked_hk
                 or last_tmpl in ("sfo_approve", "go_around", "sfo_high_key", "clear_land")
             )
             if not (sfo_report_ok or explicit_hk):
@@ -3854,11 +3862,12 @@ def _score_intents(
             if (
                 last_tmpl == "go_around"
                 and not sfo_active
+                and not asked_hk
                 and not explicit_hk
             ):
                 continue
         if intent.id == "request_sfo" and (
-            last_tmpl in ("sfo_approve", "sfo_high_key") or sfo_active
+            last_tmpl in ("sfo_approve", "sfo_high_key") or sfo_active or asked_hk
         ):
             # Already approved / still on SFO — bare High Key is the report.
             if not _group_hit(
@@ -3979,7 +3988,7 @@ def _score_intents(
         )
         last_tmpl = str(last_tx_template or "").strip().lower()
         if intent.id == "report_high_key" and (
-            last_tmpl in ("sfo_approve", "go_around") or sfo_active
+            last_tmpl in ("sfo_approve", "go_around") or sfo_active or asked_hk
         ):
             expecting = True
         if intent.id == "report_low_key" and (
@@ -3996,7 +4005,12 @@ def _score_intents(
         if intent.id == "report_sfo_final" and last_tmpl == "sfo_approve":
             expecting = True
         # Flex go-around → tip/score a fresh High Key *request*; SFO continue does not.
-        if intent.id == "request_sfo" and last_tmpl == "go_around" and not sfo_active:
+        if (
+            intent.id == "request_sfo"
+            and last_tmpl == "go_around"
+            and not sfo_active
+            and not asked_hk
+        ):
             expecting = True
         if intent.id == "request_sfo" and sfo_active:
             # Prefer the report when the pattern is still open.
@@ -4642,6 +4656,7 @@ def evaluate(
         current_step_id=current_step_id,
         steps=steps,
         last_tx_template=last_tx_template,
+        last_tx_text=last_tx_text,
         sfo_active=bool(sfo_active),
     )
     if (
@@ -5003,6 +5018,7 @@ def suggestions(
     next_channel: str = "",
     next_freq_mhz: float | None = None,
     sfo_active: bool = False,
+    last_tx_text: str = "",
 ) -> list[tuple[str, str, str, bool]]:
     """
     Fly kneeboard cues: (payload, what it does, role, agency_required).
@@ -5231,15 +5247,17 @@ def suggestions(
         # Don't tip "ready to copy" until Delivery has offered the amendment.
         if intent.id == "ready_to_copy" and last_tx_template != "clearance_amendment":
             continue
+        asked_hk = _tower_asked_report_high_key(last_tx_text)
         # SFO report tips only after the matching Tower call / while still on SFO.
         if intent.id == "report_high_key" and not (
-            last_tx_template in ("sfo_approve", "go_around") or sfo_active
+            last_tx_template in ("sfo_approve", "go_around") or sfo_active or asked_hk
         ):
             continue
         if (
             intent.id == "report_high_key"
             and last_tx_template == "go_around"
             and not sfo_active
+            and not asked_hk
         ):
             # Flex go-around — tip request SFO, not a High Key report.
             continue
@@ -5274,10 +5292,12 @@ def suggestions(
             if last_tx_template.startswith("sfo_") or sfo_active:
                 continue
         if intent.id == "request_sfo" and (
-            last_tx_template in ("sfo_approve", "sfo_high_key") or sfo_active
+            last_tx_template in ("sfo_approve", "sfo_high_key") or sfo_active or asked_hk
         ):
             continue
-        if intent.id == "request_sfo" and last_tx_template == "go_around" and sfo_active:
+        if intent.id == "request_sfo" and last_tx_template == "go_around" and (
+            sfo_active or asked_hk
+        ):
             continue
         # Range checkout ends Flight → Approach; tip it on the range-exit step
         # (and allow check-in "continue" after they leave Blackjack).
@@ -5343,9 +5363,9 @@ def suggestions(
         elif intent.id == "ready_to_copy" and expected_l == "clearance_amendment":
             rank = 0
         elif intent.id == "report_high_key" and (
-            last_tx_template in ("sfo_approve", "go_around") or sfo_active
+            last_tx_template in ("sfo_approve", "go_around") or sfo_active or asked_hk
         ):
-            if last_tx_template == "go_around" and not sfo_active:
+            if last_tx_template == "go_around" and not sfo_active and not asked_hk:
                 pass
             else:
                 rank = 0
@@ -5363,7 +5383,12 @@ def suggestions(
             rank = 0
         elif intent.id == "report_sfo_final" and last_tx_template == "sfo_approve":
             rank = 0
-        elif intent.id == "request_sfo" and last_tx_template == "go_around" and not sfo_active:
+        elif (
+            intent.id == "request_sfo"
+            and last_tx_template == "go_around"
+            and not sfo_active
+            and not asked_hk
+        ):
             rank = 0
         elif intent.id == "request_closed_traffic" and (
             sfo_active or last_tx_template.startswith("sfo_") or last_tx_template == "go_around"

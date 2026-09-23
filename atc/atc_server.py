@@ -69,6 +69,16 @@ SHARED_FLOW_KEYS = (
     "assigned_altitude_ft",
     "approach_plan",
     "approach_checked_in",
+    "approach_runway",
+    "active_recovery",
+    "landing_intent",
+    "awaiting_on_the_go",
+    "pattern_land_needs_leave",
+    "go_around_plan",
+    "sfo_pattern_open",
+    "sfo_phase",
+    "sfo_high_key_ft",
+    "sfo_base_key_pending",
     "manual_cursor",
     "manual_step_view",
     "active_takeoff_mode",
@@ -590,6 +600,22 @@ class AtcServer:
             result = dict(result)
             result["queued"] = True
             result["queue_pos"] = pos
+            # Speak before the Client paints the card. Otherwise Fly shows
+            # "contact Ground" / the readback and the pilot leaves the
+            # frequency while Tower is still talking.
+            done = job.get("done")
+            if isinstance(done, threading.Event):
+                done.wait(timeout=100.0)
+            code = job.get("exit_code")
+            err = str(job.get("error") or job.get("prerender_error") or "").strip()
+            try:
+                failed = code is not None and int(code) != 0
+            except (TypeError, ValueError):
+                failed = False
+            if failed or (err and code is None):
+                result["queued"] = False
+                result["action"] = "blocked"
+                result["detail"] = err or f"radio transmit failed ({code})"
             result["channel"] = job.get("channel")
             # Voice often wraps play_id as action=play + detail={...}. Promote
             # spoken text so Clients log/hear the real phrase, not the label.

@@ -6888,19 +6888,23 @@ def awaiting_option_on_the_go(state: dict[str, Any] | None = None) -> bool:
     return bool(isinstance(state, dict) and state.get("awaiting_on_the_go"))
 
 
-def runway_exit_hold_reason(state: dict[str, Any] | None = None) -> str:
+def runway_exit_hold_reason(
+    state: dict[str, Any] | None = None, *, allow_rollout: bool = False
+) -> str:
     """
     Why Watch must not TX exit-runway / contact Ground.
 
-    A go-around, missed approach, or the option overflies the far end;
-    that is not a landing rollout.
+    A go-around or missed approach is not a landing rollout. A low approach
+    that is actually on the pavement and slow is — the runway-end gate
+    already rejects an airborne or fast pass, so that case may proceed.
     """
     if not isinstance(state, dict):
         return ""
-    if awaiting_option_on_the_go(state):
-        return "option / low approach — not a full stop"
-    if resolve_landing_intent(state) == LANDING_INTENT_LOW_APPROACH:
-        return "cleared the option — waiting on the go or full stop"
+    if not allow_rollout:
+        if awaiting_option_on_the_go(state):
+            return "option / low approach — not a full stop"
+        if resolve_landing_intent(state) == LANDING_INTENT_LOW_APPROACH:
+            return "cleared the option — waiting on the go or full stop"
     last = str(state.get("last_tx_template") or "").strip().lower()
     if last == "go_around" or go_around_readback_open(state):
         return "go-around / missed — not exiting"
@@ -15390,15 +15394,25 @@ def preview_file_local(file_path: str) -> None:
         subprocess.Popen(["xdg-open", str(path)])
 
 
+# PIDs whose ExternalAudio process is the live transmission. A second
+# channel must not Stop-Process these or it cuts the call the pilot is hearing.
+_LIVE_EA_PIDS: set[int] = set()
+_LIVE_EA_LOCK = threading.Lock()
+
+
 def terminate_stale_external_audio(exe: Path) -> int:
     """Kill hung ExternalAudio processes for this exe (prevents ghost SRS clients)."""
     if os.name != "nt":
         return 0
     exe_path = str(exe.resolve())
+    with _LIVE_EA_LOCK:
+        live = ",".join(str(pid) for pid in sorted(_LIVE_EA_PIDS))
     ps = f"""
 $ErrorActionPreference = 'SilentlyContinue'
+$live = @({live})
 $n = 0
 Get-CimInstance Win32_Process -Filter "Name='{exe.name}'" | ForEach-Object {{
+  if ($live -contains $_.ProcessId) {{ return }}
   if ($_.ExecutablePath -and ($_.ExecutablePath -ieq '{exe_path.replace("'", "''")}')) {{
     Stop-Process -Id $_.ProcessId -Force
     $n++
@@ -15443,14 +15457,16 @@ def _run_external_audio(exe: Path, cmd: list[str], *, timeout_sec: float = 120.0
         )
     except Exception:
         pass
+    proc: subprocess.Popen[bytes] | None = None
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             cmd,
             cwd=str(exe.parent),
             creationflags=creationflags,
-            timeout=timeout_sec,
         )
-        code = int(proc.returncode)
+        with _LIVE_EA_LOCK:
+            _LIVE_EA_PIDS.add(proc.pid)
+        code = int(proc.wait(timeout=timeout_sec))
         try:
             import app_diag
 
@@ -15475,8 +15491,17 @@ def _run_external_audio(exe: Path, cmd: list[str], *, timeout_sec: float = 120.0
             )
         except Exception:
             pass
+        if proc is not None:
+            try:
+                proc.kill()
+            except OSError:
+                pass
         terminate_stale_external_audio(exe)
         return 124
+    finally:
+        if proc is not None:
+            with _LIVE_EA_LOCK:
+                _LIVE_EA_PIDS.discard(proc.pid)
 
 
 def transmit(

@@ -927,8 +927,9 @@ class FlowEngine:
         tmpl = str((step or {}).get("template") or "")
         if tmpl != "clear_land":
             return False
-        if bool(self.state.get("awaiting_on_the_go")):
-            return True
+        # Low approach still advances to Exit. The runway-end gate only
+        # speaks once they are on the pavement and slow, so a low pass
+        # does not get "exit right", and a real rollout does.
         return atc_phrase.should_hold_for_landing_clearances(
             self.state, step=step, mission=self.mission
         )

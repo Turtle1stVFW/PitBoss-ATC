@@ -2317,7 +2317,7 @@ class MissionPlanner(tk.Tk):
             if not ok_rearm:
                 return "", wait_rearm
         if tmpl == "exit_runway":
-            exit_hold = atc_phrase.runway_exit_hold_reason(state)
+            exit_hold = atc_phrase.runway_exit_hold_reason(state, allow_rollout=True)
             if exit_hold:
                 return "", exit_hold
 
@@ -2480,7 +2480,7 @@ class MissionPlanner(tk.Tk):
         if str(step.get("template") or tmpl) == "exit_runway":
             try:
                 exit_hold = atc_phrase.runway_exit_hold_reason(
-                    getattr(live_engine, "state", None)
+                    getattr(live_engine, "state", None), allow_rollout=True
                 )
             except Exception:
                 exit_hold = ""
@@ -9878,6 +9878,7 @@ class MissionPlanner(tk.Tk):
             next_channel=cursor_now,
             next_freq_mhz=next_mhz,
             sfo_active=bool(context.get("sfo_active")),
+            last_tx_text=str(context.get("last_tx_text") or ""),
         )
         if not lines:
             self.fly_say_frame.pack_forget()
