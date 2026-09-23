@@ -720,6 +720,11 @@ def current_radio_state(
         elif srs.age_s is not None:
             age = min(age if age is not None else srs.age_s, srs.age_s)
 
+    # EAM strip fills gaps when SRS/DCS is fresh but missing a radio (UHF
+    # dropped from the export while Approach still needs 273.55).
+    if fresh and _eam_enabled:
+        _merge_mhz(freqs, eam_freqs_mhz())
+
     if fresh:
         return RadioState(
             source=source,

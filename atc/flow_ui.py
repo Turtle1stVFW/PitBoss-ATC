@@ -1961,11 +1961,19 @@ class MissionPlanner(tk.Tk):
         if not isinstance(result, dict):
             return sid
         if result.get("action") == "blocked":
-            detail = str(result.get("detail") or "").strip().lower()
-            if "already played" in detail:
+            detail = str(result.get("detail") or "").strip()
+            low = detail.casefold()
+            if "already played" in low:
                 latch = tracker.pending_latch or f"fire:{sid}"
                 tracker.fire_once(latch)
                 tracker.pending_latch = ""
+            else:
+                blocked = detail or "Blocked by Host"
+                self._ui_call(
+                    lambda d=blocked, st=step: self._note_no_tx(
+                        d, action="auto", step=st
+                    )
+                )
             return ""
         return sid
 

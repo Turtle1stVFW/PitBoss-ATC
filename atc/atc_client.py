@@ -344,15 +344,25 @@ def _identity_payload(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def _radio_payload(config: dict[str, Any]) -> dict[str, Any]:
+    """
+    Snapshot this PC's radios for the Host freq gate.
+
+    On a failed / empty read, omit ``tuned_freqs_mhz`` so the Host keeps the
+    last good bank — sending ``[]`` used to wipe UHF and block every TX while
+    Fly still looked fine a moment later.
+    """
+    out: dict[str, Any] = {}
     try:
         radio = srs_radio.current_radio_state(config)
-        out = {
-            "tuned_freqs_mhz": list(radio.freqs_mhz or []),
-            "radio_fresh": bool(radio.fresh),
-            "selected_mhz": radio.selected_mhz,
-        }
+        freqs = list(radio.freqs_mhz or [])
+        if freqs or bool(radio.fresh):
+            out["tuned_freqs_mhz"] = freqs
+            out["radio_fresh"] = bool(radio.fresh)
+            out["selected_mhz"] = radio.selected_mhz
+        else:
+            out["radio_fresh"] = False
     except Exception:
-        out = {"tuned_freqs_mhz": [], "radio_fresh": False, "selected_mhz": None}
+        out["radio_fresh"] = False
     out["ownship_ll"] = _ownship_payload(config)
     return out
 

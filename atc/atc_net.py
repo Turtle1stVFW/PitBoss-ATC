@@ -76,6 +76,16 @@ def tokens_match(expected: str, got: str) -> bool:
     return hmac.compare_digest(want.encode("utf-8"), have.encode("utf-8"))
 
 
+def _norm_id(value: Any) -> str:
+    """Stable id token — int(55) and 55.0 both become \"55\"."""
+    if value is None or value == "":
+        return ""
+    try:
+        return str(int(value))
+    except (TypeError, ValueError):
+        return str(value).strip()
+
+
 def session_key(
     *,
     opus_flight_id: Any = None,
@@ -84,8 +94,8 @@ def session_key(
     opus_user_name: str = "",
 ) -> str:
     """Per-seat connection id (radios, TTS cap, Traffic row)."""
-    fid = str(opus_flight_id or "").strip()
-    seat = str(opus_seat if opus_seat is not None else "").strip()
+    fid = _norm_id(opus_flight_id)
+    seat = _norm_id(opus_seat)
     if fid:
         return f"flight:{fid}:{seat or '1'}"
     cs = _slug(callsign) or _slug(opus_user_name)
@@ -101,7 +111,7 @@ def flow_key(
     opus_user_name: str = "",
 ) -> str:
     """Shared timeline id — one cursor for every seat on the same Opus flight."""
-    fid = str(opus_flight_id or "").strip()
+    fid = _norm_id(opus_flight_id)
     if fid:
         return f"flight:{fid}"
     return session_key(

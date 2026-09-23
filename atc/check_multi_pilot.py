@@ -257,6 +257,42 @@ def test_client_freq_gate() -> list[str]:
     return fails
 
 
+def test_empty_radio_snapshot_keeps_bank() -> list[str]:
+    """Failed client radio reads must not wipe the Host's last good UHF bank."""
+    fails: list[str] = []
+    cfg = _host_config(freq_gate_enabled=True)
+    server = atc_server.AtcServer(
+        cfg, AIRPORTS, lambda: copy.deepcopy(MISSION), transmit_fn=lambda _j: 0
+    )
+    hello = server.hello(
+        {
+            "callsign_override": "Fleece 1",
+            "opus_flight_id": 404,
+            "opus_seat": 1,
+            "tuned_freqs_mhz": [273.55, 251.0],
+            "radio_fresh": True,
+        }
+    )
+    sess = server.get_session(hello["session_id"])
+    if sess is None:
+        return ["radio keep: no session"]
+    if 273.55 not in sess.tuned_freqs_mhz:
+        fails.append(f"hello should seed UHF, got {sess.tuned_freqs_mhz}")
+    # Heartbeat with a failed empty read — bank must stay.
+    server.heartbeat(sess, {"tuned_freqs_mhz": [], "radio_fresh": False})
+    if 273.55 not in sess.tuned_freqs_mhz:
+        fails.append(
+            f"empty unfresh snapshot wiped bank: {sess.tuned_freqs_mhz}"
+        )
+    # Explicit fresh empty (pilot really has no radios) may clear.
+    server.heartbeat(sess, {"tuned_freqs_mhz": [], "radio_fresh": True})
+    if sess.tuned_freqs_mhz:
+        fails.append(
+            f"fresh empty should clear bank, got {sess.tuned_freqs_mhz}"
+        )
+    return fails
+
+
 def test_session_key() -> list[str]:
     fails: list[str] = []
     k1 = atc_net.session_key(opus_flight_id=1, opus_seat=1)
@@ -266,6 +302,10 @@ def test_session_key() -> list[str]:
         fails.append("dash-1 and dash-2 must be different connection keys")
     if k1 != k3:
         fails.append("same flight/seat should resume the same session key")
+    if atc_net.session_key(opus_flight_id=55.0, opus_seat=1.0) != atc_net.session_key(
+        opus_flight_id=55, opus_seat=1
+    ):
+        fails.append("flight/seat ids must normalize int vs float")
     f1 = atc_net.flow_key(opus_flight_id=1, callsign="Fleece 1")
     f2 = atc_net.flow_key(opus_flight_id=1, callsign="Fleece 1")
     f3 = atc_net.flow_key(opus_flight_id=2, callsign="Viper 3")
@@ -1406,6 +1446,7 @@ def main() -> int:
         test_tanker_fly_freq_matches_pick,
         test_cross_flight_status_isolation,
         test_client_freq_gate,
+        test_empty_radio_snapshot_keeps_bank,
         test_secret_redaction_and_session_tts_cap,
         test_client_auto_play_from_watch,
         test_client_tanker_chat_gap,

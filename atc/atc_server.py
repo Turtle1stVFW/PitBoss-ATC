@@ -145,13 +145,22 @@ class PilotSession:
                     out.append(float(item))
                 except (TypeError, ValueError):
                     continue
-            self.tuned_freqs_mhz = out
-        self.radio_fresh = bool(body.get("radio_fresh", True if freqs is not None else False))
-        try:
-            sel = body.get("selected_mhz")
-            self.selected_mhz = float(sel) if sel is not None else None
-        except (TypeError, ValueError):
-            self.selected_mhz = None
+            fresh = bool(body.get("radio_fresh", True))
+            # Empty + not fresh = failed client read. Keep the last good bank
+            # so a blip cannot freq-gate the whole sortie.
+            if out or fresh:
+                self.tuned_freqs_mhz = out
+                self.radio_fresh = fresh
+            else:
+                self.radio_fresh = False
+        elif "radio_fresh" in body:
+            self.radio_fresh = bool(body.get("radio_fresh"))
+        if "selected_mhz" in body:
+            try:
+                sel = body.get("selected_mhz")
+                self.selected_mhz = float(sel) if sel is not None else None
+            except (TypeError, ValueError):
+                self.selected_mhz = None
         self.apply_ownship(body)
         if inject:
             self.engine.set_remote_radios(
