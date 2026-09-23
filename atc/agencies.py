@@ -166,6 +166,8 @@ HANDOFF_PENDING_BY_TEMPLATE: dict[str, str] = {
     # OPS start / WORDS+start → Clearance Delivery (Ops is flow step 1).
     "ops_words": "delivery",
     "ops_start": "delivery",
+    # Delivery readback correct → Ground for taxi.
+    "clearance_readback": "ground",
 }
 
 
@@ -817,7 +819,16 @@ def note_tx(
         if phase != "field":
             state["contact_phase"] = "recovery"
         return
-    if ch in AIRBORNE and ch != "approach":
+    # Delivery / Ground are always field sequence — even if a prior TX wrongly
+    # flipped contact_phase (Ops lives in AIRBORNE for sandbox answering but
+    # Start/WORDS happen on the ground).
+    if ch in ("delivery", "ground"):
+        state["contact_phase"] = "field"
+        return
+    # Ops answers on the ground and airborne. Do NOT mark the sortie airborne
+    # on Ops TX — that made sandbox_mission_phase return "flight" and hid
+    # every Delivery/Ground advance cue (clearance on request, ready taxi, …).
+    if ch in AIRBORNE and ch not in ("approach", "ops"):
         state["contact_phase"] = "airborne"
         return
     if ch in FIELD and phase != "airborne":

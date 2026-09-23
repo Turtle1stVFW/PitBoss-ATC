@@ -583,7 +583,22 @@ class AtcServer:
             result["queued"] = True
             result["queue_pos"] = pos
             result["channel"] = job.get("channel")
-            result["action"] = result.get("action") or "queued"
+            # Voice often wraps play_id as action=play + detail={...}. Promote
+            # spoken text so Clients log/hear the real phrase, not the label.
+            detail = result.get("detail")
+            if isinstance(detail, dict):
+                for key in ("text", "label", "freq", "step_id", "callsign"):
+                    if result.get(key) in (None, "") and detail.get(key) not in (
+                        None,
+                        "",
+                    ):
+                        result[key] = detail[key]
+            if not result.get("text") and job.get("text"):
+                result["text"] = job.get("text")
+            if result.get("action") in (None, "", "play", "none"):
+                result["action"] = "queued"
+            else:
+                result["action"] = result.get("action") or "queued"
         sess.last_result = {
             "action": result.get("action"),
             "label": result.get("label"),

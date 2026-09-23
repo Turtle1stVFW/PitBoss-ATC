@@ -1435,7 +1435,12 @@ def _play_template(engine: Any, template: str) -> dict[str, Any]:
     step = _find_step(engine.steps, template, index)
     if step is None:
         return {"action": "none", "detail": f"no {template} step"}
-    return {"action": "play", "detail": engine.play_id(step.get("id"))}
+    played = engine.play_id(step.get("id"))
+    if isinstance(played, dict):
+        out = dict(played)
+        out.setdefault("action", "transmit")
+        return out
+    return {"action": "play", "detail": played}
 
 
 def _acknowledge(engine: Any, match: voice_intent.Match) -> dict[str, Any]:
@@ -1457,7 +1462,14 @@ def _acknowledge(engine: Any, match: voice_intent.Match) -> dict[str, Any]:
         index = int(engine.state.get("index") or 0)
         step = _find_step(engine.steps, confirm, index)
         if step is not None:
-            return {"action": "play", "detail": engine.play_id(step.get("id"))}
+            # Return the play_id payload at the top level so Host queueing and
+            # LAST HEARD see the spoken text (not just the step label).
+            played = engine.play_id(step.get("id"))
+            if isinstance(played, dict):
+                out = dict(played)
+                out.setdefault("action", "transmit")
+                return out
+            return {"action": "play", "detail": played}
     return {"action": "acknowledged", "detail": "readback noted"}
 
 

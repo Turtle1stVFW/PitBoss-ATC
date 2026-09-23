@@ -7234,6 +7234,49 @@ def extras() -> int:
     else:
         print("OPS note_tx — pending Delivery after WORDS/start")
 
+    # Ops Start must NOT flip contact_phase to airborne — that made Fly show
+    # "Flight / airwork" and hide Delivery/Ground advance cues.
+    phase_st: dict[str, object] = {"contact_phase": "field"}
+    agencies_mod.note_tx(phase_st, "ops", "ops_start")
+    if agencies_mod.contact_phase(phase_st) != "field":
+        print(
+            f"  FAIL ops_start must stay field phase, got "
+            f"{agencies_mod.contact_phase(phase_st)!r}: {phase_st}"
+        )
+        bad += 1
+    else:
+        sandbox = agencies_mod.sandbox_mission_phase(
+            cursor_phase="departure",
+            cursor_channel="delivery",
+            tuned_channel="delivery",
+            state=phase_st,
+        )
+        if sandbox != "departure":
+            print(
+                f"  FAIL after ops_start sandbox phase must be departure, "
+                f"got {sandbox!r}"
+            )
+            bad += 1
+        else:
+            print("OPS note_tx — Start keeps field / departure cues")
+
+    # Stale airborne from a bad prior TX must clear when Delivery speaks.
+    stuck: dict[str, object] = {"contact_phase": "airborne"}
+    agencies_mod.note_tx(stuck, "delivery", "clearance")
+    if agencies_mod.contact_phase(stuck) != "field":
+        print(f"  FAIL Delivery TX must reset field phase: {stuck}")
+        bad += 1
+    else:
+        print("Delivery note_tx — clears stale airborne phase")
+
+    rb_st: dict[str, object] = {"contact_phase": "field"}
+    agencies_mod.note_tx(rb_st, "delivery", "clearance_readback")
+    if agencies_mod.pending_contact(rb_st) != "ground":
+        print(f"  FAIL clearance_readback must pending Ground: {rb_st}")
+        bad += 1
+    else:
+        print("Delivery note_tx — readback pendings Ground")
+
     return bad
 
 

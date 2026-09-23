@@ -3542,7 +3542,18 @@ class MissionPlanner(tk.Tk):
                             f"TX   {str(result.get('channel') or '').upper()}  {spoken}{queued}"
                         )
                 elif isinstance(detail, dict):
-                    self._voice_log(f"TX   {detail.get('label') or detail.get('step_id') or action}")
+                    spoken = str(
+                        detail.get("text")
+                        or result.get("text")
+                        or detail.get("label")
+                        or detail.get("step_id")
+                        or action
+                    )
+                    ch = str(
+                        detail.get("channel") or result.get("channel") or ""
+                    ).upper()
+                    prefix = f"TX   {ch}  " if ch else "TX   "
+                    self._voice_log(f"{prefix}{spoken}")
                 else:
                     self._voice_log(f"VOICE  {action}: {detail}")
                 if self._atc_role() != "client":
