@@ -80,6 +80,10 @@ class AtcClient:
         body = _identity_payload(self.config)
         body.update(_radio_payload(self.config))
         body["client_version"] = version.label()
+        # Host drops this row when identity rekeys (clear flight → reselect seat).
+        prior = str(self.session_id or "").strip()
+        if prior:
+            body["prior_session_id"] = prior
         data = self._request("POST", "/v1/hello", body)
         self.session_id = str(data.get("session_id") or "")
         self.callsign = str(data.get("callsign") or "")

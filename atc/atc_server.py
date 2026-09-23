@@ -287,6 +287,48 @@ class AtcServer:
             return None
         return sess
 
+    def _reclaim_stale_sessions(
+        self,
+        keep_key: str,
+        identity: dict[str, Any],
+        *,
+        prior_session_id: str = "",
+    ) -> None:
+        """
+        Drop orphan Traffic rows when one PC re-hellos under a new key.
+
+        Clearing the Opus flight then picking a seat again used to leave the old
+        ``flight:…`` or ``callsign:…`` session alive until SESSION_TTL (15 min),
+        so Host Traffic showed two RAZOR 1 rows (seat ? + seat 1). Only drop
+        callsign-keyed orphans for the same callsign — never another seat's
+        ``flight:fid:N`` row.
+        """
+        drop: list[str] = []
+        prior = str(prior_session_id or "").strip()
+        if prior and prior != keep_key and prior in self.sessions:
+            drop.append(prior)
+        cs = atc_net._slug(
+            str(identity.get("callsign") or identity.get("opus_user_name") or "")
+        )
+        fid = str(identity.get("opus_flight_id") or "").strip()
+        if cs and fid:
+            for sid, sess in self.sessions.items():
+                if sid == keep_key or sid in drop:
+                    continue
+                if not sid.startswith("callsign:"):
+                    continue
+                other = atc_net._slug(
+                    str(
+                        sess.identity.get("callsign")
+                        or sess.identity.get("opus_user_name")
+                        or ""
+                    )
+                )
+                if other == cs:
+                    drop.append(sid)
+        for sid in drop:
+            self.sessions.pop(sid, None)
+
     def hello(self, body: dict[str, Any]) -> dict[str, Any]:
         identity = _identity_from_hello(body, self.config)
         key = atc_net.session_key(
@@ -300,7 +342,11 @@ class AtcServer:
             callsign=str(identity.get("callsign") or ""),
             opus_user_name=str(identity.get("opus_user_name") or ""),
         )
+        prior = str(
+            body.get("prior_session_id") or body.get("replace_session_id") or ""
+        ).strip()
         with self._lock:
+            self._reclaim_stale_sessions(key, identity, prior_session_id=prior)
             engine = self._engine_for_flow(flow, identity)
             sess = self.sessions.get(key)
             if sess is None or time.time() - sess.last_seen > atc_net.SESSION_TTL_S:

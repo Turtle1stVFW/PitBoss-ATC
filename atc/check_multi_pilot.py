@@ -282,6 +282,91 @@ def test_session_key() -> list[str]:
     return fails
 
 
+def test_hello_reclaims_identity_upgrade() -> list[str]:
+    """Clear flight then reselect seat must not leave two Traffic rows."""
+    fails: list[str] = []
+    cfg = _host_config()
+    server = atc_server.AtcServer(
+        cfg, AIRPORTS, lambda: copy.deepcopy(MISSION), transmit_fn=lambda _j: 0
+    )
+    first = server.hello(
+        {
+            "callsign_override": "RAZOR 1",
+            "opus_flight_id": 55,
+            # No seat yet — Traffic shows "?" but key still flight:55:1
+            "radio_fresh": False,
+            "tuned_freqs_mhz": [273.55],
+        }
+    )
+    sid_flight = str(first.get("session_id") or "")
+    cleared = server.hello(
+        {
+            "callsign_override": "RAZOR 1",
+            "prior_session_id": sid_flight,
+            "radio_fresh": False,
+            "tuned_freqs_mhz": [273.55],
+        }
+    )
+    sid_callsign = str(cleared.get("session_id") or "")
+    if sid_callsign == sid_flight:
+        fails.append("clearing Opus flight should rekey off flight:…")
+    if sid_flight in server.sessions:
+        fails.append("prior flight session should be dropped on clear-flight hello")
+    seated = server.hello(
+        {
+            "callsign_override": "RAZOR 1",
+            "opus_flight_id": 55,
+            "opus_seat": 1,
+            "prior_session_id": sid_callsign,
+            "radio_fresh": True,
+            "tuned_freqs_mhz": [269.025, 251.0],
+        }
+    )
+    sid_seated = str(seated.get("session_id") or "")
+    live = [
+        s
+        for s in server.sessions.values()
+        if time.time() - s.last_seen <= atc_net.SESSION_TTL_S
+    ]
+    if len(live) != 1:
+        fails.append(
+            f"expected one live Traffic row after seat select, got {len(live)} "
+            f"keys={[s.session_id for s in live]}"
+        )
+    if sid_callsign in server.sessions:
+        fails.append("callsign-only orphan should be reclaimed when seat binds")
+    if sid_seated != atc_net.session_key(opus_flight_id=55, opus_seat=1):
+        fails.append(f"seated key unexpected: {sid_seated}")
+    # Second seat on same flight must survive a lead re-hello
+    server.hello(
+        {
+            "callsign_override": "RAZOR 1",
+            "opus_flight_id": 55,
+            "opus_seat": 2,
+            "radio_fresh": True,
+            "tuned_freqs_mhz": [269.025],
+        }
+    )
+    server.hello(
+        {
+            "callsign_override": "RAZOR 1",
+            "opus_flight_id": 55,
+            "opus_seat": 1,
+            "prior_session_id": sid_seated,
+            "radio_fresh": True,
+            "tuned_freqs_mhz": [269.025],
+        }
+    )
+    seats = {
+        s.identity.get("opus_seat")
+        for s in server.sessions.values()
+        if time.time() - s.last_seen <= atc_net.SESSION_TTL_S
+    }
+    if seats != {1, 2}:
+        fails.append(f"dash-2 must stay when lead re-hellos, got seats={seats}")
+    return fails
+
+
 def test_flight_shared_cursor() -> list[str]:
     fails: list[str] = []
     cfg = _host_config()
@@ -1309,6 +1394,7 @@ def test_host_config_not_polluted_by_client_flight() -> list[str]:
 def main() -> int:
     tests = (
         test_session_key,
+        test_hello_reclaims_identity_upgrade,
         test_connect_error_hints,
         test_persist_state_off,
         test_injected_radio_gate,
