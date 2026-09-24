@@ -2880,6 +2880,26 @@ def note_tx_finished(
     state["last_tx_end_at"] = time.time() if now is None else float(now)
 
 
+def revert_failed_radio_tx(state: dict[str, Any] | None) -> None:
+    """
+    ExternalAudio never spoke — undo the optimistic LAST HEARD / readback stamp.
+
+    play_step stamps last_tx_* when the job is queued. If the hub then fails
+    (exit 99, timeout, prerender error), Fly must not keep showing that phrase
+    as heard or open a readback window for a call that never went out.
+    """
+    if not isinstance(state, dict):
+        return
+    state["last_tx_text"] = ""
+    state["last_tx_template"] = ""
+    state["last_tx_channel"] = ""
+    state["awaiting_readback"] = False
+    state["readback_items"] = []
+    state["awaiting_confirm_template"] = ""
+    state["last_tx_end_at"] = time.time()
+    # Keep last_tx_at so gap timers do not think ATC is still talking.
+
+
 def radio_gap_remaining(
     state: dict[str, Any] | None,
     gap_s: float,

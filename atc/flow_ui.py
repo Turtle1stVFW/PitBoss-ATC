@@ -1981,14 +1981,19 @@ class MissionPlanner(tk.Tk):
             )
             return ""
         if not isinstance(result, dict):
-            return sid
+            self._ui_call(
+                lambda st=step: self._note_no_tx(
+                    "Host returned no play result", action="auto", step=st
+                )
+            )
+            return ""
         action = str(result.get("action") or "")
         text = str(result.get("text") or "").strip()
         detail = result.get("detail")
         if not text and isinstance(detail, dict):
             text = str(detail.get("text") or "").strip()
         self._last_auto_phrase = text
-        if action == "blocked" or result.get("action") == "blocked":
+        if action == "blocked" or result.get("action") == "blocked" or result.get("ok") is False:
             detail = str(result.get("detail") or "").strip()
             low = detail.casefold()
             if "already played" in low:
@@ -2537,9 +2542,49 @@ class MissionPlanner(tk.Tk):
             tracker.pending_latch = ""
             self._note_no_tx(str(exc), action="auto", step=step if isinstance(step, dict) else None)
             return
+        result = result if isinstance(result, dict) else {}
+        act = str(result.get("action") or "")
+        if act == "blocked" or result.get("ok") is False:
+            tracker.clear_fired(latch)
+            tracker.pending_latch = ""
+            self._note_no_tx(
+                str(result.get("detail") or "radio transmit failed"),
+                action="auto",
+                step=step if isinstance(step, dict) else None,
+                channel=str(result.get("channel") or ""),
+            )
+            return
+        # Solo play_id returns the step detail (no action=queued). Require a
+        # real exit_code when ExternalAudio already ran on this PC.
+        if session is None and "exit_code" in result:
+            try:
+                if int(result.get("exit_code") or 0) != 0:
+                    tracker.clear_fired(latch)
+                    tracker.pending_latch = ""
+                    self._note_no_tx(
+                        f"radio transmit failed ({result.get('exit_code')})",
+                        action="auto",
+                        step=step if isinstance(step, dict) else None,
+                        channel=str(result.get("channel") or ""),
+                    )
+                    return
+            except (TypeError, ValueError):
+                tracker.clear_fired(latch)
+                tracker.pending_latch = ""
+                self._note_no_tx(
+                    "radio transmit failed",
+                    action="auto",
+                    step=step if isinstance(step, dict) else None,
+                )
+                return
         tracker.fire_once(latch)
         tracker.pending_latch = ""
-        spoken = (result or {}).get("label") or label or fire
+        spoken = (
+            str(result.get("text") or "").strip()
+            or result.get("label")
+            or label
+            or fire
+        )
         who = ""
         if session is not None:
             who = f"{getattr(session, 'callsign', '')}  "
@@ -3529,7 +3574,7 @@ class MissionPlanner(tk.Tk):
             def done() -> None:
                 action = result.get("action")
                 detail = result.get("detail")
-                if action == "blocked":
+                if action == "blocked" or result.get("ok") is False:
                     blocked = str(detail or "Blocked off frequency")
                     self._note_no_tx(
                         blocked,
@@ -3614,31 +3659,50 @@ class MissionPlanner(tk.Tk):
 
             def work() -> None:
                 try:
-                    engine = self._live_engine()
-                    result = voice_engine.execute_ops_action(
-                        engine, "ops_codes_finalize"
-                    )
+                    if self._atc_role() == "client" and self._atc_client is not None:
+                        # Host owns ExternalAudio — never finalize codes locally.
+                        result = self._atc_client.action("ops_codes_finalize")
+                    else:
+                        engine = self._live_engine()
+                        result = voice_engine.execute_ops_action(
+                            engine, "ops_codes_finalize"
+                        )
                 except Exception as exc:  # noqa: BLE001
                     err = str(exc)
 
                     def fail() -> None:
-                        self._voice_log(f"VOICE  ops codes failed: {err}")
+                        self._note_no_tx(err, action="auto", channel="ops")
 
                     self._ui_call(fail)
                     return
 
                 def done() -> None:
-                    if result.get("action") == "transmit" and result.get("text"):
+                    if not isinstance(result, dict):
+                        self._note_no_tx(
+                            "Host returned no OPS result",
+                            action="auto",
+                            channel="ops",
+                        )
+                        return
+                    act = str(result.get("action") or "")
+                    if act == "blocked" or result.get("ok") is False:
+                        self._note_no_tx(
+                            str(result.get("detail") or "OPS blocked"),
+                            action="auto",
+                            channel="ops",
+                        )
+                        return
+                    if act in ("transmit", "queued") and result.get("text"):
                         self._voice_log(
                             f"TX   OPS  {result.get('text', '')}"
                         )
-                        self._append_fly_voice_feed(
-                            f"TX  OPS  {result.get('text', '')}\n"
-                        )
-                    again = result.get("deferred") if isinstance(result, dict) else None
+                    again = result.get("deferred")
                     if isinstance(again, dict) and again.get("kind") == "ops_codes":
                         self._schedule_ops_codes(again)
-                    self._refresh_fly_status()
+                    if self._atc_role() == "client":
+                        self._refresh_client_fly()
+                    else:
+                        self._refresh_fly_status()
 
                 self._ui_call(done)
 
@@ -9341,15 +9405,24 @@ class MissionPlanner(tk.Tk):
         if result.get("execute_departure_handoff"):
             def ho_work() -> None:
                 try:
-                    step = self.engine.current_step() or {}
-                    tmpl = str(step.get("template") or "")
-                    sid = str(step.get("id") or "")
-                    if tmpl in ("departure_handoff", "center_handoff") and sid:
-                        played = self.engine.play_id(sid, bypass_freq_gate=True)
-                    else:
-                        played = self.engine.play_template(
-                            "departure_handoff", bypass_freq_gate=True
+                    if self._atc_role() == "client" and self._atc_client is not None:
+                        step = self.engine.current_step() or {}
+                        sid = str(step.get("id") or "").strip()
+                        if not sid:
+                            raise RuntimeError("No handoff step to play")
+                        played = self._atc_client.action(
+                            "play", step_id=sid, auto=False
                         )
+                    else:
+                        step = self.engine.current_step() or {}
+                        tmpl = str(step.get("template") or "")
+                        sid = str(step.get("id") or "")
+                        if tmpl in ("departure_handoff", "center_handoff") and sid:
+                            played = self.engine.play_id(sid, bypass_freq_gate=True)
+                        else:
+                            played = self.engine.play_template(
+                                "departure_handoff", bypass_freq_gate=True
+                            )
                     self._ui_call(lambda p=played: self._on_handoff_request_done(p))
                 except Exception as exc:  # noqa: BLE001
                     err = str(exc)
@@ -9625,11 +9698,35 @@ class MissionPlanner(tk.Tk):
 
     def _on_handoff_request_done(self, played: dict[str, Any] | None) -> None:
         played = played or {}
+        act = str(played.get("action") or "")
+        if act == "blocked" or played.get("ok") is False:
+            self._note_no_tx(
+                str(played.get("detail") or "Handoff blocked"),
+                action="handoff",
+                channel=str(played.get("channel") or "departure"),
+            )
+            self._refresh_fly_status()
+            return
+        if "exit_code" in played:
+            try:
+                if int(played.get("exit_code") or 0) != 0:
+                    self._note_no_tx(
+                        f"radio transmit failed ({played.get('exit_code')})",
+                        action="handoff",
+                        channel=str(played.get("channel") or "departure"),
+                    )
+                    self._refresh_fly_status()
+                    return
+            except (TypeError, ValueError):
+                pass
         freq = played.get("freq") or ""
-        label = played.get("label") or "Departure handoff"
+        label = (
+            str(played.get("text") or "").strip()
+            or played.get("label")
+            or "Departure handoff"
+        )
         ch = str(played.get("channel") or "departure").upper()
-        self.fly_log.insert(tk.END, f"TX  {label}  ·  {freq}  ·  {ch}\n")
-        self.fly_log.see(tk.END)
+        self._voice_log(f"TX  {label}  ·  {freq}  ·  {ch}")
         self._refresh_fly_status()
 
     def _on_option_full_stop_done(self, played: dict[str, Any] | None) -> None:
@@ -10684,14 +10781,29 @@ class MissionPlanner(tk.Tk):
                     raise RuntimeError(f"Unknown fly action: {action}")
 
                 def done() -> None:
+                    if not isinstance(r, dict):
+                        self._note_no_tx(
+                            "Host returned no result", action=action
+                        )
+                        self._refresh_client_fly()
+                        return
+                    act = str(r.get("action") or "")
+                    if act == "blocked" or r.get("ok") is False:
+                        self._note_no_tx(
+                            str(r.get("detail") or "Blocked by Host"),
+                            action=action,
+                            channel=str(r.get("channel") or ""),
+                        )
+                        self._refresh_client_fly()
+                        return
                     queued = ""
-                    if isinstance(r, dict) and r.get("queued"):
+                    if r.get("queued"):
                         queued = f"  queue {r.get('queue_pos')}"
-                    label = ""
-                    if isinstance(r, dict):
-                        label = str(r.get("label") or r.get("text") or r.get("action") or action)
-                    self.fly_log.insert(tk.END, f"{action.upper()}  {label}{queued}\n")
-                    self.fly_log.see(tk.END)
+                    label = str(
+                        r.get("text") or r.get("label") or r.get("action") or action
+                    )
+                    # LAST HEARD (not only the long fly_log) so Client matches Host/voice.
+                    self._voice_log(f"{action.upper()}  {label}{queued}")
                     self._refresh_client_fly()
 
                 self._ui_call(done)

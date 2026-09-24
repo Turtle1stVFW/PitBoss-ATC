@@ -639,6 +639,26 @@ class AtcServer:
                     or ("radio transmit timed out" if not finished else "")
                     or f"radio transmit failed ({code})"
                 )
+                # play_step already stamped LAST HEARD — undo so Clients do not
+                # paint a phrase ExternalAudio never spoke.
+                try:
+                    atc_phrase.revert_failed_radio_tx(sess.engine.state)
+                    if hasattr(sess.engine, "save_state"):
+                        sess.engine.save_state()
+                except Exception:
+                    pass
+                try:
+                    import app_diag
+
+                    app_diag.error(
+                        app_diag.CAT_TX,
+                        "Host TX blocked after radio failure",
+                        channel=str(job.get("channel") or ""),
+                        exit_code=code,
+                        detail=str(result.get("detail") or "")[:200],
+                    )
+                except Exception:
+                    pass
             else:
                 result["queued"] = True
             result["channel"] = job.get("channel")
@@ -707,6 +727,9 @@ class AtcServer:
                 return engine.play_id(sid)
             if cmd == "tanker_chat":
                 return run_tanker_chat_command(engine, body)
+            if cmd == "ops_codes_finalize":
+                # Client schedules codes idle on the flying PC, then Host TXes.
+                return voice_engine.execute_ops_action(engine, "ops_codes_finalize")
             if cmd == "seek":
                 return engine.seek(int(body.get("index") or 0))
             if cmd == "seek_relative":

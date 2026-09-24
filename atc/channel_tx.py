@@ -176,7 +176,24 @@ class ChannelTxHub:
                     time.sleep(0.05)
                 wav_obj = job.get("wav_path")
                 wav = Path(str(wav_obj)) if wav_obj else None
-                job["exit_code"] = int(self._transmit(job) or 0)
+                code = int(self._transmit(job) or 0)
+                # ExternalAudio sometimes exits non-zero on a transient SRS
+                # glitch while the next identical launch works. One retry.
+                if code != 0 and str(job.get("text") or "").strip():
+                    try:
+                        import app_diag
+
+                        app_diag.warn(
+                            app_diag.CAT_TX,
+                            "channel TX retry after non-zero exit",
+                            channel=channel,
+                            exit_code=code,
+                        )
+                    except Exception:
+                        pass
+                    time.sleep(0.35)
+                    code = int(self._transmit(job) or 0)
+                job["exit_code"] = code
                 try:
                     import app_diag
 
