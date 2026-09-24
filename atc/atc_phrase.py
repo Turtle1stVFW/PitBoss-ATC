@@ -8169,6 +8169,8 @@ def seat_map_flight_context(config: dict[str, Any] | None) -> OpusFlightContext 
         route=route,
         altitude=str(cfg.get("_seat_fp_altitude") or "").strip() or None,
         mode3_fields=None,
+        field_icao=str(cfg.get("_seat_field_icao") or "").strip() or None,
+        field_name=str(cfg.get("_seat_field_name") or "").strip() or None,
     )
 
 
@@ -8178,15 +8180,26 @@ def _flight_context_from_map_fields(
     route: str | None,
     altitude: str | None,
     mode3_fields: dict[str, Any] | None,
+    field_icao: str | None = None,
+    field_name: str | None = None,
 ) -> OpusFlightContext:
     ctx = synthetic_flight_context(callsign)
     if route:
         ctx.fp_route_string = route
         tokens = parse_route_tokens(route)
-        ctx.dep_icao = destination_icao(tokens[0] if tokens else None) or (
-            tokens[0].upper() if tokens else None
+        ctx.dep_icao = destination_icao(
+            tokens[0] if tokens else None,
+            field_icao=field_icao,
+            field_name=field_name,
+        ) or (
+            tokens[0].upper() if tokens and _looks_like_icao(tokens[0]) else None
         )
-        ctx.arr_icao = destination_icao(None, route=route) or ctx.dep_icao
+        ctx.arr_icao = destination_icao(
+            None,
+            route=route,
+            field_icao=field_icao,
+            field_name=field_name,
+        ) or ctx.dep_icao
     if altitude:
         ctx.fp_altitude = altitude
     if mode3_fields:
@@ -10801,34 +10814,81 @@ def speak_fix(fix: str) -> str:
 
 
 _ICAO_CODE = re.compile(r"^[A-Z]{3,4}$")
+# Map / Opus routes often end "NELLIS AFB" — AFB must not become arr_icao
+# (TTS then said "cleared to A F B").
+_NOT_AIRPORT_ICAO = frozenset(
+    {
+        "AFB",
+        "AAF",
+        "AB",
+        "AF",
+        "NAS",
+        "MCAS",
+        "RAF",
+        "RAAF",
+        "CFB",
+    }
+)
 
 
 def destination_icao(
     raw: str | None,
     *,
     route: str | None = None,
+    field_icao: str | None = None,
+    field_name: str | None = None,
 ) -> str | None:
     """
     Destination airport only — never a dotted / spaced flight-plan string.
 
     Opus and the map tester sometimes put the whole route in arr_icao
     (KLSV.MMM8.ILC171028.KRYSS.KLSV). Spelling that letter-by-letter is
-    not a clearance.
+    not a clearance. Trailing place names (NELLIS AFB) map back to the
+    active field when they match ``field_name``.
     """
+
+    def _valid_code(tok: str) -> str | None:
+        t = (tok or "").strip().upper()
+        if not t or t in _NOT_AIRPORT_ICAO:
+            return None
+        if _looks_like_icao(t):
+            return t
+        # Exact 4-letter ICAO (incl. foreign). Never 3-letter suffixes like AFB.
+        if len(t) == 4 and t.isalpha() and _ICAO_CODE.fullmatch(t):
+            return t
+        return None
+
     def _from_blob(text: str | None) -> str | None:
         if not text:
             return None
         s = str(text).strip().upper()
-        if _ICAO_CODE.fullmatch(s):
-            return s
+        hit = _valid_code(s)
+        if hit:
+            return hit
         tokens = parse_route_tokens(s)
+        # Prefer a real ICAO from the end; skip AFB / fix names.
         for tok in reversed(tokens):
-            t = tok.upper()
-            if _ICAO_CODE.fullmatch(t) and not any(ch.isdigit() for ch in t):
-                return t
+            hit = _valid_code(tok)
+            if hit:
+                return hit
         return None
 
-    return _from_blob(raw) or _from_blob(route)
+    code = _from_blob(raw) or _from_blob(route)
+    if code:
+        return code
+
+    # Place-name fallback: "... NELLIS AFB" with field name Nellis → KLSV.
+    field = str(field_icao or "").strip().upper()
+    fname = str(field_name or "").strip().upper()
+    if not field or not fname:
+        return None
+    stem = re.sub(r"\s+(AFB|AAF|NAS|MCAS|RAF|RAAF|CFB)\s*$", "", fname).strip()
+    if not stem:
+        return None
+    blob = f"{raw or ''} {route or ''}".upper()
+    if stem in blob:
+        return field
+    return None
 
 
 def speak_icao_or_name(
@@ -10837,11 +10897,18 @@ def speak_icao_or_name(
     *,
     route: str | None = None,
 ) -> str:
-    code = destination_icao(icao, route=route)
+    field_icao = str((airport or {}).get("icao") or "").strip().upper()
+    field_name = str((airport or {}).get("name") or "").strip()
+    code = destination_icao(
+        icao,
+        route=route,
+        field_icao=field_icao or None,
+        field_name=field_name or None,
+    )
     if not code:
         return "destination"
-    if code == str(airport.get("icao") or "").strip().upper():
-        return str(airport.get("name") or code)
+    if code == field_icao:
+        return field_name or code
     # Spell a real ICAO for TTS (KEDW → K E D W). Never a route string.
     return " ".join(code)
 

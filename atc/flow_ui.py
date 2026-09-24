@@ -10486,6 +10486,24 @@ class MissionPlanner(tk.Tk):
                     ).strip()
                     if d_label:
                         with_name = f"{d_phase} · {d_label}" if d_phase else d_label
+                # While Delivery said "contact Ground" and you are still on
+                # Delivery, do not paint the next step's "Taxi to EOR" title —
+                # that looked like the flow jumped ahead.
+                if switch_to and pending_ch:
+                    try:
+                        import agencies as agencies_mod
+
+                        dest = agencies_mod.fly_label(pending_ch, ap_name) or (
+                            agencies_mod.spoken_name(pending_ch, ap_name)
+                            or pending_ch.replace("_", " ").title()
+                        )
+                    except Exception:
+                        dest = pending_ch.replace("_", " ").title()
+                    with_name = (
+                        dest
+                        if str(dest).casefold().startswith("contact ")
+                        else f"Contact {dest}"
+                    )
                 self.fly_step_num.set("SWITCH TO" if switch_to else "ON FREQ")
                 self.fly_step_name.set(with_name)
             else:

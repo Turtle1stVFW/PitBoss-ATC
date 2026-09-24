@@ -5852,6 +5852,40 @@ def extras() -> int:
         else:
             print(f"clearance dest — Nellis, not spelled route ({mmm_txt})")
 
+        # Map Route Tester often ends "...NELLIS AFB" — must not TTS "A F B".
+        afb_route = "KLSV.FLEX21R.DREAM.ST LOUIS.ARCOE.NELLIS AFB"
+        afb_opus = atc_phrase.synthetic_flight_context("Razor 1")
+        afb_opus.fp_route_string = afb_route
+        afb_opus.fp_altitude = "220"
+        afb_opus.arr_icao = atc_phrase.destination_icao(
+            None,
+            route=afb_route,
+            field_icao=str(nellis.get("icao") or ""),
+            field_name=str(nellis.get("name") or ""),
+        )
+        if afb_opus.arr_icao != "KLSV":
+            print(f"  FAIL NELLIS AFB route dest should be KLSV, got {afb_opus.arr_icao!r}")
+            bad += 1
+        else:
+            afb_txt, _ = atc_phrase.build_clearance_delivery(
+                nellis,
+                "Razor 1",
+                wx,
+                "21R",
+                afb_opus,
+                initial_climb_ft=14000,
+                channel="delivery",
+            )
+            afb_low = afb_txt.lower()
+            if "a f b" in afb_low or " afb" in afb_low or afb_low.endswith("afb"):
+                print(f"  FAIL must not clear to A F B: {afb_txt!r}")
+                bad += 1
+            elif "cleared to nellis" not in afb_low:
+                print(f"  FAIL map NELLIS AFB should clear to Nellis: {afb_txt!r}")
+                bad += 1
+            else:
+                print(f"clearance dest — map NELLIS AFB → Nellis ({afb_txt})")
+
         if "squawk" not in mmm_low:
             print(f"  FAIL filed-plan clearance must assign a squawk: {mmm_txt!r}")
             bad += 1
