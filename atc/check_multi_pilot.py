@@ -133,6 +133,128 @@ def test_channel_parallel_and_fifo() -> list[str]:
     return fails
 
 
+def test_host_tx_failure_keeps_cursor_and_last_tx() -> list[str]:
+    """Failed ExternalAudio must not advance Fly or confirm LAST HEARD."""
+    fails: list[str] = []
+    cfg = _host_config()
+    seen: list[int] = []
+
+    def tx_fail(job: dict) -> int:
+        seen.append(1)
+        time.sleep(0.05)
+        return 99
+
+    server = atc_server.AtcServer(
+        cfg, AIRPORTS, lambda: copy.deepcopy(MISSION), transmit_fn=tx_fail
+    )
+    hello = server.hello(
+        {
+            "callsign_override": "Razor 1",
+            "opus_flight_id": 401,
+            "opus_seat": 1,
+            "radio_fresh": False,
+        }
+    )
+    sess = server.get_session(hello["session_id"])
+    if sess is None:
+        return ["no session"]
+    steps = flow_engine.enabled_steps(sess.engine.mission)
+    delivery = next(
+        (
+            s
+            for s in steps
+            if str(s.get("template") or "") in ("clearance", "clearance_readback")
+            or str(s.get("channel") or "").lower() == "delivery"
+        ),
+        None,
+    )
+    if delivery is None:
+        return ["no delivery step in mission"]
+    sid = str(delivery.get("id") or "")
+    # Park on the step; play_id will also seek here.
+    for i, s in enumerate(steps):
+        if str(s.get("id") or "") == sid:
+            sess.engine.state["index"] = i
+            break
+    before = int(sess.engine.state.get("index") or 0)
+    sess.engine.state["last_tx_text"] = ""
+    sess.engine.state["last_tx_confirmed"] = False
+    result = server.run_action(
+        sess, lambda e: e.play_id(sid, bypass_freq_gate=True), {"radio_fresh": False}
+    )
+    if not seen:
+        fails.append("transmit_fn was never called")
+    if str(result.get("action") or "") != "blocked":
+        fails.append(f"expected blocked after exit 99, got {result!r}")
+    after = int(sess.engine.state.get("index") or 0)
+    if after != before:
+        fails.append(f"cursor advanced on failed TX ({before} -> {after})")
+    if sess.engine.state.get("last_tx_confirmed"):
+        fails.append("last_tx_confirmed must stay False after failed TX")
+    if str(sess.engine.state.get("last_tx_text") or "").strip():
+        fails.append("last_tx_text must be cleared after failed TX")
+    if getattr(sess.engine, "_pending_advance_kind", None):
+        fails.append("pending advance must be cleared after failed TX")
+    if getattr(sess.engine, "_deferred_readback", None) is not None:
+        fails.append("deferred readback must be cleared after failed TX")
+
+    # Shared job dict: success path confirms and advances.
+    def tx_ok(job: dict) -> int:
+        time.sleep(0.05)
+        return 0
+
+    server2 = atc_server.AtcServer(
+        cfg, AIRPORTS, lambda: copy.deepcopy(MISSION), transmit_fn=tx_ok
+    )
+    hello2 = server2.hello(
+        {
+            "callsign_override": "Razor 2",
+            "opus_flight_id": 402,
+            "opus_seat": 1,
+            "radio_fresh": False,
+        }
+    )
+    sess2 = server2.get_session(hello2["session_id"])
+    if sess2 is None:
+        fails.append("no session for success path")
+        return fails
+    steps2 = flow_engine.enabled_steps(sess2.engine.mission)
+    play = next(
+        (s for s in steps2 if str(s.get("template") or "") == "clearance_readback"),
+        next(
+            (s for s in steps2 if str(s.get("channel") or "").lower() == "delivery"),
+            None,
+        ),
+    )
+    if play is None:
+        fails.append("no clearance_readback/delivery step for success path")
+        return fails
+    sid2 = str(play.get("id") or "")
+    for i, s in enumerate(steps2):
+        if str(s.get("id") or "") == sid2:
+            sess2.engine.state["index"] = i
+            break
+    before2 = int(sess2.engine.state.get("index") or 0)
+    ok = server2.run_action(
+        sess2, lambda e: e.play_id(sid2, bypass_freq_gate=True), {"radio_fresh": False}
+    )
+    if str(ok.get("action") or "") == "blocked":
+        fails.append(f"success TX should not block: {ok!r}")
+    if "exit_code" not in ok or int(ok.get("exit_code")) != 0:
+        fails.append(f"success path must share exit_code 0, got {ok.get('exit_code')!r}")
+    after2 = int(sess2.engine.state.get("index") or 0)
+    hold = sess2.engine._hold_cursor_after_tx(play)
+    if not hold and after2 <= before2:
+        fails.append(f"cursor should advance after successful TX ({before2} -> {after2})")
+    if not sess2.engine.state.get("last_tx_confirmed"):
+        fails.append("last_tx_confirmed must be True after successful TX")
+    if not str(sess2.engine.state.get("last_tx_text") or "").strip():
+        fails.append("last_tx_text must be stamped after successful TX")
+    server.hub.stop()
+    server2.hub.stop()
+    return fails
+
+
 def test_session_isolation() -> list[str]:
     fails: list[str] = []
     cfg = _host_config()
@@ -1498,6 +1620,7 @@ def main() -> int:
         test_persist_state_off,
         test_injected_radio_gate,
         test_channel_parallel_and_fifo,
+        test_host_tx_failure_keeps_cursor_and_last_tx,
         test_session_isolation,
         test_clear_flight_cache_scoped,
         test_flight_shared_cursor,

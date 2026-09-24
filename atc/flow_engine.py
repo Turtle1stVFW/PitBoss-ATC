@@ -183,6 +183,12 @@ class FlowEngine:
         # Host queues TX per channel; mutation still runs immediately.
         self.defer_tx = False
         self.pending_tx: dict[str, Any] | None = None
+        # When defer_tx: cursor / readback / agency handoff wait until ExternalAudio
+        # exits 0. Otherwise Fly advances (and paints LAST HEARD) on a queued job.
+        self._pending_advance_kind: str | None = None
+        self._deferred_readback: tuple[Any, ...] | None = None
+        self._deferred_agency: tuple[str, str] | None = None
+        self._deferred_voice_tx: dict[str, Any] | None = None
         self.sync_requested_runway_from_mission()
         try:
             import tanker as tanker_mod
@@ -292,6 +298,91 @@ class FlowEngine:
         job = self.pending_tx
         self.pending_tx = None
         return job
+
+    def _schedule_advance_after_tx(
+        self,
+        step: dict[str, Any] | None,
+        *,
+        force_advance: bool = False,
+        kind: str = "skip",
+    ) -> None:
+        """Advance now, or remember to advance only after Host hub TX succeeds."""
+        should = bool(force_advance or not self._hold_cursor_after_tx(step))
+        if getattr(self, "defer_tx", False):
+            self._pending_advance_kind = kind if should else None
+            return
+        if not should:
+            return
+        if kind == "one":
+            steps = self.steps
+            self.state["index"] = min(int(self.state.get("index") or 0) + 1, len(steps))
+            return
+        self.state["index"] = int(self.state.get("index") or 0) + 1
+        self._advance_past_skippable()
+
+    def commit_deferred_tx_success(self, *, apply_advance: bool = True) -> None:
+        """ExternalAudio exited 0 — apply readback / agency / cursor that waited."""
+        rb = getattr(self, "_deferred_readback", None)
+        self._deferred_readback = None
+        voice_tx = getattr(self, "_deferred_voice_tx", None)
+        self._deferred_voice_tx = None
+        if voice_tx and isinstance(self.state, dict):
+            self.state["last_tx_text"] = str(voice_tx.get("text") or "")
+            self.state["last_tx_channel"] = str(voice_tx.get("channel") or "")
+            tmpl = str(voice_tx.get("template") or "")
+            if tmpl or not self.state.get("awaiting_readback"):
+                self.state["last_tx_template"] = tmpl
+            try:
+                atc_phrase.stamp_last_tx(
+                    self.state,
+                    text=str(voice_tx.get("text") or ""),
+                    deferred=False,
+                )
+            except Exception:
+                pass
+        if rb is not None:
+            self._record_readback_expectation(*rb)
+        agency = getattr(self, "_deferred_agency", None)
+        self._deferred_agency = None
+        if agency is not None:
+            try:
+                import agencies as agencies_mod
+
+                agencies_mod.note_tx(self.state, agency[0], agency[1])
+            except Exception:
+                pass
+        kind = getattr(self, "_pending_advance_kind", None)
+        self._pending_advance_kind = None
+        if apply_advance:
+            if kind == "one":
+                steps = self.steps
+                self.state["index"] = min(
+                    int(self.state.get("index") or 0) + 1, len(steps)
+                )
+            elif kind == "skip":
+                self.state["index"] = int(self.state.get("index") or 0) + 1
+                self._advance_past_skippable()
+        try:
+            atc_phrase.note_tx_finished(self.state)
+        except Exception:
+            pass
+        self.save_state()
+
+    def abandon_deferred_tx(self) -> None:
+        """Hub TX failed — drop queued success side-effects; keep cursor on the step."""
+        rb = getattr(self, "_deferred_readback", None)
+        self._deferred_readback = None
+        self._deferred_agency = None
+        self._deferred_voice_tx = None
+        self._pending_advance_kind = None
+        # play_step stamped last_step_id before EA spoke — clear so Watch can retry.
+        if rb is not None:
+            step = rb[0] if rb else None
+            sid = str((step or {}).get("id") or "")
+            if sid and str(self.state.get("last_step_id") or "") == sid:
+                self.state.pop("last_step_id", None)
+        atc_phrase.revert_failed_radio_tx(self.state)
+        self.save_state()
 
     def sync_requested_runway_from_mission(self) -> None:
         """
@@ -719,7 +810,14 @@ class FlowEngine:
 
         detail["exit_code"] = code
         self.state["last_step_id"] = step.get("id")
-        self._record_readback_expectation(step, detail, airport, opus, weather, runway)
+        if getattr(self, "defer_tx", False):
+            # Host hub has not spoken yet — do not stamp LAST HEARD, open a
+            # readback window, or hand off agencies until exit_code == 0.
+            self._deferred_readback = (step, detail, airport, opus, weather, runway)
+        else:
+            self._record_readback_expectation(
+                step, detail, airport, opus, weather, runway
+            )
         self.save_state()
         return detail
 
@@ -986,9 +1084,7 @@ class FlowEngine:
             return st
         self._freq_gate_or_raise(step, bypass=bypass_freq_gate)
         result = self.play_step(step)
-        if not self._hold_cursor_after_tx(step):
-            self.state["index"] = int(self.state.get("index") or 0) + 1
-            self._advance_past_skippable()
+        self._schedule_advance_after_tx(step, kind="skip")
         self.save_state()
         result["option_full_stop"] = True
         result["sought_template"] = sought
@@ -1426,9 +1522,9 @@ class FlowEngine:
             return held
         self._freq_gate_or_raise(step, bypass=bypass_freq_gate)
         result = self.play_step(step)
-        if not self._hold_cursor_after_tx(step):
-            self.state["index"] = idx + 1
-            self._advance_past_skippable()
+        # Capture play index: Host must not walk off this step until EA exits 0.
+        self.state["index"] = idx
+        self._schedule_advance_after_tx(step, kind="skip")
         self.save_state()
         result["advanced_to_index"] = self.state["index"]
         result["active_takeoff_mode"] = atc_phrase.resolve_active_takeoff_mode(
@@ -1463,12 +1559,8 @@ class FlowEngine:
         # Offer rolling only when backing onto a takeoff step
         self._maybe_roll_takeoff_offer(step)
         result = self.play_step(step)
-        if self._hold_cursor_after_tx(step):
-            self.state["index"] = target
-        else:
-            # Stay one past the replayed step; do not skip forward (avoids
-            # bouncing back onto the step we just left).
-            self.state["index"] = min(target + 1, len(steps))
+        self.state["index"] = target
+        self._schedule_advance_after_tx(step, kind="one")
         self.save_state()
         result["advanced_to_index"] = self.state["index"]
         return result
@@ -1600,9 +1692,9 @@ class FlowEngine:
                     return held
                 self._freq_gate_or_raise(play, bypass=bypass_freq_gate)
                 result = self.play_step(play)
-                if force_advance or not self._hold_cursor_after_tx(play):
-                    self.state["index"] = int(self.state.get("index") or 0) + 1
-                    self._advance_past_skippable()
+                self._schedule_advance_after_tx(
+                    play, force_advance=force_advance, kind="skip"
+                )
                 self.save_state()
                 return result
         raise KeyError(f"Unknown step id: {step_id}")

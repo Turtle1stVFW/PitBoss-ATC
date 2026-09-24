@@ -209,15 +209,22 @@ class ChannelTxHub:
                 done = job.get("done")
                 if isinstance(done, threading.Event):
                     done.set()
-                # Gap timers wait until speech finishes, not until it was queued.
+                # Confirm speech end only on real success. Failures must not
+                # paint last_tx_confirmed — run_action abandons deferred TX.
                 flow_state = job.get("flow_state")
                 if isinstance(flow_state, dict):
                     try:
-                        import atc_phrase as atc_phrase_mod
+                        ok = int(job.get("exit_code") or 0) == 0 and not job.get("error")
+                    except (TypeError, ValueError):
+                        ok = False
+                    if ok:
+                        try:
+                            import atc_phrase as atc_phrase_mod
 
-                        atc_phrase_mod.note_tx_finished(flow_state)
-                    except Exception:
-                        flow_state["last_tx_end_at"] = time.time()
+                            atc_phrase_mod.note_tx_finished(flow_state)
+                        except Exception:
+                            flow_state["last_tx_end_at"] = time.time()
+                            flow_state["last_tx_confirmed"] = True
                 with self._lock:
                     self._busy[channel] = None
                 q.task_done()

@@ -2022,25 +2022,36 @@ def _transmit(
         )
     st = getattr(engine, "state", None)
     if isinstance(st, dict) and str(text or "").strip():
-        st["last_tx_text"] = text
-        st["last_tx_channel"] = str(channel or "")
         tmpl = str(template or "").strip()
-        if tmpl:
-            st["last_tx_template"] = tmpl
-        elif not st.get("awaiting_readback"):
-            # Boom / ad-hoc TX is not a clearance hinge — don't invent a template.
-            st["last_tx_template"] = ""
-        atc_phrase.stamp_last_tx(
-            st,
-            text=text,
-            deferred=bool(getattr(engine, "defer_tx", False)),
-        )
-        try:
-            import agencies as agencies_mod
+        if getattr(engine, "defer_tx", False):
+            # Do not paint LAST HEARD until ExternalAudio exits 0.
+            # Stash agency + phrase for commit_deferred_tx_success.
+            if tmpl:
+                pending_tmpl = tmpl
+            elif not st.get("awaiting_readback"):
+                pending_tmpl = ""
+            else:
+                pending_tmpl = str(st.get("last_tx_template") or "")
+            engine._deferred_agency = (str(channel or ""), pending_tmpl)
+            engine._deferred_voice_tx = {
+                "text": text,
+                "channel": str(channel or ""),
+                "template": pending_tmpl,
+            }
+        else:
+            st["last_tx_text"] = text
+            st["last_tx_channel"] = str(channel or "")
+            if tmpl:
+                st["last_tx_template"] = tmpl
+            elif not st.get("awaiting_readback"):
+                st["last_tx_template"] = ""
+            atc_phrase.stamp_last_tx(st, text=text, deferred=False)
+            try:
+                import agencies as agencies_mod
 
-            agencies_mod.note_tx(st, channel, str(st.get("last_tx_template") or ""))
-        except Exception:
-            pass
+                agencies_mod.note_tx(st, channel, str(st.get("last_tx_template") or ""))
+            except Exception:
+                pass
     return {
         "action": "transmit",
         "text": text,

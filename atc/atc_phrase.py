@@ -2888,9 +2888,10 @@ def revert_failed_radio_tx(state: dict[str, Any] | None) -> None:
     """
     ExternalAudio never spoke — undo the optimistic LAST HEARD / readback stamp.
 
-    play_step stamps last_tx_* when the job is queued. If the hub then fails
-    (exit 99, timeout, prerender error), Fly must not keep showing that phrase
-    as heard or open a readback window for a call that never went out.
+    Host play_id used to advance the cursor and stamp last_tx when the job was
+    only queued. On hub failure (exit 99, timeout, prerender error) Fly must not
+    keep showing that phrase as heard, open a readback window, or sit past the
+    step that still needs a successful TX (cursor rollback is abandon_deferred_tx).
     """
     if not isinstance(state, dict):
         return

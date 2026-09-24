@@ -598,15 +598,12 @@ class AtcServer:
                             tanker.clear_aar_state(sess.engine.state)
                     sess.local_state = tanker.snapshot_seat_state(sess.engine.state)
                     tanker.strip_seat_state(sess.engine.state)
-                    # AAR parks on the tanker step only for this element. Do not
-                    # write that (or leave_tanker seeking C2) onto the flight cursor.
-                    if (
-                        not manual_nav
-                        and (
-                            on_aar
-                            or tanker.tanker_overlay_active(sess.local_state)
-                        )
-                    ):
+                    # AAR parks on the tanker step only for this element. Always
+                    # put the shared flight cursor back — seat tanker position
+                    # lives in local_state (including ◀ ▶). Skipping restore when
+                    # leave_tanker set manual_step_view left bandsaw on C2 for
+                    # every seat.
+                    if on_aar or tanker.tanker_overlay_active(sess.local_state):
                         sess.engine.state["index"] = shared_index
         self._sync_element_overlay(sess)
         if not isinstance(result, dict):
@@ -640,12 +637,16 @@ class AtcServer:
                     or ("radio transmit timed out" if not finished else "")
                     or f"radio transmit failed ({code})"
                 )
-                # play_step already stamped LAST HEARD — undo so Clients do not
-                # paint a phrase ExternalAudio never spoke.
+                # play_step may have queued readback/advance — undo so Clients
+                # do not paint a phrase ExternalAudio never spoke, and the
+                # cursor stays on the step that still needs a successful TX.
                 try:
-                    atc_phrase.revert_failed_radio_tx(sess.engine.state)
-                    if hasattr(sess.engine, "save_state"):
-                        sess.engine.save_state()
+                    if hasattr(sess.engine, "abandon_deferred_tx"):
+                        sess.engine.abandon_deferred_tx()
+                    else:
+                        atc_phrase.revert_failed_radio_tx(sess.engine.state)
+                        if hasattr(sess.engine, "save_state"):
+                            sess.engine.save_state()
                 except Exception:
                     pass
                 try:
@@ -662,6 +663,21 @@ class AtcServer:
                     pass
             else:
                 result["queued"] = True
+                result["exit_code"] = int(code)
+                # Cursor / LAST HEARD / readback / agency handoff waited for
+                # ExternalAudio exit 0 — apply them now.
+                # Element AAR: run_action already restored the shared C2 index.
+                # Do not let a deferred advance walk the flight timeline.
+                apply_advance = not (
+                    on_aar or tanker.tanker_overlay_active(sess.local_state)
+                )
+                try:
+                    if hasattr(sess.engine, "commit_deferred_tx_success"):
+                        sess.engine.commit_deferred_tx_success(
+                            apply_advance=apply_advance
+                        )
+                except Exception:
+                    pass
             result["channel"] = job.get("channel")
             # Voice often wraps play_id as action=play + detail={...}. Promote
             # spoken text so Clients log/hear the real phrase, not the label.
