@@ -60,22 +60,10 @@ def _default_transmit(job: dict[str, Any]) -> int:
 
 
 def _prerender(job: dict[str, Any]) -> None:
-    """Synth TTS to WAV while the job waits in the channel queue."""
-    try:
-        if job.get("file_path") or not str(job.get("text") or "").strip():
-            return
-        if job.get("config", {}).get("dry_run"):
-            return
-        wav = atc_phrase.synthesize_tts_wav(
-            job["config"],
-            str(job["text"]),
-            channel=job.get("channel"),
-            voice_override=job.get("voice"),
-            step=job.get("step"),
-        )
-        job["wav_path"] = wav
-    except Exception as exc:  # noqa: BLE001
-        job["prerender_error"] = str(exc)
+    """Pre-render is disabled — ExternalAudio --file was exiting before audio
+    was hearable on SRS while Fly already painted LAST HEARD. Live --text /
+    Google synth (same path as Play Previous) is the reliable Host TX."""
+    del job
 
 
 class ChannelTxHub:
@@ -125,9 +113,9 @@ class ChannelTxHub:
         job["channel"] = ch
         job.setdefault("queued_at", time.time())
         job.setdefault("done", threading.Event())
-        threading.Thread(
-            target=_prerender, args=(job,), name="atc-tts-prep", daemon=True
-        ).start()
+        # Do not pre-render to WAV. Queued --file TX was the silent-success
+        # path (exit 0 / LAST HEARD, nothing on frequency); Play Previous
+        # worked because it used a fresh live TTS launch.
         q = self._queues[ch]
         q.put(job)
         with self._lock:
@@ -163,19 +151,9 @@ class ChannelTxHub:
                 self._busy[channel] = job
             wav: Path | None = None
             try:
-                # Give pre-render a moment so the channel goes hot with a WAV.
-                deadline = time.time() + 8.0
-                while (
-                    time.time() < deadline
-                    and not job.get("wav_path")
-                    and not job.get("prerender_error")
-                    and str(job.get("text") or "").strip()
-                    and not job.get("file_path")
-                    and not (job.get("config") or {}).get("dry_run")
-                ):
-                    time.sleep(0.05)
-                wav_obj = job.get("wav_path")
-                wav = Path(str(wav_obj)) if wav_obj else None
+                # Prefer live TTS (--text / Google synth). Ignore any leftover
+                # prerender WAV so we never take the silent --file path.
+                job.pop("wav_path", None)
                 code = int(self._transmit(job) or 0)
                 # ExternalAudio sometimes exits non-zero on a transient SRS
                 # glitch while the next identical launch works. One retry.
@@ -191,7 +169,8 @@ class ChannelTxHub:
                         )
                     except Exception:
                         pass
-                    time.sleep(0.35)
+                    time.sleep(0.5)
+                    job.pop("wav_path", None)
                     code = int(self._transmit(job) or 0)
                 job["exit_code"] = code
                 try:

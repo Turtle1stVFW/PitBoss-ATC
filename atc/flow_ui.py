@@ -10570,8 +10570,13 @@ class MissionPlanner(tk.Tk):
             last_txt = str(
                 (getattr(self.engine, "state", None) or {}).get("last_tx_text") or ""
             ).strip()
+            confirmed = bool(
+                (getattr(self.engine, "state", None) or {}).get("last_tx_confirmed")
+            )
             present_ch = str((step or {}).get("channel") or "").strip().lower()
-            if last_txt and last_ch and last_ch == present_ch:
+            # Only paint the spoken phrase after ExternalAudio finished.
+            # Queued-but-silent TX used to fill fly_say / "said it did" early.
+            if last_txt and last_ch and last_ch == present_ch and confirmed:
                 self._fly_phrase_req_id = getattr(self, "_fly_phrase_req_id", 0) + 1
                 self.fly_say.set(last_txt)
             else:

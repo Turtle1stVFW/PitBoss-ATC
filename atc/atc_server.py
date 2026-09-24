@@ -57,6 +57,7 @@ SHARED_FLOW_KEYS = (
     "last_tx_end_at",
     "last_tx_channel",
     "last_tx_template",
+    "last_tx_confirmed",
     "last_agency",
     "contact_phase",
     "pending_contact",

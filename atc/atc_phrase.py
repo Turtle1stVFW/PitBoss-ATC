@@ -2865,8 +2865,11 @@ def stamp_last_tx(
     state["last_tx_at"] = t
     if deferred:
         state["last_tx_end_at"] = t + estimate_spoken_duration_s(text, speed=speed)
+        # Not on SRS yet — Fly must not treat this as LAST HEARD / fly_say.
+        state["last_tx_confirmed"] = False
     else:
         state["last_tx_end_at"] = t
+        state["last_tx_confirmed"] = True
 
 
 def note_tx_finished(
@@ -2878,6 +2881,7 @@ def note_tx_finished(
     if not isinstance(state, dict):
         return
     state["last_tx_end_at"] = time.time() if now is None else float(now)
+    state["last_tx_confirmed"] = True
 
 
 def revert_failed_radio_tx(state: dict[str, Any] | None) -> None:
@@ -2893,6 +2897,7 @@ def revert_failed_radio_tx(state: dict[str, Any] | None) -> None:
     state["last_tx_text"] = ""
     state["last_tx_template"] = ""
     state["last_tx_channel"] = ""
+    state["last_tx_confirmed"] = False
     state["awaiting_readback"] = False
     state["readback_items"] = []
     state["awaiting_confirm_template"] = ""
