@@ -1900,6 +1900,107 @@ def extras() -> int:
         bad += 1
     else:
         print("lineup tips ready; clear_takeoff tips in position")
+    # After LUAW is on the wire, Fly must tip in position — not stay on ready.
+    tips_after_luaw = voice_intent.suggestions(
+        phase="departure",
+        channel="tower",
+        expected="clear_takeoff",
+        callsign=CALLSIGN,
+        airport_name="Nellis",
+        last_tx_template="lineup",
+        limit=6,
+    )
+    if any(
+        r == "advance" and "ready" in say.lower()
+        for say, _d, r, *_ in tips_after_luaw
+    ):
+        print(f"  FAIL after LUAW must not tip ready for departure: {tips_after_luaw}")
+        bad += 1
+    elif not any(
+        r == "advance" and "in position" in say.lower()
+        for say, _d, r, *_ in tips_after_luaw
+    ):
+        print(f"  FAIL after LUAW should tip in position: {tips_after_luaw}")
+        bad += 1
+    else:
+        print("after LUAW tips in position")
+    ready_after_luaw = voice_intent.evaluate(
+        "Nellis Tower, Fleece 1, ready for departure",
+        channel="tower",
+        phase="departure",
+        expected="clear_takeoff",
+        callsign=CALLSIGN,
+        runways=RUNWAYS,
+        last_tx_template="lineup",
+        last_tx_channel="tower",
+    )
+    if ready_after_luaw.fired and ready_after_luaw.match.intent == "ready_departure":
+        print(
+            f"  FAIL ready for departure after LUAW must not re-fire: "
+            f"{ready_after_luaw.describe()}"
+        )
+        bad += 1
+    # After Departure radar, "with you" must not replay check-in (or steal Ops).
+    again_dep = voice_intent.evaluate(
+        "Departure, Fleece 1, with you",
+        channel="departure",
+        phase="departure",
+        expected="departure_handoff",
+        callsign=CALLSIGN,
+        last_tx_template="radar_contact",
+        last_tx_channel="departure",
+        last_tx_text="Fleece one, Nellis Departure, radar contact, climb and maintain flight level two two zero",
+    )
+    if again_dep.fired:
+        print(
+            f"  FAIL with you after radar contact must not re-fire "
+            f"({again_dep.match.intent if again_dep.match else '?'}): "
+            f"{again_dep.describe()}"
+        )
+        bad += 1
+    else:
+        print("after radar contact — no re-check-in")
+    # Altitude climb readback must not say-again / re-TX.
+    climb_rb = voice_intent.evaluate(
+        "climb and maintain flight level two two zero",
+        channel="departure",
+        phase="departure",
+        expected="departure_handoff",
+        callsign=CALLSIGN,
+        require_address=False,
+        last_tx_template="radar_contact",
+        last_tx_channel="departure",
+        last_tx_text="Fleece one, Nellis Departure, radar contact, climb and maintain flight level two two zero",
+    )
+    if climb_rb.fired:
+        print(f"  FAIL climb readback must not re-TX: {climb_rb.describe()}")
+        bad += 1
+    else:
+        print("climb readback — ignored / echo")
+    # Bare "repeat" is not say-again (used to re-TX on readbacks).
+    bare_repeat = voice_intent.evaluate(
+        "repeat",
+        channel="departure",
+        phase="departure",
+        callsign=CALLSIGN,
+        require_address=False,
+        last_tx_text="Fleece one, Nellis Departure, radar contact",
+    )
+    if bare_repeat.fired and bare_repeat.match.intent == "say_again":
+        print(f"  FAIL bare repeat must not say-again: {bare_repeat.describe()}")
+        bad += 1
+    say_ok = voice_intent.evaluate(
+        "Departure, Fleece 1, say again",
+        channel="departure",
+        phase="departure",
+        callsign=CALLSIGN,
+        last_tx_text="Fleece one, Nellis Departure, radar contact",
+    )
+    if not say_ok.fired or say_ok.match.intent != "say_again":
+        print(f"  FAIL say again must still work: {say_ok.describe()}")
+        bad += 1
+    else:
+        print("say again — phrase ok, bare repeat ignored")
     ready_on_luaw = voice_intent.evaluate(
         "Nellis Tower, Fleece 1, ready for departure",
         channel="tower",
@@ -8790,6 +8891,65 @@ def agency_sandbox() -> int:
         bad += 1
     else:
         print("agency display step — Bandsaw checkout → Blackjack range exit")
+
+    # After LUAW TX, cursor on clear_takeoff — do not pin Fly back to lineup.
+    tower_steps = [
+        {
+            "id": "luaw",
+            "channel": "tower",
+            "template": "lineup",
+            "phase": "departure",
+            "label": "Line up and wait",
+            "enabled": True,
+        },
+        {
+            "id": "to",
+            "channel": "tower",
+            "template": "clear_takeoff",
+            "phase": "departure",
+            "label": "Cleared for takeoff",
+            "enabled": True,
+        },
+    ]
+    after_luaw = agencies.display_step_for_agency(
+        tower_steps, "tower", cursor_index=1, last_tx_template="lineup"
+    )
+    if not after_luaw or str(after_luaw.get("template") or "") != "clear_takeoff":
+        print(
+            f"  FAIL after LUAW cursor must show clear_takeoff not lineup: {after_luaw}"
+        )
+        bad += 1
+    else:
+        print("agency display step — after LUAW shows clear_takeoff")
+    dep_steps = [
+        {
+            "id": "dep",
+            "channel": "departure",
+            "template": "radar_contact",
+            "phase": "departure",
+            "label": "Radar contact",
+            "enabled": True,
+        },
+        {
+            "id": "hand",
+            "channel": "departure",
+            "template": "departure_handoff",
+            "phase": "departure",
+            "label": "Contact Blackjack",
+            "enabled": True,
+        },
+    ]
+    after_radar = agencies.display_step_for_agency(
+        dep_steps, "departure", cursor_index=1, last_tx_template="radar_contact"
+    )
+    if not after_radar or str(after_radar.get("template") or "") != "departure_handoff":
+        print(
+            f"  FAIL after Departure radar cursor must show handoff not check-in: "
+            f"{after_radar}"
+        )
+        bad += 1
+    else:
+        print("agency display step — after radar shows handoff")
 
     if bad:
         print(f"agency sandbox — {bad} problem(s)")

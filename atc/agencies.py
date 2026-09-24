@@ -320,6 +320,10 @@ def display_step_for_agency(
         tmpl = str(step.get("template") or "").strip().lower()
         if tmpl != last:
             continue
+        # Cursor already past this TX — show the live agency step (e.g. after
+        # LUAW → clear_takeoff / in position, not stuck on "ready for departure").
+        if cur > i:
+            return pick
         later = [m for m in matches if m[0] > i]
         if later and str(later[0][1].get("template") or "").strip().lower() in (
             _AGENCY_FOLLOW_ON

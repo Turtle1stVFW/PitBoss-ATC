@@ -10006,8 +10006,10 @@ class MissionPlanner(tk.Tk):
             limit=5,
             advance_limit=2,
             optional_limit=3,
-            awaiting_readback=False,
-            readback_items=None,
+            awaiting_readback=awaiting,
+            readback_items=context.get("readback_items")
+            if awaiting and isinstance(context.get("readback_items"), list)
+            else None,
             steps=context.get("steps") if isinstance(context.get("steps"), list) else None,
             current_step_id=str(context.get("current_step_id") or ""),
             tanker_chat_choices=context.get("tanker_chat_choices")
