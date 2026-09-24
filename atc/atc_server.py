@@ -37,13 +37,14 @@ import version  # noqa: E402
 MAX_BODY = 256_000
 
 # Cursor the whole flight should see. Tanker AAR lives on PilotSession.local_state.
+# atc_role is intentionally NOT in this list — Host role must never be flipped
+# to solo during seat bind (Traffic desync + wrong ExternalAudio SRS target).
 _IDENTITY_CONFIG_KEYS = (
     "opus_user_name",
     "opus_flight_id",
     "opus_seat",
     "opus_flight_label",
     "callsign_override",
-    "atc_role",
 )
 # Client Fly copies these, then drops any key the host omitted so a cache
 # reset does not leave the last sortie (OPS start, pending Delivery, …).
@@ -613,6 +614,19 @@ class AtcServer:
             job["callsign"] = sess.callsign
             # So the channel worker can stamp when speech actually ends.
             job["flow_state"] = sess.engine.state
+            # Host hub always speaks into local SRS (127.0.0.1), never the
+            # squadron hostname Clients use. pin_host_tx_target also runs in
+            # hub.submit as a second belt.
+            try:
+                import atc_net
+
+                atc_net.pin_host_tx_target(job)
+            except Exception:
+                raw_cfg = job.get("config")
+                if isinstance(raw_cfg, dict):
+                    tx_cfg = dict(raw_cfg)
+                    tx_cfg["atc_role"] = "host"
+                    job["config"] = tx_cfg
             pos = self.hub.submit(job)
             result = dict(result)
             result["queue_pos"] = pos
@@ -693,6 +707,10 @@ class AtcServer:
                 result["text"] = job.get("text")
             if result.get("action") == "blocked":
                 pass
+            elif int(result.get("exit_code") or -1) == 0 and result.get("queued"):
+                # Hub waited for a real exit 0 — report transmit, not a
+                # premature "queued" success that Fly can misread as fired.
+                result["action"] = "transmit"
             elif result.get("action") in (None, "", "play", "none"):
                 result["action"] = "queued"
             else:
@@ -962,9 +980,13 @@ def _apply_identity_to_config(config: dict[str, Any], identity: dict[str, Any]) 
     config["opus_seat"] = identity.get("opus_seat")
     config["opus_flight_label"] = identity.get("opus_flight_label") or ""
     config["callsign_override"] = identity.get("callsign_override") or ""
-    # Resolve this jet as a pilot, not as the Host router (Host skips Opus
-    # when it has no flight_id of its own).
-    config["atc_role"] = "solo"
+    # Keep atc_role as Host. Session engines (and the shared Host Fly engine
+    # during bind) used to flip to solo so Opus would resolve the client's
+    # flight_id — but Host-without-flight_id already skips Opus only when
+    # selected_id is None, and with the client's flight_id bound it resolves.
+    # Stamping solo onto the shared config made Traffic paint "Solo" while
+    # Setup still showed Host, and ExternalAudio targeted squadron SRS
+    # instead of 127.0.0.1 — silent TX on every agency. Never mutate role.
 
 
 @contextmanager

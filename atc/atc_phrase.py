@@ -15426,6 +15426,23 @@ _LIVE_EA_PIDS: set[int] = set()
 _LIVE_EA_LOCK = threading.Lock()
 
 
+def _wav_playback_sec(path: Path) -> float:
+    """Duration of a WAV for post-exit dwell (EA --file can exit before SRS hears it)."""
+    try:
+        with wave.open(str(path), "rb") as wf:
+            rate = int(wf.getframerate() or 0)
+            frames = int(wf.getnframes() or 0)
+            if rate > 0 and frames > 0:
+                return max(0.5, float(frames) / float(rate))
+    except (OSError, wave.Error):
+        pass
+    try:
+        # 16 kHz mono 16-bit ≈ 32 KB/s
+        return max(1.0, min(180.0, path.stat().st_size / 32000.0))
+    except OSError:
+        return 0.0
+
+
 def terminate_stale_external_audio(exe: Path) -> int:
     """Kill hung ExternalAudio processes for this exe (prevents ghost SRS clients).
 
@@ -15794,7 +15811,16 @@ def transmit_file(
         approx_sec = max(30.0, min(180.0, path.stat().st_size / 16000.0 + 45.0))
     except OSError:
         approx_sec = 120.0
-    return _run_external_audio(exe, cmd, timeout_sec=approx_sec)
+    # ExternalAudio --file sometimes exits 0 before PCM is hearable on SRS
+    # (the old prerender silent-success bug). Hold the request until the WAV
+    # duration elapses so Host never paints LAST HEARD / commits cursor early.
+    started = time.time()
+    code = _run_external_audio(exe, cmd, timeout_sec=approx_sec)
+    if code == 0:
+        remain = _wav_playback_sec(path) - (time.time() - started) + 0.4
+        if remain > 0.05:
+            time.sleep(min(remain, 120.0))
+    return code
 
 
 def main() -> int:

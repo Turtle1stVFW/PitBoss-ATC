@@ -4984,6 +4984,9 @@ def hide_blackjack_checkin_cue(
     """True once the flight is on Blackjack and does not need to check in again."""
     last_tmpl = str(last_tx_template or "").strip().lower()
     last_ch = str(last_tx_channel or "").strip().lower()
+    # Back from Bandsaw/Joshua → tip range exit, not another check-in.
+    if last_tmpl in ("bandsaw_check_out", "joshua_check_out", "bj_range_exit"):
+        return True
     if last_tmpl in _BJ_ON_FREQ_TEMPLATES:
         return True
     if not blackjack_checked_in:

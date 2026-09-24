@@ -6484,7 +6484,7 @@ def extras() -> int:
     back_from_bs = voice_intent.suggestions(
         phase="flight",
         channel="blackjack",
-        expected="bj_check_in",
+        expected="bj_range_exit",
         callsign=CALLSIGN,
         airport_name="Nellis",
         last_tx_template="bandsaw_check_out",
@@ -6493,13 +6493,24 @@ def extras() -> int:
         limit=8,
     )
     back_says = [str(s).lower() for s, *_ in back_from_bs]
-    if not any("checking in" in s for s in back_says):
+    if any("checking in" in s for s in back_says) and not any(
+        "range" in s or "complete" in s or "exit" in s for s in back_says
+    ):
         print(
-            f"  FAIL Blackjack should tip check-in (continue) after Bandsaw: {back_from_bs}"
+            f"  FAIL Blackjack after Bandsaw must tip range exit, not check-in: "
+            f"{back_from_bs}"
+        )
+        bad += 1
+    elif not any(
+        "range" in s or "complete" in s or "exit" in s or "off station" in s
+        for s in back_says
+    ):
+        print(
+            f"  FAIL Blackjack after Bandsaw should tip range exit: {back_from_bs}"
         )
         bad += 1
     else:
-        print("blackjack cues after Bandsaw — check-in continue")
+        print("blackjack cues after Bandsaw — range exit")
 
     stamped: dict = {}
     atc_phrase.build_template_text(
@@ -8694,6 +8705,14 @@ def agency_sandbox() -> int:
             "label": "Bandsaw check-out",
             "enabled": True,
         },
+        {
+            "id": "exit",
+            "channel": "blackjack",
+            "template": "bj_range_exit",
+            "phase": "flight",
+            "label": "Blackjack range exit",
+            "enabled": True,
+        },
     ]
     bs_while_bj = agencies.display_step_for_agency(
         timeline, "bandsaw", cursor_index=0, last_tx_template="bj_check_in"
@@ -8718,6 +8737,25 @@ def agency_sandbox() -> int:
         bad += 1
     else:
         print("agency display step — Bandsaw while Blackjack holds")
+    bj_after_bs = agencies.display_step_for_agency(
+        timeline, "blackjack", cursor_index=0, last_tx_template="bandsaw_check_out"
+    )
+    if not bj_after_bs or str(bj_after_bs.get("template") or "") != "bj_range_exit":
+        print(
+            f"  FAIL after Bandsaw checkout Fly must show Blackjack range exit: "
+            f"{bj_after_bs}"
+        )
+        bad += 1
+    bj_cursor_exit = agencies.display_step_for_agency(
+        timeline, "blackjack", cursor_index=3, last_tx_template="bj_check_in"
+    )
+    if not bj_cursor_exit or str(bj_cursor_exit.get("template") or "") != "bj_range_exit":
+        print(
+            f"  FAIL cursor on range exit must not pin check-in cues: {bj_cursor_exit}"
+        )
+        bad += 1
+    else:
+        print("agency display step — Bandsaw checkout → Blackjack range exit")
 
     if bad:
         print(f"agency sandbox — {bad} problem(s)")

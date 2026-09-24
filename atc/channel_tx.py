@@ -113,6 +113,15 @@ class ChannelTxHub:
         job["channel"] = ch
         job.setdefault("queued_at", time.time())
         job.setdefault("done", threading.Event())
+        # Hub exists only on the Host PC. Pin --ip=127.0.0.1 even if Setup /
+        # seat-bind left atc_role=solo or airport srs_host=showtime (that was
+        # the intermittent silent-ATC path: TX logged, SRS never heard it).
+        try:
+            import atc_net
+
+            atc_net.pin_host_tx_target(job)
+        except Exception:
+            pass
         # Do not pre-render to WAV. Queued --file TX was the silent-success
         # path (exit 0 / LAST HEARD, nothing on frequency); Play Previous
         # worked because it used a fresh live TTS launch.
@@ -154,7 +163,11 @@ class ChannelTxHub:
                 # Prefer live TTS (--text / Google synth). Ignore any leftover
                 # prerender WAV so we never take the silent --file path.
                 job.pop("wav_path", None)
-                code = int(self._transmit(job) or 0)
+                raw = self._transmit(job)
+                try:
+                    code = int(raw) if raw is not None else 2
+                except (TypeError, ValueError):
+                    code = 2
                 # ExternalAudio sometimes exits non-zero on a transient SRS
                 # glitch while the next identical launch works. One retry.
                 if code != 0 and str(job.get("text") or "").strip():
@@ -171,7 +184,11 @@ class ChannelTxHub:
                         pass
                     time.sleep(0.5)
                     job.pop("wav_path", None)
-                    code = int(self._transmit(job) or 0)
+                    raw = self._transmit(job)
+                    try:
+                        code = int(raw) if raw is not None else 2
+                    except (TypeError, ValueError):
+                        code = 2
                 job["exit_code"] = code
                 try:
                     import app_diag
@@ -209,15 +226,18 @@ class ChannelTxHub:
                 done = job.get("done")
                 if isinstance(done, threading.Event):
                     done.set()
-                # Confirm speech end only on real success. Failures must not
-                # paint last_tx_confirmed — run_action abandons deferred TX.
+                # Confirm speech end only when LAST HEARD was already stamped
+                # (solo / non-deferred). Host deferred TX leaves last_tx_text
+                # empty until run_action.commit_deferred_tx_success after exit 0
+                # — painting confirmed here early made Clients show TX success
+                # before the phrase was committed (or after a silent wrong-SRS).
                 flow_state = job.get("flow_state")
                 if isinstance(flow_state, dict):
                     try:
                         ok = int(job.get("exit_code") or 0) == 0 and not job.get("error")
                     except (TypeError, ValueError):
                         ok = False
-                    if ok:
+                    if ok and str(flow_state.get("last_tx_text") or "").strip():
                         try:
                             import atc_phrase as atc_phrase_mod
 

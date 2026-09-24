@@ -48,6 +48,71 @@ def _host_config(**over: object) -> dict:
     return cfg
 
 
+def test_host_hub_pins_local_srs() -> list[str]:
+    """Host hub must never launch ExternalAudio at showtime (silent TX)."""
+    fails: list[str] = []
+    seen: list[tuple[str, str]] = []
+
+    def tx(job: dict) -> int:
+        cfg = job.get("config") if isinstance(job.get("config"), dict) else {}
+        ap = job.get("airport") if isinstance(job.get("airport"), dict) else {}
+        seen.append(
+            (
+                atc_net.effective_srs_host(ap, cfg),
+                str(ap.get("srs_host") or ""),
+            )
+        )
+        if atc_net.role_of(cfg) != "host":
+            fails.append(f"hub job role must be host, got {cfg.get('atc_role')!r}")
+        if not cfg.get("_force_local_srs"):
+            fails.append("hub job must set _force_local_srs")
+        return 0
+
+    hub = channel_tx.ChannelTxHub(["ops", "other"], transmit_fn=tx)
+    done = threading.Event()
+    job = {
+        "config": {"dry_run": True, "atc_role": "solo"},
+        "airport": {"srs_host": atc_net.SQUADRON_SRS_HOST, "srs_port": 5002},
+        "channel": "ops",
+        "tx_name": "NellisOps",
+        "freq": 269.025,
+        "mod": "AM",
+        "text": "Start approved.",
+        "done": done,
+    }
+    hub.submit(job)
+    if not done.wait(2.0):
+        fails.append("hub job did not finish")
+    hub.stop()
+    if not seen:
+        fails.append("transmit fn never ran")
+    else:
+        srs, ap_host = seen[0]
+        if srs != atc_net.HOST_LOCAL_SRS_HOST:
+            fails.append(
+                f"effective SRS must be {atc_net.HOST_LOCAL_SRS_HOST}, got {srs}"
+            )
+        if ap_host != atc_net.HOST_LOCAL_SRS_HOST:
+            fails.append(
+                f"airport srs_host must be pinned to "
+                f"{atc_net.HOST_LOCAL_SRS_HOST}, got {ap_host}"
+            )
+    # Role alone must win even without hub pin.
+    solo_showtime = atc_net.effective_srs_host(
+        {"srs_host": atc_net.SQUADRON_SRS_HOST},
+        {"atc_role": "solo"},
+    )
+    if solo_showtime != atc_net.SQUADRON_SRS_HOST:
+        fails.append(f"solo should keep squadron SRS, got {solo_showtime}")
+    host_force = atc_net.effective_srs_host(
+        {"srs_host": atc_net.SQUADRON_SRS_HOST},
+        {"atc_role": "solo", "_force_local_srs": True},
+    )
+    if host_force != atc_net.HOST_LOCAL_SRS_HOST:
+        fails.append(f"_force_local_srs must win, got {host_force}")
+    return fails
+
+
 def test_channel_parallel_and_fifo() -> list[str]:
     fails: list[str] = []
     order: list[str] = []
@@ -240,6 +305,8 @@ def test_host_tx_failure_keeps_cursor_and_last_tx() -> list[str]:
     )
     if str(ok.get("action") or "") == "blocked":
         fails.append(f"success TX should not block: {ok!r}")
+    if str(ok.get("action") or "") not in ("transmit", "queued", "play"):
+        fails.append(f"success TX should report transmit, got {ok.get('action')!r}")
     if "exit_code" not in ok or int(ok.get("exit_code")) != 0:
         fails.append(f"success path must share exit_code 0, got {ok.get('exit_code')!r}")
     after2 = int(sess2.engine.state.get("index") or 0)
@@ -252,6 +319,139 @@ def test_host_tx_failure_keeps_cursor_and_last_tx() -> list[str]:
         fails.append("last_tx_text must be stamped after successful TX")
     server.hub.stop()
     server2.hub.stop()
+    return fails
+
+
+def test_bandsaw_checkout_display_and_tx_failure() -> list[str]:
+    """Bandsaw checkout → bj_range_exit cues; failed TX must not confirm last_tx."""
+    fails: list[str] = []
+    timeline = [
+        {
+            "id": "bj",
+            "channel": "blackjack",
+            "template": "bj_check_in",
+            "phase": "flight",
+            "enabled": True,
+        },
+        {
+            "id": "bs",
+            "channel": "bandsaw",
+            "template": "bandsaw_check_in",
+            "phase": "flight",
+            "enabled": True,
+        },
+        {
+            "id": "bso",
+            "channel": "bandsaw",
+            "template": "bandsaw_check_out",
+            "phase": "flight",
+            "enabled": True,
+        },
+        {
+            "id": "exit",
+            "channel": "blackjack",
+            "template": "bj_range_exit",
+            "phase": "flight",
+            "enabled": True,
+        },
+    ]
+    # Stale bj_check_in last_tx with cursor already on range exit.
+    shown = agencies.display_step_for_agency(
+        timeline, "blackjack", cursor_index=3, last_tx_template="bj_check_in"
+    )
+    if not shown or str(shown.get("template") or "") != "bj_range_exit":
+        fails.append(
+            f"cursor on bj_range_exit must show range exit, not check-in: {shown!r}"
+        )
+    shown2 = agencies.display_step_for_agency(
+        timeline, "blackjack", cursor_index=0, last_tx_template="bandsaw_check_out"
+    )
+    if not shown2 or str(shown2.get("template") or "") != "bj_range_exit":
+        fails.append(
+            f"bandsaw_check_out last_tx must show bj_range_exit: {shown2!r}"
+        )
+
+    cfg = _host_config()
+    seen: list[int] = []
+
+    def tx_fail(job: dict) -> int:
+        seen.append(1)
+        time.sleep(0.05)
+        return 99
+
+    server = atc_server.AtcServer(
+        cfg, AIRPORTS, lambda: copy.deepcopy(MISSION), transmit_fn=tx_fail
+    )
+    hello = server.hello(
+        {
+            "callsign_override": "Razor 9",
+            "opus_flight_id": 909,
+            "opus_seat": 1,
+            "radio_fresh": False,
+        }
+    )
+    sess = server.get_session(hello["session_id"])
+    if sess is None:
+        return fails + ["no session for bandsaw TX failure"]
+    steps = flow_engine.enabled_steps(sess.engine.mission)
+    bj_i = next(
+        (
+            i
+            for i, s in enumerate(steps)
+            if str(s.get("template") or "") == "bj_check_in"
+        ),
+        None,
+    )
+    if bj_i is None:
+        server.hub.stop()
+        return fails + ["no bj_check_in in mission"]
+    sess.engine.state["index"] = bj_i
+    before = int(sess.engine.state.get("index") or 0)
+    sess.engine.state["last_tx_text"] = "Blackjack Fleece 1 continue"
+    sess.engine.state["last_tx_template"] = "bj_check_in"
+    sess.engine.state["last_tx_confirmed"] = True
+    sess.engine.defer_tx = True
+    sess.engine._pending_bandsaw_advance = True
+    # Simulate Host wait failing after checkout was staged.
+    if hasattr(sess.engine, "abandon_deferred_tx"):
+        sess.engine.abandon_deferred_tx()
+    if getattr(sess.engine, "_pending_bandsaw_advance", False):
+        fails.append("abandon must clear pending bandsaw advance")
+    if int(sess.engine.state.get("index") or 0) != before:
+        fails.append("failed TX must keep cursor (bandsaw advance not applied)")
+    if sess.engine.state.get("last_tx_confirmed"):
+        fails.append("last_tx_confirmed must be False after abandon")
+    if str(sess.engine.state.get("last_tx_text") or "").strip():
+        fails.append("last_tx_text must clear after abandon")
+    # Hub path: real failed transmit on play.
+    bso = next(
+        (s for s in steps if str(s.get("template") or "") == "bandsaw_check_out"),
+        None,
+    )
+    if bso is not None:
+        sid = str(bso.get("id") or "")
+        for i, s in enumerate(steps):
+            if str(s.get("id") or "") == sid:
+                sess.engine.state["index"] = i
+                break
+        park = int(sess.engine.state.get("index") or 0)
+        out = server.run_action(
+            sess,
+            lambda e: e.play_id(sid, bypass_freq_gate=True),
+            {"radio_fresh": False},
+        )
+        if str(out.get("action") or "") != "blocked":
+            fails.append(f"bandsaw checkout TX fail must block, got {out!r}")
+        if int(sess.engine.state.get("index") or 0) != park:
+            fails.append(
+                f"bandsaw checkout fail advanced cursor "
+                f"{park} -> {sess.engine.state.get('index')}"
+            )
+        if sess.engine.state.get("last_tx_confirmed"):
+            fails.append("bandsaw fail must not confirm last_tx")
+        if not seen:
+            fails.append("bandsaw checkout transmit_fn never called")
+    server.hub.stop()
     return fails
 
 
@@ -1596,6 +1796,19 @@ def test_host_config_not_polluted_by_client_flight() -> list[str]:
         with atc_server._session_engine_binding(sess):
             if atc_phrase.configured_opus_flight_id(sess.engine.config) != 909:
                 fails.append("bound seat should see client flight_id 909")
+            if atc_net.role_of(sess.engine.config) != "host":
+                fails.append(
+                    f"bound seat must keep Host role for local SRS TX, got "
+                    f"{sess.engine.config.get('atc_role')}"
+                )
+            srs = atc_net.effective_srs_host(
+                {"srs_host": atc_net.SQUADRON_SRS_HOST},
+                sess.engine.config,
+            )
+            if srs != atc_net.HOST_LOCAL_SRS_HOST:
+                fails.append(
+                    f"Host bound TX must target {atc_net.HOST_LOCAL_SRS_HOST}, got {srs}"
+                )
         if cfg.get("opus_flight_id") not in (None, ""):
             fails.append("Host config flight_id leaked after session bind")
         if atc_net.role_of(cfg) != "host":
@@ -1620,7 +1833,9 @@ def main() -> int:
         test_persist_state_off,
         test_injected_radio_gate,
         test_channel_parallel_and_fifo,
+        test_host_hub_pins_local_srs,
         test_host_tx_failure_keeps_cursor_and_last_tx,
+        test_bandsaw_checkout_display_and_tx_failure,
         test_session_isolation,
         test_clear_flight_cache_scoped,
         test_flight_shared_cursor,

@@ -1620,6 +1620,9 @@ class MissionPlanner(tk.Tk):
                 lambda: self.mission,
             )
             self._atc_server.host_engine = self.engine
+            # Lock ExternalAudio onto local SRS before any client TX.
+            self.config_data["atc_role"] = "host"
+            self._apply_role_srs_host()
             try:
                 self._atc_server.start(
                     port=int(self.config_data.get("atc_port") or atc_net.DEFAULT_ATC_PORT)
@@ -3146,8 +3149,32 @@ class MissionPlanner(tk.Tk):
                         if isinstance(row, dict) and str(row.get("id") or "").strip() == sid:
                             live_step = row
                             break
+                # Tips must follow the same agency remap as the Fly hero card
+                # (Bandsaw checkout → bj_range_exit, not the Blackjack hold).
+                try:
+                    import agencies as agencies_mod
+
+                    remapped = agencies_mod.display_step_for_agency(
+                        list(getattr(self.engine, "steps", None) or []),
+                        cursor_channel
+                        or str(live_step.get("channel") or "").strip().lower(),
+                        cursor_index=int(
+                            (getattr(self.engine, "state", None) or {}).get("index")
+                            or 0
+                        ),
+                        last_tx_template=str(
+                            (getattr(self.engine, "state", None) or {}).get(
+                                "last_tx_template"
+                            )
+                            or ""
+                        ),
+                    )
+                    if isinstance(remapped, dict):
+                        live_step = remapped
+                except Exception:
+                    pass
                 context["expected"] = voice_intent.step_expected_template(live_step)
-                context["current_step_id"] = sid
+                context["current_step_id"] = str(live_step.get("id") or sid)
         except Exception:  # noqa: BLE001
             pass
         # Tips / voice scoring follow the live radio when it is an agency in
@@ -3220,6 +3247,33 @@ class MissionPlanner(tk.Tk):
         context["tuned_channel"] = tuned or ""
         context["cursor_channel"] = cursor_channel
         context["phase"] = mission_phase
+        # Remap expected tips to the live agency card (Blackjack after Bandsaw
+        # checkout → bj_range_exit), not the shared cursor hold.
+        try:
+            import agencies as agencies_mod
+
+            tip_ch = str(context.get("channel") or tuned or cursor_channel or "").strip().lower()
+            if tip_ch:
+                remapped = agencies_mod.display_step_for_agency(
+                    list(getattr(self.engine, "steps", None) or []),
+                    tip_ch,
+                    cursor_index=int(
+                        (getattr(self.engine, "state", None) or {}).get("index") or 0
+                    ),
+                    last_tx_template=str(
+                        (getattr(self.engine, "state", None) or {}).get(
+                            "last_tx_template"
+                        )
+                        or ""
+                    ),
+                )
+                if isinstance(remapped, dict):
+                    context["expected"] = voice_intent.step_expected_template(remapped)
+                    sid_r = str(remapped.get("id") or "").strip()
+                    if sid_r:
+                        context["current_step_id"] = sid_r
+        except Exception:
+            pass
         context["callsign"] = atc_phrase.cached_radio_callsign(self.config_data)
         seat = atc_phrase.configured_opus_seat(self.config_data)
         if seat is not None:
@@ -10900,7 +10954,8 @@ class MissionPlanner(tk.Tk):
 
     def _schedule_traffic_poll(self) -> None:
         try:
-            if self._atc_role() == "host":
+            # Prefer live Host listener — config role can briefly desync.
+            if self._atc_server is not None or self._atc_role() == "host":
                 self._refresh_traffic()
             elif self._atc_role() == "client":
                 self._refresh_client_fly()
@@ -10912,6 +10967,22 @@ class MissionPlanner(tk.Tk):
         if not hasattr(self, "var_traffic"):
             return
         role = self._atc_role()
+        # Runtime listener wins over config. Session identity bind used to
+        # stamp atc_role=solo onto the shared Host config — Traffic then
+        # painted Solo while Setup's StringVar still said Host, and TX went
+        # to the wrong SRS. Heal the desync whenever the Host is listening.
+        if self._atc_server is not None and role != "host":
+            self.config_data["atc_role"] = "host"
+            if hasattr(self, "var_atc_role"):
+                try:
+                    self.var_atc_role.set("host")
+                except Exception:
+                    pass
+            role = "host"
+            app_diag.warn(
+                app_diag.CAT_NETWORK,
+                "Host role restored after runtime desync (Traffic)",
+            )
         if role != "host" or self._atc_server is None:
             if role == "client":
                 self.var_traffic.set(
@@ -11811,7 +11882,19 @@ class MissionPlanner(tk.Tk):
 
     def _apply_role_srs_host(self) -> None:
         """Host → local SRS; Solo/Client → squadron SRS (known defaults only)."""
-        role = self._atc_role()
+        # While the Host listener is up, never rewrite airports to showtime.
+        # A Solo desync (Traffic said Solo, Setup said Host) used to set
+        # srs_host=showtime.455aew.com so ExternalAudio TX was silent on SRS.
+        if getattr(self, "_atc_server", None) is not None:
+            self.config_data["atc_role"] = "host"
+            if hasattr(self, "var_atc_role"):
+                try:
+                    self.var_atc_role.set("host")
+                except Exception:
+                    pass
+            role = "host"
+        else:
+            role = self._atc_role()
         for ap in self.airports.values():
             if not isinstance(ap, dict):
                 continue

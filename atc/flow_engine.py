@@ -186,6 +186,7 @@ class FlowEngine:
         # When defer_tx: cursor / readback / agency handoff wait until ExternalAudio
         # exits 0. Otherwise Fly advances (and paints LAST HEARD) on a queued job.
         self._pending_advance_kind: str | None = None
+        self._pending_bandsaw_advance: bool = False
         self._deferred_readback: tuple[Any, ...] | None = None
         self._deferred_agency: tuple[str, str] | None = None
         self._deferred_voice_tx: dict[str, Any] | None = None
@@ -362,6 +363,16 @@ class FlowEngine:
             elif kind == "skip":
                 self.state["index"] = int(self.state.get("index") or 0) + 1
                 self._advance_past_skippable()
+            if getattr(self, "_pending_bandsaw_advance", False):
+                self._pending_bandsaw_advance = False
+                try:
+                    import voice_engine as voice_engine_mod
+
+                    voice_engine_mod._advance_past_bandsaw(self)
+                except Exception:
+                    pass
+        else:
+            self._pending_bandsaw_advance = False
         try:
             atc_phrase.note_tx_finished(self.state)
         except Exception:
@@ -375,6 +386,7 @@ class FlowEngine:
         self._deferred_agency = None
         self._deferred_voice_tx = None
         self._pending_advance_kind = None
+        self._pending_bandsaw_advance = False
         # play_step stamped last_step_id before EA spoke — clear so Watch can retry.
         if rb is not None:
             step = rb[0] if rb else None

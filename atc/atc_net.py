@@ -58,10 +58,36 @@ def effective_srs_host(
     config: dict[str, Any] | None = None,
 ) -> str:
     """SRS host ExternalAudio should use for this role."""
+    # Host TX must always hit local SRS. Solo/Client desync used to leave
+    # atc_role=solo on the shared config (or airport srs_host=showtime) so
+    # ExternalAudio got --ip=showtime.455aew.com and nobody heard ATC.
+    if (config or {}).get("_force_local_srs") or role_of(config) == "host":
+        return HOST_LOCAL_SRS_HOST
     return apply_role_srs_host(
         str((airport or {}).get("srs_host") or ""),
         config=config,
     )
+
+
+def pin_host_tx_target(job: dict[str, Any]) -> dict[str, Any]:
+    """
+    ChannelTxHub runs only on the Host PC — ExternalAudio must use 127.0.0.1.
+
+    Copies config/airport so a concurrent seat bind cannot flip role or swap
+    srs_host to the squadron hostname under a live launch.
+    """
+    raw_cfg = job.get("config")
+    if isinstance(raw_cfg, dict):
+        tx_cfg = dict(raw_cfg)
+        tx_cfg["atc_role"] = "host"
+        tx_cfg["_force_local_srs"] = True
+        job["config"] = tx_cfg
+    raw_ap = job.get("airport")
+    if isinstance(raw_ap, dict):
+        tx_ap = dict(raw_ap)
+        tx_ap["srs_host"] = HOST_LOCAL_SRS_HOST
+        job["airport"] = tx_ap
+    return job
 
 
 def token_of(config: dict[str, Any] | None) -> str:
