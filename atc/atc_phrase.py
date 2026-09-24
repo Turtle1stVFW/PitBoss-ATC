@@ -1079,11 +1079,16 @@ def resolve_active_opus_flight(config: dict[str, Any]) -> OpusFlightContext | No
 
     # Dedicated Host box only routes client flights. Without a selected
     # flight_id, do not scan Opus signups by username (404 spam / wrong jet).
-    # Session engines still resolve when the client's opus_flight_id is bound.
+    # Session bind seeds callsign_override / opus_flight_label from the client
+    # so TX says "Razor one" — not the Host-box placeholder.
     if role == "host" and selected_id is None:
-        label = override or "HOST"
+        label = (
+            override
+            or clean_flight_callsign(str(config.get("opus_flight_label") or ""))
+            or "HOST"
+        )
         print(f"Host has no Opus flight selected — using {label} (clients carry FP)")
-        return synthetic_flight_context(label)
+        return apply_callsign_override(config, synthetic_flight_context(label))
 
     cache_key = _opus_cache_key(config)
     now = time.time()

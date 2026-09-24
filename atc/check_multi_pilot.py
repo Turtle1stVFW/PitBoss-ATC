@@ -675,6 +675,77 @@ def test_session_key() -> list[str]:
     return fails
 
 
+def test_bound_seat_tx_callsign_not_host() -> list[str]:
+    """During Client bind, Ops/ATC phrases must use Razor 1 — not HOST."""
+    fails: list[str] = []
+    cfg = _host_config()
+    for key in ("opus_flight_id", "opus_seat", "opus_flight_label", "callsign_override"):
+        cfg.pop(key, None)
+    server = atc_server.AtcServer(
+        cfg, AIRPORTS, lambda: copy.deepcopy(MISSION), transmit_fn=lambda _j: 0
+    )
+    hello = server.hello(
+        {
+            "opus_flight_id": 55,
+            "opus_seat": 1,
+            "opus_flight_label": "RAZOR 1 · KLSV · FLEX21R",
+            "opus_user_name": "Turtle",
+            "tuned_freqs_mhz": [269.025],
+            "radio_fresh": True,
+        }
+    )
+    sess = server.sessions.get(str(hello.get("session_id") or ""))
+    if sess is None:
+        return ["missing session after hello"]
+    with atc_server._session_engine_binding(sess):
+        if atc_net.role_of(sess.engine.config) != "host":
+            fails.append(
+                f"bind must keep Host role for local SRS, got "
+                f"{sess.engine.config.get('atc_role')!r}"
+            )
+        ov = str(sess.engine.config.get("callsign_override") or "")
+        if "razor" not in ov.casefold():
+            fails.append(f"bind must seed callsign_override from identity, got {ov!r}")
+        ctx = atc_phrase.resolve_active_opus_flight(sess.engine.config)
+        cs = str(getattr(ctx, "radio_callsign", "") or "")
+        if cs.casefold() == "host":
+            fails.append(f"bound resolve must not be HOST, got {cs!r}")
+        if "razor" not in cs.casefold():
+            fails.append(f"bound resolve should be Razor 1, got {cs!r}")
+        ap = sess.engine.airport()
+        result = voice_engine.execute_ops_action(
+            sess.engine, "ops_check_in", airport=ap
+        )
+        text = str((result or {}).get("text") or "")
+        # Deferred TX stashes on pending_tx
+        pending = getattr(sess.engine, "pending_tx", None)
+        if isinstance(pending, dict) and pending.get("text"):
+            text = str(pending.get("text") or "")
+        if not text and isinstance(sess.engine.state, dict):
+            text = str(sess.engine.state.get("last_tx_text") or "")
+        # execute_ops may return blocked/queued — pull spoken line from defer
+        if not text:
+            job = sess.engine.take_pending_tx() if hasattr(sess.engine, "take_pending_tx") else None
+            if isinstance(job, dict):
+                text = str(job.get("text") or "")
+        # Force-build if transmit was deferred without putting text on result
+        if not text:
+            import ops as ops_mod
+
+            text = ops_mod.build_ops_check_in(cs, ap, opus=ctx, config=sess.engine.config)
+        if "host" in text.casefold().split(",")[0]:
+            fails.append(f"Ops TX must not address HOST, got {text!r}")
+        if "razor" not in text.casefold():
+            fails.append(f"Ops TX should address Razor, got {text!r}")
+    # Outside bind, Host config must not keep the client's override.
+    if str(cfg.get("callsign_override") or "").strip():
+        fails.append(
+            f"Host config leaked callsign_override after bind: "
+            f"{cfg.get('callsign_override')!r}"
+        )
+    return fails
+
+
 def test_hello_callsign_not_host_synthetic() -> list[str]:
     """Client hello must not become Traffic callsign HOST (Host-box placeholder)."""
     fails: list[str] = []
@@ -1883,6 +1954,7 @@ def main() -> int:
     tests = (
         test_session_key,
         test_hello_callsign_not_host_synthetic,
+        test_bound_seat_tx_callsign_not_host,
         test_hello_reclaims_identity_upgrade,
         test_connect_error_hints,
         test_persist_state_off,

@@ -991,7 +991,20 @@ def _apply_identity_to_config(config: dict[str, Any], identity: dict[str, Any]) 
     config["opus_flight_id"] = identity.get("opus_flight_id")
     config["opus_seat"] = identity.get("opus_seat")
     config["opus_flight_label"] = identity.get("opus_flight_label") or ""
-    config["callsign_override"] = identity.get("callsign_override") or ""
+    # Hello stores the Traffic name on identity["callsign"] (e.g. RAZOR 1).
+    # Clients often leave callsign_override empty — without seeding it here,
+    # Host-role resolve_active_opus_flight hits the no-flight synthetic and
+    # TTS says "HOST, Ops" instead of "Razor one, Wool Ops".
+    override = str(identity.get("callsign_override") or "").strip()
+    if not override:
+        cs = str(identity.get("callsign") or "").strip()
+        if cs.casefold() not in {"", "host", "host · no own jet", "callsign", "map"}:
+            override = cs
+    if not override:
+        override = atc_phrase.clean_flight_callsign(
+            str(identity.get("opus_flight_label") or "")
+        )
+    config["callsign_override"] = override
     # Keep atc_role as Host. Session engines (and the shared Host Fly engine
     # during bind) used to flip to solo so Opus would resolve the client's
     # flight_id — but Host-without-flight_id already skips Opus only when
