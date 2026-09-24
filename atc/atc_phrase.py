@@ -15401,12 +15401,24 @@ _LIVE_EA_LOCK = threading.Lock()
 
 
 def terminate_stale_external_audio(exe: Path) -> int:
-    """Kill hung ExternalAudio processes for this exe (prevents ghost SRS clients)."""
+    """Kill hung ExternalAudio processes for this exe (prevents ghost SRS clients).
+
+    Skips PIDs in ``_LIVE_EA_PIDS`` (a call that is still speaking). When any
+    live TX exists, do not Stop-Process at all — another agency may be on the
+    wire and killing orphans risks racing a just-spawned Popen.
+    """
     if os.name != "nt":
         return 0
-    exe_path = str(exe.resolve())
     with _LIVE_EA_LOCK:
-        live = ",".join(str(pid) for pid in sorted(_LIVE_EA_PIDS))
+        if _LIVE_EA_PIDS:
+            return 0
+        return _terminate_stale_external_audio_unlocked(exe)
+
+
+def _terminate_stale_external_audio_unlocked(exe: Path) -> int:
+    """Caller must hold ``_LIVE_EA_LOCK`` and know ``_LIVE_EA_PIDS`` is empty."""
+    exe_path = str(exe.resolve())
+    live = ",".join(str(pid) for pid in sorted(_LIVE_EA_PIDS))
     ps = f"""
 $ErrorActionPreference = 'SilentlyContinue'
 $live = @({live})
@@ -15441,7 +15453,6 @@ Write-Output $n
 
 def _run_external_audio(exe: Path, cmd: list[str], *, timeout_sec: float = 120.0) -> int:
     """Launch ExternalAudio with timeout; kill process group on hang."""
-    terminate_stale_external_audio(exe)
     creationflags = 0
     if os.name == "nt":
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -15459,12 +15470,16 @@ def _run_external_audio(exe: Path, cmd: list[str], *, timeout_sec: float = 120.0
         pass
     proc: subprocess.Popen[bytes] | None = None
     try:
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(exe.parent),
-            creationflags=creationflags,
-        )
+        # Hold the lock across orphan cleanup + spawn + PID register so another
+        # channel cannot Stop-Process a Popen that is not yet in _LIVE_EA_PIDS.
         with _LIVE_EA_LOCK:
+            if not _LIVE_EA_PIDS:
+                _terminate_stale_external_audio_unlocked(exe)
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(exe.parent),
+                creationflags=creationflags,
+            )
             _LIVE_EA_PIDS.add(proc.pid)
         code = int(proc.wait(timeout=timeout_sec))
         try:

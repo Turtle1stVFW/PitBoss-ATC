@@ -582,11 +582,30 @@ class AtcServer:
                     job = sess.engine.take_pending_tx()
                 finally:
                     sess.engine.defer_tx = False
+                    # Arrows park the shared flight. Do not snap the index back
+                    # to the pre-AAR cursor — that made ◀ ▶ a no-op on tanker.
+                    manual_nav = bool(
+                        isinstance(sess.engine.state, dict)
+                        and sess.engine.state.get("manual_step_view")
+                    )
+                    if manual_nav and (
+                        on_aar or tanker.tanker_overlay_active(sess.engine.state)
+                    ):
+                        try:
+                            tanker.reconcile_aar_overlay(sess.engine)
+                        except Exception:
+                            tanker.clear_aar_state(sess.engine.state)
                     sess.local_state = tanker.snapshot_seat_state(sess.engine.state)
                     tanker.strip_seat_state(sess.engine.state)
                     # AAR parks on the tanker step only for this element. Do not
                     # write that (or leave_tanker seeking C2) onto the flight cursor.
-                    if on_aar or tanker.tanker_overlay_active(sess.local_state):
+                    if (
+                        not manual_nav
+                        and (
+                            on_aar
+                            or tanker.tanker_overlay_active(sess.local_state)
+                        )
+                    ):
                         sess.engine.state["index"] = shared_index
         self._sync_element_overlay(sess)
         if not isinstance(result, dict):
@@ -598,24 +617,30 @@ class AtcServer:
             job["flow_state"] = sess.engine.state
             pos = self.hub.submit(job)
             result = dict(result)
-            result["queued"] = True
             result["queue_pos"] = pos
             # Speak before the Client paints the card. Otherwise Fly shows
             # "contact Ground" / the readback and the pilot leaves the
             # frequency while Tower is still talking.
             done = job.get("done")
+            finished = True
             if isinstance(done, threading.Event):
-                done.wait(timeout=100.0)
+                finished = done.wait(timeout=100.0)
             code = job.get("exit_code")
             err = str(job.get("error") or job.get("prerender_error") or "").strip()
             try:
                 failed = code is not None and int(code) != 0
             except (TypeError, ValueError):
-                failed = False
-            if failed or (err and code is None):
+                failed = True
+            if not finished or failed or code is None:
                 result["queued"] = False
                 result["action"] = "blocked"
-                result["detail"] = err or f"radio transmit failed ({code})"
+                result["detail"] = (
+                    err
+                    or ("radio transmit timed out" if not finished else "")
+                    or f"radio transmit failed ({code})"
+                )
+            else:
+                result["queued"] = True
             result["channel"] = job.get("channel")
             # Voice often wraps play_id as action=play + detail={...}. Promote
             # spoken text so Clients log/hear the real phrase, not the label.
@@ -629,7 +654,9 @@ class AtcServer:
                         result[key] = detail[key]
             if not result.get("text") and job.get("text"):
                 result["text"] = job.get("text")
-            if result.get("action") in (None, "", "play", "none"):
+            if result.get("action") == "blocked":
+                pass
+            elif result.get("action") in (None, "", "play", "none"):
                 result["action"] = "queued"
             else:
                 result["action"] = result.get("action") or "queued"

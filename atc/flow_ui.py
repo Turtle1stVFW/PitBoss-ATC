@@ -10182,12 +10182,17 @@ class MissionPlanner(tk.Tk):
                 sandbox = False
             # Arrows win until the next TX: show the step the pilot parked on,
             # with its number and radio, not the agency we are nudging them to.
-            if (getattr(self.engine, "state", None) or {}).get("manual_step_view"):
+            manual_park = bool(
+                (getattr(self.engine, "state", None) or {}).get("manual_step_view")
+            )
+            if manual_park:
                 sandbox = False
             # Ops is not a timeline step — without this, a custom Plan (Untitled)
             # keeps painting Delivery over the Ops radio the pilot just selected.
             # Same for C2 side trips (Bandsaw while Blackjack holds the cursor).
-            if not sandbox:
+            # Do not re-open sandbox while hand-parked — that painted YOU ARE ON /
+            # ON FREQ over STEP N and made ◀ ▶ look dead on Host/Client.
+            if not sandbox and not manual_park:
                 try:
                     live_tune = (
                         srs_radio.channel_for_tuned_freq(

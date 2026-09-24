@@ -104,6 +104,32 @@ def test_channel_parallel_and_fifo() -> list[str]:
     elif fifo != ["Fleece1", "Viper3"]:
         fails.append(f"Ground FIFO expected Fleece1 then Viper3, got {fifo}")
     hub2.stop()
+
+    # Host run_action waits on the same job dict — submit must not copy it away.
+    seen: list[int] = []
+
+    def tx_shared(job: dict) -> int:
+        time.sleep(0.05)
+        return 99
+
+    hub3 = channel_tx.ChannelTxHub(["tower", "other"], transmit_fn=tx_shared)
+    job = {
+        **base,
+        "channel": "tower",
+        "callsign": "Razor1",
+        "text": "report",
+    }
+    hub3.submit(job)
+    done = job.get("done")
+    if not isinstance(done, threading.Event) or not done.wait(2.0):
+        fails.append("submit must put done Event on the caller's job dict")
+    elif job.get("exit_code") != 99:
+        fails.append(
+            f"submit must share exit_code with caller (got {job.get('exit_code')!r})"
+        )
+    else:
+        seen.append(99)
+    hub3.stop()
     return fails
 
 

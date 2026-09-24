@@ -113,11 +113,15 @@ class ChannelTxHub:
                 pass
 
     def submit(self, job: dict[str, Any]) -> int:
-        """Enqueue a TX job. Returns 1-based queue position on that channel."""
+        """Enqueue a TX job. Returns 1-based queue position on that channel.
+
+        Mutates and enqueues the same dict the Host holds so run_action can
+        wait on ``done`` / read ``exit_code``. A shallow copy broke that: Fly
+        painted \"sent\" while ExternalAudio was still speaking (or had failed).
+        """
         ch = str(job.get("channel") or "other").strip().lower() or "other"
         if ch not in self._queues:
             ch = "other"
-        job = dict(job)
         job["channel"] = ch
         job.setdefault("queued_at", time.time())
         job.setdefault("done", threading.Event())
