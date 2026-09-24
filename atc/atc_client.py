@@ -405,6 +405,40 @@ def _radio_payload(config: dict[str, Any]) -> dict[str, Any]:
     alt = _ownship_alt_ft(config)
     if alt is not None:
         out["ownship_alt_ft"] = alt
+    # Map Route Tester plan — Host needs this for Delivery / clearance (it has
+    # no local ownship_inject.json for this jet).
+    fp = _map_flight_plan_payload(config)
+    if fp:
+        out.update(fp)
+    return out
+
+
+def _map_flight_plan_payload(config: dict[str, Any]) -> dict[str, Any]:
+    """Route / altitude from the map inject when the client is map-flying."""
+    inj: dict[str, Any] | None = None
+    try:
+        inj = atc_phrase.read_ownship_inject(config=config)
+    except Exception:
+        inj = None
+    if not isinstance(inj, dict):
+        # drive_fly may still be writing FP while the checkbox is briefly off
+        try:
+            inj = atc_phrase.read_ownship_inject()
+        except Exception:
+            inj = None
+    if not isinstance(inj, dict):
+        return {}
+    route = str(inj.get("fp_route_string") or "").strip()
+    if not route and not atc_phrase.ownship_from_map_enabled(config):
+        return {}
+    out: dict[str, Any] = {}
+    if route:
+        out["fp_route_string"] = route
+    alt = str(inj.get("fp_altitude") or "").strip()
+    if alt:
+        out["fp_altitude"] = alt
+    if route or atc_phrase.ownship_from_map_enabled(config):
+        out["ownship_from_map"] = True
     return out
 
 

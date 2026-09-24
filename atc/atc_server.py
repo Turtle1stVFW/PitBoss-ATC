@@ -45,6 +45,10 @@ _IDENTITY_CONFIG_KEYS = (
     "opus_seat",
     "opus_flight_label",
     "callsign_override",
+    # Client Route Tester plan — Host has no local map inject for that jet.
+    "_seat_from_map",
+    "_seat_fp_route_string",
+    "_seat_fp_altitude",
 )
 # Client Fly copies these, then drops any key the host omitted so a cache
 # reset does not leave the last sortie (OPS start, pending Delivery, …).
@@ -123,6 +127,26 @@ class PilotSession:
     def touch(self) -> None:
         self.last_seen = time.time()
 
+    def apply_map_flight_plan(self, body: dict[str, Any]) -> None:
+        """
+        Client Route Tester FP (route / altitude). Host has no local inject for
+        this jet — without these fields, Delivery kept reading Opus instead of
+        the map plan.
+        """
+        route = str(body.get("fp_route_string") or "").strip()
+        if not route and not body.get("ownship_from_map"):
+            return
+        if route:
+            self.identity["fp_route_string"] = route
+            self.identity["from_map"] = True
+        alt = str(body.get("fp_altitude") or "").strip()
+        if alt:
+            self.identity["fp_altitude"] = alt
+        elif route:
+            self.identity.pop("fp_altitude", None)
+        if body.get("ownship_from_map"):
+            self.identity["from_map"] = True
+
     def apply_ownship(self, body: dict[str, Any]) -> None:
         """
         Record where this seat says it is.
@@ -183,6 +207,7 @@ class PilotSession:
             except (TypeError, ValueError):
                 self.selected_mhz = None
         self.apply_ownship(body)
+        self.apply_map_flight_plan(body)
         if inject:
             self.engine.set_remote_radios(
                 self.tuned_freqs_mhz,
@@ -1005,6 +1030,19 @@ def _apply_identity_to_config(config: dict[str, Any], identity: dict[str, Any]) 
             str(identity.get("opus_flight_label") or "")
         )
     config["callsign_override"] = override
+    # Client map plan (Route Tester) — Host TX must use this route, not Opus.
+    if identity.get("from_map") and str(identity.get("fp_route_string") or "").strip():
+        config["_seat_from_map"] = True
+        config["_seat_fp_route_string"] = str(identity.get("fp_route_string") or "").strip()
+        alt = str(identity.get("fp_altitude") or "").strip()
+        if alt:
+            config["_seat_fp_altitude"] = alt
+        else:
+            config.pop("_seat_fp_altitude", None)
+    else:
+        config.pop("_seat_from_map", None)
+        config.pop("_seat_fp_route_string", None)
+        config.pop("_seat_fp_altitude", None)
     # Keep atc_role as Host. Session engines (and the shared Host Fly engine
     # during bind) used to flip to solo so Opus would resolve the client's
     # flight_id — but Host-without-flight_id already skips Opus only when

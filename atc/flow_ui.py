@@ -14779,14 +14779,8 @@ class MissionPlanner(tk.Tk):
             self.config_data["opus_flight_label"] = " · ".join(
                 self._opus_flight_summary_bits(row)
             )
-            if atc_phrase.ownship_from_map_enabled(self.config_data):
-                self.config_data["ownship_from_map"] = False
-                if hasattr(self, "var_ownship_from_map"):
-                    self.var_ownship_from_map.set(False)
-                try:
-                    save_json(CONFIG_PATH, self.config_data)
-                except OSError:
-                    pass
+            # Keep map FP when the tester is ownship — selecting Opus is for
+            # callsign/crew; turning map off here forced Delivery onto Opus route.
             self._update_opus_flight_label(row)
             dlg.destroy()
             self._persist_identity(refresh_opus=True)

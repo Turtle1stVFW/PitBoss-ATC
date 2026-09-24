@@ -1031,13 +1031,26 @@ def resolve_active_opus_flight(config: dict[str, Any]) -> OpusFlightContext | No
     Load filed FP + callsign from Opus.
 
     Preference order:
-      1. config opus_flight_id (chosen in the flights picker)
-      2. Scan flights for opus_user_name signup (legacy auto-match)
-      3. Manual callsign / offline placeholder
+      1. Bound client map plan (Host TX for a Route Tester seat)
+      2. Local map tester inject when ownship_from_map is on
+      3. config opus_flight_id (chosen in the flights picker)
+      4. Scan flights for opus_user_name signup (legacy auto-match)
+      5. Manual callsign / offline placeholder
 
     Seat: opus_seat if set, else matching signup for opus_user_name, else seat 1.
-    callsign_override replaces the spoken callsign (FP still from Opus when available).
+    callsign_override replaces the spoken callsign (FP still from map/Opus when available).
     """
+    # Host-bound client: map FP rode in on hello/heartbeat (no local inject here).
+    if config.get("_seat_from_map") and str(
+        config.get("_seat_fp_route_string") or ""
+    ).strip():
+        mapped = seat_map_flight_context(config)
+        if mapped is not None:
+            print(
+                f"Using client map flight: {mapped.radio_callsign} "
+                f"route={mapped.fp_route_string} alt={mapped.fp_altitude}"
+            )
+            return apply_callsign_override(config, mapped)
     if ownship_from_map_enabled(config):
         mapped = map_flight_context(config)
         if mapped is not None:
@@ -8130,8 +8143,43 @@ def map_flight_context(config: dict[str, Any] | None) -> OpusFlightContext | Non
         return None
     override = callsign_override(config or {})
     cs = override or str(inj.get("callsign") or "").strip() or "MAP"
-    ctx = synthetic_flight_context(cs)
-    route = str(inj.get("fp_route_string") or "").strip()
+    ctx = _flight_context_from_map_fields(
+        cs,
+        route=str(inj.get("fp_route_string") or "").strip() or None,
+        altitude=str(inj.get("fp_altitude") or "").strip() or None,
+        mode3_fields=inj,
+    )
+    return ctx
+
+
+def seat_map_flight_context(config: dict[str, Any] | None) -> OpusFlightContext | None:
+    """Host-side: client-sent Route Tester plan bound onto this seat's TX config."""
+    cfg = config or {}
+    route = str(cfg.get("_seat_fp_route_string") or "").strip()
+    if not route:
+        return None
+    override = callsign_override(cfg)
+    cs = (
+        override
+        or clean_flight_callsign(str(cfg.get("opus_flight_label") or ""))
+        or "MAP"
+    )
+    return _flight_context_from_map_fields(
+        cs,
+        route=route,
+        altitude=str(cfg.get("_seat_fp_altitude") or "").strip() or None,
+        mode3_fields=None,
+    )
+
+
+def _flight_context_from_map_fields(
+    callsign: str,
+    *,
+    route: str | None,
+    altitude: str | None,
+    mode3_fields: dict[str, Any] | None,
+) -> OpusFlightContext:
+    ctx = synthetic_flight_context(callsign)
     if route:
         ctx.fp_route_string = route
         tokens = parse_route_tokens(route)
@@ -8139,12 +8187,12 @@ def map_flight_context(config: dict[str, Any] | None) -> OpusFlightContext | Non
             tokens[0].upper() if tokens else None
         )
         ctx.arr_icao = destination_icao(None, route=route) or ctx.dep_icao
-    alt = str(inj.get("fp_altitude") or "").strip()
-    if alt:
-        ctx.fp_altitude = alt
-    sq = _opus_mode3_from_fields(inj)
-    if sq:
-        ctx.mode3 = sq
+    if altitude:
+        ctx.fp_altitude = altitude
+    if mode3_fields:
+        sq = _opus_mode3_from_fields(mode3_fields)
+        if sq:
+            ctx.mode3 = sq
     return ctx
 
 

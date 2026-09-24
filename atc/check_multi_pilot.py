@@ -675,6 +675,56 @@ def test_session_key() -> list[str]:
     return fails
 
 
+def test_client_map_fp_used_on_host() -> list[str]:
+    """Host Delivery must use the client's Route Tester plan, not Opus-only."""
+    fails: list[str] = []
+    cfg = _host_config()
+    for key in ("opus_flight_id", "opus_seat", "opus_flight_label", "callsign_override"):
+        cfg.pop(key, None)
+    server = atc_server.AtcServer(
+        cfg, AIRPORTS, lambda: copy.deepcopy(MISSION), transmit_fn=lambda _j: 0
+    )
+    route = "KLSV.FLEX21R.DREAM.ST LOUIS.ARCOE.NELLIS AFB"
+    hello = server.hello(
+        {
+            "opus_flight_id": 55,
+            "opus_seat": 1,
+            "opus_flight_label": "RAZOR 1 · KLSV",
+            "opus_user_name": "Turtle",
+            "ownship_from_map": True,
+            "fp_route_string": route,
+            "fp_altitude": "220",
+            "tuned_freqs_mhz": [275.8],
+            "radio_fresh": True,
+            "ownship_ll": [36.24, -115.03],
+        }
+    )
+    sess = server.sessions.get(str(hello.get("session_id") or ""))
+    if sess is None:
+        return ["missing session after map-fp hello"]
+    if not sess.identity.get("from_map"):
+        fails.append("session identity should flag from_map")
+    if str(sess.identity.get("fp_route_string") or "") != route:
+        fails.append(
+            f"session should keep map route, got {sess.identity.get('fp_route_string')!r}"
+        )
+    with atc_server._session_engine_binding(sess):
+        ctx = atc_phrase.resolve_active_opus_flight(sess.engine.config)
+        got = str(getattr(ctx, "fp_route_string", "") or "")
+        if got != route:
+            fails.append(f"bound resolve must use map route, got {got!r}")
+        if str(getattr(ctx, "fp_altitude", "") or "") != "220":
+            fails.append(
+                f"bound resolve must use map altitude, got {getattr(ctx, 'fp_altitude', None)!r}"
+            )
+        if "razor" not in str(getattr(ctx, "radio_callsign", "") or "").casefold():
+            fails.append(
+                f"bound resolve should keep Razor callsign, got "
+                f"{getattr(ctx, 'radio_callsign', None)!r}"
+            )
+    return fails
+
+
 def test_bound_seat_tx_callsign_not_host() -> list[str]:
     """During Client bind, Ops/ATC phrases must use Razor 1 — not HOST."""
     fails: list[str] = []
@@ -1954,6 +2004,7 @@ def main() -> int:
     tests = (
         test_session_key,
         test_hello_callsign_not_host_synthetic,
+        test_client_map_fp_used_on_host,
         test_bound_seat_tx_callsign_not_host,
         test_hello_reclaims_identity_upgrade,
         test_connect_error_hints,
