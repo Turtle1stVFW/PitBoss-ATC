@@ -11814,6 +11814,14 @@ class MissionPlanner(tk.Tk):
             "atc_host": host or "127.0.0.1",
             "atc_port": port,
             "atc_token": token,
+            # Carry this PC's Opus jet so Test Connection does not register a
+            # Traffic row named "HOST" (empty identity on a Host box).
+            "opus_user_name": str(self.config_data.get("opus_user_name") or "").strip(),
+            "opus_flight_id": self.config_data.get("opus_flight_id"),
+            "opus_seat": self.config_data.get("opus_seat"),
+            "opus_flight_label": str(self.config_data.get("opus_flight_label") or "").strip(),
+            "callsign_override": str(self.config_data.get("callsign_override") or "").strip(),
+            "opus_backend_url": str(self.config_data.get("opus_backend_url") or "").strip(),
         }
         client = atc_client.AtcClient(cfg)
         try:

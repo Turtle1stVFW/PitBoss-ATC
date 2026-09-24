@@ -675,6 +675,60 @@ def test_session_key() -> list[str]:
     return fails
 
 
+def test_hello_callsign_not_host_synthetic() -> list[str]:
+    """Client hello must not become Traffic callsign HOST (Host-box placeholder)."""
+    fails: list[str] = []
+    cfg = _host_config()
+    # Dedicated Host has no own jet — same as production after strip.
+    for key in ("opus_flight_id", "opus_seat", "opus_flight_label", "callsign_override"):
+        cfg.pop(key, None)
+    server = atc_server.AtcServer(
+        cfg, AIRPORTS, lambda: copy.deepcopy(MISSION), transmit_fn=lambda _j: 0
+    )
+    labeled = server.hello(
+        {
+            "opus_flight_id": 55,
+            "opus_seat": 1,
+            "opus_flight_label": "RAZOR 1 · KLSV · FLEX21R",
+            "opus_user_name": "Turtle",
+        }
+    )
+    cs = str(labeled.get("callsign") or "")
+    if cs.casefold() == "host":
+        fails.append(f"labeled hello must not be HOST, got {cs!r}")
+    if "razor" not in cs.casefold():
+        fails.append(f"labeled hello should be Razor 1, got {cs!r}")
+    live = server.traffic().get("sessions") or []
+    if not any("razor" in str(s.get("callsign") or "").casefold() for s in live):
+        fails.append(f"Traffic should list Razor 1, got {live}")
+
+    # Empty jet fields must fall back to username — never Host placeholder.
+    bare = server.hello(
+        {
+            "opus_user_name": "Turtle",
+            "prior_session_id": str(labeled.get("session_id") or ""),
+        }
+    )
+    bare_cs = str(bare.get("callsign") or "")
+    if bare_cs.casefold() == "host":
+        fails.append(f"bare hello must not be HOST, got {bare_cs!r}")
+    if bare_cs != "Turtle":
+        fails.append(f"bare hello should use username, got {bare_cs!r}")
+
+    # Override wins.
+    ov = server.hello(
+        {
+            "callsign_override": "RAZOR 1",
+            "opus_flight_id": 55,
+            "opus_seat": 1,
+            "prior_session_id": str(bare.get("session_id") or ""),
+        }
+    )
+    if str(ov.get("callsign") or "").casefold() == "host":
+        fails.append("override hello must not be HOST")
+    return fails
+
+
 def test_hello_reclaims_identity_upgrade() -> list[str]:
     """Clear flight then reselect seat must not leave two Traffic rows."""
     fails: list[str] = []
@@ -1828,6 +1882,7 @@ def test_host_config_not_polluted_by_client_flight() -> list[str]:
 def main() -> int:
     tests = (
         test_session_key,
+        test_hello_callsign_not_host_synthetic,
         test_hello_reclaims_identity_upgrade,
         test_connect_error_hints,
         test_persist_state_off,

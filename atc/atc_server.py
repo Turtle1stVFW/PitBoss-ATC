@@ -963,13 +963,25 @@ def _identity_from_hello(body: dict[str, Any], host_config: dict[str, Any]) -> d
     if not callsign:
         cfg = dict(host_config)
         _apply_identity_to_config(cfg, ident)
+        # Client seat resolve must not hit Host-without-flight → synthetic
+        # "HOST" (Traffic then listed Razor 1 as Host). Treat as solo so the
+        # client's flight_id / username can resolve normally.
+        cfg["atc_role"] = "solo"
         try:
             ctx = atc_phrase.resolve_active_opus_flight(cfg)
-            callsign = str(getattr(ctx, "radio_callsign", "") or "")
+            callsign = str(getattr(ctx, "radio_callsign", "") or "") if ctx else ""
         except Exception:
             callsign = ""
+    # Never paint a Traffic pilot as the Host box placeholder / offline stub.
+    weak = {"", "host", "host · no own jet", "callsign", "map"}
+    if str(callsign or "").strip().casefold() in weak:
+        callsign = ""
     if not callsign:
-        callsign = ident["opus_user_name"] or "CALLSIGN"
+        callsign = (
+            atc_phrase.clean_flight_callsign(ident["opus_flight_label"])
+            or ident["opus_user_name"]
+            or "CALLSIGN"
+        )
     ident["callsign"] = callsign
     return ident
 
