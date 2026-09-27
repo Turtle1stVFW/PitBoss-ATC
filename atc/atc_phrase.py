@@ -1625,9 +1625,14 @@ def is_vfr_recovery_weather(
     except (TypeError, ValueError):
         vis_lim = 3.0
     raw = (weather.raw or "").upper()
-    if any(tok in raw.split() for tok in ("FG", "FZFG", "TS", "+TSRA", "TSRA")):
-        # Fog / thunderstorm — treat as no VFR recovery
-        if "FG" in raw.split() or "FZFG" in raw.split():
+    tokens = raw.split()
+    # Fog / thunderstorm — no VFR recovery. Match whole groups (FG, TS) and
+    # thunder composites (TSRA, +TSRA, VCTS); do not match remarks like OTS.
+    for tok in tokens:
+        if tok in ("FG", "FZFG", "TS"):
+            return False
+        core = tok.lstrip("+-")
+        if core.startswith("TS") or (core.endswith("TS") and core.startswith("VC")):
             return False
     if weather.ceiling_ft is not None and weather.ceiling_ft < ceil_lim:
         return False
@@ -1636,6 +1641,15 @@ def is_vfr_recovery_weather(
     # Broken/overcast without parsed height still present in raw near field elev
     if weather.ceiling_ft is None and re.search(r"\b(BKN|OVC)00[0-2]\d\b", raw):
         return False
+    # Vertical visibility (indefinite ceiling) when height was not parsed
+    if weather.ceiling_ft is None:
+        vv = re.search(r"\bVV(\d{3})\b", raw)
+        if vv:
+            try:
+                if int(vv.group(1)) * 100 < ceil_lim:
+                    return False
+            except (TypeError, ValueError):
+                return False
     return True
 
 
@@ -2401,6 +2415,25 @@ def assign_approach_plan(
                 force=True,
                 recovery=str(plan.get("pattern") or st.get("active_recovery") or "")
                 or None,
+                position=position,
+            )
+        # Weather went IMC after an early VMC assign (Control / Blackjack).
+        # Drop the sticky VFR overhead unless the pilot/Fly explicitly pinned it.
+        # Do not auto-flip instrument → VFR when weather improves mid-recovery.
+        plan_source = str(plan.get("source") or "")
+        plan_is_vfr = normalize_recovery_key(plan.get("pattern")) != "instrument"
+        if (
+            plan_is_vfr
+            and not vmc_now
+            and plan_source not in ("override", "request")
+        ):
+            return assign_approach_plan(
+                airport,
+                weather,
+                mission=mission,
+                state=state,
+                opus=opus,
+                force=True,
                 position=position,
             )
         # Filed route changed, or a position/default plan ignored the FP fix.
@@ -12231,6 +12264,15 @@ def parse_metar(raw: str) -> Weather:
             continue
         if ceiling_ft is None or ft < ceiling_ft:
             ceiling_ft = ft
+    # Vertical visibility is an indefinite ceiling (treat as ceiling height).
+    vv_m = re.search(r"\bVV(\d{3})\b", raw.upper())
+    if vv_m:
+        try:
+            vv_ft = int(vv_m.group(1)) * 100
+        except (TypeError, ValueError):
+            vv_ft = None
+        if vv_ft is not None and (ceiling_ft is None or vv_ft < ceiling_ft):
+            ceiling_ft = vv_ft
 
     return Weather(
         wind_dir,
