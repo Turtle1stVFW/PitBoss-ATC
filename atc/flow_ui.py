@@ -1620,6 +1620,9 @@ class MissionPlanner(tk.Tk):
                 lambda: self.mission,
             )
             self._atc_server.host_engine = self.engine
+            # Lock ExternalAudio onto local SRS before any client TX.
+            self.config_data["atc_role"] = "host"
+            self._apply_role_srs_host()
             try:
                 self._atc_server.start(
                     port=int(self.config_data.get("atc_port") or atc_net.DEFAULT_ATC_PORT)
@@ -1981,14 +1984,19 @@ class MissionPlanner(tk.Tk):
             )
             return ""
         if not isinstance(result, dict):
-            return sid
+            self._ui_call(
+                lambda st=step: self._note_no_tx(
+                    "Host returned no play result", action="auto", step=st
+                )
+            )
+            return ""
         action = str(result.get("action") or "")
         text = str(result.get("text") or "").strip()
         detail = result.get("detail")
         if not text and isinstance(detail, dict):
             text = str(detail.get("text") or "").strip()
         self._last_auto_phrase = text
-        if action == "blocked" or result.get("action") == "blocked":
+        if action == "blocked" or result.get("action") == "blocked" or result.get("ok") is False:
             detail = str(result.get("detail") or "").strip()
             low = detail.casefold()
             if "already played" in low:
@@ -2537,9 +2545,49 @@ class MissionPlanner(tk.Tk):
             tracker.pending_latch = ""
             self._note_no_tx(str(exc), action="auto", step=step if isinstance(step, dict) else None)
             return
+        result = result if isinstance(result, dict) else {}
+        act = str(result.get("action") or "")
+        if act == "blocked" or result.get("ok") is False:
+            tracker.clear_fired(latch)
+            tracker.pending_latch = ""
+            self._note_no_tx(
+                str(result.get("detail") or "radio transmit failed"),
+                action="auto",
+                step=step if isinstance(step, dict) else None,
+                channel=str(result.get("channel") or ""),
+            )
+            return
+        # Solo play_id returns the step detail (no action=queued). Require a
+        # real exit_code when ExternalAudio already ran on this PC.
+        if session is None and "exit_code" in result:
+            try:
+                if int(result.get("exit_code") or 0) != 0:
+                    tracker.clear_fired(latch)
+                    tracker.pending_latch = ""
+                    self._note_no_tx(
+                        f"radio transmit failed ({result.get('exit_code')})",
+                        action="auto",
+                        step=step if isinstance(step, dict) else None,
+                        channel=str(result.get("channel") or ""),
+                    )
+                    return
+            except (TypeError, ValueError):
+                tracker.clear_fired(latch)
+                tracker.pending_latch = ""
+                self._note_no_tx(
+                    "radio transmit failed",
+                    action="auto",
+                    step=step if isinstance(step, dict) else None,
+                )
+                return
         tracker.fire_once(latch)
         tracker.pending_latch = ""
-        spoken = (result or {}).get("label") or label or fire
+        spoken = (
+            str(result.get("text") or "").strip()
+            or result.get("label")
+            or label
+            or fire
+        )
         who = ""
         if session is not None:
             who = f"{getattr(session, 'callsign', '')}  "
@@ -3101,8 +3149,32 @@ class MissionPlanner(tk.Tk):
                         if isinstance(row, dict) and str(row.get("id") or "").strip() == sid:
                             live_step = row
                             break
+                # Tips must follow the same agency remap as the Fly hero card
+                # (Bandsaw checkout → bj_range_exit, not the Blackjack hold).
+                try:
+                    import agencies as agencies_mod
+
+                    remapped = agencies_mod.display_step_for_agency(
+                        list(getattr(self.engine, "steps", None) or []),
+                        cursor_channel
+                        or str(live_step.get("channel") or "").strip().lower(),
+                        cursor_index=int(
+                            (getattr(self.engine, "state", None) or {}).get("index")
+                            or 0
+                        ),
+                        last_tx_template=str(
+                            (getattr(self.engine, "state", None) or {}).get(
+                                "last_tx_template"
+                            )
+                            or ""
+                        ),
+                    )
+                    if isinstance(remapped, dict):
+                        live_step = remapped
+                except Exception:
+                    pass
                 context["expected"] = voice_intent.step_expected_template(live_step)
-                context["current_step_id"] = sid
+                context["current_step_id"] = str(live_step.get("id") or sid)
         except Exception:  # noqa: BLE001
             pass
         # Tips / voice scoring follow the live radio when it is an agency in
@@ -3175,6 +3247,33 @@ class MissionPlanner(tk.Tk):
         context["tuned_channel"] = tuned or ""
         context["cursor_channel"] = cursor_channel
         context["phase"] = mission_phase
+        # Remap expected tips to the live agency card (Blackjack after Bandsaw
+        # checkout → bj_range_exit), not the shared cursor hold.
+        try:
+            import agencies as agencies_mod
+
+            tip_ch = str(context.get("channel") or tuned or cursor_channel or "").strip().lower()
+            if tip_ch:
+                remapped = agencies_mod.display_step_for_agency(
+                    list(getattr(self.engine, "steps", None) or []),
+                    tip_ch,
+                    cursor_index=int(
+                        (getattr(self.engine, "state", None) or {}).get("index") or 0
+                    ),
+                    last_tx_template=str(
+                        (getattr(self.engine, "state", None) or {}).get(
+                            "last_tx_template"
+                        )
+                        or ""
+                    ),
+                )
+                if isinstance(remapped, dict):
+                    context["expected"] = voice_intent.step_expected_template(remapped)
+                    sid_r = str(remapped.get("id") or "").strip()
+                    if sid_r:
+                        context["current_step_id"] = sid_r
+        except Exception:
+            pass
         context["callsign"] = atc_phrase.cached_radio_callsign(self.config_data)
         seat = atc_phrase.configured_opus_seat(self.config_data)
         if seat is not None:
@@ -3529,7 +3628,7 @@ class MissionPlanner(tk.Tk):
             def done() -> None:
                 action = result.get("action")
                 detail = result.get("detail")
-                if action == "blocked":
+                if action == "blocked" or result.get("ok") is False:
                     blocked = str(detail or "Blocked off frequency")
                     self._note_no_tx(
                         blocked,
@@ -3614,31 +3713,50 @@ class MissionPlanner(tk.Tk):
 
             def work() -> None:
                 try:
-                    engine = self._live_engine()
-                    result = voice_engine.execute_ops_action(
-                        engine, "ops_codes_finalize"
-                    )
+                    if self._atc_role() == "client" and self._atc_client is not None:
+                        # Host owns ExternalAudio — never finalize codes locally.
+                        result = self._atc_client.action("ops_codes_finalize")
+                    else:
+                        engine = self._live_engine()
+                        result = voice_engine.execute_ops_action(
+                            engine, "ops_codes_finalize"
+                        )
                 except Exception as exc:  # noqa: BLE001
                     err = str(exc)
 
                     def fail() -> None:
-                        self._voice_log(f"VOICE  ops codes failed: {err}")
+                        self._note_no_tx(err, action="auto", channel="ops")
 
                     self._ui_call(fail)
                     return
 
                 def done() -> None:
-                    if result.get("action") == "transmit" and result.get("text"):
+                    if not isinstance(result, dict):
+                        self._note_no_tx(
+                            "Host returned no OPS result",
+                            action="auto",
+                            channel="ops",
+                        )
+                        return
+                    act = str(result.get("action") or "")
+                    if act == "blocked" or result.get("ok") is False:
+                        self._note_no_tx(
+                            str(result.get("detail") or "OPS blocked"),
+                            action="auto",
+                            channel="ops",
+                        )
+                        return
+                    if act in ("transmit", "queued") and result.get("text"):
                         self._voice_log(
                             f"TX   OPS  {result.get('text', '')}"
                         )
-                        self._append_fly_voice_feed(
-                            f"TX  OPS  {result.get('text', '')}\n"
-                        )
-                    again = result.get("deferred") if isinstance(result, dict) else None
+                    again = result.get("deferred")
                     if isinstance(again, dict) and again.get("kind") == "ops_codes":
                         self._schedule_ops_codes(again)
-                    self._refresh_fly_status()
+                    if self._atc_role() == "client":
+                        self._refresh_client_fly()
+                    else:
+                        self._refresh_fly_status()
 
                 self._ui_call(done)
 
@@ -9341,15 +9459,24 @@ class MissionPlanner(tk.Tk):
         if result.get("execute_departure_handoff"):
             def ho_work() -> None:
                 try:
-                    step = self.engine.current_step() or {}
-                    tmpl = str(step.get("template") or "")
-                    sid = str(step.get("id") or "")
-                    if tmpl in ("departure_handoff", "center_handoff") and sid:
-                        played = self.engine.play_id(sid, bypass_freq_gate=True)
-                    else:
-                        played = self.engine.play_template(
-                            "departure_handoff", bypass_freq_gate=True
+                    if self._atc_role() == "client" and self._atc_client is not None:
+                        step = self.engine.current_step() or {}
+                        sid = str(step.get("id") or "").strip()
+                        if not sid:
+                            raise RuntimeError("No handoff step to play")
+                        played = self._atc_client.action(
+                            "play", step_id=sid, auto=False
                         )
+                    else:
+                        step = self.engine.current_step() or {}
+                        tmpl = str(step.get("template") or "")
+                        sid = str(step.get("id") or "")
+                        if tmpl in ("departure_handoff", "center_handoff") and sid:
+                            played = self.engine.play_id(sid, bypass_freq_gate=True)
+                        else:
+                            played = self.engine.play_template(
+                                "departure_handoff", bypass_freq_gate=True
+                            )
                     self._ui_call(lambda p=played: self._on_handoff_request_done(p))
                 except Exception as exc:  # noqa: BLE001
                     err = str(exc)
@@ -9625,11 +9752,35 @@ class MissionPlanner(tk.Tk):
 
     def _on_handoff_request_done(self, played: dict[str, Any] | None) -> None:
         played = played or {}
+        act = str(played.get("action") or "")
+        if act == "blocked" or played.get("ok") is False:
+            self._note_no_tx(
+                str(played.get("detail") or "Handoff blocked"),
+                action="handoff",
+                channel=str(played.get("channel") or "departure"),
+            )
+            self._refresh_fly_status()
+            return
+        if "exit_code" in played:
+            try:
+                if int(played.get("exit_code") or 0) != 0:
+                    self._note_no_tx(
+                        f"radio transmit failed ({played.get('exit_code')})",
+                        action="handoff",
+                        channel=str(played.get("channel") or "departure"),
+                    )
+                    self._refresh_fly_status()
+                    return
+            except (TypeError, ValueError):
+                pass
         freq = played.get("freq") or ""
-        label = played.get("label") or "Departure handoff"
+        label = (
+            str(played.get("text") or "").strip()
+            or played.get("label")
+            or "Departure handoff"
+        )
         ch = str(played.get("channel") or "departure").upper()
-        self.fly_log.insert(tk.END, f"TX  {label}  ·  {freq}  ·  {ch}\n")
-        self.fly_log.see(tk.END)
+        self._voice_log(f"TX  {label}  ·  {freq}  ·  {ch}")
         self._refresh_fly_status()
 
     def _on_option_full_stop_done(self, played: dict[str, Any] | None) -> None:
@@ -9855,8 +10006,10 @@ class MissionPlanner(tk.Tk):
             limit=5,
             advance_limit=2,
             optional_limit=3,
-            awaiting_readback=False,
-            readback_items=None,
+            awaiting_readback=awaiting,
+            readback_items=context.get("readback_items")
+            if awaiting and isinstance(context.get("readback_items"), list)
+            else None,
             steps=context.get("steps") if isinstance(context.get("steps"), list) else None,
             current_step_id=str(context.get("current_step_id") or ""),
             tanker_chat_choices=context.get("tanker_chat_choices")
@@ -10182,12 +10335,17 @@ class MissionPlanner(tk.Tk):
                 sandbox = False
             # Arrows win until the next TX: show the step the pilot parked on,
             # with its number and radio, not the agency we are nudging them to.
-            if (getattr(self.engine, "state", None) or {}).get("manual_step_view"):
+            manual_park = bool(
+                (getattr(self.engine, "state", None) or {}).get("manual_step_view")
+            )
+            if manual_park:
                 sandbox = False
             # Ops is not a timeline step — without this, a custom Plan (Untitled)
             # keeps painting Delivery over the Ops radio the pilot just selected.
             # Same for C2 side trips (Bandsaw while Blackjack holds the cursor).
-            if not sandbox:
+            # Do not re-open sandbox while hand-parked — that painted YOU ARE ON /
+            # ON FREQ over STEP N and made ◀ ▶ look dead on Host/Client.
+            if not sandbox and not manual_park:
                 try:
                     live_tune = (
                         srs_radio.channel_for_tuned_freq(
@@ -10330,6 +10488,24 @@ class MissionPlanner(tk.Tk):
                     ).strip()
                     if d_label:
                         with_name = f"{d_phase} · {d_label}" if d_phase else d_label
+                # While Delivery said "contact Ground" and you are still on
+                # Delivery, do not paint the next step's "Taxi to EOR" title —
+                # that looked like the flow jumped ahead.
+                if switch_to and pending_ch:
+                    try:
+                        import agencies as agencies_mod
+
+                        dest = agencies_mod.fly_label(pending_ch, ap_name) or (
+                            agencies_mod.spoken_name(pending_ch, ap_name)
+                            or pending_ch.replace("_", " ").title()
+                        )
+                    except Exception:
+                        dest = pending_ch.replace("_", " ").title()
+                    with_name = (
+                        dest
+                        if str(dest).casefold().startswith("contact ")
+                        else f"Contact {dest}"
+                    )
                 self.fly_step_num.set("SWITCH TO" if switch_to else "ON FREQ")
                 self.fly_step_name.set(with_name)
             else:
@@ -10468,8 +10644,13 @@ class MissionPlanner(tk.Tk):
             last_txt = str(
                 (getattr(self.engine, "state", None) or {}).get("last_tx_text") or ""
             ).strip()
+            confirmed = bool(
+                (getattr(self.engine, "state", None) or {}).get("last_tx_confirmed")
+            )
             present_ch = str((step or {}).get("channel") or "").strip().lower()
-            if last_txt and last_ch and last_ch == present_ch:
+            # Only paint the spoken phrase after ExternalAudio finished.
+            # Queued-but-silent TX used to fill fly_say / "said it did" early.
+            if last_txt and last_ch and last_ch == present_ch and confirmed:
                 self._fly_phrase_req_id = getattr(self, "_fly_phrase_req_id", 0) + 1
                 self.fly_say.set(last_txt)
             else:
@@ -10679,14 +10860,29 @@ class MissionPlanner(tk.Tk):
                     raise RuntimeError(f"Unknown fly action: {action}")
 
                 def done() -> None:
+                    if not isinstance(r, dict):
+                        self._note_no_tx(
+                            "Host returned no result", action=action
+                        )
+                        self._refresh_client_fly()
+                        return
+                    act = str(r.get("action") or "")
+                    if act == "blocked" or r.get("ok") is False:
+                        self._note_no_tx(
+                            str(r.get("detail") or "Blocked by Host"),
+                            action=action,
+                            channel=str(r.get("channel") or ""),
+                        )
+                        self._refresh_client_fly()
+                        return
                     queued = ""
-                    if isinstance(r, dict) and r.get("queued"):
+                    if r.get("queued"):
                         queued = f"  queue {r.get('queue_pos')}"
-                    label = ""
-                    if isinstance(r, dict):
-                        label = str(r.get("label") or r.get("text") or r.get("action") or action)
-                    self.fly_log.insert(tk.END, f"{action.upper()}  {label}{queued}\n")
-                    self.fly_log.see(tk.END)
+                    label = str(
+                        r.get("text") or r.get("label") or r.get("action") or action
+                    )
+                    # LAST HEARD (not only the long fly_log) so Client matches Host/voice.
+                    self._voice_log(f"{action.upper()}  {label}{queued}")
                     self._refresh_client_fly()
 
                 self._ui_call(done)
@@ -10778,7 +10974,8 @@ class MissionPlanner(tk.Tk):
 
     def _schedule_traffic_poll(self) -> None:
         try:
-            if self._atc_role() == "host":
+            # Prefer live Host listener — config role can briefly desync.
+            if self._atc_server is not None or self._atc_role() == "host":
                 self._refresh_traffic()
             elif self._atc_role() == "client":
                 self._refresh_client_fly()
@@ -10790,6 +10987,22 @@ class MissionPlanner(tk.Tk):
         if not hasattr(self, "var_traffic"):
             return
         role = self._atc_role()
+        # Runtime listener wins over config. Session identity bind used to
+        # stamp atc_role=solo onto the shared Host config — Traffic then
+        # painted Solo while Setup's StringVar still said Host, and TX went
+        # to the wrong SRS. Heal the desync whenever the Host is listening.
+        if self._atc_server is not None and role != "host":
+            self.config_data["atc_role"] = "host"
+            if hasattr(self, "var_atc_role"):
+                try:
+                    self.var_atc_role.set("host")
+                except Exception:
+                    pass
+            role = "host"
+            app_diag.warn(
+                app_diag.CAT_NETWORK,
+                "Host role restored after runtime desync (Traffic)",
+            )
         if role != "host" or self._atc_server is None:
             if role == "client":
                 self.var_traffic.set(
@@ -11621,6 +11834,14 @@ class MissionPlanner(tk.Tk):
             "atc_host": host or "127.0.0.1",
             "atc_port": port,
             "atc_token": token,
+            # Carry this PC's Opus jet so Test Connection does not register a
+            # Traffic row named "HOST" (empty identity on a Host box).
+            "opus_user_name": str(self.config_data.get("opus_user_name") or "").strip(),
+            "opus_flight_id": self.config_data.get("opus_flight_id"),
+            "opus_seat": self.config_data.get("opus_seat"),
+            "opus_flight_label": str(self.config_data.get("opus_flight_label") or "").strip(),
+            "callsign_override": str(self.config_data.get("callsign_override") or "").strip(),
+            "opus_backend_url": str(self.config_data.get("opus_backend_url") or "").strip(),
         }
         client = atc_client.AtcClient(cfg)
         try:
@@ -11689,7 +11910,19 @@ class MissionPlanner(tk.Tk):
 
     def _apply_role_srs_host(self) -> None:
         """Host → local SRS; Solo/Client → squadron SRS (known defaults only)."""
-        role = self._atc_role()
+        # While the Host listener is up, never rewrite airports to showtime.
+        # A Solo desync (Traffic said Solo, Setup said Host) used to set
+        # srs_host=showtime.455aew.com so ExternalAudio TX was silent on SRS.
+        if getattr(self, "_atc_server", None) is not None:
+            self.config_data["atc_role"] = "host"
+            if hasattr(self, "var_atc_role"):
+                try:
+                    self.var_atc_role.set("host")
+                except Exception:
+                    pass
+            role = "host"
+        else:
+            role = self._atc_role()
         for ap in self.airports.values():
             if not isinstance(ap, dict):
                 continue
@@ -14566,14 +14799,8 @@ class MissionPlanner(tk.Tk):
             self.config_data["opus_flight_label"] = " · ".join(
                 self._opus_flight_summary_bits(row)
             )
-            if atc_phrase.ownship_from_map_enabled(self.config_data):
-                self.config_data["ownship_from_map"] = False
-                if hasattr(self, "var_ownship_from_map"):
-                    self.var_ownship_from_map.set(False)
-                try:
-                    save_json(CONFIG_PATH, self.config_data)
-                except OSError:
-                    pass
+            # Keep map FP when the tester is ownship — selecting Opus is for
+            # callsign/crew; turning map off here forced Delivery onto Opus route.
             self._update_opus_flight_label(row)
             dlg.destroy()
             self._persist_identity(refresh_opus=True)

@@ -1522,9 +1522,24 @@ INTENTS: tuple[Intent, ...] = (
     ),
     Intent(
         "say_again",
-        (("say again", "repeat", "come again", "one more time", "didn t copy", "did not copy"),),
+        (
+            (
+                "say again",
+                "say that again",
+                "come again",
+                "one more time",
+                "didn t copy",
+                "did not copy",
+                "please repeat",
+                "can you repeat",
+                "repeat last",
+                "repeat that",
+            ),
+        ),
         example="say again",
         does="replay the last transmission",
+        # Bare "repeat" used to match climb / contact readbacks via Whisper
+        # near-misses and re-TX the last call ("say again treatment").
     ),
     Intent(
         "accept_rolling",
@@ -3763,6 +3778,24 @@ def _score_intents(
         # one; the rest of the time "roger" is just talk.
         if intent.id == "acknowledge_readback" and not awaiting_readback:
             continue
+        # Already had LUAW — "ready for departure" must not re-fire and tip
+        # must move to in position (cursor past lineup).
+        last_tmpl = str(last_tx_template or "").strip().lower()
+        if (
+            intent.id == "ready_departure"
+            and last_tmpl in ("lineup", "line_up_and_wait")
+            and not awaiting_readback
+        ):
+            continue
+        # Check-ins are agency-specific. Off-channel soft-penalty still left
+        # ops_check_in above the fire bar on Departure "with you" after radar.
+        if (
+            "check_in" in intent.id
+            and intent.channels
+            and channel
+            and channel not in intent.channels
+        ):
+            continue
         # Addressed Blackjack — do not steal the check-in as Bandsaw / Departure.
         if addressed == "blackjack" and intent.id in (
             "bandsaw_check_in",
@@ -4052,7 +4085,12 @@ def _score_intents(
             confidence = min(1.0, 0.98 * intent.weight)
             coverage = 1.0
         elif intent.groups:
-            hits = [_group_hit(text, group) for group in intent.groups]
+            # Say-again must be literal — fuzzy "repeat" near-misses used to
+            # re-TX the last call on climb / contact readbacks.
+            use_fuzzy = intent.id != "say_again"
+            hits = [
+                _group_hit(text, group, fuzzy=use_fuzzy) for group in intent.groups
+            ]
             matched = [h for h in hits if h]
             if len(matched) != len(hits):
                 # ATC is waiting on this exact call, so a shortened version of
@@ -4485,8 +4523,19 @@ def echoes_last_atc(
     addr = str(addressed or "").strip().lower()
     prev = str(last_tx_channel or "").strip().lower()
     pending = str(pending_contact or "").strip().lower()
+    last_tmpl = str(last_tx_template or "").strip().lower()
     # Real check-in after a handoff must still fire ("with you" / "checking in").
+    # Exception: Departure already gave radar / climb — do not re-fire check-in
+    # (that re-TX'd the climb and left Fly stuck on the check-in cue).
+    # Do not include departure_handoff here — that is the Tower "contact Departure"
+    # cue and the first "with you" must still open the check-in.
     if any(cue in text and cue not in last for cue in _CHECKIN_OVERRIDE_ECHO):
+        if (
+            intent is not None
+            and "check_in" in intent.id
+            and last_tmpl in ("radar_contact", "climb_cruise")
+        ):
+            return True
         return False
     # C2 asks that reuse ATC's own wording (alpha check / picture / dope /
     # declare / VID after a picture that named "east group") are new requests,
@@ -4513,7 +4562,6 @@ def echoes_last_atc(
             return True
     if addr and prev and addr != prev:
         return False
-    last_tmpl = str(last_tx_template or "").strip().lower()
     cand_tmpl = str(candidate_template or "").strip().lower()
     if "monitor tower" in last and "monitor tower" in text:
         return True
@@ -4984,6 +5032,9 @@ def hide_blackjack_checkin_cue(
     """True once the flight is on Blackjack and does not need to check in again."""
     last_tmpl = str(last_tx_template or "").strip().lower()
     last_ch = str(last_tx_channel or "").strip().lower()
+    # Back from Bandsaw/Joshua → tip range exit, not another check-in.
+    if last_tmpl in ("bandsaw_check_out", "joshua_check_out", "bj_range_exit"):
+        return True
     if last_tmpl in _BJ_ON_FREQ_TEMPLATES:
         return True
     if not blackjack_checked_in:
@@ -5200,6 +5251,23 @@ def suggestions(
             continue
         # After Ground has issued taxi, tip the readback — not another request.
         if awaiting_readback and intent.id == "ready_taxi":
+            continue
+        # LUAW already on the wire — tip in position, not ready for departure.
+        if (
+            intent.id == "ready_departure"
+            and str(last_tx_template or "").strip().lower()
+            in ("lineup", "line_up_and_wait")
+            and not awaiting_readback
+            and expected_l not in _DEPARTURE_READY_TEMPLATES
+        ):
+            continue
+        # Departure already answered — tip handoff, not another "with you".
+        if (
+            intent.id == "departure_check_in"
+            and str(last_tx_template or "").strip().lower()
+            in ("radar_contact", "climb_cruise", "departure_handoff")
+            and expected_l not in ("", "radar_contact")
+        ):
             continue
         # LUAW is the default — don't tip "request line up" next to ready.
         if expected_l in ("lineup", "line_up_and_wait") and intent.id == "request_lineup":

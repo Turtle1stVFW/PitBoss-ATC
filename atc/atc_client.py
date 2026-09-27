@@ -163,7 +163,42 @@ class AtcClient:
                 body = {"session_id": self.session_id}
                 body.update(_radio_payload(self.config))
                 data = self._request("POST", "/v1/heartbeat", body)
-                self.last_status = data
+                # Heartbeat is paint-only. A seek/action that finished while this
+                # request was in flight must not be overwritten by the older cursor.
+                prev = self.last_status if isinstance(self.last_status, dict) else {}
+                incoming = data if isinstance(data, dict) else {}
+                prev_fs = (
+                    prev.get("flow_state")
+                    if isinstance(prev.get("flow_state"), dict)
+                    else {}
+                )
+                if prev_fs.get("manual_step_view"):
+                    try:
+                        prev_idx = int(prev.get("index") or 0)
+                        new_idx = int(incoming.get("index") or 0)
+                    except (TypeError, ValueError):
+                        prev_idx, new_idx = 0, 0
+                    if prev_idx != new_idx:
+                        keep = {
+                            key: prev[key]
+                            for key in (
+                                "index",
+                                "step_number",
+                                "label",
+                                "step",
+                                "flow_state",
+                                "awaiting_readback",
+                                "last_tx_text",
+                                "total",
+                                "at_end",
+                            )
+                            if key in prev
+                        }
+                        self.last_status = {**incoming, **keep}
+                    else:
+                        self.last_status = incoming
+                else:
+                    self.last_status = incoming
                 self.last_error = ""
                 try:
                     import app_diag
@@ -370,6 +405,40 @@ def _radio_payload(config: dict[str, Any]) -> dict[str, Any]:
     alt = _ownship_alt_ft(config)
     if alt is not None:
         out["ownship_alt_ft"] = alt
+    # Map Route Tester plan — Host needs this for Delivery / clearance (it has
+    # no local ownship_inject.json for this jet).
+    fp = _map_flight_plan_payload(config)
+    if fp:
+        out.update(fp)
+    return out
+
+
+def _map_flight_plan_payload(config: dict[str, Any]) -> dict[str, Any]:
+    """Route / altitude from the map inject when the client is map-flying."""
+    inj: dict[str, Any] | None = None
+    try:
+        inj = atc_phrase.read_ownship_inject(config=config)
+    except Exception:
+        inj = None
+    if not isinstance(inj, dict):
+        # drive_fly may still be writing FP while the checkbox is briefly off
+        try:
+            inj = atc_phrase.read_ownship_inject()
+        except Exception:
+            inj = None
+    if not isinstance(inj, dict):
+        return {}
+    route = str(inj.get("fp_route_string") or "").strip()
+    if not route and not atc_phrase.ownship_from_map_enabled(config):
+        return {}
+    out: dict[str, Any] = {}
+    if route:
+        out["fp_route_string"] = route
+    alt = str(inj.get("fp_altitude") or "").strip()
+    if alt:
+        out["fp_altitude"] = alt
+    if route or atc_phrase.ownship_from_map_enabled(config):
+        out["ownship_from_map"] = True
     return out
 
 

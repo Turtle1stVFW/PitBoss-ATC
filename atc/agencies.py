@@ -292,16 +292,38 @@ def display_step_for_agency(
             pick = step
             break
     last = str(last_tx_template or "").strip().lower()
-    if last in ("bandsaw_check_out", "joshua_check_out"):
-        for _i, step in matches:
-            if str(step.get("template") or "").strip().lower() == "bj_range_exit":
-                return step
+    # After C2 checkout (or when the shared cursor already sits on range
+    # exit), never pin Fly back to the Blackjack check-in hold.
+    range_exit = next(
+        (
+            (i, step)
+            for i, step in matches
+            if str(step.get("template") or "").strip().lower() == "bj_range_exit"
+        ),
+        None,
+    )
+    if range_exit is not None:
+        exit_i, exit_step = range_exit
+        if last in ("bandsaw_check_out", "joshua_check_out"):
+            return exit_step
+        if exit_i <= cur and last in (
+            "bj_check_in",
+            "bj_continue",
+            "bj_range_entry",
+            "bj_alpha_check",
+            "",
+        ):
+            return exit_step
     if not last:
         return pick
     for i, step in matches:
         tmpl = str(step.get("template") or "").strip().lower()
         if tmpl != last:
             continue
+        # Cursor already past this TX — show the live agency step (e.g. after
+        # LUAW → clear_takeoff / in position, not stuck on "ready for departure").
+        if cur > i:
+            return pick
         later = [m for m in matches if m[0] > i]
         if later and str(later[0][1].get("template") or "").strip().lower() in (
             _AGENCY_FOLLOW_ON

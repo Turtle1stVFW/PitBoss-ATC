@@ -1080,16 +1080,18 @@ def execute_intent(
             if isinstance(getattr(engine, "state", None), dict):
                 engine.state.pop("bandsaw_checked_in", None)
             if played.get("action") != "none":
-                _advance_past_bandsaw(engine)
+                _schedule_bandsaw_advance(engine)
                 return played
             # No bandsaw_check_out step in this mission — reply and skip ahead
             # past any remaining Bandsaw / Joshua cursor.
             text = atc_phrase.build_bandsaw_check_out(airport, callsign)
-            result = _transmit(engine, airport, text, "bandsaw")
+            result = _transmit(
+                engine, airport, text, "bandsaw", template="bandsaw_check_out"
+            )
             if isinstance(getattr(engine, "state", None), dict):
                 engine.state.pop("bandsaw_checked_in", None)
             if result.get("action") == "transmit":
-                _advance_past_bandsaw(engine)
+                _schedule_bandsaw_advance(engine)
             return result
         if intent == "joshua_check_in" or match.template == "joshua_check_in":
             import tanker as tanker_mod
@@ -1123,12 +1125,14 @@ def execute_intent(
         if intent == "joshua_check_out" or match.template == "joshua_check_out":
             played = _play_step(engine, match)
             if played.get("action") != "none":
-                _advance_past_bandsaw(engine)
+                _schedule_bandsaw_advance(engine)
                 return played
             text = atc_phrase.build_joshua_check_out(airport, callsign)
-            result = _transmit(engine, airport, text, "joshua")
+            result = _transmit(
+                engine, airport, text, "joshua", template="joshua_check_out"
+            )
             if result.get("action") == "transmit":
-                _advance_past_bandsaw(engine)
+                _schedule_bandsaw_advance(engine)
             return result
         if intent == "control_check_in" or match.template == "control_check_in":
             cur = engine.current_step() or {}
@@ -2022,25 +2026,36 @@ def _transmit(
         )
     st = getattr(engine, "state", None)
     if isinstance(st, dict) and str(text or "").strip():
-        st["last_tx_text"] = text
-        st["last_tx_channel"] = str(channel or "")
         tmpl = str(template or "").strip()
-        if tmpl:
-            st["last_tx_template"] = tmpl
-        elif not st.get("awaiting_readback"):
-            # Boom / ad-hoc TX is not a clearance hinge — don't invent a template.
-            st["last_tx_template"] = ""
-        atc_phrase.stamp_last_tx(
-            st,
-            text=text,
-            deferred=bool(getattr(engine, "defer_tx", False)),
-        )
-        try:
-            import agencies as agencies_mod
+        if getattr(engine, "defer_tx", False):
+            # Do not paint LAST HEARD until ExternalAudio exits 0.
+            # Stash agency + phrase for commit_deferred_tx_success.
+            if tmpl:
+                pending_tmpl = tmpl
+            elif not st.get("awaiting_readback"):
+                pending_tmpl = ""
+            else:
+                pending_tmpl = str(st.get("last_tx_template") or "")
+            engine._deferred_agency = (str(channel or ""), pending_tmpl)
+            engine._deferred_voice_tx = {
+                "text": text,
+                "channel": str(channel or ""),
+                "template": pending_tmpl,
+            }
+        else:
+            st["last_tx_text"] = text
+            st["last_tx_channel"] = str(channel or "")
+            if tmpl:
+                st["last_tx_template"] = tmpl
+            elif not st.get("awaiting_readback"):
+                st["last_tx_template"] = ""
+            atc_phrase.stamp_last_tx(st, text=text, deferred=False)
+            try:
+                import agencies as agencies_mod
 
-            agencies_mod.note_tx(st, channel, str(st.get("last_tx_template") or ""))
-        except Exception:
-            pass
+                agencies_mod.note_tx(st, channel, str(st.get("last_tx_template") or ""))
+            except Exception:
+                pass
     return {
         "action": "transmit",
         "text": text,
@@ -2704,6 +2719,14 @@ def resolve_tanker_chat(
         engine.state,
     )
     return result
+
+
+def _schedule_bandsaw_advance(engine: Any) -> None:
+    """Move past C2 only after ExternalAudio exits 0 when Host is queueing TX."""
+    if getattr(engine, "defer_tx", False):
+        engine._pending_bandsaw_advance = True
+        return
+    _advance_past_bandsaw(engine)
 
 
 def _advance_past_bandsaw(engine: Any) -> None:

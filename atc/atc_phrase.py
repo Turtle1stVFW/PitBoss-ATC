@@ -1031,13 +1031,26 @@ def resolve_active_opus_flight(config: dict[str, Any]) -> OpusFlightContext | No
     Load filed FP + callsign from Opus.
 
     Preference order:
-      1. config opus_flight_id (chosen in the flights picker)
-      2. Scan flights for opus_user_name signup (legacy auto-match)
-      3. Manual callsign / offline placeholder
+      1. Bound client map plan (Host TX for a Route Tester seat)
+      2. Local map tester inject when ownship_from_map is on
+      3. config opus_flight_id (chosen in the flights picker)
+      4. Scan flights for opus_user_name signup (legacy auto-match)
+      5. Manual callsign / offline placeholder
 
     Seat: opus_seat if set, else matching signup for opus_user_name, else seat 1.
-    callsign_override replaces the spoken callsign (FP still from Opus when available).
+    callsign_override replaces the spoken callsign (FP still from map/Opus when available).
     """
+    # Host-bound client: map FP rode in on hello/heartbeat (no local inject here).
+    if config.get("_seat_from_map") and str(
+        config.get("_seat_fp_route_string") or ""
+    ).strip():
+        mapped = seat_map_flight_context(config)
+        if mapped is not None:
+            print(
+                f"Using client map flight: {mapped.radio_callsign} "
+                f"route={mapped.fp_route_string} alt={mapped.fp_altitude}"
+            )
+            return apply_callsign_override(config, mapped)
     if ownship_from_map_enabled(config):
         mapped = map_flight_context(config)
         if mapped is not None:
@@ -1079,11 +1092,16 @@ def resolve_active_opus_flight(config: dict[str, Any]) -> OpusFlightContext | No
 
     # Dedicated Host box only routes client flights. Without a selected
     # flight_id, do not scan Opus signups by username (404 spam / wrong jet).
-    # Session engines still resolve when the client's opus_flight_id is bound.
+    # Session bind seeds callsign_override / opus_flight_label from the client
+    # so TX says "Razor one" — not the Host-box placeholder.
     if role == "host" and selected_id is None:
-        label = override or "HOST"
+        label = (
+            override
+            or clean_flight_callsign(str(config.get("opus_flight_label") or ""))
+            or "HOST"
+        )
         print(f"Host has no Opus flight selected — using {label} (clients carry FP)")
-        return synthetic_flight_context(label)
+        return apply_callsign_override(config, synthetic_flight_context(label))
 
     cache_key = _opus_cache_key(config)
     now = time.time()
@@ -2898,8 +2916,11 @@ def stamp_last_tx(
     state["last_tx_at"] = t
     if deferred:
         state["last_tx_end_at"] = t + estimate_spoken_duration_s(text, speed=speed)
+        # Not on SRS yet — Fly must not treat this as LAST HEARD / fly_say.
+        state["last_tx_confirmed"] = False
     else:
         state["last_tx_end_at"] = t
+        state["last_tx_confirmed"] = True
 
 
 def note_tx_finished(
@@ -2911,6 +2932,29 @@ def note_tx_finished(
     if not isinstance(state, dict):
         return
     state["last_tx_end_at"] = time.time() if now is None else float(now)
+    state["last_tx_confirmed"] = True
+
+
+def revert_failed_radio_tx(state: dict[str, Any] | None) -> None:
+    """
+    ExternalAudio never spoke — undo the optimistic LAST HEARD / readback stamp.
+
+    Host play_id used to advance the cursor and stamp last_tx when the job was
+    only queued. On hub failure (exit 99, timeout, prerender error) Fly must not
+    keep showing that phrase as heard, open a readback window, or sit past the
+    step that still needs a successful TX (cursor rollback is abandon_deferred_tx).
+    """
+    if not isinstance(state, dict):
+        return
+    state["last_tx_text"] = ""
+    state["last_tx_template"] = ""
+    state["last_tx_channel"] = ""
+    state["last_tx_confirmed"] = False
+    state["awaiting_readback"] = False
+    state["readback_items"] = []
+    state["awaiting_confirm_template"] = ""
+    state["last_tx_end_at"] = time.time()
+    # Keep last_tx_at so gap timers do not think ATC is still talking.
 
 
 def radio_gap_remaining(
@@ -8132,21 +8176,69 @@ def map_flight_context(config: dict[str, Any] | None) -> OpusFlightContext | Non
         return None
     override = callsign_override(config or {})
     cs = override or str(inj.get("callsign") or "").strip() or "MAP"
-    ctx = synthetic_flight_context(cs)
-    route = str(inj.get("fp_route_string") or "").strip()
+    ctx = _flight_context_from_map_fields(
+        cs,
+        route=str(inj.get("fp_route_string") or "").strip() or None,
+        altitude=str(inj.get("fp_altitude") or "").strip() or None,
+        mode3_fields=inj,
+    )
+    return ctx
+
+
+def seat_map_flight_context(config: dict[str, Any] | None) -> OpusFlightContext | None:
+    """Host-side: client-sent Route Tester plan bound onto this seat's TX config."""
+    cfg = config or {}
+    route = str(cfg.get("_seat_fp_route_string") or "").strip()
+    if not route:
+        return None
+    override = callsign_override(cfg)
+    cs = (
+        override
+        or clean_flight_callsign(str(cfg.get("opus_flight_label") or ""))
+        or "MAP"
+    )
+    return _flight_context_from_map_fields(
+        cs,
+        route=route,
+        altitude=str(cfg.get("_seat_fp_altitude") or "").strip() or None,
+        mode3_fields=None,
+        field_icao=str(cfg.get("_seat_field_icao") or "").strip() or None,
+        field_name=str(cfg.get("_seat_field_name") or "").strip() or None,
+    )
+
+
+def _flight_context_from_map_fields(
+    callsign: str,
+    *,
+    route: str | None,
+    altitude: str | None,
+    mode3_fields: dict[str, Any] | None,
+    field_icao: str | None = None,
+    field_name: str | None = None,
+) -> OpusFlightContext:
+    ctx = synthetic_flight_context(callsign)
     if route:
         ctx.fp_route_string = route
         tokens = parse_route_tokens(route)
-        ctx.dep_icao = destination_icao(tokens[0] if tokens else None) or (
-            tokens[0].upper() if tokens else None
+        ctx.dep_icao = destination_icao(
+            tokens[0] if tokens else None,
+            field_icao=field_icao,
+            field_name=field_name,
+        ) or (
+            tokens[0].upper() if tokens and _looks_like_icao(tokens[0]) else None
         )
-        ctx.arr_icao = destination_icao(None, route=route) or ctx.dep_icao
-    alt = str(inj.get("fp_altitude") or "").strip()
-    if alt:
-        ctx.fp_altitude = alt
-    sq = _opus_mode3_from_fields(inj)
-    if sq:
-        ctx.mode3 = sq
+        ctx.arr_icao = destination_icao(
+            None,
+            route=route,
+            field_icao=field_icao,
+            field_name=field_name,
+        ) or ctx.dep_icao
+    if altitude:
+        ctx.fp_altitude = altitude
+    if mode3_fields:
+        sq = _opus_mode3_from_fields(mode3_fields)
+        if sq:
+            ctx.mode3 = sq
     return ctx
 
 
@@ -10755,34 +10847,81 @@ def speak_fix(fix: str) -> str:
 
 
 _ICAO_CODE = re.compile(r"^[A-Z]{3,4}$")
+# Map / Opus routes often end "NELLIS AFB" — AFB must not become arr_icao
+# (TTS then said "cleared to A F B").
+_NOT_AIRPORT_ICAO = frozenset(
+    {
+        "AFB",
+        "AAF",
+        "AB",
+        "AF",
+        "NAS",
+        "MCAS",
+        "RAF",
+        "RAAF",
+        "CFB",
+    }
+)
 
 
 def destination_icao(
     raw: str | None,
     *,
     route: str | None = None,
+    field_icao: str | None = None,
+    field_name: str | None = None,
 ) -> str | None:
     """
     Destination airport only — never a dotted / spaced flight-plan string.
 
     Opus and the map tester sometimes put the whole route in arr_icao
     (KLSV.MMM8.ILC171028.KRYSS.KLSV). Spelling that letter-by-letter is
-    not a clearance.
+    not a clearance. Trailing place names (NELLIS AFB) map back to the
+    active field when they match ``field_name``.
     """
+
+    def _valid_code(tok: str) -> str | None:
+        t = (tok or "").strip().upper()
+        if not t or t in _NOT_AIRPORT_ICAO:
+            return None
+        if _looks_like_icao(t):
+            return t
+        # Exact 4-letter ICAO (incl. foreign). Never 3-letter suffixes like AFB.
+        if len(t) == 4 and t.isalpha() and _ICAO_CODE.fullmatch(t):
+            return t
+        return None
+
     def _from_blob(text: str | None) -> str | None:
         if not text:
             return None
         s = str(text).strip().upper()
-        if _ICAO_CODE.fullmatch(s):
-            return s
+        hit = _valid_code(s)
+        if hit:
+            return hit
         tokens = parse_route_tokens(s)
+        # Prefer a real ICAO from the end; skip AFB / fix names.
         for tok in reversed(tokens):
-            t = tok.upper()
-            if _ICAO_CODE.fullmatch(t) and not any(ch.isdigit() for ch in t):
-                return t
+            hit = _valid_code(tok)
+            if hit:
+                return hit
         return None
 
-    return _from_blob(raw) or _from_blob(route)
+    code = _from_blob(raw) or _from_blob(route)
+    if code:
+        return code
+
+    # Place-name fallback: "... NELLIS AFB" with field name Nellis → KLSV.
+    field = str(field_icao or "").strip().upper()
+    fname = str(field_name or "").strip().upper()
+    if not field or not fname:
+        return None
+    stem = re.sub(r"\s+(AFB|AAF|NAS|MCAS|RAF|RAAF|CFB)\s*$", "", fname).strip()
+    if not stem:
+        return None
+    blob = f"{raw or ''} {route or ''}".upper()
+    if stem in blob:
+        return field
+    return None
 
 
 def speak_icao_or_name(
@@ -10791,11 +10930,18 @@ def speak_icao_or_name(
     *,
     route: str | None = None,
 ) -> str:
-    code = destination_icao(icao, route=route)
+    field_icao = str((airport or {}).get("icao") or "").strip().upper()
+    field_name = str((airport or {}).get("name") or "").strip()
+    code = destination_icao(
+        icao,
+        route=route,
+        field_icao=field_icao or None,
+        field_name=field_name or None,
+    )
     if not code:
         return "destination"
-    if code == str(airport.get("icao") or "").strip().upper():
-        return str(airport.get("name") or code)
+    if code == field_icao:
+        return field_name or code
     # Spell a real ICAO for TTS (KEDW → K E D W). Never a route string.
     return " ".join(code)
 
@@ -15442,13 +15588,42 @@ _LIVE_EA_PIDS: set[int] = set()
 _LIVE_EA_LOCK = threading.Lock()
 
 
+def _wav_playback_sec(path: Path) -> float:
+    """Duration of a WAV for post-exit dwell (EA --file can exit before SRS hears it)."""
+    try:
+        with wave.open(str(path), "rb") as wf:
+            rate = int(wf.getframerate() or 0)
+            frames = int(wf.getnframes() or 0)
+            if rate > 0 and frames > 0:
+                return max(0.5, float(frames) / float(rate))
+    except (OSError, wave.Error):
+        pass
+    try:
+        # 16 kHz mono 16-bit ≈ 32 KB/s
+        return max(1.0, min(180.0, path.stat().st_size / 32000.0))
+    except OSError:
+        return 0.0
+
+
 def terminate_stale_external_audio(exe: Path) -> int:
-    """Kill hung ExternalAudio processes for this exe (prevents ghost SRS clients)."""
+    """Kill hung ExternalAudio processes for this exe (prevents ghost SRS clients).
+
+    Skips PIDs in ``_LIVE_EA_PIDS`` (a call that is still speaking). When any
+    live TX exists, do not Stop-Process at all — another agency may be on the
+    wire and killing orphans risks racing a just-spawned Popen.
+    """
     if os.name != "nt":
         return 0
-    exe_path = str(exe.resolve())
     with _LIVE_EA_LOCK:
-        live = ",".join(str(pid) for pid in sorted(_LIVE_EA_PIDS))
+        if _LIVE_EA_PIDS:
+            return 0
+        return _terminate_stale_external_audio_unlocked(exe)
+
+
+def _terminate_stale_external_audio_unlocked(exe: Path) -> int:
+    """Caller must hold ``_LIVE_EA_LOCK`` and know ``_LIVE_EA_PIDS`` is empty."""
+    exe_path = str(exe.resolve())
+    live = ",".join(str(pid) for pid in sorted(_LIVE_EA_PIDS))
     ps = f"""
 $ErrorActionPreference = 'SilentlyContinue'
 $live = @({live})
@@ -15483,7 +15658,6 @@ Write-Output $n
 
 def _run_external_audio(exe: Path, cmd: list[str], *, timeout_sec: float = 120.0) -> int:
     """Launch ExternalAudio with timeout; kill process group on hang."""
-    terminate_stale_external_audio(exe)
     creationflags = 0
     if os.name == "nt":
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -15501,12 +15675,16 @@ def _run_external_audio(exe: Path, cmd: list[str], *, timeout_sec: float = 120.0
         pass
     proc: subprocess.Popen[bytes] | None = None
     try:
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(exe.parent),
-            creationflags=creationflags,
-        )
+        # Hold the lock across orphan cleanup + spawn + PID register so another
+        # channel cannot Stop-Process a Popen that is not yet in _LIVE_EA_PIDS.
         with _LIVE_EA_LOCK:
+            if not _LIVE_EA_PIDS:
+                _terminate_stale_external_audio_unlocked(exe)
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(exe.parent),
+                creationflags=creationflags,
+            )
             _LIVE_EA_PIDS.add(proc.pid)
         code = int(proc.wait(timeout=timeout_sec))
         try:
@@ -15795,7 +15973,16 @@ def transmit_file(
         approx_sec = max(30.0, min(180.0, path.stat().st_size / 16000.0 + 45.0))
     except OSError:
         approx_sec = 120.0
-    return _run_external_audio(exe, cmd, timeout_sec=approx_sec)
+    # ExternalAudio --file sometimes exits 0 before PCM is hearable on SRS
+    # (the old prerender silent-success bug). Hold the request until the WAV
+    # duration elapses so Host never paints LAST HEARD / commits cursor early.
+    started = time.time()
+    code = _run_external_audio(exe, cmd, timeout_sec=approx_sec)
+    if code == 0:
+        remain = _wav_playback_sec(path) - (time.time() - started) + 0.4
+        if remain > 0.05:
+            time.sleep(min(remain, 120.0))
+    return code
 
 
 def main() -> int:
