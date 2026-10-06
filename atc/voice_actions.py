@@ -141,17 +141,26 @@ def _ownship(
     *,
     opus: Any,
     config: dict[str, Any],
+    callsign: str | None = None,
 ) -> tuple[dict[str, Any] | None, tuple[float, float] | None]:
+    """
+    Fighter position for picture / declare.
+
+    A bound client seat (the fix the flying PC sent the host) wins. Otherwise
+    use the matched CAOC unit's lat/lon. Other tracks are still read when the
+    unit match fails, as long as this position exists.
+    """
     hostile_side = _hostile_coalition(airport)
-    own = atc_phrase.match_caoc_unit_for_flight(units, opus=opus, config=config)
+    own = atc_phrase.match_caoc_unit_for_flight(
+        units, callsign=callsign, opus=opus, config=config
+    )
     if own and str(own.get("coalition") or "").lower() == hostile_side:
         own = None
     own_ll: tuple[float, float] | None = None
-    if own:
-        try:
-            own_ll = atc_phrase.caoc_xz_to_ll(float(own["xMeters"]), float(own["zMeters"]))
-        except (KeyError, TypeError, ValueError):
-            own_ll = None
+    if atc_phrase.ownship_seat_bound(config):
+        own_ll = atc_phrase.seat_ownship_latlon(config)
+    if own_ll is None and own is not None:
+        own_ll = atc_phrase.caoc_unit_latlon(own)
     return own, own_ll
 
 
@@ -221,7 +230,7 @@ def _groups_from_tracks(
         ]
         coal = ""
         if coalitions:
-            # Majority coalition; enemy-side wins a tie so we don't friendly-wash.
+            # DCS side only. The spoken call comes from affiliation, not this.
             red_or_blue = [c for c in coalitions if c in ("red", "blue")]
             if hostile_side in red_or_blue:
                 coal = hostile_side
@@ -253,9 +262,7 @@ def _groups_from_tracks(
             affiliation=cluster_aff or None,
             ti_training=ti,
         )
-        label = str(
-            lead.get("display_callsign") or lead.get("label") or ""
-        ).strip()
+        label = str(lead.get("display_callsign") or "").strip()
         groups.append(
             pl.FightGroup(
                 bearing=int(lead["bearing"]),
@@ -288,13 +295,15 @@ def collect_hostile_groups(
     opus: Any = None,
     state: dict[str, Any] | None = None,
     upgrade_hostile: bool = False,
+    callsign: str | None = None,
 ) -> tuple[list[pl.FightGroup], dict[str, Any] | None, tuple[float, float] | None]:
     """
     Hostile air groups from the live CAOC feed, nearest first.
 
     Skips fixtures and groups outside picture_max_range_nm. Returns
-    (groups, own_unit, own_ll). OPUS affiliation drives the spoken label;
-    UNKNOWN / TI get a VID cue instead of a random bandit/hostile roll.
+    (groups, own_unit, own_ll). The CAOC affiliation token is the picture
+    call. UNKNOWN and undeclared TI stay bogey until a VID writes BANDIT
+    or HOSTILE. Red coalition is not a hostile call.
     """
     radar = atc_phrase.fetch_caoc_radar(config)
     if not radar:
@@ -306,7 +315,9 @@ def collect_hostile_groups(
 
     max_nm = picture_max_range_nm(config)
     hostile_side = _hostile_coalition(airport)
-    own, own_ll = _ownship(units, airport, opus=opus, config=config)
+    own, own_ll = _ownship(
+        units, airport, opus=opus, config=config, callsign=callsign
+    )
     if own_ll is None:
         return [], own, None
 
@@ -768,6 +779,7 @@ def collect_declare_groups(
     cue: dict[str, Any] | None = None,
     state: dict[str, Any] | None = None,
     upgrade_hostile: bool = False,
+    callsign: str | None = None,
 ) -> tuple[list[pl.FightGroup], dict[str, Any] | None, tuple[float, float] | None]:
     """
     Air groups for DECLARE.
@@ -786,7 +798,9 @@ def collect_declare_groups(
 
     max_nm = picture_max_range_nm(config)
     hostile_side = _hostile_coalition(airport)
-    own, own_ll = _ownship(units, airport, opus=opus, config=config)
+    own, own_ll = _ownship(
+        units, airport, opus=opus, config=config, callsign=callsign
+    )
     if cue is None and own_ll is None:
         return [], own, None
 
@@ -895,9 +909,13 @@ def build_picture_reply(
     Raises RadarUnavailable when the feed is down.
     """
     cs = atc_phrase.speak_callsign(callsign)
-    groups, _own, _own_ll = collect_hostile_groups(
-        config, airport, opus=opus, state=state
+    groups, _own, own_ll = collect_hostile_groups(
+        config, airport, opus=opus, state=state, callsign=callsign
     )
+    if own_ll is None:
+        if isinstance(state, dict):
+            state[_PICTURE_GROUPS_KEY] = []
+        return f"{cs}, {agency}, unable picture.", []
     if not groups:
         if isinstance(state, dict):
             state[_PICTURE_GROUPS_KEY] = []
@@ -950,7 +968,7 @@ def build_bogey_dope_reply(
     """Ch V §11 — magnetic BRAA relative to ownship on closest hostile group."""
     cs = atc_phrase.speak_callsign(callsign)
     groups, _own, own_ll = collect_hostile_groups(
-        config, airport, opus=opus, state=state
+        config, airport, opus=opus, state=state, callsign=callsign
     )
     if own_ll is None:
         return f"{cs}, {agency}, unable bogey dope, no ownship track.", []
@@ -977,6 +995,9 @@ def build_bogey_dope_reply(
         bits.append(alt)
     if aspect:
         bits.append(aspect)
+    call = pl.ti_display_callsign(g)
+    if call:
+        bits.append(call)
     bits.append(g.declaration)
     if g.count > 1:
         bits.append(f"{atc_phrase.speak_natural_number(g.count)} contacts")
@@ -1015,6 +1036,7 @@ def build_declare_reply(
         cue=cue,
         state=state,
         upgrade_hostile=False,
+        callsign=callsign,
     )
     if cue is None and own_ll is None:
         return f"{cs}, {agency}, unable.", []
@@ -1273,6 +1295,7 @@ def build_vid_affiliation_reply(
             cue=cue,
             state=state,
             upgrade_hostile=False,
+            callsign=callsign,
         )
         g = prefer_declare_group(groups, cue=cue)
         if g is None:

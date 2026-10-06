@@ -494,7 +494,9 @@ def http_patch_json(
         raise
 
 
-_OPUS_AFFILIATION_ENUM = frozenset({"FRIENDLY", "BANDIT", "HOSTILE", "UNKNOWN"})
+_OPUS_AFFILIATION_ENUM = frozenset(
+    {"FRIENDLY", "BANDIT", "HOSTILE", "UNKNOWN", "NEUTRAL"}
+)
 
 
 def patch_caoc_unit_affiliation(
@@ -8108,7 +8110,8 @@ def build_center_check_in(callsign: str, *, position: str = "") -> str:
 # --- CAOC radar / bullseye alpha check ---------------------------------
 # Match Opus CAOC aircraft popup math (/opus/caoc): click unit → tooltip
 #   "ELVIS 305 25"  (name + mag bearing 000-359 + range NM, zero-padded to 2)
-# Unit xz → lat/lon uses CAOC's planar L(x,z); bullseye is WGS84 ELVIS.
+# Live units carry WGS84 lat/lon. xMeters/zMeters are the older planar
+# metres (and what the map tester still writes). Bullseye is WGS84 ELVIS.
 
 _CAOC_XZ_ORIGIN_LAT = 36.2362
 _CAOC_XZ_ORIGIN_LON = -115.0343
@@ -8820,6 +8823,68 @@ def caoc_ll_to_xz(lat: float, lon: float) -> tuple[float, float]:
     return x, z
 
 
+def _finite_coord(raw: Any) -> float | None:
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value):
+        return None
+    return value
+
+
+def _caoc_unit_wgs84(unit: dict[str, Any]) -> tuple[float, float] | None:
+    """lat/lon on the radar unit, or None when the pair is missing or unset."""
+    lat = _finite_coord(unit.get("lat"))
+    lon = _finite_coord(unit.get("lon"))
+    if lat is None or lon is None:
+        return None
+    if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+        return None
+    # 0,0 is the unset pair, not a Nevada position.
+    if lat == 0.0 and lon == 0.0:
+        return None
+    return lat, lon
+
+
+def caoc_unit_latlon(unit: dict[str, Any] | None) -> tuple[float, float] | None:
+    """
+    Where this CAOC unit is, as WGS84 lat/lon.
+
+    Prefer the snapshot's ``lat`` / ``lon``. Fall back to planar
+    ``xMeters`` / ``zMeters`` for older snapshots and the map tester.
+    """
+    if not isinstance(unit, dict):
+        return None
+    wgs = _caoc_unit_wgs84(unit)
+    if wgs is not None:
+        return wgs
+    x = _finite_coord(unit.get("xMeters"))
+    z = _finite_coord(unit.get("zMeters"))
+    if x is None or z is None:
+        return None
+    return caoc_xz_to_ll(x, z)
+
+
+def caoc_unit_xz(unit: dict[str, Any] | None) -> tuple[float, float] | None:
+    """
+    Planar metres for runway geometry.
+
+    A published lat/lon is projected into the same frame runway zones use.
+    Without it, ``xMeters`` / ``zMeters`` are already in that frame.
+    """
+    if not isinstance(unit, dict):
+        return None
+    wgs = _caoc_unit_wgs84(unit)
+    if wgs is not None:
+        return caoc_ll_to_xz(wgs[0], wgs[1])
+    x = _finite_coord(unit.get("xMeters"))
+    z = _finite_coord(unit.get("zMeters"))
+    if x is None or z is None:
+        return None
+    return x, z
+
+
 def _haversine_nm(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     rlat1, rlat2 = math.radians(lat1), math.radians(lat2)
     dlat = math.radians(lat2 - lat1)
@@ -9056,13 +9121,53 @@ def same_flight_callsign(want: str, have: str) -> bool:
     return longer.startswith(shorter) and len(longer) - len(shorter) == 1
 
 
+# DCS weapons ride the radar feed as type=air. Affiliation does not identify them.
+_WEAPON_OBJECT_RE = re.compile(
+    r"(?:"
+    r"AIM[\s_\-]?\d|"
+    r"AGM[\s_\-]?\d|"
+    r"R[\s_\-](?:27|33|37|40|60|73|77)|"
+    r"KH[\s_\-]?\d|"
+    r"MISSILE|"
+    r"SIDEWINDER|"
+    r"AMRAAM|"
+    r"SPARROW|"
+    r"PHOENIX|"
+    r"CATM[\s_\-]?\d|"
+    r"MAGIC[\s_\-]?2|"
+    r"\bMICA\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def caoc_unit_is_weapon(unit: dict[str, Any] | None) -> bool:
+    """True for missiles and similar weapons (AIM-9, AIM-120, R-73, …)."""
+    if not isinstance(unit, dict):
+        return False
+    blob = " ".join(
+        str(unit.get(k) or "")
+        for k in ("objectName", "object_name", "name")
+    )
+    return bool(_WEAPON_OBJECT_RE.search(blob))
+
+
 def caoc_air_units(units: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Air tracks suitable for CAOC map / alpha check (skip FARPs, numeric junk names)."""
+    """
+    Air tracks from a CAOC radar snapshot.
+
+    Keep every ``type == air`` row. Drop weapons by objectName, plus FARPs
+    and numeric junk names. ``affiliation`` is a picture call, not a test
+    for “is this air” — ground / land / sea rows stay out even when the
+    picture gateway painted them HOSTILE or NEUTRAL.
+    """
     out: list[dict[str, Any]] = []
     for u in units:
         if not isinstance(u, dict):
             continue
         if str(u.get("type") or "").lower() != "air":
+            continue
+        if caoc_unit_is_weapon(u):
             continue
         obj = str(u.get("objectName") or "").upper()
         if any(tok in obj for tok in ("FARP", "CONTAINER", "HELIPAD", "INVISIBLE")):
@@ -9147,6 +9252,8 @@ def caoc_unit_is_dead_or_wreck(unit: dict[str, Any] | None) -> bool:
 def caoc_unit_is_picture_eligible(unit: dict[str, Any] | None) -> bool:
     """Air track that may appear on picture / declare / bogey dope."""
     if not isinstance(unit, dict):
+        return False
+    if caoc_unit_is_weapon(unit):
         return False
     return not caoc_unit_is_dead_or_wreck(unit)
 
@@ -9296,13 +9403,9 @@ def bullseye_for_caoc_unit(
     if qnh is None:
         qnh = metar_altimeter_inhg(config, weather=weather)
     alt_ft = caoc_unit_alt_ft(unit, altimeter_inhg=qnh)
-    unit_lat: float | None = None
-    unit_lon: float | None = None
-    try:
-        ux, uz = float(unit["xMeters"]), float(unit["zMeters"])
-        unit_lat, unit_lon = caoc_xz_to_ll(ux, uz)
-    except (KeyError, TypeError, ValueError):
-        pass
+    unit_ll = caoc_unit_latlon(unit)
+    unit_lat = unit_ll[0] if unit_ll else None
+    unit_lon = unit_ll[1] if unit_ll else None
 
     if parsed:
         name, brg, rng = parsed
@@ -9844,7 +9947,10 @@ def ownship_latlon(
         if not own:
             _miss()
             return _cached_ll()
-        ll = caoc_xz_to_ll(float(own["xMeters"]), float(own["zMeters"]))
+        ll = caoc_unit_latlon(own)
+        if ll is None:
+            _miss()
+            return _cached_ll()
     except (KeyError, TypeError, ValueError, OSError):
         _miss()
         return _cached_ll()

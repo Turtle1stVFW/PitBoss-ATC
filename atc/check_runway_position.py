@@ -39,6 +39,56 @@ def main() -> int:
         print("  FAIL 03L should run about 041° true (030 magnetic)")
         bad += 1
 
+    show("radar lat/lon")
+    thr_ll = atc_phrase.caoc_xz_to_ll(frame.tx, frame.tz)
+    latlon_only = {
+        "type": "air",
+        "name": "Fleece 1",
+        "lat": thr_ll[0],
+        "lon": thr_ll[1],
+    }
+    got_xz = rp.unit_xz(latlon_only)
+    got_ll = atc_phrase.caoc_unit_latlon(latlon_only)
+    if got_xz is None or got_ll is None:
+        print("  FAIL lat/lon unit has no position")
+        bad += 1
+    elif math.hypot(got_xz[0] - frame.tx, got_xz[1] - frame.tz) > 1.0:
+        print(f"  FAIL lat/lon did not land on the threshold: {got_xz}")
+        bad += 1
+    else:
+        along, lateral = frame.project(*got_xz)
+        print(f"ok   lat/lon-only jet on the threshold (along {along:.1f} m)")
+        if abs(along) > 1.0 or abs(lateral) > 1.0:
+            print(f"  FAIL threshold projection along={along:.1f} lateral={lateral:.1f}")
+            bad += 1
+
+    bogus = {**latlon_only, "xMeters": 500000.0, "zMeters": -400000.0}
+    bogus_ll = atc_phrase.caoc_unit_latlon(bogus)
+    if bogus_ll is None or abs(bogus_ll[0] - thr_ll[0]) > 1e-6 or abs(bogus_ll[1] - thr_ll[1]) > 1e-6:
+        print(f"  FAIL lat/lon lost to xMeters: {bogus_ll}")
+        bad += 1
+    else:
+        print("ok   lat/lon wins over a stale xMeters/zMeters pair")
+
+    legacy = {"xMeters": frame.tx, "zMeters": frame.tz, "lat": 0, "lon": 0}
+    legacy_ll = atc_phrase.caoc_unit_latlon(legacy)
+    if (
+        legacy_ll is None
+        or abs(legacy_ll[0] - thr_ll[0]) > 1e-4
+        or abs(legacy_ll[1] - thr_ll[1]) > 1e-4
+    ):
+        print(f"  FAIL xMeters fallback: {legacy_ll}")
+        bad += 1
+    else:
+        print("ok   xMeters/zMeters still place a unit when lat/lon is unset")
+
+    fix = atc_phrase.bullseye_for_caoc_unit(latlon_only, {})
+    if not fix or fix.get("lat") is None or fix.get("lon") is None:
+        print(f"  FAIL bullseye from lat/lon: {fix}")
+        bad += 1
+    else:
+        print(f"ok   bullseye from lat/lon ({fix.get('display')})")
+
     # Reverse direction must be the same strip, opposite heading.
     rev = rp.RunwayFrame.build("21R", rp.runway_geometry(AIRPORT, "21R"))
     assert rev is not None

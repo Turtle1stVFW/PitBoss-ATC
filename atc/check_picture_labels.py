@@ -172,7 +172,7 @@ def main() -> int:
     else:
         print("OK declare says unable instead of guessing friendly")
 
-    # Sticky declarations: same group keeps its label; only Hostile upgrades.
+    # Picture call comes from affiliation. Red coalition is not bandit/hostile.
     mem = pl.DeclarationMemory()
     mem.force(["u1"], "bandit", brg=56, rng=67, feet=21000)
     d1 = mem.assign(["u1"], brg=58, rng=70, feet=20500, coalition="red", hostile_side="red")
@@ -186,7 +186,33 @@ def main() -> int:
         hostile_side="red",
         upgrade_hostile=True,
     )
-    d4 = mem.assign(["u1"], brg=61, rng=73, feet=19800, coalition="red", hostile_side="red")
+    d_bandit = mem.assign(
+        ["u1"],
+        brg=61,
+        rng=73,
+        feet=19800,
+        coalition="red",
+        hostile_side="red",
+        affiliation="BANDIT",
+    )
+    d_hostile = mem.assign(
+        ["u1"],
+        brg=61,
+        rng=73,
+        feet=19800,
+        coalition="blue",
+        hostile_side="red",
+        affiliation="HOSTILE",
+    )
+    d_unk = mem.assign(
+        ["u1"],
+        brg=62,
+        rng=74,
+        feet=19000,
+        coalition="red",
+        hostile_side="red",
+        affiliation="UNKNOWN",
+    )
     other = mem.assign(["u2"], brg=200, rng=40, feet=15000, coalition="red", hostile_side="red")
     other2 = mem.assign(["u2"], brg=201, rng=41, feet=15100, coalition="red", hostile_side="red")
     friendly = mem.assign(["u3"], brg=10, rng=10, feet=10000, coalition="blue", hostile_side="red")
@@ -195,11 +221,14 @@ def main() -> int:
     lead_up = pl.transcript_upgrades_hostile("Blackjack Fleece 1 declare hostile 056 67")
     lead_plain = pl.transcript_upgrades_hostile("Blackjack Fleece 1 declare 056 67")
     if (
-        d1 != "bandit"
-        or d2 != "bandit"
-        or d3 != "hostile"
-        or d4 != "hostile"
-        or other != other2
+        d1 != "bogey spades"
+        or d2 != "bogey spades"
+        or d3 != "bogey spades"
+        or d_bandit != "bandit"
+        or d_hostile != "hostile"
+        or d_unk != "bogey spades"
+        or other != "bogey spades"
+        or other2 != "bogey spades"
         or friendly != "friendly"
         or not bandsaw_up
         or jack_no
@@ -207,23 +236,43 @@ def main() -> int:
         or lead_plain
     ):
         print(
-            f"FAIL sticky decl: {d1=} {d2=} {d3=} {d4=} {other=} {other2=} "
-            f"{friendly=} bandsaw={bandsaw_up} jack={jack_no} lead={lead_up}/{lead_plain}"
+            f"FAIL picture call: {d1=} {d2=} {d3=} {d_bandit=} {d_hostile=} "
+            f"{d_unk=} {other=} {friendly=} bandsaw={bandsaw_up} jack={jack_no} "
+            f"lead={lead_up}/{lead_plain}"
         )
         bad += 1
     else:
-        print(f"OK sticky declarations bandit->hostile; other group {other}")
+        print("OK affiliation is the picture call; red coalition stays unknown")
 
     state = {}
-    mem.to_state(state)
+    pinned = pl.DeclarationMemory()
+    pinned.assign(
+        ["u1"],
+        brg=62,
+        rng=74,
+        feet=19000,
+        coalition="red",
+        hostile_side="red",
+        affiliation="HOSTILE",
+    )
+    pinned.to_state(state)
     again = pl.DeclarationMemory.from_state(state).assign(
+        ["u1"],
+        brg=62,
+        rng=74,
+        feet=19000,
+        coalition="red",
+        hostile_side="red",
+        affiliation="HOSTILE",
+    )
+    dropped = pl.DeclarationMemory.from_state(state).assign(
         ["u1"], brg=62, rng=74, feet=19000, coalition="red", hostile_side="red"
     )
-    if again != "hostile":
-        print(f"FAIL declaration persisted in state: {again} state={state}")
+    if again != "hostile" or dropped != "bogey spades":
+        print(f"FAIL declaration round-trip: {again=} {dropped=} state={state}")
         bad += 1
     else:
-        print("OK declaration memory survives state round-trip")
+        print("OK HOSTILE sticks from affiliation; a missing token is unknown")
 
     neu = pl.DeclarationMemory()
     neu_first = neu.assign(
@@ -255,6 +304,11 @@ def main() -> int:
     red_g = _g(6.0, 270, heading=90, feet=28000, bearing=56, range_nm=67)
     red_g.declaration = "bandit"
     red_g.coalition = "red"
+    red_g.affiliation = "BANDIT"
+    unk_red = _g(8.0, 270, heading=90, feet=28000, bearing=50, range_nm=40)
+    unk_red.declaration = "bogey spades"
+    unk_red.coalition = "red"
+    unk_red.affiliation = "UNKNOWN"
     neu_g = _g(12.0, 250, heading=90, feet=32000, bearing=40, range_nm=20)
     neu_g.declaration = "bogey spades"
     neu_g.coalition = "neutral"
@@ -262,24 +316,29 @@ def main() -> int:
     bandsaw_red = pl.declare_may_upgrade_hostile(
         red_g, agency="Bandsaw", channel="bandsaw", hostile_side="red"
     )
+    bandsaw_unk = pl.declare_may_upgrade_hostile(
+        unk_red, agency="Bandsaw", channel="bandsaw", hostile_side="red"
+    )
     bandsaw_neu = pl.declare_may_upgrade_hostile(
         neu_g, agency="Bandsaw", channel="bandsaw", hostile_side="red"
     )
     if (
         neu_first != "bogey spades"
         or neu_up != "bogey spades"
-        or civ_red != "hostile"
+        or civ_red != "bogey spades"
         or repaired != "bogey spades"
         or not bandsaw_red
+        or bandsaw_unk
         or bandsaw_neu
     ):
         print(
             f"FAIL civilian/neutral declare: {neu_first=} {neu_up=} {civ_red=} "
-            f"{repaired=} bandsaw_red={bandsaw_red} bandsaw_neu={bandsaw_neu}"
+            f"{repaired=} bandsaw_red={bandsaw_red} bandsaw_unk={bandsaw_unk} "
+            f"bandsaw_neu={bandsaw_neu}"
         )
         bad += 1
     else:
-        print("OK declare: CAOC neutrals stay bogey spades; red can be hostile")
+        print("OK declare: unknown stays bogey; red coalition is not hostile")
 
     import atc_phrase
 
@@ -357,7 +416,7 @@ def main() -> int:
     else:
         print("OK F-5E-3 is pictured; E-3 / KC-135 stay fixtures")
 
-    # OPUS affiliation wins over coalition / random rolls.
+    # Affiliation is the picture call. Coalition does not invent bandit.
     opus_unk = pl.DeclarationMemory().assign(
         ["ti1"],
         brg=56,
@@ -403,20 +462,54 @@ def main() -> int:
         coalition="red",
         hostile_side="red",
     )
+    blue_default = pl.DeclarationMemory().assign(
+        ["blue1"],
+        brg=12,
+        rng=15,
+        feet=18000,
+        coalition="blue",
+        hostile_side="red",
+    )
+    blue_unk = pl.DeclarationMemory().assign(
+        ["blue2"],
+        brg=13,
+        rng=16,
+        feet=18100,
+        coalition="blue",
+        hostile_side="red",
+        affiliation="UNKNOWN",
+    )
+    named_hostile = pl.picture_call_declaration(
+        affiliation="UNKNOWN",
+        coalition="red",
+        hostile_side="red",
+    )
+    gateway_words = (
+        pl.normalize_opus_affiliation("interceptor") == "friendly"
+        and pl.normalize_opus_affiliation("suspect") == "hostile"
+        and pl.normalize_opus_affiliation("special interest") == "bogey spades"
+        and pl.normalize_opus_affiliation("neutral land") == "neutral"
+        and pl.normalize_opus_affiliation("assumed friendly") == "friendly"
+    )
     if (
         opus_unk != "bogey spades"
         or opus_bandit != "bandit"
         or opus_hostile != "hostile"
         or ti_bare != "bogey spades"
-        or legacy_enemy != "bandit"
+        or legacy_enemy != "bogey spades"
+        or blue_default != "friendly"
+        or blue_unk != "bogey spades"
+        or named_hostile != "bogey spades"
+        or not gateway_words
     ):
         print(
             f"FAIL opus affiliation: {opus_unk=} {opus_bandit=} {opus_hostile=} "
-            f"{ti_bare=} {legacy_enemy=}"
+            f"{ti_bare=} {legacy_enemy=} {blue_default=} {blue_unk=} "
+            f"{named_hostile=} {gateway_words=}"
         )
         bad += 1
     else:
-        print("OK OPUS affiliation: UNKNOWN/TI bogey spades; BANDIT/HOSTILE as-is")
+        print("OK affiliation: UNKNOWN/red bogey; blue friendly; BANDIT/HOSTILE as-is")
 
     unk_g = _g(20, 270, heading=90, feet=24000, bearing=56, range_nm=67)
     unk_g.declaration = "bogey spades"
@@ -438,19 +531,42 @@ def main() -> int:
         "tiTraining": True,
         "name": "TI_TRAINING_1",
         "coalition": "red",
+        "displayCallsign": "UNK",
     }
     friend_unit = {"affiliation": "FRIENDLY", "coalition": "red", "name": "FLEECE 1"}
     known_unit = {"affiliation": "HOSTILE", "coalition": "red", "name": "IVAN 11"}
+    red_bare = {"type": "air", "coalition": "red", "name": "Hostile", "groupName": "Bandit 1"}
+    blue_bare = {"type": "air", "coalition": "blue", "name": "FLEECE 1"}
+    blue_bogey = {"type": "air", "coalition": "blue", "affiliation": "UNKNOWN", "name": "Bogey"}
+    neutral_air = {"type": "air", "affiliation": "NEUTRAL", "coalition": "red", "name": "CIV"}
+    unk_display = {"type": "air", "displayCallsign": "UNK", "name": "Bandit 1", "coalition": "blue"}
+    ti_group = _g(20, 270, heading=90, feet=24000, bearing=56, range_nm=67)
+    ti_group.declaration = "bogey spades"
+    ti_group.ti_training = True
+    ti_group.label = "UNK"
+    ti_group.name = "single group"
+    ti_said = pl.core_group_clause(ti_group, include_bullseye=False, include_track=False)
     if (
         not pl.picture_include_unit(ti_unit, "red")
         or pl.picture_include_unit(friend_unit, "red")
         or not pl.picture_include_unit(known_unit, "red")
+        or not pl.picture_include_unit(red_bare, "red")
+        or pl.picture_include_unit(blue_bare, "red")
+        or not pl.picture_include_unit(blue_bogey, "red")
+        or pl.picture_include_unit(neutral_air, "red")
         or not pl.caoc_unit_is_ti_training(ti_unit)
+        or not pl.caoc_unit_is_ti_training(unk_display)
+        or "UNK" not in ti_said
+        or "hostile" in ti_said.casefold()
+        or "bandit" in ti_said.casefold()
     ):
-        print("FAIL picture include / TI flag")
+        print(
+            f"FAIL picture include / TI flag: said={ti_said!r} "
+            f"unk_display={pl.caoc_unit_is_ti_training(unk_display)}"
+        )
         bad += 1
     else:
-        print("OK picture includes TI/HOSTILE and skips FRIENDLY")
+        print("OK picture includes unknown/TI/HOSTILE, skips FRIENDLY and NEUTRAL")
 
     if voice_actions.parse_vid_affiliation("Bandsaw Fleece 1 VID hostile") != "hostile":
         print("FAIL parse VID hostile")
@@ -602,11 +718,110 @@ def main() -> int:
             print("OK affiliation PATCH helper (stubbed HTTP)")
 
     spoken = pl.spoken_to_opus_affiliation("bandit")
-    if spoken != "BANDIT" or pl.spoken_to_opus_affiliation("bogey spades") != "UNKNOWN":
+    if (
+        spoken != "BANDIT"
+        or pl.spoken_to_opus_affiliation("bogey spades") != "UNKNOWN"
+        or pl.spoken_to_opus_affiliation("neutral") != "NEUTRAL"
+    ):
         print(f"FAIL spoken_to_opus_affiliation: {spoken}")
         bad += 1
     else:
         print("OK spoken declaration maps to OPUS affiliation enum")
+
+    missile = {
+        "type": "air",
+        "name": "AIM-120",
+        "objectName": "AIM-120C",
+        "coalition": "red",
+        "affiliation": "HOSTILE",
+    }
+    flanker = {
+        "type": "air",
+        "name": "Ivan 11",
+        "objectName": "Su-27",
+        "coalition": "red",
+        "affiliation": "UNKNOWN",
+    }
+    ground = {
+        "type": "ground",
+        "name": "SA-10",
+        "objectName": "S-300PS",
+        "coalition": "red",
+        "affiliation": "HOSTILE",
+    }
+    air = atc_phrase.caoc_air_units([missile, flanker, ground])
+    if (
+        air != [flanker]
+        or not atc_phrase.caoc_unit_is_weapon(missile)
+        or atc_phrase.caoc_unit_is_picture_eligible(missile)
+        or not atc_phrase.caoc_unit_is_picture_eligible(flanker)
+    ):
+        print(f"FAIL air-track filter: {air}")
+        bad += 1
+    else:
+        print("OK air list keeps fighters and drops missiles and ground")
+
+    # Live CAOC rows carry lat/lon and no xMeters. Picture must still see them,
+    # including when the host only has the client's seat fix.
+    nellis = atc_phrase.load_json(atc_phrase.AIRPORTS_PATH)["nellis"]
+    radar = {
+        "units": [
+            {
+                "id": "me",
+                "type": "air",
+                "name": "Turtle",
+                "pilotName": "Turtle",
+                "lat": 36.22,
+                "lon": -115.04,
+                "coalition": "blue",
+                "affiliation": "FRIENDLY",
+                "objectName": "F-16C_50",
+                "altMeters": 3000,
+                "headingDeg": 40,
+            },
+            {
+                "id": "bogey",
+                "type": "air",
+                "name": "Ivan 11",
+                "lat": 36.40,
+                "lon": -115.20,
+                "coalition": "red",
+                "affiliation": "UNKNOWN",
+                "objectName": "MiG-29S",
+                "altMeters": 8000,
+                "headingDeg": 180,
+            },
+        ]
+    }
+    orig_fetch = atc_phrase.fetch_caoc_radar
+    orig_qnh = atc_phrase.metar_altimeter_inhg
+    atc_phrase.fetch_caoc_radar = lambda *_a, **_k: radar  # type: ignore[method-assign]
+    atc_phrase.metar_altimeter_inhg = lambda *_a, **_k: None  # type: ignore[method-assign]
+    try:
+        groups, _own, oll = voice_actions.collect_hostile_groups(
+            {"opus_user_name": "Turtle"},
+            nellis,
+            callsign="SUBPAR 2",
+        )
+        seat_cfg = {
+            "opus_user_name": "nobody",
+            atc_phrase.OWNSHIP_SEAT_BOUND_KEY: True,
+            atc_phrase.OWNSHIP_SEAT_LL_KEY: [36.22, -115.04],
+        }
+        seat_groups, _seat_own, seat_ll = voice_actions.collect_hostile_groups(
+            seat_cfg, nellis, callsign="GHOST 1"
+        )
+    finally:
+        atc_phrase.fetch_caoc_radar = orig_fetch  # type: ignore[method-assign]
+        atc_phrase.metar_altimeter_inhg = orig_qnh  # type: ignore[method-assign]
+    if oll is None or len(groups) != 1 or groups[0].declaration != "bogey spades":
+        print(f"FAIL lat/lon picture: {oll=} groups={[(g.declaration, g.object) for g in groups]}")
+        bad += 1
+    elif seat_ll is None or len(seat_groups) != 1:
+        print(f"FAIL seat fix picture: {seat_ll=} n={len(seat_groups)}")
+        bad += 1
+    else:
+        print("OK picture reads lat/lon tracks from the fighter fix")
 
     print(f"\n{bad} failure(s)" if bad else "\nall picture label checks passed")
     return 1 if bad else 0

@@ -1390,10 +1390,9 @@ def _unit_latlon(
 ) -> tuple[float, float] | None:
     if not unit:
         return None
-    try:
-        return atc_phrase.caoc_xz_to_ll(float(unit["xMeters"]), float(unit["zMeters"]))
-    except (KeyError, TypeError, ValueError):
-        pass
+    ll = atc_phrase.caoc_unit_latlon(unit)
+    if ll is not None:
+        return ll
     try:
         fix = atc_phrase.bullseye_for_caoc_unit(unit, config or {}, opus=opus)
         if fix and fix.get("lat") is not None and fix.get("lon") is not None:
