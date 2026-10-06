@@ -924,6 +924,59 @@ def extras() -> int:
         bad += 1
     else:
         print("approach sticky STRYK at SARAH — direct Sarah")
+
+    # Early VMC Control assign must not stick overhead once METAR goes IMC.
+    st_wx = {}
+    atc_phrase.assign_approach_plan(nellis, vmc, state=st_wx, force=True)
+    plan_after_imc = atc_phrase.assign_approach_plan(
+        nellis, ifr, state=st_wx, force=False
+    )
+    if plan_after_imc.get("pattern") != "instrument":
+        print(
+            f"  FAIL sticky VMC plan must rebuild to instrument in IMC: "
+            f"{plan_after_imc}"
+        )
+        bad += 1
+    else:
+        print(
+            f"approach sticky VMC to IMC — {plan_after_imc.get('instrument_id')} "
+            f"IAF {plan_after_imc.get('iaf')}"
+        )
+    # Pilot-pinned overhead stays even in IMC.
+    st_pin = {
+        "approach_assigned": True,
+        "approach_plan": {
+            **dict(plan_vmc),
+            "source": "override",
+            "pattern": "visual_overhead",
+            "vmc": True,
+        },
+        "active_recovery": "visual_overhead",
+    }
+    plan_pinned = atc_phrase.assign_approach_plan(
+        nellis, ifr, state=st_pin, force=False
+    )
+    if plan_pinned.get("pattern") == "instrument":
+        print(f"  FAIL override overhead must stick in IMC: {plan_pinned}")
+        bad += 1
+    else:
+        print("approach override overhead in IMC — sticky")
+    # Thunderstorm METAR must not allow VFR recoveries (even with high ceiling).
+    ts_wx = atc_phrase.Weather(
+        210,
+        8,
+        29.92,
+        "KLSV 010000Z 21008KT 10SM TSRA BKN040 20/10 A2992",
+        ceiling_ft=4000,
+        visibility_sm=10.0,
+    )
+    if atc_phrase.is_vfr_recovery_weather(
+        ts_wx, catalog=atc_phrase.load_approach_catalog(nellis)
+    ):
+        print(f"  FAIL TSRA must block VFR recovery: {ts_wx.raw}")
+        bad += 1
+    else:
+        print("approach TSRA weather — IMC / instrument")
     p_ask_sarah = atc_phrase.assign_approach_plan(
         nellis, vmc, state={}, force=True, vfr_recovery="SARAH"
     )
