@@ -618,7 +618,7 @@ def main() -> int:
         or not pl.picture_include_unit(magic, "red")
         or not pl.caoc_unit_is_ti_training(ti_unit)
         or not pl.caoc_unit_is_ti_training(unk_display)
-        or "UNK" not in ti_said
+        or "unk" in ti_said.casefold()
         or "hostile" in ti_said.casefold()
         or "bandit" in ti_said.casefold()
     ):

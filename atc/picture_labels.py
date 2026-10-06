@@ -313,8 +313,8 @@ def ti_display_callsign(group: FightGroup | None) -> str:
     """
     Callsign to speak for a TI contact.
 
-    Prefer ``displayCallsign`` (usually UNK). Never speak hostile, bandit,
-    or friendly from a DCS group name.
+    ``displayCallsign`` UNK only marks the contact undeclared. It is not
+    spoken. Never speak hostile, bandit, or friendly from a DCS group name.
     """
     if group is None or not group.ti_training:
         return ""
@@ -323,7 +323,7 @@ def ti_display_callsign(group: FightGroup | None) -> str:
         return ""
     token = text.casefold()
     if token in {"unk", "unknown"}:
-        return "UNK"
+        return ""
     if token in {
         "hostile",
         "hostiles",
