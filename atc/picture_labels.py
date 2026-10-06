@@ -734,7 +734,86 @@ _OPUS_AFFILIATION_SPOKEN = {
 _PICTURE_THREAT_CALLS = frozenset({"bogey", "bogey spades", "bandit", "hostile"})
 _TRUTHY = frozenset({True, 1, 1.0, "1", "true", "yes", "on"})
 VID_INTERCEPT_CUE = "recommend intercept for visual I-D"
+COMMIT_CUE = "recommend commit"
+# Mixed picture: hostile groups are a shoot cue; bogeys still need a VID.
+MIXED_COMMIT_VID_CUE = "recommend commit, intercept bogey for visual I-D"
 _TI_TRAINING_PREFIX = "TI_TRAINING_"
+
+# Civil random-traffic callsigns. The gateway often leaves these UNKNOWN.
+# They are assumed friendly until a VID writes BANDIT or HOSTILE.
+# ICAO airline designator + flight number, Janet, or a US N-number.
+_AIRLINE_DESIGNATORS = frozenset(
+    {
+        "AAL",
+        "AAY",
+        "ABX",
+        "ACA",
+        "AFR",
+        "AMX",
+        "ANA",
+        "ASA",
+        "ASH",
+        "AUA",
+        "AVA",
+        "AWE",
+        "AWI",
+        "AZA",
+        "BAW",
+        "BEL",
+        "BTA",
+        "CCA",
+        "CES",
+        "CKS",
+        "CMP",
+        "CPA",
+        "CSA",
+        "DAL",
+        "DLH",
+        "EDV",
+        "EIN",
+        "ENY",
+        "ETD",
+        "FDX",
+        "FFT",
+        "FIN",
+        "GJS",
+        "GLO",
+        "GTI",
+        "HAL",
+        "IBE",
+        "ICE",
+        "JAL",
+        "JBU",
+        "JIA",
+        "KAL",
+        "KLM",
+        "LAN",
+        "LOT",
+        "NKS",
+        "PDT",
+        "QFA",
+        "QTR",
+        "QXE",
+        "RPA",
+        "SAS",
+        "SIA",
+        "SKW",
+        "SWA",
+        "SWR",
+        "TAM",
+        "TAP",
+        "THY",
+        "UAL",
+        "UAE",
+        "UPS",
+        "VIR",
+        "WJA",
+    }
+)
+_JANET_RE = re.compile(r"\bjanet\s*\d+\b", re.IGNORECASE)
+_N_NUMBER_RE = re.compile(r"\bN\d{1,5}[A-Z]{0,2}\b", re.IGNORECASE)
+_AIRLINE_FLIGHT_RE = re.compile(r"\b([A-Za-z]{3})\s*(\d{1,4})\b")
+_IFF_TAIL_RE = re.compile(r"#\s*IFF:\S+", re.IGNORECASE)
 
 
 def normalize_opus_affiliation(raw: Any) -> str | None:
@@ -825,14 +904,66 @@ def picture_call_declaration(
     return "bogey spades"
 
 
+def _random_traffic_callsign_blob(unit: dict[str, Any]) -> str:
+    parts = [
+        str(unit.get(k) or "")
+        for k in (
+            "displayCallsign",
+            "display_callsign",
+            "name",
+            "groupName",
+            "group_name",
+            "unitName",
+            "unit_name",
+        )
+    ]
+    return _IFF_TAIL_RE.sub(" ", " ".join(parts))
+
+
+def caoc_unit_is_random_civil(unit: dict[str, Any] | None) -> bool:
+    """
+    Airline, Janet, or N-number random traffic.
+
+    DAL 3698, AAL 4595, Janet 87, and N9572H are this traffic. A military
+    callsign (MAGIC, TEXACO) is not, even on an airliner-looking type.
+    """
+    if not isinstance(unit, dict):
+        return False
+    blob = _random_traffic_callsign_blob(unit)
+    if not blob.strip():
+        return False
+    if _JANET_RE.search(blob) or _N_NUMBER_RE.search(blob):
+        return True
+    for match in _AIRLINE_FLIGHT_RE.finditer(blob):
+        if match.group(1).upper() in _AIRLINE_DESIGNATORS:
+            return True
+    return False
+
+
+def unit_is_assumed_friendly_traffic(unit: dict[str, Any] | None) -> bool:
+    """
+    Random civil traffic the gateway still marks UNKNOWN.
+
+    Assumed friendly, so it stays off the picture. BANDIT or HOSTILE from a
+    VID wins and the track is pictured again.
+    """
+    if not caoc_unit_is_random_civil(unit):
+        return False
+    aff = normalize_opus_affiliation((unit or {}).get("affiliation"))
+    return aff not in ("hostile", "bandit")
+
+
 def picture_include_unit(unit: dict[str, Any] | None, hostile_side: str = "red") -> bool:
     """
     Whether this air track belongs on picture / bogey dope.
 
     UNKNOWN, BANDIT, and HOSTILE are pictured. FRIENDLY and NEUTRAL are not.
-    Affiliation does not decide whether the row is an air track.
+    Airline, Janet, and N-number traffic is assumed friendly while the token
+    is still UNKNOWN. Affiliation does not decide whether the row is an air track.
     """
     if not isinstance(unit, dict):
+        return False
+    if unit_is_assumed_friendly_traffic(unit):
         return False
     decl = picture_call_declaration(
         affiliation=unit.get("affiliation"),
@@ -841,6 +972,37 @@ def picture_include_unit(unit: dict[str, Any] | None, hostile_side: str = "red")
         ti_training=caoc_unit_is_ti_training(unit),
     )
     return decl in _PICTURE_THREAT_CALLS
+
+
+def needs_commit_cue(group: FightGroup | None = None, **kwargs: Any) -> bool:
+    """HOSTILE only. BANDIT is a known enemy, not a shoot cue."""
+    aff_raw = kwargs.get("affiliation")
+    decl = kwargs.get("declaration")
+    if group is not None:
+        aff_raw = aff_raw if aff_raw is not None else group.affiliation
+        decl = decl if decl is not None else group.declaration
+    aff = normalize_opus_affiliation(aff_raw)
+    spoken = normalize_declaration(decl) if decl is not None else ""
+    return aff == "hostile" or spoken == "hostile"
+
+
+def recommend_cue(groups: list[FightGroup] | None) -> str:
+    """
+    Picture-call recommendation.
+
+    Unknown / bogey spades: intercept for a visual ID.
+    Hostile: commit. Bandit gets neither — known enemy, not a shoot cue.
+    """
+    rows = list(groups or [])
+    commit = any(needs_commit_cue(g) for g in rows)
+    vid = any(needs_vid_cue(g) for g in rows)
+    if commit and vid:
+        return MIXED_COMMIT_VID_CUE
+    if commit:
+        return COMMIT_CUE
+    if vid:
+        return VID_INTERCEPT_CUE
+    return ""
 
 
 def needs_vid_cue(group: FightGroup | None = None, **kwargs: Any) -> bool:

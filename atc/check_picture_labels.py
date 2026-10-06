@@ -518,13 +518,30 @@ def main() -> int:
     known = _g(25, 270, heading=90, feet=25000, bearing=40, range_nm=30)
     known.declaration = "hostile"
     known.affiliation = "HOSTILE"
-    if not pl.needs_vid_cue(unk_g) or pl.needs_vid_cue(known):
+    bandit_g = _g(30, 270, heading=90, feet=22000, bearing=10, range_nm=40)
+    bandit_g.declaration = "bandit"
+    bandit_g.affiliation = "BANDIT"
+    if (
+        not pl.needs_vid_cue(unk_g)
+        or pl.needs_vid_cue(known)
+        or pl.needs_commit_cue(unk_g)
+        or not pl.needs_commit_cue(known)
+        or pl.needs_commit_cue(bandit_g)
+        or pl.needs_vid_cue(bandit_g)
+        or pl.recommend_cue([unk_g]) != pl.VID_INTERCEPT_CUE
+        or pl.recommend_cue([known]) != pl.COMMIT_CUE
+        or pl.recommend_cue([bandit_g]) != ""
+        or pl.recommend_cue([known, unk_g]) != pl.MIXED_COMMIT_VID_CUE
+    ):
         print(
-            f"FAIL VID cue: unk={pl.needs_vid_cue(unk_g)} known={pl.needs_vid_cue(known)}"
+            f"FAIL recommend cue: vid={pl.needs_vid_cue(unk_g)} "
+            f"commit={pl.needs_commit_cue(known)} "
+            f"unk={pl.recommend_cue([unk_g])!r} hostile={pl.recommend_cue([known])!r} "
+            f"bandit={pl.recommend_cue([bandit_g])!r}"
         )
         bad += 1
     else:
-        print("OK VID cue only on UNKNOWN / undeclared TI")
+        print("OK unknown gets intercept for VID; hostile gets commit; bandit gets neither")
 
     ti_unit = {
         "affiliation": "UNKNOWN",
@@ -540,6 +557,43 @@ def main() -> int:
     blue_bogey = {"type": "air", "coalition": "blue", "affiliation": "UNKNOWN", "name": "Bogey"}
     neutral_air = {"type": "air", "affiliation": "NEUTRAL", "coalition": "red", "name": "CIV"}
     unk_display = {"type": "air", "displayCallsign": "UNK", "name": "Bandit 1", "coalition": "blue"}
+    dal = {
+        "type": "air",
+        "affiliation": "UNKNOWN",
+        "coalition": "neutral",
+        "name": "DAL 3698",
+        "groupName": "DAL 3698",
+        "objectName": "A_320",
+    }
+    aal = {
+        "type": "air",
+        "affiliation": "UNKNOWN",
+        "coalition": "neutral",
+        "name": "AAL 4595-1",
+        "groupName": "AAL 4595",
+    }
+    janet = {
+        "type": "air",
+        "affiliation": "UNKNOWN",
+        "coalition": "neutral",
+        "name": "Janet 88",
+        "objectName": "B_737",
+    }
+    cessna = {
+        "type": "air",
+        "affiliation": "UNKNOWN",
+        "coalition": "neutral",
+        "name": "N9572H #IFF:0166FR",
+        "objectName": "Cessna_210N",
+    }
+    dal_hostile = dict(dal, affiliation="HOSTILE")
+    magic = {
+        "type": "air",
+        "affiliation": "UNKNOWN",
+        "coalition": "red",
+        "name": "MAGIC #IFF:6611FR-1-1",
+        "objectName": "E-3A",
+    }
     ti_group = _g(20, 270, heading=90, feet=24000, bearing=56, range_nm=67)
     ti_group.declaration = "bogey spades"
     ti_group.ti_training = True
@@ -554,6 +608,12 @@ def main() -> int:
         or pl.picture_include_unit(blue_bare, "red")
         or not pl.picture_include_unit(blue_bogey, "red")
         or pl.picture_include_unit(neutral_air, "red")
+        or pl.picture_include_unit(dal, "red")
+        or pl.picture_include_unit(aal, "red")
+        or pl.picture_include_unit(janet, "red")
+        or pl.picture_include_unit(cessna, "red")
+        or not pl.picture_include_unit(dal_hostile, "red")
+        or not pl.picture_include_unit(magic, "red")
         or not pl.caoc_unit_is_ti_training(ti_unit)
         or not pl.caoc_unit_is_ti_training(unk_display)
         or "UNK" not in ti_said

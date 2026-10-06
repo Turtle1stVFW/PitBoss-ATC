@@ -119,6 +119,9 @@ def _cluster(tracks: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
 
 
 def _close(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    # Random civil traffic stays its own group so it cannot relabel a fighter.
+    if bool(a.get("assumed_friendly")) != bool(b.get("assumed_friendly")):
+        return False
     # Prefer lat/lon haversine when both have positions
     if None not in (a.get("lat"), a.get("lon"), b.get("lat"), b.get("lon")):
         try:
@@ -195,6 +198,7 @@ def _track_dict(
         "display_callsign": str(
             unit.get("displayCallsign") or unit.get("display_callsign") or ""
         ).strip(),
+        "assumed_friendly": pl.unit_is_assumed_friendly_traffic(unit),
     }
 
 
@@ -251,6 +255,7 @@ def _groups_from_tracks(
             for extra in affs[1:]:
                 cluster_aff = pl.higher_declaration(cluster_aff, extra)
         ti = any(bool(t.get("ti_training")) for t in cluster)
+        assumed = bool(cluster) and all(t.get("assumed_friendly") for t in cluster)
         decl = book.assign(
             ids,
             brg=int(lead["bearing"]),
@@ -259,8 +264,8 @@ def _groups_from_tracks(
             coalition=coal,
             hostile_side=hostile_side,
             upgrade_hostile=upgrade_hostile,
-            affiliation=cluster_aff or None,
-            ti_training=ti,
+            affiliation="assumed friendly" if assumed else (cluster_aff or None),
+            ti_training=False if assumed else ti,
         )
         label = str(lead.get("display_callsign") or "").strip()
         groups.append(
@@ -1339,7 +1344,8 @@ def build_vid_affiliation_reply(
 
 
 def _with_vid_cue(text: str, groups: list[pl.FightGroup]) -> str:
-    if not any(pl.needs_vid_cue(g) for g in groups):
+    cue = pl.recommend_cue(groups)
+    if not cue:
         return text
     body = text[:-1] if text.endswith(".") else text
-    return f"{body}, {pl.VID_INTERCEPT_CUE}."
+    return f"{body}, {cue}."
