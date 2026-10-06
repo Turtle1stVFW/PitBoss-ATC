@@ -386,6 +386,22 @@ _DECLARE_TENS = {
     "thirty": 30,
     "forty": 40,
     "fifty": 50,
+    "sixty": 60,
+    "seventy": 70,
+    "eighty": 80,
+    "ninety": 90,
+}
+_DECLARE_TEENS = {
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+    "fifteen": 15,
+    "sixteen": 16,
+    "seventeen": 17,
+    "eighteen": 18,
+    "nineteen": 19,
 }
 # Whisper often writes angel / angles for angels.
 _DECLARE_ANGELS = r"(?:angels?|angles?)"
@@ -529,6 +545,92 @@ def _parse_packed_bullseye(first: str) -> tuple[int, int, int | None] | None:
     return None
 
 
+def _split_glued_hundreds(text: str) -> str:
+    """
+    '2951 hundred' is bearing digits plus the 'one' of 'one hundred'.
+
+    normalize() glues every digit word, so 'two niner fife, one hundred'
+    arrives as '2951 hundred'. Put the last digit back in front of hundred.
+    """
+    toks = str(text or "").split()
+    out: list[str] = []
+    i = 0
+    while i < len(toks):
+        tok = toks[i]
+        if (
+            tok.isdigit()
+            and len(tok) > 1
+            and i + 1 < len(toks)
+            and toks[i + 1] == "hundred"
+        ):
+            if tok[:-1]:
+                out.append(tok[:-1])
+            out.append(tok[-1])
+            i += 1
+            continue
+        out.append(tok)
+        i += 1
+    return " ".join(out)
+
+
+def _fold_declare_spoken_numbers(text: str) -> str:
+    """
+    Turn picture-call range words into digits before the bullseye split.
+
+    Bearing digits are already collapsed ('one four four' → 144). The range
+    is spoken as a whole number ('sixty eight', 'one hundred fourteen').
+    Leaving 'sixty' as a word made the following 'eight' the range, so
+    ELVIS 144/68 was matched as 144/8 and every declare came back unable.
+    """
+    toks = str(text or "").split()
+    out: list[str] = []
+    i = 0
+    while i < len(toks):
+        tok = toks[i]
+        hundreds = _declare_ones_value(tok)
+        if (
+            hundreds is not None
+            and 1 <= hundreds <= 9
+            and i + 1 < len(toks)
+            and toks[i + 1] == "hundred"
+        ):
+            total = hundreds * 100
+            i += 2
+            if i < len(toks) and toks[i] in _DECLARE_TEENS:
+                total += _DECLARE_TEENS[toks[i]]
+                i += 1
+            elif i < len(toks) and toks[i] in _DECLARE_TENS:
+                total += _DECLARE_TENS[toks[i]]
+                i += 1
+                if i < len(toks):
+                    ones = _declare_ones_value(toks[i])
+                    if ones is not None:
+                        total += ones
+                        i += 1
+            elif i < len(toks) and toks[i].isdigit() and len(toks[i]) <= 2:
+                total += int(toks[i])
+                i += 1
+            out.append(str(total))
+            continue
+        if tok in _DECLARE_TENS:
+            total = _DECLARE_TENS[tok]
+            if i + 1 < len(toks):
+                ones = _declare_ones_value(toks[i + 1])
+                if ones is not None:
+                    total += ones
+                    i += 1
+            out.append(str(total))
+            i += 1
+            continue
+        if tok in _DECLARE_TEENS:
+            out.append(str(_DECLARE_TEENS[tok]))
+            i += 1
+            continue
+        out.append(tok)
+        i += 1
+    return " ".join(out)
+
+
 def parse_declare_cue(
     text: str, *, config: dict[str, Any] | None = None
 ) -> dict[str, Any] | None:
@@ -551,6 +653,7 @@ def parse_declare_cue(
     except Exception:
         norm = re.sub(r"[^a-z0-9\s]", " ", raw.lower())
         norm = re.sub(r"\s+", " ", norm).strip()
+    norm = _fold_declare_spoken_numbers(_split_glued_hundreds(norm))
     toks = norm.split()
     if not toks:
         return None
@@ -1283,7 +1386,17 @@ def build_vid_affiliation_reply(
     cs = atc_phrase.speak_callsign(callsign)
     target = parse_vid_affiliation(transcript)
     if not target:
-        return f"{cs}, {agency}, unable, say affiliation.", []
+        # No ROE word and no ID/upgrade marker — they asked, they did not assign.
+        return build_declare_reply(
+            config,
+            airport,
+            callsign,
+            agency=agency,
+            channel=channel,
+            opus=opus,
+            transcript=transcript,
+            state=state,
+        )
 
     named = match_picture_group_ref(transcript, state)
     g: pl.FightGroup | None = None

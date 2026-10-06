@@ -114,6 +114,8 @@ def main() -> int:
         ("Declare group Bullseye 020 15 Angels 28", 20, 15, 28000),
         ("Declare group Elvis 020 15 angels twenty eight", 20, 15, 28000),
         ("Declare group Bullseye 020 15 twenty eight", 20, 15, 28000),
+        ("Bandsaw, Fleece 1, declare Elvis one four four, sixty eight", 144, 68, None),
+        ("Bandsaw, declare Elvis two niner fife, one hundred fourteen", 295, 114, None),
     ]
     for raw, brg, rng, alt in cases:
         cue = voice_actions.parse_declare_cue(raw)

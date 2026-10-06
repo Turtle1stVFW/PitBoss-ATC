@@ -1101,7 +1101,7 @@ INTENTS: tuple[Intent, ...] = (
     ),
     Intent(
         "request_declare",
-        (("declare",),),
+        (("declare", "affiliation"),),
         channels=("blackjack", "bandsaw", "joshua", "ops", "other", "control_east", "control_west", "center"),
         phases=("flight",),
         weight=1.25,
@@ -3736,6 +3736,32 @@ def _tower_asked_report_high_key(last_tx_text: str = "") -> bool:
     return "report high key" in str(last_tx_text or "").lower()
 
 
+def _is_declare_query(text: str) -> bool:
+    """
+    Pilot is asking what the group is, not assigning an affiliation.
+
+    'declare north group' and 'what's his affiliation' are queries. 'declare
+    as bandit' / 'VID' / 'ID group' still set the call.
+    """
+    if not re.search(r"(?<!\w)(?:declare|affiliation)(?!\w)", text):
+        return False
+    return not _group_hit(
+        text,
+        (
+            "declare as",
+            "vid",
+            "visual id",
+            "visual i-d",
+            "visual identification",
+            "id group",
+            "eye dee",
+            "upgrade",
+            "upgrade group",
+        ),
+        fuzzy=False,
+    )
+
+
 def _score_intents(
     text: str,
     transcript: str,
@@ -3767,6 +3793,11 @@ def _score_intents(
         if intent.id in _C2_INTENT_IDS and not step_offers_c2(
             current_step, channel=channel
         ):
+            continue
+        # A declare / "affiliation?" question must not be scored as a VID.
+        # Picture labels ('north group') used to win that tie and answer
+        # "unable, say affiliation" when the pilot was asking, not setting.
+        if intent.id == "report_vid" and _is_declare_query(text):
             continue
         # Tower will take overhead / tac overhead / straight-in. Instrument
         # and named IAF / recovery fixes stay with Approach.
