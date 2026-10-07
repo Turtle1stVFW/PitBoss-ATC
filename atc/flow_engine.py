@@ -1008,6 +1008,48 @@ class FlowEngine:
             prev.get("channel") or prev.get("phase") or ""
         )
 
+    def _skip_control_handoff_if_on_approach(
+        self, step: dict[str, Any] | None
+    ) -> dict[str, Any] | None:
+        """
+        NATCF already handed them to Approach and they are on that UHF.
+
+        Re-playing the handoff still demanded Control's frequency, so the
+        approach clearance never became the current step.
+        """
+        if str((step or {}).get("template") or "") != "control_handoff":
+            return None
+        airport = self.airport()
+        radio = getattr(self, "remote_radios", None)
+        if not isinstance(radio, srs_radio.RadioState) or not radio.freqs_mhz:
+            radio = None
+        on_approach = srs_radio.bank_has_agency(
+            airport, "approach", self.config, state=radio
+        )
+        if not on_approach:
+            return None
+        # Still monitoring Control — let the handoff transmit there.
+        control = str(self.state.get("control_channel") or step.get("channel") or "")
+        control = control.strip().lower()
+        if control in ("control_east", "control_west") and srs_radio.bank_has_agency(
+            airport, control, self.config, state=radio
+        ):
+            return None
+        if self.state.get("approach_checked_in"):
+            self._seek_template("approach_procedure")
+        else:
+            self._seek_template("approach_check_in")
+        self._advance_past_skippable()
+        self.save_state()
+        return {
+            "action": "advanced",
+            "label": "Already on Approach",
+            "text": "",
+            "channel": "approach",
+            "detail": "tuned Approach — Control handoff already complete",
+            "advanced_to_index": self.state.get("index"),
+        }
+
     def _freq_gate_or_raise(self, step: dict[str, Any] | None, *, bypass: bool = False) -> None:
         """Block external Advance/TX when the pilot is known to be off frequency."""
         if bypass:
@@ -1307,6 +1349,7 @@ class FlowEngine:
             pass
         self.state["last_step_id"] = "bj_continue"
         self.state["blackjack_checked_in"] = True
+        self.state.pop("await_blackjack_checkin", None)
         self.state["last_tx_text"] = text
         self.state["last_tx_template"] = "bj_continue"
         self.state["last_tx_channel"] = channel
@@ -1702,6 +1745,9 @@ class FlowEngine:
                 )
                 if held is not None:
                     return held
+                skipped = self._skip_control_handoff_if_on_approach(play)
+                if skipped is not None:
+                    return skipped
                 self._freq_gate_or_raise(play, bypass=bypass_freq_gate)
                 result = self.play_step(play)
                 self._schedule_advance_after_tx(

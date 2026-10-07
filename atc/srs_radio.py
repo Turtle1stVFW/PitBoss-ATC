@@ -829,6 +829,16 @@ def check_freq_gate(
     freq = target_mhz
     if freq is None and step is not None:
         ch = ch or str(step.get("channel") or step.get("phase") or "other")
+        tmpl = str(step.get("template") or "").strip().lower()
+        if tmpl in ("control_check_in", "control_handoff"):
+            try:
+                import agencies as agencies_mod
+
+                assigned = agencies_mod.assigned_control_channel(state)
+            except Exception:
+                assigned = ""
+            if assigned:
+                ch = assigned
         try:
             freq, _mod, _name = atc_phrase.step_radio(
                 airport, ch, step, state=state, config=config

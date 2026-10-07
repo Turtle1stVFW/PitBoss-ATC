@@ -801,6 +801,36 @@ def pending_contact(state: dict[str, Any] | None) -> str:
     return str((state or {}).get("pending_contact") or "").strip().lower()
 
 
+def assigned_control_channel(state: dict[str, Any] | None) -> str:
+    """NATCF sector this sortie is working. Empty until a handoff names one."""
+    ch = str((state or {}).get("control_channel") or "").strip().lower()
+    return ch if ch in CONTROL else ""
+
+
+def range_exit_auto_wait(
+    state: dict[str, Any] | None,
+    *,
+    inside_blackjack: bool | None = None,
+) -> str:
+    """
+    Why Watch must not auto-play Blackjack range exit.
+
+    After Bandsaw / Joshua checkout the pilot still has to check in.
+    If they are already outside the range polygon, that is not a fresh
+    exit — they say "off station" when they are actually done.
+    """
+    if not isinstance(state, dict):
+        return ""
+    if state.get("await_blackjack_checkin"):
+        return "waiting for Blackjack check-in"
+    if state.get("range_exit_skip_until_inside"):
+        if inside_blackjack:
+            state.pop("range_exit_skip_until_inside", None)
+            return ""
+        return "say off station when you are ready to leave the range"
+    return ""
+
+
 def note_tx(
     state: dict[str, Any] | None,
     channel: str,
@@ -816,14 +846,27 @@ def note_tx(
     state.pop("manual_step_view", None)
     if ch:
         state["last_agency"] = ch
-        if pending_contact(state) == ch:
+        pending = pending_contact(state)
+        if pending == ch:
+            state.pop("pending_contact", None)
+        elif pending in CONTROL and ch in CONTROL:
+            # They were sent to one NATCF sector and the other one answered.
+            # Stay with the sector that is actually talking — cues and the
+            # gate follow that UHF, not the polygon guess.
+            state["control_channel"] = ch
             state.pop("pending_contact", None)
     if tmpl in ("bj_check_in", "bj_continue", "bj_alpha_check", "bj_range_entry"):
         state["blackjack_checked_in"] = True
+        state.pop("await_blackjack_checkin", None)
     if tmpl == "bandsaw_check_in":
         state["bandsaw_checked_in"] = True
-    if tmpl == "bandsaw_check_out":
+    if tmpl in ("bandsaw_check_out", "joshua_check_out"):
         state.pop("bandsaw_checked_in", None)
+        # Back on Blackjack is a check-in, not an immediate range exit.
+        # Tuning the UHF must not play the exit while they are already
+        # outside the polygon (northern ranges).
+        state["await_blackjack_checkin"] = True
+        state["range_exit_skip_until_inside"] = True
     dest = ""
     if tmpl == "bj_range_exit":
         dest = str(state.get("control_channel") or "control_east").strip().lower()

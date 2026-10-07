@@ -2227,6 +2227,26 @@ class MissionPlanner(tk.Tk):
         if tmpl == "approach_check_in":
             return "", "waiting for Approach check-in"
 
+        # Range exit is not the first call after a Bandsaw checkout. Tuning
+        # Blackjack while already outside the polygon must not read the exit.
+        if tmpl == "bj_range_exit":
+            inside = None
+            try:
+                import agencies as agencies_mod
+
+                ll = atc_phrase._ownship_ll_from_state(state)
+                if ll and airport is not None:
+                    inside = agencies_mod.ll_in_agency(
+                        airport, "blackjack", ll[0], ll[1]
+                    )
+                wait = agencies_mod.range_exit_auto_wait(
+                    state, inside_blackjack=inside
+                )
+            except Exception:
+                wait = ""
+            if wait:
+                return "", wait
+
         # NATCF → Approach: after check-in, while still inbound to the exit fix.
         if tmpl == "control_handoff":
             ready, waiting = atc_phrase.control_handoff_auto_ready(
@@ -3081,18 +3101,24 @@ class MissionPlanner(tk.Tk):
         tun = str(tuned or "").strip().lower()
         owning = self._map_owning_agency()
         if ch in ("control_east", "control_west"):
-            ll = self._ownship_ll()
-            if ll:
-                try:
-                    import agencies as agencies_mod
+            # The sector ATC named (or the one that answered) stays put.
+            # Re-reading the polygon every paint made Fly demand West while
+            # the gate and the radio were on East.
+            try:
+                import agencies as agencies_mod
 
-                    return agencies_mod.control_for_ll(
-                        self.engine.airport(), ll[0], ll[1]
-                    )
-                except Exception:
-                    return owning if owning in ("control_east", "control_west") else ch
-            if owning in ("control_east", "control_west"):
-                return owning
+                assigned = agencies_mod.assigned_control_channel(
+                    getattr(self.engine, "state", None)
+                )
+                if assigned:
+                    return assigned
+                pending = agencies_mod.pending_contact(
+                    getattr(self.engine, "state", None)
+                )
+                if pending in ("control_east", "control_west"):
+                    return pending
+            except Exception:
+                pass
             return ch
         if ch == "joshua" and tun != "joshua":
             try:
@@ -10420,22 +10446,8 @@ class MissionPlanner(tk.Tk):
                 if live_ch == "ops" and pending_ch == "delivery" and not ops_start_done:
                     pending_ch = ""
                 # Keep pending_contact until that agency actually TXes (check-in).
-                # Clearing it on tune alone made contact/switch readbacks look like
-                # fresh calls and let handoff autos arm early.
-                if pending_ch in ("control_east", "control_west"):
-                    ll = self._ownship_ll()
-                    if ll:
-                        try:
-                            import agencies as agencies_mod
-
-                            pending_ch = agencies_mod.control_for_ll(
-                                self.engine.airport(), ll[0], ll[1]
-                            )
-                        except Exception:
-                            if owning_ch in ("control_east", "control_west"):
-                                pending_ch = owning_ch
-                    elif owning_ch in ("control_east", "control_west"):
-                        pending_ch = owning_ch
+                # Do not replace NATCF East/West with the live polygon — that
+                # fought the handoff ATC just read and the UHF they switched to.
                 hero_ch = live_ch
                 if pending_ch and live_ch != pending_ch:
                     hero_ch = pending_ch

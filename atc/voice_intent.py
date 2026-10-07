@@ -961,6 +961,30 @@ def extract_nav_point(text: str) -> str | None:
     return None
 
 
+def vectors_name_a_fix_not_a_tanker(text: str) -> bool:
+    """
+    'Vectors to Arcoe' is the waypoint, not the ARCO tanker callsign.
+
+    Whisper often drops the trailing E ('arco'). That token is also a tanker
+    name, and a one-edit fuzzy hit used to score request_tanker ahead of the
+    fix. An explicit tanker / Texaco call still wins.
+    """
+    if _group_hit(
+        text,
+        ("tanker", "texaco", "shell", "boom", "air refuel", "air refueling", "aar"),
+        fuzzy=False,
+    ):
+        return False
+    phrase = extract_nav_point(text)
+    if phrase:
+        token = "".join(phrase.split())
+        if token in {"arco", "arcoe", "rco"}:
+            return True
+        if _resolved_nav_point(text) is not None:
+            return True
+    return bool(_group_hit(text, ("arcoe", "waypoint"), fuzzy=False))
+
+
 def _resolved_nav_point(text: str) -> dict[str, Any] | None:
     """The point in a 'vectors to …' call, resolved against the nav catalogs."""
     phrase = extract_nav_point(text)
@@ -3789,6 +3813,9 @@ def _score_intents(
         # "wind check" still fuzzy-matches "check wind". Reject the radio-check
         # shape before it can score as request_winds on every agency.
         if intent.id == "request_winds" and looks_like_radio_check_not_winds(text):
+            continue
+        # "request vectors to arcoe" fuzzy-matches tanker callsign "arco".
+        if intent.id == "request_tanker" and vectors_name_a_fix_not_a_tanker(text):
             continue
         if intent.id in _C2_INTENT_IDS and not step_offers_c2(
             current_step, channel=channel

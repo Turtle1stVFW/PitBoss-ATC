@@ -2759,6 +2759,9 @@ def _advance_past_bandsaw(engine: Any) -> None:
     if exit_i is not None and idx < exit_i:
         idx = exit_i
     engine.state["index"] = idx
+    if isinstance(engine.state, dict):
+        engine.state["await_blackjack_checkin"] = True
+        engine.state["range_exit_skip_until_inside"] = True
     if hasattr(engine, "_advance_past_skippable"):
         engine._advance_past_skippable()
     engine.save_state()
@@ -3206,6 +3209,34 @@ def _resolve_tx_channel(
     addressed = ""
     if match is not None:
         addressed = str(match.slots.get("channel") or "").strip().lower()
+    remote = getattr(engine, "remote_radios", None)
+    tuned = srs_radio.channel_for_tuned_freq(
+        airport,
+        engine.config,
+        state=remote if isinstance(remote, srs_radio.RadioState) else None,
+    )
+    # NATCF East and West are one agency with two UHFs. A Control call goes
+    # out on the sector the pilot is actually tuned to. If they are not on
+    # either yet, use the sector the last handoff named — not a hardcoded
+    # East step. Other agencies (Blackjack, Approach, …) keep their address.
+    control_call = addressed in ("control_east", "control_west") or (
+        not addressed and tuned in ("control_east", "control_west")
+    )
+    if control_call:
+        if tuned in ("control_east", "control_west"):
+            return tuned
+        try:
+            import agencies as agencies_mod
+
+            assigned = agencies_mod.assigned_control_channel(
+                getattr(engine, "state", None)
+            )
+        except Exception:
+            assigned = ""
+        if assigned:
+            return assigned
+        if addressed in ("control_east", "control_west"):
+            return addressed
     if addressed:
         return addressed
     intent = str(match.intent or "") if match is not None else ""

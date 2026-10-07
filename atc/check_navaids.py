@@ -424,6 +424,11 @@ def intents() -> int:
          "tower", "departure", "request_unrestricted_climb"),
         ("Nellis Control, Dagger 1, request vectors to Stryk",
          "control_east", "approach", "request_point_vectors"),
+        # ARCOE is the waypoint. Whisper's "arco" must not task the tanker.
+        ("Nellis Control, Dagger 1, request vectors to arcoe",
+         "control_east", "flight", "request_point_vectors"),
+        ("Nellis Control, Dagger 1, request vectors to arco",
+         "control_east", "flight", "request_point_vectors"),
         ("Blackjack, Dagger 1, request bearing to Mormon Mesa",
          "blackjack", "flight", "request_point_vectors"),
         ("Nellis Control, Dagger 1, how far to Beatty",
