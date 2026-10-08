@@ -23,6 +23,7 @@ import threading
 import time
 import warnings
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 try:
@@ -56,6 +57,34 @@ MODEL_CHOICES = ("tiny.en", "base.en", "small.en", "distil-small.en")
 MIN_UTTERANCE_S = 0.4
 MAX_UTTERANCE_S = 20.0
 DEFAULT_MIN_CONFIDENCE = 0.6
+
+
+def bundled_model_dir(model_size: str) -> Path | None:
+    """Installer layout: atc/runtime/models/<size>/model.bin (real files, not hub links)."""
+    folder = Path(__file__).resolve().parent / "runtime" / "models" / model_size
+    if (folder / "model.bin").is_file():
+        return folder
+    return None
+
+
+def whisper_model_ref(model_size: str) -> str:
+    """Local weights when this size shipped with the app, otherwise the hub name."""
+    folder = bundled_model_dir(model_size)
+    return str(folder) if folder is not None else model_size
+
+
+def _prefer_bundled_hf_cache() -> None:
+    """Point Hugging Face at the cache shipped beside the bundled interpreter.
+
+    The VAD model is small and separate from base.en. Setting this in-process
+    still works after an elevated restart, which does not keep launcher env vars.
+    """
+    hf = Path(__file__).resolve().parent / "runtime" / "hf"
+    if not hf.is_dir():
+        return
+    os.environ.setdefault("HF_HOME", str(hf))
+    os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(hf / "hub"))
+    os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 
 
 def _context_seat(context: dict[str, Any] | None) -> int | None:
@@ -124,6 +153,7 @@ class Transcriber:
                     pass
                 return False
             try:
+                _prefer_bundled_hf_cache()
                 _quiet_huggingface_hub()
                 with warnings.catch_warnings():
                     warnings.filterwarnings(
@@ -137,7 +167,7 @@ class Transcriber:
                         category=UserWarning,
                     )
                     self._model = WhisperModel(
-                        self.model_size,
+                        whisper_model_ref(self.model_size),
                         device=self.device,
                         compute_type=self.compute_type,
                     )

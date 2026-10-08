@@ -6,16 +6,17 @@ Patched `DCS-SR-ExternalAudio` plus the **PitBoss ATC** Python app. **Testing bu
 
 **You (Host operator)**
 
-1. Run `atc\Pack-Share-Zip.cmd` — it builds a zip **without** your `config.json`, tokens, or Google key.
-2. Send the zip, [PILOT-SETUP.md](PILOT-SETUP.md), the ATC hostname, and the shared token.
+1. Run `atc\Build-Beta-Installer.cmd`. It writes `dist\PitBossATC-Setup-<version>.exe` with Python, numpy, faster-whisper, and the speech model already inside. Your `config.json` and keys are not in it.
+2. Send that Setup exe, the ATC hostname, and the shared token. Walkthrough: [PILOT-SETUP.md](PILOT-SETUP.md).
 3. Keep the Host running (`atc\Start-ATC-Host.cmd`). Your checklist: [HOST-SETUP.md](HOST-SETUP.md).
+
+`atc\Pack-Share-Zip.cmd` is the source zip for someone who will install Python themselves. Open-beta testers should get the Setup exe.
 
 **Them (pilot PC)** — [PILOT-SETUP.md](PILOT-SETUP.md) is the walkthrough. Short version:
 
-1. Install Python 3.10+ from python.org (PATH + tcl/tk).
-2. Unzip. Double-click `atc\Setup-Pilot.cmd`.
-3. First-run window: Opus username, **Client**, hostname + token, Test connection, Save.
-4. Title bar: pick the Opus flight. Fly: hold SRS PTT and talk.
+1. Run `PitBossATC-Setup.exe`. Python is included. Leave the default folder.
+2. Launch **PitBoss ATC**. First-run window: Opus username, **Client**, hostname + token, Test connection, Save.
+3. Restart DCS once. Title bar: pick the Opus flight. Fly: hold SRS PTT and talk.
 
 ## Requirements
 
@@ -33,6 +34,7 @@ Patched `DCS-SR-ExternalAudio` plus the **PitBoss ATC** Python app. **Testing bu
 | `Open-Flight-Flow.cmd` | Everyday launch |
 | `Start-ATC-Host.cmd` | Dedicated-server Host box |
 | `Pack-Share-Zip.cmd` | Host operator: zip a tester copy with secrets stripped |
+| `Build-Beta-Installer.cmd` | Host operator: build `PitBossATC-Setup.exe` (Python + voice bundled) |
 | `Allow-ATC-Host-Firewall.cmd` | Host: inbound TCP 8766 (Run as administrator) |
 
 5. Optional Google Neural2 voices: see [docs/ATC.md](docs/ATC.md). Put your service-account JSON in `atc\secrets\` (gitignored).

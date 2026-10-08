@@ -55,3 +55,7 @@ Thumbs.db
 
 # Cursor IDE — local only (rules/plans must not overwrite other contributors)
 .cursor/
+
+# Open-beta installer output, download cache, and generated Inno defines
+dist/
+atc/installer/build_defines.iss

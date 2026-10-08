@@ -1,4 +1,4 @@
-# New pilot setup (testing)
+# New pilot setup (open beta)
 
 This is a testing build of **PitBoss ATC**. You already have DCS, SRS, and an Opus / CAOC login. You do **not** need the Google TTS key — that stays on the Host.
 
@@ -7,7 +7,18 @@ Ask the person running ATC for two things only:
 1. **ATC address** — usually the same hostname you already type for SRS (example: `showtime.455aew.com`)
 2. **Shared token** — a short string. Not a JSON file.
 
-## 1. Install Python (once per PC)
+## If you received PitBossATC-Setup.exe
+
+You do **not** install Python, numpy, or Whisper. The setup exe includes them.
+
+1. Double-click `PitBossATC-Setup.exe`. If Windows SmartScreen says the publisher is unknown, choose **More info**, then **Run anyway**.
+2. Leave the default install folder. Administrator rights are not required.
+3. When it finishes, launch **PitBoss ATC** (desktop or Start menu). The first-run window is the same table in step 3 below.
+4. Restart DCS once before you fly, so the radio hook loads.
+
+Then continue at [Before you fly](#4-before-you-fly). Skip the Python and source-zip steps.
+
+## 1. Install Python (source zip only)
 
 Download [Python 3.10+](https://www.python.org/downloads/windows/) (not the Microsoft Store stub).
 
@@ -16,11 +27,11 @@ In the installer, check:
 - **Add python.exe to PATH**
 - **tcl/tk and IDLE**
 
-## 2. Get the folder onto this PC
+## 2. Get the folder onto this PC (source zip only)
 
 Unzip the share pack (or clone the repo) anywhere. Do not copy someone else’s `atc\config.json` or `atc\secrets\` folder.
 
-## 3. Run first-time setup
+## 3. Run first-time setup (source zip only)
 
 Double-click:
 

@@ -56,6 +56,15 @@ def _skip(path: Path) -> bool:
     # Rebuilt for this zip so a pilot PC shows the commit that was packed.
     if path.as_posix().lower() == "atc/build":
         return True
+    # Installer output is large and must not be zipped back into a share pack.
+    if path.parts and path.parts[0].lower() == "dist":
+        return True
+    posix = path.as_posix().lower()
+    if posix.startswith("atc/installer/cache") or posix == "atc/installer/build_defines.iss":
+        return True
+    # Local FAA cache, not part of a tester build.
+    if posix == "tools/_nttr_sua.geojson":
+        return True
     return False
 
 

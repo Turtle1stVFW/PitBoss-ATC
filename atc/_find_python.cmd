@@ -14,7 +14,15 @@ if defined ATC_PYTHON_OVERRIDE (
   )
 )
 
-REM 1) Official py launcher (often missing on dedicated servers)
+REM 1) Private runtime from the beta installer. Prefer it over a system
+REM    Python that does not have numpy / faster-whisper.
+if exist "%~dp0runtime\python.exe" (
+  set "ATC_PYTHON=%~dp0runtime\python.exe"
+  set "PYTHONNOUSERSITE=1"
+  goto :check
+)
+
+REM 2) Official py launcher (often missing on dedicated servers)
 where py >nul 2>&1
 if not errorlevel 1 (
   for /f "delims=" %%I in ('py -3 -c "import sys; print(sys.executable)" 2^>nul') do (
@@ -23,7 +31,7 @@ if not errorlevel 1 (
 )
 if defined ATC_PYTHON goto :check
 
-REM 2) python.exe on PATH — skip the Microsoft Store stub
+REM 3) python.exe on PATH — skip the Microsoft Store stub
 where python >nul 2>&1
 if not errorlevel 1 (
   for /f "delims=" %%I in ('where python 2^>nul') do (
@@ -50,7 +58,7 @@ if not errorlevel 1 (
   )
 )
 
-REM 3) Standard install folders (PATH not required)
+REM 4) Standard install folders (PATH not required)
 for /d %%D in ("%LocalAppData%\Programs\Python\Python3*") do (
   if exist "%%~D\python.exe" (
     set "ATC_PYTHON=%%~D\python.exe"
@@ -77,12 +85,6 @@ for /d %%D in ("%SystemDrive%\Python3*" "%SystemDrive%\Python*") do (
     set "ATC_PYTHON=%%~D\python.exe"
     goto :check
   )
-)
-
-REM 4) Optional private runtime next to this folder
-if exist "%~dp0runtime\python.exe" (
-  set "ATC_PYTHON=%~dp0runtime\python.exe"
-  goto :check
 )
 
 goto :missing

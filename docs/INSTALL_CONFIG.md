@@ -1,6 +1,6 @@
 # Installation Guide (Windows 11)
 
-Follow this guide to install this application until an automated installer is provided in the Github Releases. 
+Open-beta testers should run **PitBossATC-Setup.exe** instead of this guide. That installer already includes Python, numpy, and faster-whisper. This page is for a from-source checkout. 
 
 ## Quick Start
 
