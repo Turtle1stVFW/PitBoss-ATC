@@ -12,7 +12,7 @@ A **Python mission-flow planner** (Tk UI) that builds ATC / C2 radio phrases fro
 |------|------|
 | `DCS-SR-ExternalAudio.exe` + DLLs | Slim Windows build with remote `--ip` / hostname support |
 | `runtimes\win-x64\` | Native Speech / gRPC libs for ExternalAudio |
-| `atc\` | Flow planner UI, engine, phrases, voice, Host/Client, Stream Deck scripts |
+| `atc\` | Flow planner UI, engine, phrases, voice, Host/Client |
 | `tools\` | Zone editor / route-tester map server and geo import helpers |
 | `patches\` | Source patches + rebuild notes for ExternalAudio |
 | `docs\` | Maintainer docs (this file) |
@@ -30,7 +30,8 @@ Launchers live under `atc\`. Setup / Flight Flow / Host all start the same app.
 | `Open-Route-Tester.cmd` | `tools\zone_server.py --page tester` | Map-jet / route tester (`/tester`) |
 | `Install-DCS-Radio-Export.cmd` | `install_dcs_radio_export.py` | DCS Export hook for the frequency gate |
 | `Test-Fake-Pilots.cmd` | `fake_pilots.py` | Simulated clients against a local Host |
-| `streamdeck\*.cmd` | HTTP or CLI into the flow | Expect local control server on `flow_http_port` (default 8765) |
+
+Stream Deck (and any other button box) is not a folder in this repo. A Website action hits the local control server the running app already opens on `flow_http_port` (default 8765): `http://127.0.0.1:8765/next`, `/back`, `/seek_next`, `/seek_prev`, `/reset`, `/flip`, `/status`.
 
 `_find_python.cmd` locates `python.exe` with tcl/tk for the other launchers.
 

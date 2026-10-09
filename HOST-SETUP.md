@@ -26,6 +26,18 @@ Give each tester:
 
 Do **not** give them `atc\config.json`, `atc\secrets\`, or `tts_usage.json`.
 
+## Publishing an installer update
+
+Commits do not update installed copies. Testers are prompted only for a **published** GitHub Release that contains `PitBossATC-Setup-….exe`. Drafts and prereleases do not prompt.
+
+1. `atc\Build-Beta-Installer.cmd`
+2. On GitHub: **Releases → Draft a new release**. Tag it `v0.1.109` (match the version in the exe name). Attach `dist\PitBossATC-Setup-….exe`. Leave it as a draft until you want testers to see it.
+3. **Publish release**. Older installs then offer the download.
+
+`atc\Publish-Release.cmd` does the same upload when the GitHub CLI (`gh`) is installed. Without `--publish` it stays a draft.
+
+The repo has to be public (no token is built into the app). Do not attach `config.json` or anything from `atc\secrets\`.
+
 ## Traffic tab
 
 After the first Client connects, **Traffic** lists who is on and the per-frequency TX queue. Same Opus flight = one timeline.

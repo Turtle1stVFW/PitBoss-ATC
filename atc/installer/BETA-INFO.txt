@@ -24,4 +24,5 @@ After setup finishes:
 Ask the person running ATC for the address and the shared token only.
 Do not copy anyone else's config.json or Google key.
 
-Close PitBoss ATC before you install an update over this one.
+Later builds ask before downloading a newer installer. Close PitBoss ATC
+before you install an update by hand over this one.

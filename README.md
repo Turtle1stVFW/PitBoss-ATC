@@ -10,6 +10,8 @@ Patched `DCS-SR-ExternalAudio` plus the **PitBoss ATC** Python app. **Testing bu
 2. Send that Setup exe, the ATC hostname, and the shared token. Walkthrough: [PILOT-SETUP.md](PILOT-SETUP.md).
 3. Keep the Host running (`atc\Start-ATC-Host.cmd`). Your checklist: [HOST-SETUP.md](HOST-SETUP.md).
 
+Testers are not updated on every commit. `atc\Publish-Release.cmd --publish` publishes the Setup exe. Running copies then offer that download. A draft release does not.
+
 `atc\Pack-Share-Zip.cmd` is the source zip for someone who will install Python themselves. Open-beta testers should get the Setup exe.
 
 **Them (pilot PC)** — [PILOT-SETUP.md](PILOT-SETUP.md) is the walkthrough. Short version:
@@ -35,6 +37,7 @@ Patched `DCS-SR-ExternalAudio` plus the **PitBoss ATC** Python app. **Testing bu
 | `Start-ATC-Host.cmd` | Dedicated-server Host box |
 | `Pack-Share-Zip.cmd` | Host operator: zip a tester copy with secrets stripped |
 | `Build-Beta-Installer.cmd` | Host operator: build `PitBossATC-Setup.exe` (Python + voice bundled) |
+| `Publish-Release.cmd` | Host operator: upload that exe as a GitHub release (`--publish` offers it to testers) |
 | `Allow-ATC-Host-Firewall.cmd` | Host: inbound TCP 8766 (Run as administrator) |
 
 5. Optional Google Neural2 voices: see [docs/ATC.md](docs/ATC.md). Put your service-account JSON in `atc\secrets\` (gitignored).

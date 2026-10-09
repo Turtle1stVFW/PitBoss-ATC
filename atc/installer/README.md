@@ -10,6 +10,16 @@ The build machine needs network once (CPython, wheels, the speech model, and
 the Inno Setup compiler). The compiler is downloaded into `dist\cache\` from
 the NuGet `Tools.InnoSetup` package. Output and cache are gitignored.
 
+## Updates
+
+Installed copies ask GitHub for a newer **published** release asset named
+`PitBossATC-Setup-….exe`. Commits, draft releases, and prereleases do not
+prompt. The repo is `Turtle1stVFW/PitBoss-ATC` and must be public.
+
+On GitHub: **Releases → Draft a new release**, tag `v<version>`, attach the Setup exe, and publish it when testers should get it. `atc\Publish-Release.cmd` does that upload when the GitHub CLI is installed; `--publish` is the step that offers it to testers.
+
+The running app compares its version (`0.1.109`) with the version in the exe name, downloads to `%TEMP%\PitBossATC\`, then closes and starts setup.
+
 ## Voice control dependencies (required by default)
 
 Ship voice capture/recognition with the app — do **not** leave these as optional

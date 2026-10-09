@@ -114,6 +114,12 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
+REM GUI launchers use pythonw so routine warnings do not sit in a second window.
+REM Fall back to python.exe only when the windowless twin is missing.
+set "ATC_PYTHONW=%ATC_PYTHON%"
+for %%I in ("%ATC_PYTHON%") do (
+  if exist "%%~dpIpythonw.exe" set "ATC_PYTHONW=%%~dpIpythonw.exe"
+)
 exit /b 0
 
 :missing

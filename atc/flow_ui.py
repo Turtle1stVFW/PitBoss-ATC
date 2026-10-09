@@ -18,6 +18,16 @@ import subprocess
 import sys
 import tempfile
 import threading
+
+# pythonw.exe (how the .cmd launchers start this app) has no console.
+# print() raises if stdout/stderr are None, so park them on the null device.
+# Startup failures still use a message box. Setup-Pilot.cmd keeps its own window.
+if sys.stdout is None or sys.stderr is None:
+    _null_stdio = open(os.devnull, "w", encoding="utf-8", errors="replace")
+    if sys.stdout is None:
+        sys.stdout = _null_stdio
+    if sys.stderr is None:
+        sys.stderr = _null_stdio
 import time
 import tkinter as tk
 import uuid
@@ -11095,6 +11105,11 @@ class MissionPlanner(tk.Tk):
         ).pack(side=tk.RIGHT, padx=(0, 8))
         ttk.Button(
             hdr,
+            text="Check for updates…",
+            command=lambda: self._check_for_updates(True),
+        ).pack(side=tk.RIGHT, padx=(0, 8))
+        ttk.Button(
+            hdr,
             text="First-run setup…",
             command=self._show_first_run,
         ).pack(side=tk.RIGHT, padx=(0, 8))
@@ -11167,6 +11182,20 @@ class MissionPlanner(tk.Tk):
     def _maybe_first_run(self) -> None:
         if setup_welcome.should_show(self.config_data):
             setup_welcome.show(self)
+        self._check_for_updates(False)
+
+    def _check_for_updates(self, manual: bool = False) -> None:
+        import update_check
+
+        update_check.start_check(
+            parent=self,
+            marshal=self._ui_call,
+            config=self.config_data,
+            save=lambda: save_json(CONFIG_PATH, self.config_data),
+            shutdown=self._on_close,
+            local_version=version.version(),
+            manual=manual,
+        )
 
     def _show_first_run(self) -> None:
         setup_welcome.show(self, force=True)
@@ -11359,6 +11388,16 @@ class MissionPlanner(tk.Tk):
                     ("bullet", "• Do not pick Host on a flying PC."),
                     ("bullet", "• Do not copy atc\\secrets\\ or someone else's config.json."),
                     ("muted", "Re-open this sheet anytime: Help → First-run setup…  Written walkthrough: PILOT-SETUP.md"),
+                ],
+            ),
+            (
+                "Updates",
+                [
+                    ("body", "The app checks GitHub for a published installer. Ordinary commits do not update this PC."),
+                    ("bullet", "• A newer PitBossATC-Setup exe asks before it downloads. Drafts and prereleases do not."),
+                    ("bullet", "• Later waits a day. Skip this version hides that build. Check for updates… on this page looks again."),
+                    ("bullet", "• When the download finishes, PitBoss ATC closes and the setup exe runs. Your config.json stays."),
+                    ("muted", "https://github.com/Turtle1stVFW/PitBoss-ATC/releases"),
                 ],
             ),
             (

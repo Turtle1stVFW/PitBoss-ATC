@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Stream Deck Ground/Tower phrase builder for SRS ExternalAudio.
+ATC phrase builder for SRS ExternalAudio.
 
 Fetches METAR from Opus, picks active runway from wind, fills phrase templates,
 and transmits via the patched DCS-SR-ExternalAudio.exe to the squadron SRS server.

@@ -16,6 +16,8 @@ You do **not** install Python, numpy, or Whisper. The setup exe includes them.
 3. When it finishes, launch **PitBoss ATC** (desktop or Start menu). The first-run window is the same table in step 3 below.
 4. Restart DCS once before you fly, so the radio hook loads.
 
+When a newer installer is published, PitBoss ATC asks before downloading it. You will not be prompted for ordinary code updates. Help → **Check for updates…** looks again.
+
 Then continue at [Before you fly](#4-before-you-fly). Skip the Python and source-zip steps.
 
 ## 1. Install Python (source zip only)
