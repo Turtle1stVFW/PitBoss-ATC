@@ -1,7 +1,7 @@
 {
-  "name": "Nellis Default",
+  "name": "Untitled",
   "airport": "nellis",
-      "active_recovery": "visual_overhead",
+  "active_recovery": "visual_overhead",
   "recovery_options": [
     "visual_overhead",
     "tactical_overhead",
@@ -401,7 +401,7 @@
     {
       "id": "ops_codes",
       "phase": "approach",
-      "label": "Ops â€” codes after parking",
+      "label": "Ops \u00e2\u20ac\u201d codes after parking",
       "channel": "ops",
       "mode": "tts",
       "template": "ops_status",

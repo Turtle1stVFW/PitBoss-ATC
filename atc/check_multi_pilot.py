@@ -19,6 +19,7 @@ sys.path.insert(0, str(HERE))
 import atc_net
 import atc_phrase
 import atc_server
+import agencies
 import channel_tx
 import flow_engine
 import runway_position
@@ -45,6 +46,71 @@ def _host_config(**over: object) -> dict:
     cfg["opus_metar_url"] = "http://127.0.0.1:1/metar?icao={icao}"
     cfg.update(over)
     return cfg
+
+
+def test_host_hub_pins_local_srs() -> list[str]:
+    """Host hub must never launch ExternalAudio at showtime (silent TX)."""
+    fails: list[str] = []
+    seen: list[tuple[str, str]] = []
+
+    def tx(job: dict) -> int:
+        cfg = job.get("config") if isinstance(job.get("config"), dict) else {}
+        ap = job.get("airport") if isinstance(job.get("airport"), dict) else {}
+        seen.append(
+            (
+                atc_net.effective_srs_host(ap, cfg),
+                str(ap.get("srs_host") or ""),
+            )
+        )
+        if atc_net.role_of(cfg) != "host":
+            fails.append(f"hub job role must be host, got {cfg.get('atc_role')!r}")
+        if not cfg.get("_force_local_srs"):
+            fails.append("hub job must set _force_local_srs")
+        return 0
+
+    hub = channel_tx.ChannelTxHub(["ops", "other"], transmit_fn=tx)
+    done = threading.Event()
+    job = {
+        "config": {"dry_run": True, "atc_role": "solo"},
+        "airport": {"srs_host": atc_net.SQUADRON_SRS_HOST, "srs_port": 5002},
+        "channel": "ops",
+        "tx_name": "NellisOps",
+        "freq": 269.025,
+        "mod": "AM",
+        "text": "Start approved.",
+        "done": done,
+    }
+    hub.submit(job)
+    if not done.wait(2.0):
+        fails.append("hub job did not finish")
+    hub.stop()
+    if not seen:
+        fails.append("transmit fn never ran")
+    else:
+        srs, ap_host = seen[0]
+        if srs != atc_net.HOST_LOCAL_SRS_HOST:
+            fails.append(
+                f"effective SRS must be {atc_net.HOST_LOCAL_SRS_HOST}, got {srs}"
+            )
+        if ap_host != atc_net.HOST_LOCAL_SRS_HOST:
+            fails.append(
+                f"airport srs_host must be pinned to "
+                f"{atc_net.HOST_LOCAL_SRS_HOST}, got {ap_host}"
+            )
+    # Role alone must win even without hub pin.
+    solo_showtime = atc_net.effective_srs_host(
+        {"srs_host": atc_net.SQUADRON_SRS_HOST},
+        {"atc_role": "solo"},
+    )
+    if solo_showtime != atc_net.SQUADRON_SRS_HOST:
+        fails.append(f"solo should keep squadron SRS, got {solo_showtime}")
+    host_force = atc_net.effective_srs_host(
+        {"srs_host": atc_net.SQUADRON_SRS_HOST},
+        {"atc_role": "solo", "_force_local_srs": True},
+    )
+    if host_force != atc_net.HOST_LOCAL_SRS_HOST:
+        fails.append(f"_force_local_srs must win, got {host_force}")
+    return fails
 
 
 def test_channel_parallel_and_fifo() -> list[str]:
@@ -103,6 +169,289 @@ def test_channel_parallel_and_fifo() -> list[str]:
     elif fifo != ["Fleece1", "Viper3"]:
         fails.append(f"Ground FIFO expected Fleece1 then Viper3, got {fifo}")
     hub2.stop()
+
+    # Host run_action waits on the same job dict — submit must not copy it away.
+    seen: list[int] = []
+
+    def tx_shared(job: dict) -> int:
+        time.sleep(0.05)
+        return 99
+
+    hub3 = channel_tx.ChannelTxHub(["tower", "other"], transmit_fn=tx_shared)
+    job = {
+        **base,
+        "channel": "tower",
+        "callsign": "Razor1",
+        "text": "report",
+    }
+    hub3.submit(job)
+    done = job.get("done")
+    if not isinstance(done, threading.Event) or not done.wait(2.0):
+        fails.append("submit must put done Event on the caller's job dict")
+    elif job.get("exit_code") != 99:
+        fails.append(
+            f"submit must share exit_code with caller (got {job.get('exit_code')!r})"
+        )
+    else:
+        seen.append(99)
+    hub3.stop()
+    return fails
+
+
+def test_host_tx_failure_keeps_cursor_and_last_tx() -> list[str]:
+    """Failed ExternalAudio must not advance Fly or confirm LAST HEARD."""
+    fails: list[str] = []
+    cfg = _host_config()
+    seen: list[int] = []
+
+    def tx_fail(job: dict) -> int:
+        seen.append(1)
+        time.sleep(0.05)
+        return 99
+
+    server = atc_server.AtcServer(
+        cfg, AIRPORTS, lambda: copy.deepcopy(MISSION), transmit_fn=tx_fail
+    )
+    hello = server.hello(
+        {
+            "callsign_override": "Razor 1",
+            "opus_flight_id": 401,
+            "opus_seat": 1,
+            "radio_fresh": False,
+        }
+    )
+    sess = server.get_session(hello["session_id"])
+    if sess is None:
+        return ["no session"]
+    steps = flow_engine.enabled_steps(sess.engine.mission)
+    delivery = next(
+        (
+            s
+            for s in steps
+            if str(s.get("template") or "") in ("clearance", "clearance_readback")
+            or str(s.get("channel") or "").lower() == "delivery"
+        ),
+        None,
+    )
+    if delivery is None:
+        return ["no delivery step in mission"]
+    sid = str(delivery.get("id") or "")
+    # Park on the step; play_id will also seek here.
+    for i, s in enumerate(steps):
+        if str(s.get("id") or "") == sid:
+            sess.engine.state["index"] = i
+            break
+    before = int(sess.engine.state.get("index") or 0)
+    sess.engine.state["last_tx_text"] = ""
+    sess.engine.state["last_tx_confirmed"] = False
+    result = server.run_action(
+        sess, lambda e: e.play_id(sid, bypass_freq_gate=True), {"radio_fresh": False}
+    )
+    if not seen:
+        fails.append("transmit_fn was never called")
+    if str(result.get("action") or "") != "blocked":
+        fails.append(f"expected blocked after exit 99, got {result!r}")
+    after = int(sess.engine.state.get("index") or 0)
+    if after != before:
+        fails.append(f"cursor advanced on failed TX ({before} -> {after})")
+    if sess.engine.state.get("last_tx_confirmed"):
+        fails.append("last_tx_confirmed must stay False after failed TX")
+    if str(sess.engine.state.get("last_tx_text") or "").strip():
+        fails.append("last_tx_text must be cleared after failed TX")
+    if getattr(sess.engine, "_pending_advance_kind", None):
+        fails.append("pending advance must be cleared after failed TX")
+    if getattr(sess.engine, "_deferred_readback", None) is not None:
+        fails.append("deferred readback must be cleared after failed TX")
+
+    # Shared job dict: success path confirms and advances.
+    def tx_ok(job: dict) -> int:
+        time.sleep(0.05)
+        return 0
+
+    server2 = atc_server.AtcServer(
+        cfg, AIRPORTS, lambda: copy.deepcopy(MISSION), transmit_fn=tx_ok
+    )
+    hello2 = server2.hello(
+        {
+            "callsign_override": "Razor 2",
+            "opus_flight_id": 402,
+            "opus_seat": 1,
+            "radio_fresh": False,
+        }
+    )
+    sess2 = server2.get_session(hello2["session_id"])
+    if sess2 is None:
+        fails.append("no session for success path")
+        return fails
+    steps2 = flow_engine.enabled_steps(sess2.engine.mission)
+    play = next(
+        (s for s in steps2 if str(s.get("template") or "") == "clearance_readback"),
+        next(
+            (s for s in steps2 if str(s.get("channel") or "").lower() == "delivery"),
+            None,
+        ),
+    )
+    if play is None:
+        fails.append("no clearance_readback/delivery step for success path")
+        return fails
+    sid2 = str(play.get("id") or "")
+    for i, s in enumerate(steps2):
+        if str(s.get("id") or "") == sid2:
+            sess2.engine.state["index"] = i
+            break
+    before2 = int(sess2.engine.state.get("index") or 0)
+    ok = server2.run_action(
+        sess2, lambda e: e.play_id(sid2, bypass_freq_gate=True), {"radio_fresh": False}
+    )
+    if str(ok.get("action") or "") == "blocked":
+        fails.append(f"success TX should not block: {ok!r}")
+    if str(ok.get("action") or "") not in ("transmit", "queued", "play"):
+        fails.append(f"success TX should report transmit, got {ok.get('action')!r}")
+    if "exit_code" not in ok or int(ok.get("exit_code")) != 0:
+        fails.append(f"success path must share exit_code 0, got {ok.get('exit_code')!r}")
+    after2 = int(sess2.engine.state.get("index") or 0)
+    hold = sess2.engine._hold_cursor_after_tx(play)
+    if not hold and after2 <= before2:
+        fails.append(f"cursor should advance after successful TX ({before2} -> {after2})")
+    if not sess2.engine.state.get("last_tx_confirmed"):
+        fails.append("last_tx_confirmed must be True after successful TX")
+    if not str(sess2.engine.state.get("last_tx_text") or "").strip():
+        fails.append("last_tx_text must be stamped after successful TX")
+    server.hub.stop()
+    server2.hub.stop()
+    return fails
+
+
+def test_bandsaw_checkout_display_and_tx_failure() -> list[str]:
+    """Bandsaw checkout → bj_range_exit cues; failed TX must not confirm last_tx."""
+    fails: list[str] = []
+    timeline = [
+        {
+            "id": "bj",
+            "channel": "blackjack",
+            "template": "bj_check_in",
+            "phase": "flight",
+            "enabled": True,
+        },
+        {
+            "id": "bs",
+            "channel": "bandsaw",
+            "template": "bandsaw_check_in",
+            "phase": "flight",
+            "enabled": True,
+        },
+        {
+            "id": "bso",
+            "channel": "bandsaw",
+            "template": "bandsaw_check_out",
+            "phase": "flight",
+            "enabled": True,
+        },
+        {
+            "id": "exit",
+            "channel": "blackjack",
+            "template": "bj_range_exit",
+            "phase": "flight",
+            "enabled": True,
+        },
+    ]
+    # Stale bj_check_in last_tx with cursor already on range exit.
+    shown = agencies.display_step_for_agency(
+        timeline, "blackjack", cursor_index=3, last_tx_template="bj_check_in"
+    )
+    if not shown or str(shown.get("template") or "") != "bj_range_exit":
+        fails.append(
+            f"cursor on bj_range_exit must show range exit, not check-in: {shown!r}"
+        )
+    shown2 = agencies.display_step_for_agency(
+        timeline, "blackjack", cursor_index=0, last_tx_template="bandsaw_check_out"
+    )
+    if not shown2 or str(shown2.get("template") or "") != "bj_range_exit":
+        fails.append(
+            f"bandsaw_check_out last_tx must show bj_range_exit: {shown2!r}"
+        )
+
+    cfg = _host_config()
+    seen: list[int] = []
+
+    def tx_fail(job: dict) -> int:
+        seen.append(1)
+        time.sleep(0.05)
+        return 99
+
+    server = atc_server.AtcServer(
+        cfg, AIRPORTS, lambda: copy.deepcopy(MISSION), transmit_fn=tx_fail
+    )
+    hello = server.hello(
+        {
+            "callsign_override": "Razor 9",
+            "opus_flight_id": 909,
+            "opus_seat": 1,
+            "radio_fresh": False,
+        }
+    )
+    sess = server.get_session(hello["session_id"])
+    if sess is None:
+        return fails + ["no session for bandsaw TX failure"]
+    steps = flow_engine.enabled_steps(sess.engine.mission)
+    bj_i = next(
+        (
+            i
+            for i, s in enumerate(steps)
+            if str(s.get("template") or "") == "bj_check_in"
+        ),
+        None,
+    )
+    if bj_i is None:
+        server.hub.stop()
+        return fails + ["no bj_check_in in mission"]
+    sess.engine.state["index"] = bj_i
+    before = int(sess.engine.state.get("index") or 0)
+    sess.engine.state["last_tx_text"] = "Blackjack Fleece 1 continue"
+    sess.engine.state["last_tx_template"] = "bj_check_in"
+    sess.engine.state["last_tx_confirmed"] = True
+    sess.engine.defer_tx = True
+    sess.engine._pending_bandsaw_advance = True
+    # Simulate Host wait failing after checkout was staged.
+    if hasattr(sess.engine, "abandon_deferred_tx"):
+        sess.engine.abandon_deferred_tx()
+    if getattr(sess.engine, "_pending_bandsaw_advance", False):
+        fails.append("abandon must clear pending bandsaw advance")
+    if int(sess.engine.state.get("index") or 0) != before:
+        fails.append("failed TX must keep cursor (bandsaw advance not applied)")
+    if sess.engine.state.get("last_tx_confirmed"):
+        fails.append("last_tx_confirmed must be False after abandon")
+    if str(sess.engine.state.get("last_tx_text") or "").strip():
+        fails.append("last_tx_text must clear after abandon")
+    # Hub path: real failed transmit on play.
+    bso = next(
+        (s for s in steps if str(s.get("template") or "") == "bandsaw_check_out"),
+        None,
+    )
+    if bso is not None:
+        sid = str(bso.get("id") or "")
+        for i, s in enumerate(steps):
+            if str(s.get("id") or "") == sid:
+                sess.engine.state["index"] = i
+                break
+        park = int(sess.engine.state.get("index") or 0)
+        out = server.run_action(
+            sess,
+            lambda e: e.play_id(sid, bypass_freq_gate=True),
+            {"radio_fresh": False},
+        )
+        if str(out.get("action") or "") != "blocked":
+            fails.append(f"bandsaw checkout TX fail must block, got {out!r}")
+        if int(sess.engine.state.get("index") or 0) != park:
+            fails.append(
+                f"bandsaw checkout fail advanced cursor "
+                f"{park} -> {sess.engine.state.get('index')}"
+            )
+        if sess.engine.state.get("last_tx_confirmed"):
+            fails.append("bandsaw fail must not confirm last_tx")
+        if not seen:
+            fails.append("bandsaw checkout transmit_fn never called")
+    server.hub.stop()
     return fails
 
 
@@ -257,6 +606,42 @@ def test_client_freq_gate() -> list[str]:
     return fails
 
 
+def test_empty_radio_snapshot_keeps_bank() -> list[str]:
+    """Failed client radio reads must not wipe the Host's last good UHF bank."""
+    fails: list[str] = []
+    cfg = _host_config(freq_gate_enabled=True)
+    server = atc_server.AtcServer(
+        cfg, AIRPORTS, lambda: copy.deepcopy(MISSION), transmit_fn=lambda _j: 0
+    )
+    hello = server.hello(
+        {
+            "callsign_override": "Fleece 1",
+            "opus_flight_id": 404,
+            "opus_seat": 1,
+            "tuned_freqs_mhz": [273.55, 251.0],
+            "radio_fresh": True,
+        }
+    )
+    sess = server.get_session(hello["session_id"])
+    if sess is None:
+        return ["radio keep: no session"]
+    if 273.55 not in sess.tuned_freqs_mhz:
+        fails.append(f"hello should seed UHF, got {sess.tuned_freqs_mhz}")
+    # Heartbeat with a failed empty read — bank must stay.
+    server.heartbeat(sess, {"tuned_freqs_mhz": [], "radio_fresh": False})
+    if 273.55 not in sess.tuned_freqs_mhz:
+        fails.append(
+            f"empty unfresh snapshot wiped bank: {sess.tuned_freqs_mhz}"
+        )
+    # Explicit fresh empty (pilot really has no radios) may clear.
+    server.heartbeat(sess, {"tuned_freqs_mhz": [], "radio_fresh": True})
+    if sess.tuned_freqs_mhz:
+        fails.append(
+            f"fresh empty should clear bank, got {sess.tuned_freqs_mhz}"
+        )
+    return fails
+
+
 def test_session_key() -> list[str]:
     fails: list[str] = []
     k1 = atc_net.session_key(opus_flight_id=1, opus_seat=1)
@@ -266,6 +651,14 @@ def test_session_key() -> list[str]:
         fails.append("dash-1 and dash-2 must be different connection keys")
     if k1 != k3:
         fails.append("same flight/seat should resume the same session key")
+    if atc_net.session_key(opus_flight_id=55.0, opus_seat=1.0) != atc_net.session_key(
+        opus_flight_id=55, opus_seat=1
+    ):
+        fails.append("flight/seat ids must normalize int vs float")
+    if not agencies.is_default_sandbox({"flow_file": "flows/nellis_standard.json"}):
+        fails.append("Nellis Standard must use the agency sandbox")
+    if agencies.is_default_sandbox({"flow_file": "flows/untitled.json"}):
+        fails.append("custom Untitled plans must not use the agency sandbox")
     f1 = atc_net.flow_key(opus_flight_id=1, callsign="Fleece 1")
     f2 = atc_net.flow_key(opus_flight_id=1, callsign="Fleece 1")
     f3 = atc_net.flow_key(opus_flight_id=2, callsign="Viper 3")
@@ -279,6 +672,266 @@ def test_session_key() -> list[str]:
         fails.append("seats 1-2 should be the lead element")
     if tanker.element_seats(3) != (3, 4) or tanker.element_seats(4) != (3, 4):
         fails.append("seats 3-4 should be the second element")
+    return fails
+
+
+def test_client_map_fp_used_on_host() -> list[str]:
+    """Host Delivery must use the client's Route Tester plan, not Opus-only."""
+    fails: list[str] = []
+    cfg = _host_config()
+    for key in ("opus_flight_id", "opus_seat", "opus_flight_label", "callsign_override"):
+        cfg.pop(key, None)
+    server = atc_server.AtcServer(
+        cfg, AIRPORTS, lambda: copy.deepcopy(MISSION), transmit_fn=lambda _j: 0
+    )
+    route = "KLSV.FLEX21R.DREAM.ST LOUIS.ARCOE.NELLIS AFB"
+    hello = server.hello(
+        {
+            "opus_flight_id": 55,
+            "opus_seat": 1,
+            "opus_flight_label": "RAZOR 1 · KLSV",
+            "opus_user_name": "Turtle",
+            "ownship_from_map": True,
+            "fp_route_string": route,
+            "fp_altitude": "220",
+            "tuned_freqs_mhz": [275.8],
+            "radio_fresh": True,
+            "ownship_ll": [36.24, -115.03],
+        }
+    )
+    sess = server.sessions.get(str(hello.get("session_id") or ""))
+    if sess is None:
+        return ["missing session after map-fp hello"]
+    if not sess.identity.get("from_map"):
+        fails.append("session identity should flag from_map")
+    if str(sess.identity.get("fp_route_string") or "") != route:
+        fails.append(
+            f"session should keep map route, got {sess.identity.get('fp_route_string')!r}"
+        )
+    with atc_server._session_engine_binding(sess):
+        ctx = atc_phrase.resolve_active_opus_flight(sess.engine.config)
+        got = str(getattr(ctx, "fp_route_string", "") or "")
+        if got != route:
+            fails.append(f"bound resolve must use map route, got {got!r}")
+        if str(getattr(ctx, "fp_altitude", "") or "") != "220":
+            fails.append(
+                f"bound resolve must use map altitude, got {getattr(ctx, 'fp_altitude', None)!r}"
+            )
+        if "razor" not in str(getattr(ctx, "radio_callsign", "") or "").casefold():
+            fails.append(
+                f"bound resolve should keep Razor callsign, got "
+                f"{getattr(ctx, 'radio_callsign', None)!r}"
+            )
+    return fails
+
+
+def test_bound_seat_tx_callsign_not_host() -> list[str]:
+    """During Client bind, Ops/ATC phrases must use Razor 1 — not HOST."""
+    fails: list[str] = []
+    cfg = _host_config()
+    for key in ("opus_flight_id", "opus_seat", "opus_flight_label", "callsign_override"):
+        cfg.pop(key, None)
+    server = atc_server.AtcServer(
+        cfg, AIRPORTS, lambda: copy.deepcopy(MISSION), transmit_fn=lambda _j: 0
+    )
+    hello = server.hello(
+        {
+            "opus_flight_id": 55,
+            "opus_seat": 1,
+            "opus_flight_label": "RAZOR 1 · KLSV · FLEX21R",
+            "opus_user_name": "Turtle",
+            "tuned_freqs_mhz": [269.025],
+            "radio_fresh": True,
+        }
+    )
+    sess = server.sessions.get(str(hello.get("session_id") or ""))
+    if sess is None:
+        return ["missing session after hello"]
+    with atc_server._session_engine_binding(sess):
+        if atc_net.role_of(sess.engine.config) != "host":
+            fails.append(
+                f"bind must keep Host role for local SRS, got "
+                f"{sess.engine.config.get('atc_role')!r}"
+            )
+        ov = str(sess.engine.config.get("callsign_override") or "")
+        if "razor" not in ov.casefold():
+            fails.append(f"bind must seed callsign_override from identity, got {ov!r}")
+        ctx = atc_phrase.resolve_active_opus_flight(sess.engine.config)
+        cs = str(getattr(ctx, "radio_callsign", "") or "")
+        if cs.casefold() == "host":
+            fails.append(f"bound resolve must not be HOST, got {cs!r}")
+        if "razor" not in cs.casefold():
+            fails.append(f"bound resolve should be Razor 1, got {cs!r}")
+        ap = sess.engine.airport()
+        result = voice_engine.execute_ops_action(
+            sess.engine, "ops_check_in", airport=ap
+        )
+        text = str((result or {}).get("text") or "")
+        # Deferred TX stashes on pending_tx
+        pending = getattr(sess.engine, "pending_tx", None)
+        if isinstance(pending, dict) and pending.get("text"):
+            text = str(pending.get("text") or "")
+        if not text and isinstance(sess.engine.state, dict):
+            text = str(sess.engine.state.get("last_tx_text") or "")
+        # execute_ops may return blocked/queued — pull spoken line from defer
+        if not text:
+            job = sess.engine.take_pending_tx() if hasattr(sess.engine, "take_pending_tx") else None
+            if isinstance(job, dict):
+                text = str(job.get("text") or "")
+        # Force-build if transmit was deferred without putting text on result
+        if not text:
+            import ops as ops_mod
+
+            text = ops_mod.build_ops_check_in(cs, ap, opus=ctx, config=sess.engine.config)
+        if "host" in text.casefold().split(",")[0]:
+            fails.append(f"Ops TX must not address HOST, got {text!r}")
+        if "razor" not in text.casefold():
+            fails.append(f"Ops TX should address Razor, got {text!r}")
+    # Outside bind, Host config must not keep the client's override.
+    if str(cfg.get("callsign_override") or "").strip():
+        fails.append(
+            f"Host config leaked callsign_override after bind: "
+            f"{cfg.get('callsign_override')!r}"
+        )
+    return fails
+
+
+def test_hello_callsign_not_host_synthetic() -> list[str]:
+    """Client hello must not become Traffic callsign HOST (Host-box placeholder)."""
+    fails: list[str] = []
+    cfg = _host_config()
+    # Dedicated Host has no own jet — same as production after strip.
+    for key in ("opus_flight_id", "opus_seat", "opus_flight_label", "callsign_override"):
+        cfg.pop(key, None)
+    server = atc_server.AtcServer(
+        cfg, AIRPORTS, lambda: copy.deepcopy(MISSION), transmit_fn=lambda _j: 0
+    )
+    labeled = server.hello(
+        {
+            "opus_flight_id": 55,
+            "opus_seat": 1,
+            "opus_flight_label": "RAZOR 1 · KLSV · FLEX21R",
+            "opus_user_name": "Turtle",
+        }
+    )
+    cs = str(labeled.get("callsign") or "")
+    if cs.casefold() == "host":
+        fails.append(f"labeled hello must not be HOST, got {cs!r}")
+    if "razor" not in cs.casefold():
+        fails.append(f"labeled hello should be Razor 1, got {cs!r}")
+    live = server.traffic().get("sessions") or []
+    if not any("razor" in str(s.get("callsign") or "").casefold() for s in live):
+        fails.append(f"Traffic should list Razor 1, got {live}")
+
+    # Empty jet fields must fall back to username — never Host placeholder.
+    bare = server.hello(
+        {
+            "opus_user_name": "Turtle",
+            "prior_session_id": str(labeled.get("session_id") or ""),
+        }
+    )
+    bare_cs = str(bare.get("callsign") or "")
+    if bare_cs.casefold() == "host":
+        fails.append(f"bare hello must not be HOST, got {bare_cs!r}")
+    if bare_cs != "Turtle":
+        fails.append(f"bare hello should use username, got {bare_cs!r}")
+
+    # Override wins.
+    ov = server.hello(
+        {
+            "callsign_override": "RAZOR 1",
+            "opus_flight_id": 55,
+            "opus_seat": 1,
+            "prior_session_id": str(bare.get("session_id") or ""),
+        }
+    )
+    if str(ov.get("callsign") or "").casefold() == "host":
+        fails.append("override hello must not be HOST")
+    return fails
+
+
+def test_hello_reclaims_identity_upgrade() -> list[str]:
+    """Clear flight then reselect seat must not leave two Traffic rows."""
+    fails: list[str] = []
+    cfg = _host_config()
+    server = atc_server.AtcServer(
+        cfg, AIRPORTS, lambda: copy.deepcopy(MISSION), transmit_fn=lambda _j: 0
+    )
+    first = server.hello(
+        {
+            "callsign_override": "RAZOR 1",
+            "opus_flight_id": 55,
+            # No seat yet — Traffic shows "?" but key still flight:55:1
+            "radio_fresh": False,
+            "tuned_freqs_mhz": [273.55],
+        }
+    )
+    sid_flight = str(first.get("session_id") or "")
+    cleared = server.hello(
+        {
+            "callsign_override": "RAZOR 1",
+            "prior_session_id": sid_flight,
+            "radio_fresh": False,
+            "tuned_freqs_mhz": [273.55],
+        }
+    )
+    sid_callsign = str(cleared.get("session_id") or "")
+    if sid_callsign == sid_flight:
+        fails.append("clearing Opus flight should rekey off flight:…")
+    if sid_flight in server.sessions:
+        fails.append("prior flight session should be dropped on clear-flight hello")
+    seated = server.hello(
+        {
+            "callsign_override": "RAZOR 1",
+            "opus_flight_id": 55,
+            "opus_seat": 1,
+            "prior_session_id": sid_callsign,
+            "radio_fresh": True,
+            "tuned_freqs_mhz": [269.025, 251.0],
+        }
+    )
+    sid_seated = str(seated.get("session_id") or "")
+    live = [
+        s
+        for s in server.sessions.values()
+        if time.time() - s.last_seen <= atc_net.SESSION_TTL_S
+    ]
+    if len(live) != 1:
+        fails.append(
+            f"expected one live Traffic row after seat select, got {len(live)} "
+            f"keys={[s.session_id for s in live]}"
+        )
+    if sid_callsign in server.sessions:
+        fails.append("callsign-only orphan should be reclaimed when seat binds")
+    if sid_seated != atc_net.session_key(opus_flight_id=55, opus_seat=1):
+        fails.append(f"seated key unexpected: {sid_seated}")
+    # Second seat on same flight must survive a lead re-hello
+    server.hello(
+        {
+            "callsign_override": "RAZOR 1",
+            "opus_flight_id": 55,
+            "opus_seat": 2,
+            "radio_fresh": True,
+            "tuned_freqs_mhz": [269.025],
+        }
+    )
+    server.hello(
+        {
+            "callsign_override": "RAZOR 1",
+            "opus_flight_id": 55,
+            "opus_seat": 1,
+            "prior_session_id": sid_seated,
+            "radio_fresh": True,
+            "tuned_freqs_mhz": [269.025],
+        }
+    )
+    seats = {
+        s.identity.get("opus_seat")
+        for s in server.sessions.values()
+        if time.time() - s.last_seen <= atc_net.SESSION_TTL_S
+    }
+    if seats != {1, 2}:
+        fails.append(f"dash-2 must stay when lead re-hellos, got seats={seats}")
     return fails
 
 
@@ -763,8 +1416,36 @@ def test_injected_radio_gate() -> list[str]:
     forced, _mod = srs_radio.maybe_force_eam_tx_freq(
         eam_cfg, 289.4, "AM", radio=client_sel
     )
-    if abs(forced - 123.625) > 0.01:
-        fails.append(f"EAM host TX should use client selected 123.625, got {forced}")
+    if abs(forced - 289.4) > 0.01:
+        fails.append(f"VHF selected must not steal UHF TX, got {forced}")
+    banked = srs_radio.RadioState(
+        source="client",
+        freqs_mhz=[327.0, 132.65],
+        selected_mhz=132.65,
+        fresh=True,
+        age_s=0.0,
+    )
+    kept, _mod_kept = srs_radio.maybe_force_eam_tx_freq(
+        eam_cfg, 327.0, "AM", radio=banked
+    )
+    if abs(kept - 327.0) > 0.01:
+        fails.append(
+            f"Tower TX must stay on UHF 327.0 while VHF is keyed, got {kept}"
+        )
+    stale = srs_radio.RadioState(
+        source="client",
+        freqs_mhz=[132.65],
+        selected_mhz=132.65,
+        fresh=False,
+        age_s=2.0,
+    )
+    stale_tx, _mod_stale = srs_radio.maybe_force_eam_tx_freq(
+        eam_cfg, 327.0, "AM", radio=stale
+    )
+    if abs(stale_tx - 327.0) > 0.01:
+        fails.append(
+            f"UHF agency freq must win over a stale VHF selection, got {stale_tx}"
+        )
     srs_radio.apply_config(_host_config(freq_gate_eam_enabled=False))
     return fails
 
@@ -1290,6 +1971,19 @@ def test_host_config_not_polluted_by_client_flight() -> list[str]:
         with atc_server._session_engine_binding(sess):
             if atc_phrase.configured_opus_flight_id(sess.engine.config) != 909:
                 fails.append("bound seat should see client flight_id 909")
+            if atc_net.role_of(sess.engine.config) != "host":
+                fails.append(
+                    f"bound seat must keep Host role for local SRS TX, got "
+                    f"{sess.engine.config.get('atc_role')}"
+                )
+            srs = atc_net.effective_srs_host(
+                {"srs_host": atc_net.SQUADRON_SRS_HOST},
+                sess.engine.config,
+            )
+            if srs != atc_net.HOST_LOCAL_SRS_HOST:
+                fails.append(
+                    f"Host bound TX must target {atc_net.HOST_LOCAL_SRS_HOST}, got {srs}"
+                )
         if cfg.get("opus_flight_id") not in (None, ""):
             fails.append("Host config flight_id leaked after session bind")
         if atc_net.role_of(cfg) != "host":
@@ -1309,10 +2003,17 @@ def test_host_config_not_polluted_by_client_flight() -> list[str]:
 def main() -> int:
     tests = (
         test_session_key,
+        test_hello_callsign_not_host_synthetic,
+        test_client_map_fp_used_on_host,
+        test_bound_seat_tx_callsign_not_host,
+        test_hello_reclaims_identity_upgrade,
         test_connect_error_hints,
         test_persist_state_off,
         test_injected_radio_gate,
         test_channel_parallel_and_fifo,
+        test_host_hub_pins_local_srs,
+        test_host_tx_failure_keeps_cursor_and_last_tx,
+        test_bandsaw_checkout_display_and_tx_failure,
         test_session_isolation,
         test_clear_flight_cache_scoped,
         test_flight_shared_cursor,
@@ -1320,6 +2021,7 @@ def main() -> int:
         test_tanker_fly_freq_matches_pick,
         test_cross_flight_status_isolation,
         test_client_freq_gate,
+        test_empty_radio_snapshot_keeps_bank,
         test_secret_redaction_and_session_tts_cap,
         test_client_auto_play_from_watch,
         test_client_tanker_chat_gap,

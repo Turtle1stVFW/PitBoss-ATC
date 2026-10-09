@@ -338,6 +338,22 @@ def main() -> int:
             f"route={None if not ctx else ctx.fp_route_string} "
             f"alt={None if not ctx else ctx.fp_altitude}"
         )
+        # NELLIS AFB trailing place name must resolve to KLSV / speak Nellis.
+        afb_route = "KLSV.FLEX21R.DREAM.ST LOUIS.ARCOE.NELLIS AFB"
+        dest = atc_phrase.destination_icao(
+            None,
+            route=afb_route,
+            field_icao=str(NELLIS.get("icao") or ""),
+            field_name=str(NELLIS.get("name") or ""),
+        )
+        speak = atc_phrase.speak_icao_or_name(
+            dest, NELLIS, route=afb_route
+        )
+        ok = dest == "KLSV" and "nellis" in speak.lower() and "a f b" not in speak.lower()
+        bad += 0 if ok else 1
+        print(
+            f"{'ok  ' if ok else 'FAIL'} map NELLIS AFB dest={dest!r} speak={speak!r}"
+        )
         ghost = {
             "id": "dcs-fleece",
             "type": "air",

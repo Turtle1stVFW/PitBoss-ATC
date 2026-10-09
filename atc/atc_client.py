@@ -80,6 +80,10 @@ class AtcClient:
         body = _identity_payload(self.config)
         body.update(_radio_payload(self.config))
         body["client_version"] = version.label()
+        # Host drops this row when identity rekeys (clear flight → reselect seat).
+        prior = str(self.session_id or "").strip()
+        if prior:
+            body["prior_session_id"] = prior
         data = self._request("POST", "/v1/hello", body)
         self.session_id = str(data.get("session_id") or "")
         self.callsign = str(data.get("callsign") or "")
@@ -107,7 +111,7 @@ class AtcClient:
             "summarised": match.summarised,
         }
         body.update(_radio_payload(self.config))
-        data = self._request("POST", "/v1/intent", body)
+        data = self._request("POST", "/v1/intent", body, timeout=100)
         if isinstance(data, dict):
             fly = {
                 key: data[key]
@@ -138,7 +142,7 @@ class AtcClient:
         body.update(fields)
         body.update(_radio_payload(self.config))
         path = f"/v1/{command.strip().lower()}"
-        data = self._request("POST", path, body)
+        data = self._request("POST", path, body, timeout=100)
         if isinstance(data, dict):
             self.last_status = {**self.last_status, **data}
         return data
@@ -159,7 +163,42 @@ class AtcClient:
                 body = {"session_id": self.session_id}
                 body.update(_radio_payload(self.config))
                 data = self._request("POST", "/v1/heartbeat", body)
-                self.last_status = data
+                # Heartbeat is paint-only. A seek/action that finished while this
+                # request was in flight must not be overwritten by the older cursor.
+                prev = self.last_status if isinstance(self.last_status, dict) else {}
+                incoming = data if isinstance(data, dict) else {}
+                prev_fs = (
+                    prev.get("flow_state")
+                    if isinstance(prev.get("flow_state"), dict)
+                    else {}
+                )
+                if prev_fs.get("manual_step_view"):
+                    try:
+                        prev_idx = int(prev.get("index") or 0)
+                        new_idx = int(incoming.get("index") or 0)
+                    except (TypeError, ValueError):
+                        prev_idx, new_idx = 0, 0
+                    if prev_idx != new_idx:
+                        keep = {
+                            key: prev[key]
+                            for key in (
+                                "index",
+                                "step_number",
+                                "label",
+                                "step",
+                                "flow_state",
+                                "awaiting_readback",
+                                "last_tx_text",
+                                "total",
+                                "at_end",
+                            )
+                            if key in prev
+                        }
+                        self.last_status = {**incoming, **keep}
+                    else:
+                        self.last_status = incoming
+                else:
+                    self.last_status = incoming
                 self.last_error = ""
                 try:
                     import app_diag
@@ -205,6 +244,7 @@ class AtcClient:
         body: dict[str, Any] | None = None,
         *,
         headers: dict[str, str] | None = None,
+        timeout: float = 8,
     ) -> dict[str, Any]:
         token = atc_net.token_of(self.config)
         hdrs = {
@@ -217,7 +257,7 @@ class AtcClient:
         url = self.base_url + path
         req = urllib.request.Request(url, data=data, method=method, headers=hdrs)
         try:
-            with urllib.request.urlopen(req, timeout=8) as resp:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 raw = resp.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")[:400]
@@ -238,7 +278,9 @@ class AtcClient:
                     self.hello()
                     if body is not None:
                         body["session_id"] = self.session_id
-                    return self._request(method, path, body, headers=headers)
+                    return self._request(
+                        method, path, body, headers=headers, timeout=timeout
+                    )
                 finally:
                     self._rehello_guard = False
             raise AtcClientError(f"{exc.code} {msg} [{url}]") from exc
@@ -340,16 +382,63 @@ def _identity_payload(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def _radio_payload(config: dict[str, Any]) -> dict[str, Any]:
+    """
+    Snapshot this PC's radios for the Host freq gate.
+
+    On a failed / empty read, omit ``tuned_freqs_mhz`` so the Host keeps the
+    last good bank — sending ``[]`` used to wipe UHF and block every TX while
+    Fly still looked fine a moment later.
+    """
+    out: dict[str, Any] = {}
     try:
         radio = srs_radio.current_radio_state(config)
-        out = {
-            "tuned_freqs_mhz": list(radio.freqs_mhz or []),
-            "radio_fresh": bool(radio.fresh),
-            "selected_mhz": radio.selected_mhz,
-        }
+        freqs = list(radio.freqs_mhz or [])
+        if freqs or bool(radio.fresh):
+            out["tuned_freqs_mhz"] = freqs
+            out["radio_fresh"] = bool(radio.fresh)
+            out["selected_mhz"] = radio.selected_mhz
+        else:
+            out["radio_fresh"] = False
     except Exception:
-        out = {"tuned_freqs_mhz": [], "radio_fresh": False, "selected_mhz": None}
+        out["radio_fresh"] = False
     out["ownship_ll"] = _ownship_payload(config)
+    alt = _ownship_alt_ft(config)
+    if alt is not None:
+        out["ownship_alt_ft"] = alt
+    # Map Route Tester plan — Host needs this for Delivery / clearance (it has
+    # no local ownship_inject.json for this jet).
+    fp = _map_flight_plan_payload(config)
+    if fp:
+        out.update(fp)
+    return out
+
+
+def _map_flight_plan_payload(config: dict[str, Any]) -> dict[str, Any]:
+    """Route / altitude from the map inject when the client is map-flying."""
+    inj: dict[str, Any] | None = None
+    try:
+        inj = atc_phrase.read_ownship_inject(config=config)
+    except Exception:
+        inj = None
+    if not isinstance(inj, dict):
+        # drive_fly may still be writing FP while the checkbox is briefly off
+        try:
+            inj = atc_phrase.read_ownship_inject()
+        except Exception:
+            inj = None
+    if not isinstance(inj, dict):
+        return {}
+    route = str(inj.get("fp_route_string") or "").strip()
+    if not route and not atc_phrase.ownship_from_map_enabled(config):
+        return {}
+    out: dict[str, Any] = {}
+    if route:
+        out["fp_route_string"] = route
+    alt = str(inj.get("fp_altitude") or "").strip()
+    if alt:
+        out["fp_altitude"] = alt
+    if route or atc_phrase.ownship_from_map_enabled(config):
+        out["ownship_from_map"] = True
     return out
 
 
@@ -379,3 +468,24 @@ def _ownship_payload(config: dict[str, Any]) -> list[float] | None:
     if ll is None:
         return None
     return [float(ll[0]), float(ll[1])]
+
+
+def _ownship_alt_ft(config: dict[str, Any]) -> float | None:
+    """Map-jet altitude in feet, so Host alpha checks can say angels."""
+    try:
+        inj = atc_phrase.read_ownship_inject(config=config)
+    except Exception:
+        inj = None
+    if not isinstance(inj, dict):
+        return None
+    for key in ("alt_ft", "alt_ft_msl"):
+        raw = inj.get(key)
+        if raw in (None, ""):
+            continue
+        try:
+            alt = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if alt > 0:
+            return alt
+    return None

@@ -263,3 +263,8 @@ def _push_vars(
         app.config_data["atc_port"] = atc_net.DEFAULT_ATC_PORT
     app.config_data["atc_token"] = token_var.get().strip()
     app.config_data["voice_enabled"] = bool(voice_var.get())
+    if hasattr(app, "_apply_role_srs_host"):
+        try:
+            app._apply_role_srs_host()
+        except Exception:
+            pass

@@ -1,10 +1,24 @@
 # Packaging notes
 
-**Today (testing):** `atc\Setup-Pilot.cmd` is the stand-in installer. It finds
-Python, writes `config.json` from the example, `pip install`s voice packages,
-warms Whisper `base.en`, and runs the DCS radio-export hook. `Pack-Share-Zip.cmd`
-builds a tester zip with secrets stripped. A real bundled-Python / Inno Setup
-installer is the next step — same post-install actions, no python.org click.
+**Open beta:** `atc\Build-Beta-Installer.cmd` writes
+`dist\PitBossATC-Setup-<version>.exe`. The setup exe installs a private
+CPython under `atc\runtime\`, with numpy, faster-whisper, and the `base.en`
+weights already in place. Testers do not install Python or run pip.
+`Setup-Pilot.cmd` and `Pack-Share-Zip.cmd` remain the from-source path.
+
+The build machine needs network once (CPython, wheels, the speech model, and
+the Inno Setup compiler). The compiler is downloaded into `dist\cache\` from
+the NuGet `Tools.InnoSetup` package. Output and cache are gitignored.
+
+## Updates
+
+Installed copies ask GitHub for a newer **published** release asset named
+`PitBossATC-Setup-….exe`. Commits, draft releases, and prereleases do not
+prompt. The repo is `Turtle1stVFW/PitBoss-ATC` and must be public.
+
+On GitHub: **Releases → Draft a new release**, tag `v<version>`, attach the Setup exe, and publish it when testers should get it. `atc\Publish-Release.cmd` does that upload when the GitHub CLI is installed; `--publish` is the step that offers it to testers.
+
+The running app compares its version (`0.1.109`) with the version in the exe name, downloads to `%TEMP%\PitBossATC\`, then closes and starts setup.
 
 ## Voice control dependencies (required by default)
 
@@ -17,25 +31,21 @@ misleading “no input devices” / voice fails silently.
 | `numpy` | Mic ring buffer + PCM → float for Whisper |
 | `faster-whisper` | On-device speech recognition (pulls ctranslate2, etc.) |
 
-Options when building the installer:
-
-1. **Bundled runtime** (preferred): include a private Python (or venv) under
-   `{app}` with these packages preinstalled, and launch `flow_ui.py` with that
-   interpreter.
-2. **Frozen exe** (PyInstaller / similar): freeze `flow_ui` **and** hidden
-   imports for `numpy`, `faster-whisper`, `ctranslate2`, `av`, `onnxruntime`.
+`Build-Beta-Installer.cmd` uses a bundled runtime: a private Python under
+`atc\runtime` with these packages installed, and launchers prefer
+`atc\runtime\python.exe` over any system Python.
 
 Dev / CI can install from `atc/requirements-voice.txt`.
 
-### Whisper model weights (first-run download)
+### Whisper model weights
 
-`base.en` (~150 MB) is fetched from Hugging Face on first voice enable and
-cached under `%USERPROFILE%\.cache\huggingface\`. That is normal — users do
-**not** need an `HF_TOKEN`, and Windows symlink warnings are harmless (the app
-suppresses them).
+The beta installer copies `base.en` (~150 MB) to `atc\runtime\models\base.en\`
+as real files (not Hugging Face symlinks). The app loads that folder when it
+is present. A from-source checkout still downloads `base.en` on first voice
+enable into `%USERPROFILE%\.cache\huggingface\`. Users do **not** need an
+`HF_TOKEN`, and Windows symlink warnings are harmless (the app suppresses them).
 
-For a smoother installer experience, pre-warm the cache during packaging or a
-post-install step so flight night is offline-safe:
+To warm a source checkout so flight night is offline-safe:
 
 ```bat
 py -3 -c "from faster_whisper import WhisperModel; WhisperModel('base.en', device='cpu', compute_type='int8')"
@@ -53,8 +63,9 @@ and a small hook in `Export.lua`. Do **not** ask users to edit those files.
 
 ## Post-install custom action
 
-After files are laid down, run (elevated only if your installer already elevates;
-Saved Games is per-user and does not need admin):
+The beta setup already does this (`Setup-Installed.cmd` → `setup_pilot.py`).
+For a hand-rolled installer, after files are laid down, run (elevated only if
+your installer already elevates; Saved Games is per-user and does not need admin):
 
 ```bat
 Install-DCS-Radio-Export.cmd
@@ -88,18 +99,12 @@ It runs on `127.0.0.1:8777`. If an installer or corporate policy blocks the app
 from binding a loopback port, that button is what breaks; `zone_editor_port` in
 `config.json` moves it.
 
-## Inno Setup sketch
+## Inno Setup
 
-```iss
-[Files]
-Source: "atc\*"; DestDir: "{app}\atc"; Flags: recursesubdirs
-Source: "tools\*"; DestDir: "{app}\tools"; Flags: recursesubdirs
+`PitBossATC.iss` is compiled by `build_beta.py` (per-user folder
+`%LOCALAPPDATA%\PitBoss ATC`, no administrator). After files are copied it
+runs `Setup-Installed.cmd`, which creates `config.json` if needed and installs
+the DCS radio-export hook. Uninstall removes that hook.
 
-[Run]
-Filename: "{app}\atc\Install-DCS-Radio-Export.cmd"; \
-  StatusMsg: "Installing DCS radio export for frequency gate…"; \
-  Flags: runhidden waituntilterminated
-```
-
-The script is idempotent: re-running upgrades the Lua file and will not duplicate
-the Export.lua hook or modify the SRS `pcall` line.
+The radio-export script is idempotent: re-running upgrades the Lua file and
+will not duplicate the Export.lua hook or modify the SRS `pcall` line.

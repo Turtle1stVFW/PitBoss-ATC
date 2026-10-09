@@ -71,7 +71,15 @@ _BODY_SECTION_HEADERS = {
 }
 
 # Shared across seats on the same Opus flight (timer + codes).
-SHARED_STATE_KEYS: tuple[str, ...] = (SORTIE_STATE_KEY,)
+_CODES_PENDING_KEY = "ops_codes_pending"
+_CODES_LAST_AT_KEY = "ops_codes_last_at"
+_CODES_DONE_KEY = "ops_codes_done"
+SHARED_STATE_KEYS: tuple[str, ...] = (
+    SORTIE_STATE_KEY,
+    _CODES_PENDING_KEY,
+    _CODES_LAST_AT_KEY,
+    _CODES_DONE_KEY,
+)
 
 _NATO = (
     "Alpha",
@@ -649,8 +657,13 @@ def parse_aircraft_codes(
 ) -> list[AircraftCode]:
     """
     'Snake 5-1 Code 1, Snake 5-2 Code 2' or 'dash 3 code two'.
+
+    Also accepts compact 'codes 1 1 2 1' / '1/1/2/1' and 'parked, code 1'.
     """
-    text = re.sub(r"[^a-z0-9\s\-]", " ", (transcript or "").casefold())
+    text = re.sub(r"[^a-z0-9\s\-/]", " ", (transcript or "").casefold())
+    text = re.sub(r"\s+", " ", text).strip()
+    # CNI / maintenance suffixes are noise for the parser.
+    text = re.sub(r"\b(?:cni|parked|parking)\b", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     flight = re.sub(r"[^a-z0-9]+", " ", (flight_callsign or "").casefold()).strip()
     out: list[AircraftCode] = []
@@ -689,6 +702,19 @@ def parse_aircraft_codes(
         _add(seat, code, label)
 
     if not out:
+        # Compact: "codes 1 1 2 1" or "1/1/2/1" → seat order 1..N
+        compact = re.search(
+            r"\bcodes?\s+((?:[1-5](?:\s*[/\s]\s*)?)+)\b",
+            text,
+        )
+        if not compact:
+            compact = re.search(r"\b((?:[1-5]\s*/\s*){1,3}[1-5])\b", text)
+        if compact:
+            digits = re.findall(r"[1-5]", compact.group(1))
+            for i, d in enumerate(digits, start=1):
+                _add(i, int(d), f"{flight} {i}".strip() if flight else "")
+
+    if not out:
         bare = re.search(
             r"\bcode\s+(one|two|three|tree|four|fower|five|fife|[1-5])\b",
             text,
@@ -698,6 +724,105 @@ def parse_aircraft_codes(
             if code:
                 _add(1, code, flight_callsign)
     return out
+
+
+CODES_IDLE_S = 10.0
+
+
+def _codes_from_pending(raw: Any) -> list[AircraftCode]:
+    out: list[AircraftCode] = []
+    if not isinstance(raw, list):
+        return out
+    for row in raw:
+        if isinstance(row, AircraftCode):
+            out.append(row)
+            continue
+        if not isinstance(row, dict):
+            continue
+        try:
+            seat = int(row.get("seat") or 0)
+            code = int(row.get("code") or 0)
+        except (TypeError, ValueError):
+            continue
+        if seat > 0 and code in {1, 2, 3, 4, 5}:
+            out.append(
+                AircraftCode(
+                    seat=seat,
+                    code=code,
+                    callsign=str(row.get("callsign") or ""),
+                )
+            )
+    return out
+
+
+def merge_pending_codes(
+    state: dict[str, Any] | None,
+    codes: list[AircraftCode],
+    *,
+    now: float | None = None,
+) -> list[AircraftCode]:
+    """Merge newly heard seat codes into shared pending collection."""
+    if not isinstance(state, dict):
+        return list(codes or [])
+    pending = {c.seat: c for c in _codes_from_pending(state.get(_CODES_PENDING_KEY))}
+    for c in codes or []:
+        pending[c.seat] = c
+    merged = [pending[k] for k in sorted(pending)]
+    state[_CODES_PENDING_KEY] = [asdict(c) for c in merged]
+    state[_CODES_LAST_AT_KEY] = float(now if now is not None else time.time())
+    return merged
+
+
+def codes_collection_ready(
+    state: dict[str, Any] | None,
+    *,
+    opus: Any = None,
+    now: float | None = None,
+    need_ships: int | None = None,
+    idle_s: float = CODES_IDLE_S,
+) -> tuple[bool, list[AircraftCode], str]:
+    """
+    True when Ops may copy codes for the flight.
+
+    Ready when every seat has reported, or ≤ idle_s after the last code
+    (default 10s — enough for dashes without a long dead air).
+    """
+    if not isinstance(state, dict):
+        return False, [], "no state"
+    if state.get(_CODES_DONE_KEY):
+        return False, [], "codes already copied"
+    pending = _codes_from_pending(state.get(_CODES_PENDING_KEY))
+    if not pending:
+        return False, [], "waiting for codes"
+    try:
+        total = int(need_ships) if need_ships is not None else 0
+    except (TypeError, ValueError):
+        total = 0
+    if total <= 0:
+        try:
+            total = int(atc_phrase.flight_ship_count(opus))
+        except Exception:
+            total = 1
+    total = max(1, total)
+    if len(pending) >= total:
+        return True, pending, f"{len(pending)}/{total} seats"
+    tnow = float(now if now is not None else time.time())
+    try:
+        last = float(state.get(_CODES_LAST_AT_KEY) or 0.0)
+    except (TypeError, ValueError):
+        last = 0.0
+    left = max(0.0, float(idle_s) - (tnow - last))
+    if left <= 0.0:
+        return True, pending, f"{len(pending)}/{total} seats (idle)"
+    return False, pending, f"{len(pending)}/{total} seats — copy in {left:.0f}s"
+
+
+def mark_codes_done(state: dict[str, Any] | None) -> None:
+    if not isinstance(state, dict):
+        return
+    state[_CODES_DONE_KEY] = True
+    state.pop(_CODES_PENDING_KEY, None)
+    state.pop(_CODES_LAST_AT_KEY, None)
 
 
 def build_words_reply(
@@ -765,12 +890,25 @@ def build_status_reply(
     config: dict[str, Any] | None = None,
 ) -> str:
     cs = atc_phrase.speak_callsign(callsign)
-    agency = "Ops"
+    agency = spoken_ops_name(airport, opus=opus, config=config)
     bits = [f"{cs}, {agency}, copy codes"]
     bits.append(speak_time_now(when))
     if sortie.total_hours is not None:
         bits.append(f"total time {speak_decimal_hours(float(sortie.total_hours))}")
     return ", ".join(bits) + "."
+
+
+def build_codes_copy_ack(
+    callsign: str,
+    *,
+    airport: dict[str, Any] | None = None,
+    opus: Any = None,
+    config: dict[str, Any] | None = None,
+) -> str:
+    """Short per-ship ack while waiting for the rest of the flight."""
+    cs = atc_phrase.speak_callsign(callsign)
+    agency = spoken_ops_name(airport, opus=opus, config=config)
+    return f"{cs}, {agency}, copy."
 
 
 def build_ops_check_in(

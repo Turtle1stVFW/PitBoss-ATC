@@ -235,10 +235,11 @@ From the app: **Setup → Map is my jet…**. Standalone:
 py -3 tools/zone_server.py --page tester
 ```
 
-or `atc/Open-Route-Tester.cmd`. Plot a filed route, drag or Play the red jet.
-**Drive Fly ownship** (on by default) feeds that position into Fly so auto
-clearances, voice, and TTS run for real. CAOC still supplies tankers and other
-tracks. Weather and radio stay on the Fly tab.
+or `atc/Open-Route-Tester.cmd`. Plot a filed route, drag or Play the red jet, or
+use **Route scrub** to jump along the path (map only). **Drive Fly ownship**
+(on by default) feeds that position into Fly so auto clearances, voice, and TTS
+run for real. CAOC still supplies tankers and other tracks. Weather and radio
+stay on the Fly tab.
 
 Drop `NTTR.kml` in `tools/overlays/` so DREAM / JUNNO / FYTTR label at CAOC
 coordinates. A bundled extract lives in `atc/nttr_navpoints.json`.

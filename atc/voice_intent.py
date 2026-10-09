@@ -196,6 +196,10 @@ def retune_destination(
 
     OPS starts the card: WORDS / start stay the advance until start is
     approved. The Delivery cursor must not steal that with a tune tip.
+
+    Once the pilot is already on the pending handoff radio (Delivery after
+    start, Ground after taxi clearance, …), do not tip them back to an
+    earlier cursor agency — tip that radio's call instead.
     """
     here_l = (here or "").strip().lower()
     cursor_l = (cursor or "").strip().lower()
@@ -204,7 +208,12 @@ def retune_destination(
         return ""
     if pending_l and pending_l != here_l:
         return pending_l
-    return cursor_l
+    # Arrived on the handoff target — stay; suggestions tip this agency's call.
+    if pending_l and pending_l == here_l:
+        return ""
+    if cursor_l and cursor_l != here_l:
+        return cursor_l
+    return ""
 
 
 def cue_channel(
@@ -388,11 +397,11 @@ def normalize(text: str) -> str:
         out.append(token)
     if run:
         out.append("".join(run))
-    return _fold_eor(" ".join(out))
+    return _fold_taxi_via(_fold_eor(" ".join(out)))
 
 
 # Whisper almost never writes the acronym "eor". Pilots say the letters;
-# the model writes "E or", "e o r", "ee or", "igor", …
+# the model writes "E or", "e o r", "ee or", "igor", "ER", …
 _EOR_FOLD: tuple[tuple[str, str], ...] = (
     (r"(?<!\w)e\s+o\s+r(?!\w)", "eor"),
     (r"(?<!\w)ee\s+o\s+r(?!\w)", "eor"),
@@ -405,11 +414,39 @@ _EOR_FOLD: tuple[tuple[str, str], ...] = (
     (r"(?<!\w)aor(?!\w)", "eor"),
 )
 
+# Place / via cues that make a bare "er" mean EOR (variable-width, so use finditer).
+_EOR_PLACE_PREFIX = re.compile(
+    r"\b(northwest|northeast|southwest|southeast|north|south|west|east|nw|ne|sw|se|via|taxi|at)\s+er\b"
+)
+_EOR_BEFORE_VIA = re.compile(r"\ber(?=\s+(?:via|runway|hold|for)\b)")
+
 
 def _fold_eor(text: str) -> str:
     """Collapse Whisper's letter-spellings of EOR into the token 'eor'."""
     folded = text
     for pat, repl in _EOR_FOLD:
+        folded = re.sub(pat, repl, folded)
+    folded = _EOR_PLACE_PREFIX.sub(lambda m: f"{m.group(1)} eor", folded)
+    folded = _EOR_BEFORE_VIA.sub("eor", folded)
+    return folded
+
+
+# Taxiway phonetics Whisper mangles (Fox Echo → foxratt / fox echo).
+_TAXI_VIA_FOLD: tuple[tuple[str, str], ...] = (
+    (r"(?<!\w)foxratt(?!\w)", "foxtrot"),
+    (r"(?<!\w)fox\s+rat(?!\w)", "foxtrot"),
+    (r"(?<!\w)fox\s+echo(?!\w)", "foxtrot echo"),
+    (r"(?<!\w)fox\s+e\s+cho(?!\w)", "foxtrot echo"),
+    (r"(?<!\w)foxtrot\s+e\s+cho(?!\w)", "foxtrot echo"),
+    # "Foxratt at go" — Echo misheard after Foxtrot.
+    (r"(?<!\w)foxtrot\s+at\s+go(?!\w)", "foxtrot echo"),
+)
+
+
+def _fold_taxi_via(text: str) -> str:
+    """Repair common Whisper taxiway / NATO alphabet mishears."""
+    folded = text
+    for pat, repl in _TAXI_VIA_FOLD:
         folded = re.sub(pat, repl, folded)
     return folded
 
@@ -445,6 +482,37 @@ def extract_runway(text: str, known: list[str] | None = None) -> str | None:
             return siblings[0]
         if siblings:
             return siblings[0]  # ambiguous; ATC states the runway in its reply
+        return None
+    return candidate
+
+
+def extract_runway_loose(text: str, known: list[str] | None = None) -> str | None:
+    """
+    Runway even without the word 'runway' — 'on the go, 21 right, high key'.
+
+    Prefers an explicit 'runway …' match; otherwise bare '21 right' / '21R'.
+    """
+    hit = extract_runway(text, known)
+    if hit:
+        return hit
+    match = re.search(
+        r"\b(\d{1,2})\s*(left|right|center|centre|l|r|c)\b", text
+    )
+    if not match:
+        match = re.search(r"\b(\d{1,2})([lrc])\b", text)
+    if not match:
+        return None
+    digits, side = match.group(1), (match.group(2) or "")
+    number = digits.zfill(2)
+    suffix = _SIDE_WORDS.get(side, side.upper() if side else "")
+    candidate = f"{number}{suffix}"
+    if known:
+        options = {r.upper(): r for r in known}
+        if candidate.upper() in options:
+            return options[candidate.upper()]
+        siblings = [r for r in known if re.match(rf"^0*{int(number)}[LRC]?$", r.upper())]
+        if siblings:
+            return siblings[0]
         return None
     return candidate
 
@@ -893,6 +961,30 @@ def extract_nav_point(text: str) -> str | None:
     return None
 
 
+def vectors_name_a_fix_not_a_tanker(text: str) -> bool:
+    """
+    'Vectors to Arcoe' is the waypoint, not the ARCO tanker callsign.
+
+    Whisper often drops the trailing E ('arco'). That token is also a tanker
+    name, and a one-edit fuzzy hit used to score request_tanker ahead of the
+    fix. An explicit tanker / Texaco call still wins.
+    """
+    if _group_hit(
+        text,
+        ("tanker", "texaco", "shell", "boom", "air refuel", "air refueling", "aar"),
+        fuzzy=False,
+    ):
+        return False
+    phrase = extract_nav_point(text)
+    if phrase:
+        token = "".join(phrase.split())
+        if token in {"arco", "arcoe", "rco"}:
+            return True
+        if _resolved_nav_point(text) is not None:
+            return True
+    return bool(_group_hit(text, ("arcoe", "waypoint"), fuzzy=False))
+
+
 def _resolved_nav_point(text: str) -> dict[str, Any] | None:
     """The point in a 'vectors to …' call, resolved against the nav catalogs."""
     phrase = extract_nav_point(text)
@@ -1033,13 +1125,21 @@ INTENTS: tuple[Intent, ...] = (
     ),
     Intent(
         "request_declare",
-        (("declare",),),
+        (("declare", "affiliation"),),
         channels=("blackjack", "bandsaw", "joshua", "ops", "other", "control_east", "control_west", "center"),
         phases=("flight",),
         weight=1.25,
         example="declare bullseye 056 67",
         does="ask C2 what that group is (query only)",
-        veto=("declare as", "vid", "visual id"),
+        veto=(
+            "declare as",
+            "vid",
+            "visual id",
+            "visual i-d",
+            "id group",
+            "upgrade",
+            "upgrade group",
+        ),
     ),
     Intent(
         "report_vid",
@@ -1047,20 +1147,40 @@ INTENTS: tuple[Intent, ...] = (
             (
                 "vid",
                 "visual id",
+                "visual i-d",
                 "visual identification",
+                "id group",
+                "eye dee",
+                "upgrade",
+                "upgrade group",
                 "declare as",
                 "group is",
                 "that's a",
                 "thats a",
                 "that is a",
+                "north group",
+                "south group",
+                "east group",
+                "west group",
+                "lead group",
+                "trail group",
+                "middle group",
+                "single group",
+                "north lead group",
+                "south lead group",
+                "east lead group",
+                "west lead group",
+                "north trail group",
+                "south trail group",
+                "east trail group",
+                "west trail group",
             ),
-            ("bandit", "hostile", "friendly", "bogey", "bogie", "unknown"),
         ),
         channels=("blackjack", "bandsaw", "joshua", "ops", "other", "control_east", "control_west", "center"),
         phases=("flight",),
         weight=1.45,
-        example="VID hostile",
-        does="set CAOC affiliation after VID",
+        example="ID north group MiG",
+        does="set CAOC affiliation after visual ID (defaults to bandit)",
         veto=("picture", "pitcher", "bogey dope", "braa"),
     ),
     Intent(
@@ -1392,13 +1512,15 @@ INTENTS: tuple[Intent, ...] = (
                 "code four",
                 "code five",
                 "code fife",
+                "parked",
+                "codes",
             ),
         ),
         kind="request",
         channels=("ops",),
         phases=("departure", "flight", "approach"),
         weight=1.25,
-        example="code 1",
+        example="parked, code 1",
         does="postflight aircraft codes",
         veto=("ops check", "words", "start"),
     ),
@@ -1424,9 +1546,24 @@ INTENTS: tuple[Intent, ...] = (
     ),
     Intent(
         "say_again",
-        (("say again", "repeat", "come again", "one more time", "didn t copy", "did not copy"),),
+        (
+            (
+                "say again",
+                "say that again",
+                "come again",
+                "one more time",
+                "didn t copy",
+                "did not copy",
+                "please repeat",
+                "can you repeat",
+                "repeat last",
+                "repeat that",
+            ),
+        ),
         example="say again",
         does="replay the last transmission",
+        # Bare "repeat" used to match climb / contact readbacks via Whisper
+        # near-misses and re-TX the last call ("say again treatment").
     ),
     Intent(
         "accept_rolling",
@@ -1749,7 +1886,7 @@ INTENTS: tuple[Intent, ...] = (
         phases=("flight", "approach"),
         example="checking in",
         does="Approach check-in / recovery assignment",
-        veto=("request hold", "holding", "vectors", "cancel hold"),
+        veto=("request hold", "holding", "vectors", "cancel hold", "initial"),
     ),
     Intent(
         "request_approach",
@@ -1850,7 +1987,7 @@ INTENTS: tuple[Intent, ...] = (
         weight=1.3,
         example="high key",
         does="report High Key",
-        veto=("request high key", "low key", "base key"),
+        veto=("request high key", "low key", "base key", "on the go", "going around"),
     ),
     Intent(
         "report_low_key",
@@ -1869,7 +2006,7 @@ INTENTS: tuple[Intent, ...] = (
         phases=("approach",),
         weight=1.35,
         example="low key",
-        does="report Low Key — option / land clearance",
+        does="report Low Key — cleared low approach",
         veto=("high key", "base key"),
     ),
     Intent(
@@ -1889,8 +2026,32 @@ INTENTS: tuple[Intent, ...] = (
         phases=("approach",),
         weight=1.3,
         example="base key",
-        does="report Base Key (clears if Low Key was missed)",
+        does="report Base Key (safety net if Low Key missed)",
         veto=("high key",),
+    ),
+    Intent(
+        "request_closed_traffic",
+        (
+            (
+                "closed traffic",
+                "request closed traffic",
+                "requesting closed traffic",
+                "request closed",
+                "requesting closed",
+                "close traffic",
+                "closed stop",
+                "close stop",
+                "request closed stop",
+                "full stop closed",
+            ),
+        ),
+        kind="action",
+        channels=("tower",),
+        phases=("approach",),
+        weight=1.28,
+        example="request closed traffic",
+        does="leave SFO — closed traffic / full stop",
+        veto=("high key", "low key", "on the go", "going around"),
     ),
     Intent(
         "report_sfo_final",
@@ -2066,7 +2227,7 @@ INTENTS: tuple[Intent, ...] = (
         phases=("approach",),
         example="gear down full stop",
         does="landing clearance",
-        veto=("low approach", "the option", "low pass", "initial", "with you", "high key", "low key", "base key", "sfo", "flameout"),
+        veto=("low approach", "the option", "low pass", "initial", "with you", "high key", "low key", "base key", "sfo", "flameout", "cleared to land", "cleared for land"),
     ),
     Intent(
         "tower_check_in",
@@ -2100,10 +2261,9 @@ INTENTS: tuple[Intent, ...] = (
         template="right_break",
         channels=("tower",),
         phases=("approach",),
-        weight=1.2,
+        weight=1.35,
         example="initial",
         does="tower check-in",
-        veto=("with you",),
     ),
     Intent(
         "request_low_approach",
@@ -2122,7 +2282,15 @@ INTENTS: tuple[Intent, ...] = (
         weight=1.25,
         example="request low approach",
         does="expect the option (then on the go)",
-        veto=("cleared to land", "full stop"),
+        veto=(
+            "cleared to land",
+            "full stop",
+            "cleared for the option",
+            "cleared the option",
+            "clear for the option",
+            "cleared low approach",
+            "clear low approach",
+        ),
     ),
     Intent(
         "going_around",
@@ -2155,8 +2323,8 @@ INTENTS: tuple[Intent, ...] = (
         channels=("tower",),
         phases=("approach",),
         weight=1.35,
-        example="going around",
-        does="go-around / missed approach / pattern reentry",
+        example="on the go high key",
+        does="on the go — High Key again, or request closed",
     ),
     Intent(
         "clear_of_runway",
@@ -2454,7 +2622,7 @@ INTENTS: tuple[Intent, ...] = (
         kind="step",
         template="radar_contact",
         channels=("departure",),
-        phases=("departure",),
+        phases=("departure", "flight"),
         weight=1.2,
         example="with you",
         does="departure radar contact",
@@ -3044,6 +3212,21 @@ def _clearance_phrase_hit(text: str, item: dict[str, Any] | None) -> bool:
             "cleared for landing",
             "clear for landing",
         ),
+        "cleared for the option": (
+            "cleared for the option",
+            "cleared the option",
+            "clear for the option",
+            "clear the option",
+            "for the option",
+            "the option",
+        ),
+        "cleared low approach": (
+            "cleared low approach",
+            "clear low approach",
+            "cleared for low approach",
+            "clear for low approach",
+            "low approach",
+        ),
         "line up and wait": ("line up and wait", "line up", "luaw"),
     }
     for full, alts in key_bits.items():
@@ -3071,6 +3254,16 @@ def _go_around_instruction_hit(text: str, item: dict[str, Any] | None) -> bool:
             return True
         if re.search(r"(?<!\w)(?:left|right)\s+close[d]?(?!\w)", text):
             return True
+        # "right" / "left" alone when that side is the closed pattern.
+        for side in ("right", "left"):
+            if side not in blob:
+                continue
+            if re.search(rf"(?<!\w){side}(?!\w)", text):
+                return True
+    if "high key" in blob and re.search(
+        r"(?<!\w)(?:report\s+)?high\s+key(?!\w)", text
+    ):
+        return True
     if "flex" in blob and re.search(r"(?<!\w)flex(?:\s+reentry|\s+entry)?(?!\w)", text):
         return True
     if "duck" in blob and re.search(r"(?<!\w)duck(?:\s+reentry|\s+entry)?(?!\w)", text):
@@ -3198,6 +3391,14 @@ def _heard_altitudes_ft(text: str) -> list[int]:
         n = int(m.group(1))
         if 50 <= n <= 600:
             _add_altitude_ft(found, n * 100)
+    # Truncated Whisper: "climb and maintain one seven" → "17" (thousands).
+    for m in re.finditer(
+        r"(?:climb(?:\s+and\s+maintain)?|maintain)\s+(\d{2})\b",
+        text,
+    ):
+        n = int(m.group(1))
+        if 10 <= n <= 60:
+            _add_altitude_ft(found, n * 1000)
 
     return found
 
@@ -3554,6 +3755,37 @@ def looks_like_radio_check_not_winds(text: str) -> bool:
     return False
 
 
+def _tower_asked_report_high_key(last_tx_text: str = "") -> bool:
+    """Tower already said 'report high key' — the next High Key is the report."""
+    return "report high key" in str(last_tx_text or "").lower()
+
+
+def _is_declare_query(text: str) -> bool:
+    """
+    Pilot is asking what the group is, not assigning an affiliation.
+
+    'declare north group' and 'what's his affiliation' are queries. 'declare
+    as bandit' / 'VID' / 'ID group' still set the call.
+    """
+    if not re.search(r"(?<!\w)(?:declare|affiliation)(?!\w)", text):
+        return False
+    return not _group_hit(
+        text,
+        (
+            "declare as",
+            "vid",
+            "visual id",
+            "visual i-d",
+            "visual identification",
+            "id group",
+            "eye dee",
+            "upgrade",
+            "upgrade group",
+        ),
+        fuzzy=False,
+    )
+
+
 def _score_intents(
     text: str,
     transcript: str,
@@ -3569,6 +3801,8 @@ def _score_intents(
     current_step_id: str = "",
     steps: list[dict[str, Any]] | None = None,
     last_tx_template: str = "",
+    last_tx_text: str = "",
+    sfo_active: bool = False,
 ) -> Match | None:
     """Highest-scoring intent for a transcript, before any addressing gate."""
     best: Match | None = None
@@ -3580,9 +3814,17 @@ def _score_intents(
         # shape before it can score as request_winds on every agency.
         if intent.id == "request_winds" and looks_like_radio_check_not_winds(text):
             continue
+        # "request vectors to arcoe" fuzzy-matches tanker callsign "arco".
+        if intent.id == "request_tanker" and vectors_name_a_fix_not_a_tanker(text):
+            continue
         if intent.id in _C2_INTENT_IDS and not step_offers_c2(
             current_step, channel=channel
         ):
+            continue
+        # A declare / "affiliation?" question must not be scored as a VID.
+        # Picture labels ('north group') used to win that tie and answer
+        # "unable, say affiliation" when the pilot was asking, not setting.
+        if intent.id == "report_vid" and _is_declare_query(text):
             continue
         # Tower will take overhead / tac overhead / straight-in. Instrument
         # and named IAF / recovery fixes stay with Approach.
@@ -3593,6 +3835,24 @@ def _score_intents(
         # A bare acknowledgement only means something while ATC is waiting on
         # one; the rest of the time "roger" is just talk.
         if intent.id == "acknowledge_readback" and not awaiting_readback:
+            continue
+        # Already had LUAW — "ready for departure" must not re-fire and tip
+        # must move to in position (cursor past lineup).
+        last_tmpl = str(last_tx_template or "").strip().lower()
+        if (
+            intent.id == "ready_departure"
+            and last_tmpl in ("lineup", "line_up_and_wait")
+            and not awaiting_readback
+        ):
+            continue
+        # Check-ins are agency-specific. Off-channel soft-penalty still left
+        # ops_check_in above the fire bar on Departure "with you" after radar.
+        if (
+            "check_in" in intent.id
+            and intent.channels
+            and channel
+            and channel not in intent.channels
+        ):
             continue
         # Addressed Blackjack — do not steal the check-in as Bandsaw / Departure.
         if addressed == "blackjack" and intent.id in (
@@ -3671,17 +3931,36 @@ def _score_intents(
         ):
             continue
         last_tmpl = str(last_tx_template or "").strip().lower()
-        # High Key report only after SFO approve (bare "high key" otherwise
-        # is request_sfo). Explicit "at/reporting high key" always OK.
+        asked_hk = _tower_asked_report_high_key(last_tx_text)
+        # High Key report after SFO approve, while the SFO pattern is still open
+        # (another High Key after on-the-go), or after Tower said report High Key.
+        # Bare "high key" otherwise is request_sfo (e.g. after Flex).
         if intent.id == "report_high_key":
-            if last_tmpl != "sfo_approve" and not _group_hit(
+            explicit_hk = _group_hit(
                 text,
                 ("at high key", "reporting high key", "report high key"),
                 fuzzy=False,
+            )
+            sfo_report_ok = bool(
+                sfo_active
+                or asked_hk
+                or last_tmpl in ("sfo_approve", "go_around", "sfo_high_key", "clear_land")
+            )
+            if not (sfo_report_ok or explicit_hk):
+                continue
+            # After a Flex go-around, bare High Key is a fresh SFO request unless
+            # the pattern is already open / Tower asked for High Key again.
+            if (
+                last_tmpl == "go_around"
+                and not sfo_active
+                and not asked_hk
+                and not explicit_hk
             ):
                 continue
-        if intent.id == "request_sfo" and last_tmpl == "sfo_approve":
-            # Already approved — bare High Key is the report, not a re-request.
+        if intent.id == "request_sfo" and (
+            last_tmpl in ("sfo_approve", "sfo_high_key") or sfo_active or asked_hk
+        ):
+            # Already approved / still on SFO — bare High Key is the report.
             if not _group_hit(
                 text,
                 (
@@ -3698,9 +3977,44 @@ def _score_intents(
             "sfo_high_key",
             "sfo_approve",
         ):
-            if not _group_hit(
+            if not sfo_active and not _group_hit(
                 text,
                 ("at low key", "reporting low key", "report low key"),
+                fuzzy=False,
+            ):
+                continue
+        if intent.id == "report_base_key" and last_tmpl not in (
+            "sfo_low_key",
+            "sfo_high_key",
+            "sfo_approve",
+            "clear_land",
+        ):
+            if not sfo_active and not _group_hit(
+                text,
+                ("at base key", "reporting base key", "report base key"),
+                fuzzy=False,
+            ):
+                continue
+        if intent.id == "request_closed_traffic" and not (
+            sfo_active
+            or last_tmpl
+            in (
+                "sfo_approve",
+                "sfo_high_key",
+                "sfo_low_key",
+                "clear_land",
+                "go_around",
+                "closed_traffic",
+            )
+        ):
+            if not _group_hit(
+                text,
+                (
+                    "closed traffic",
+                    "request closed traffic",
+                    "closed stop",
+                    "close stop",
+                ),
                 fuzzy=False,
             ):
                 continue
@@ -3718,6 +4032,13 @@ def _score_intents(
         if expected in _TOWER_CHECKIN_TEMPLATES and intent.id in (
             "request_landing",
             "request_low_approach",
+        ):
+            continue
+        # After clear-to-land / option TX, the readback is not a new request.
+        if (
+            awaiting_readback
+            and expected == "clear_land"
+            and intent.id in ("request_landing", "request_low_approach")
         ):
             continue
         # Contact-tower step: not another Approach check-in.
@@ -3757,13 +4078,37 @@ def _score_intents(
             current_step_id=current_step_id,
         )
         last_tmpl = str(last_tx_template or "").strip().lower()
-        if intent.id == "report_high_key" and last_tmpl == "sfo_approve":
+        if intent.id == "report_high_key" and (
+            last_tmpl in ("sfo_approve", "go_around") or sfo_active or asked_hk
+        ):
             expecting = True
-        if intent.id == "report_low_key" and last_tmpl == "sfo_high_key":
+        if intent.id == "report_low_key" and (
+            last_tmpl == "sfo_high_key" or sfo_active
+        ):
+            expecting = True
+        if intent.id == "report_base_key" and last_tmpl in (
+            "sfo_low_key",
+            "sfo_high_key",
+            "sfo_approve",
+            "clear_land",
+        ):
             expecting = True
         if intent.id == "report_sfo_final" and last_tmpl == "sfo_approve":
             expecting = True
-        if intent.id == "request_sfo" and last_tmpl == "go_around":
+        # Flex go-around → tip/score a fresh High Key *request*; SFO continue does not.
+        if (
+            intent.id == "request_sfo"
+            and last_tmpl == "go_around"
+            and not sfo_active
+            and not asked_hk
+        ):
+            expecting = True
+        if intent.id == "request_sfo" and sfo_active:
+            # Prefer the report when the pattern is still open.
+            expecting = False
+        if intent.id == "request_closed_traffic" and (
+            sfo_active or last_tmpl.startswith("sfo_") or last_tmpl == "go_around"
+        ):
             expecting = True
         # Mission phrases belong to one step — only when that step is due.
         if intent.step_id and not expecting:
@@ -3798,7 +4143,12 @@ def _score_intents(
             confidence = min(1.0, 0.98 * intent.weight)
             coverage = 1.0
         elif intent.groups:
-            hits = [_group_hit(text, group) for group in intent.groups]
+            # Say-again must be literal — fuzzy "repeat" near-misses used to
+            # re-TX the last call on climb / contact readbacks.
+            use_fuzzy = intent.id != "say_again"
+            hits = [
+                _group_hit(text, group, fuzzy=use_fuzzy) for group in intent.groups
+            ]
             matched = [h for h in hits if h]
             if len(matched) != len(hits):
                 # ATC is waiting on this exact call, so a shortened version of
@@ -3926,6 +4276,31 @@ def _score_intents(
                 text, ("full stop", "gear down", "cleared to land"), fuzzy=False
             ):
                 slots["landing_intent"] = "full_stop"
+        if intent.id == "going_around":
+            # "On the go, 21R, High key" vs "On the go, 21R, request closed"
+            if _group_hit(
+                text,
+                (
+                    "request closed",
+                    "requesting closed",
+                    "closed traffic",
+                    "close traffic",
+                    "closed stop",
+                    "close stop",
+                    "request closed traffic",
+                ),
+                fuzzy=False,
+            ):
+                slots["after"] = "closed_traffic"
+            elif _group_hit(
+                text,
+                ("high key", "report high key", "for high key"),
+                fuzzy=False,
+            ):
+                slots["after"] = "high_key"
+            heard_rwy = extract_runway_loose(text, runways)
+            if heard_rwy:
+                slots["runway"] = heard_rwy
         if intent.id in (
             "inbound_recovery",
             "request_approach",
@@ -4206,8 +4581,30 @@ def echoes_last_atc(
     addr = str(addressed or "").strip().lower()
     prev = str(last_tx_channel or "").strip().lower()
     pending = str(pending_contact or "").strip().lower()
+    last_tmpl = str(last_tx_template or "").strip().lower()
     # Real check-in after a handoff must still fire ("with you" / "checking in").
+    # Exception: Departure already gave radar / climb — do not re-fire check-in
+    # (that re-TX'd the climb and left Fly stuck on the check-in cue).
+    # Do not include departure_handoff here — that is the Tower "contact Departure"
+    # cue and the first "with you" must still open the check-in.
     if any(cue in text and cue not in last for cue in _CHECKIN_OVERRIDE_ECHO):
+        if (
+            intent is not None
+            and "check_in" in intent.id
+            and last_tmpl in ("radar_contact", "climb_cruise")
+        ):
+            return True
+        return False
+    # C2 asks that reuse ATC's own wording (alpha check / picture / dope /
+    # declare / VID after a picture that named "east group") are new requests,
+    # not readbacks of the last transmission.
+    if intent is not None and intent.id in (
+        "request_alpha_check",
+        "request_picture",
+        "request_bogey_dope",
+        "request_declare",
+        "report_vid",
+    ):
         return False
     # Contact / switch readback — even after retune to the destination agency.
     if _is_contact_switch_echo(text, last):
@@ -4223,7 +4620,6 @@ def echoes_last_atc(
             return True
     if addr and prev and addr != prev:
         return False
-    last_tmpl = str(last_tx_template or "").strip().lower()
     cand_tmpl = str(candidate_template or "").strip().lower()
     if "monitor tower" in last and "monitor tower" in text:
         return True
@@ -4307,6 +4703,7 @@ def evaluate(
     tuned_channel: str | None = None,
     cursor_channel: str = "",
     pending_contact: str = "",
+    sfo_active: bool = False,
 ) -> Evaluation:
     """
     Decide whether a transmission is ATC business, and if so what it asks for.
@@ -4365,6 +4762,8 @@ def evaluate(
         current_step_id=current_step_id,
         steps=steps,
         last_tx_template=last_tx_template,
+        last_tx_text=last_tx_text,
+        sfo_active=bool(sfo_active),
     )
     if (
         candidate is not None
@@ -4556,12 +4955,15 @@ def evaluate(
         "report_low_key",
         "report_base_key",
         "report_sfo_final",
+        "request_closed_traffic",
     ) and str(last_tx_template or "").strip().lower() in (
         "go_around",
         "sfo_approve",
         "sfo_high_key",
+        "sfo_low_key",
         "clear_land",
         "right_break",
+        "closed_traffic",
     ):
         address_optional = True
     if candidate.intent in (
@@ -4569,6 +4971,14 @@ def evaluate(
         "report_low_key",
         "report_base_key",
         "report_sfo_final",
+        "request_closed_traffic",
+    ):
+        address_optional = True
+    # Option / SFO waveoff — "on the go, 21R, high key" needs no Tower opener.
+    if candidate.intent == "going_around" and (
+        sfo_active
+        or str(last_tx_template or "").strip().lower()
+        in ("clear_land", "go_around", "sfo_low_key", "sfo_high_key", "sfo_approve")
     ):
         address_optional = True
     if require_address and not address_optional and not address.to_atc:
@@ -4680,6 +5090,9 @@ def hide_blackjack_checkin_cue(
     """True once the flight is on Blackjack and does not need to check in again."""
     last_tmpl = str(last_tx_template or "").strip().lower()
     last_ch = str(last_tx_channel or "").strip().lower()
+    # Back from Bandsaw/Joshua → tip range exit, not another check-in.
+    if last_tmpl in ("bandsaw_check_out", "joshua_check_out", "bj_range_exit"):
+        return True
     if last_tmpl in _BJ_ON_FREQ_TEMPLATES:
         return True
     if not blackjack_checked_in:
@@ -4713,6 +5126,8 @@ def suggestions(
     tuned_channel: str = "",
     next_channel: str = "",
     next_freq_mhz: float | None = None,
+    sfo_active: bool = False,
+    last_tx_text: str = "",
 ) -> list[tuple[str, str, str, bool]]:
     """
     Fly kneeboard cues: (payload, what it does, role, agency_required).
@@ -4776,6 +5191,9 @@ def suggestions(
                         "“squawk”/“squawking” + code, code alone, or roger "
                         "· agency optional"
                     )
+                elif "closed" in hinge_says[0].casefold() or "close traffic" in hinge_says[0].casefold():
+                    side = "right" if "right" in hinge_says[0].casefold() else "left"
+                    tip = f"“{side}” is enough · agency optional"
                 elif hinge_key == "climb":
                     tip = "altitude alone is enough · agency optional"
                 elif hinge_key == "callsign":
@@ -4892,6 +5310,23 @@ def suggestions(
         # After Ground has issued taxi, tip the readback — not another request.
         if awaiting_readback and intent.id == "ready_taxi":
             continue
+        # LUAW already on the wire — tip in position, not ready for departure.
+        if (
+            intent.id == "ready_departure"
+            and str(last_tx_template or "").strip().lower()
+            in ("lineup", "line_up_and_wait")
+            and not awaiting_readback
+            and expected_l not in _DEPARTURE_READY_TEMPLATES
+        ):
+            continue
+        # Departure already answered — tip handoff, not another "with you".
+        if (
+            intent.id == "departure_check_in"
+            and str(last_tx_template or "").strip().lower()
+            in ("radar_contact", "climb_cruise", "departure_handoff")
+            and expected_l not in ("", "radar_contact")
+        ):
+            continue
         # LUAW is the default — don't tip "request line up" next to ready.
         if expected_l in ("lineup", "line_up_and_wait") and intent.id == "request_lineup":
             continue
@@ -4938,30 +5373,56 @@ def suggestions(
         # Don't tip "ready to copy" until Delivery has offered the amendment.
         if intent.id == "ready_to_copy" and last_tx_template != "clearance_amendment":
             continue
-        # SFO report tips only after the matching Tower call.
-        if intent.id == "report_high_key" and last_tx_template != "sfo_approve":
+        asked_hk = _tower_asked_report_high_key(last_tx_text)
+        # SFO report tips only after the matching Tower call / while still on SFO.
+        if intent.id == "report_high_key" and not (
+            last_tx_template in ("sfo_approve", "go_around") or sfo_active or asked_hk
+        ):
             continue
-        if intent.id == "report_low_key" and last_tx_template != "sfo_high_key":
+        if (
+            intent.id == "report_high_key"
+            and last_tx_template == "go_around"
+            and not sfo_active
+            and not asked_hk
+        ):
+            # Flex go-around — tip request SFO, not a High Key report.
+            continue
+        if intent.id == "report_low_key" and last_tx_template not in (
+            "sfo_high_key",
+            "sfo_approve",
+        ) and not sfo_active:
             continue
         if intent.id == "report_sfo_final" and last_tx_template != "sfo_approve":
             continue
         if intent.id == "report_base_key" and last_tx_template not in (
             "sfo_high_key",
+            "sfo_low_key",
             "sfo_approve",
+            "clear_land",
+        ) and not sfo_active:
+            continue
+        if intent.id == "request_closed_traffic" and not (
+            sfo_active
+            or last_tx_template.startswith("sfo_")
+            or last_tx_template in ("go_around", "clear_land", "closed_traffic")
         ):
             continue
         # Tip High Key after a Flex/Duck go-around; hide reports until approved.
+        # While still on SFO, tip High Key report — not a fresh SFO request.
         if intent.id == "request_sfo" and last_tx_template not in (
             "go_around",
             "clear_land",
             "right_break",
             "",
         ):
-            if last_tx_template.startswith("sfo_"):
+            if last_tx_template.startswith("sfo_") or sfo_active:
                 continue
-        if intent.id == "request_sfo" and last_tx_template in (
-            "sfo_approve",
-            "sfo_high_key",
+        if intent.id == "request_sfo" and (
+            last_tx_template in ("sfo_approve", "sfo_high_key") or sfo_active or asked_hk
+        ):
+            continue
+        if intent.id == "request_sfo" and last_tx_template == "go_around" and (
+            sfo_active or asked_hk
         ):
             continue
         # Range checkout ends Flight → Approach; tip it on the range-exit step
@@ -5027,13 +5488,37 @@ def suggestions(
             rank = 0
         elif intent.id == "ready_to_copy" and expected_l == "clearance_amendment":
             rank = 0
-        elif intent.id == "report_high_key" and last_tx_template == "sfo_approve":
+        elif intent.id == "report_high_key" and (
+            last_tx_template in ("sfo_approve", "go_around") or sfo_active or asked_hk
+        ):
+            if last_tx_template == "go_around" and not sfo_active and not asked_hk:
+                pass
+            else:
+                rank = 0
+        elif intent.id == "report_low_key" and last_tx_template in (
+            "sfo_high_key",
+            "sfo_approve",
+        ):
             rank = 0
-        elif intent.id == "report_low_key" and last_tx_template == "sfo_high_key":
+        elif intent.id == "report_base_key" and last_tx_template in (
+            "sfo_low_key",
+            "sfo_high_key",
+            "sfo_approve",
+            "clear_land",
+        ):
             rank = 0
         elif intent.id == "report_sfo_final" and last_tx_template == "sfo_approve":
             rank = 0
-        elif intent.id == "request_sfo" and last_tx_template == "go_around":
+        elif (
+            intent.id == "request_sfo"
+            and last_tx_template == "go_around"
+            and not sfo_active
+            and not asked_hk
+        ):
+            rank = 0
+        elif intent.id == "request_closed_traffic" and (
+            sfo_active or last_tx_template.startswith("sfo_") or last_tx_template == "go_around"
+        ):
             rank = 0
         elif intent.id == "range_entry" and expected_l == "bj_range_exit":
             # Back from Bandsaw / still on the range — tip check-in (continue).
@@ -5111,7 +5596,36 @@ def suggestions(
         # Requests and actions → optional (even when ranked high for visibility).
         # OPS step 1 and tanker side-trip: the speakable requests *are* the card.
         if intent.kind == "step" or intent.step_id:
-            role = "advance" if rank == 0 else ""
+            if rank == 0:
+                role = "advance"
+            elif (
+                # Tuned to this agency while the shared cursor still names an
+                # earlier template (Ops → Delivery, Delivery → Ground, …).
+                # Tip only the next timeline call for this radio — not every
+                # Ground step (taxi + at EOR) at once.
+                not should_tip_retune(here_l, dest_l)
+                and hide_cursor_phrases
+                and intent.channels
+                and channel_l in intent.channels
+            ):
+                next_tmpl = ""
+                for st in steps or []:
+                    if not isinstance(st, dict) or st.get("enabled", True) is False:
+                        continue
+                    if str(st.get("channel") or "").strip().lower() != channel_l:
+                        continue
+                    next_tmpl = str(st.get("template") or "").strip().lower()
+                    break
+                if next_tmpl:
+                    role = (
+                        "advance"
+                        if intent.template and intent.template == next_tmpl
+                        else ""
+                    )
+                else:
+                    role = "advance"
+            else:
+                role = ""
         elif channel_l == "ops" and intent.id in (
             "ops_request_words",
             "ops_request_start",

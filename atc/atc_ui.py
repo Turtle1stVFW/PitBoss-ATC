@@ -21,7 +21,6 @@ from tkinter import filedialog, messagebox, ttk
 HERE = Path(__file__).resolve().parent
 CONFIG_PATH = HERE / "config.json"
 AIRPORTS_PATH = HERE / "airports.json"
-STREAMDECK_DIR = HERE / "streamdeck"
 PHRASE_SCRIPT = HERE / "atc_phrase.py"
 
 # Ensure sibling imports work when launched as script
@@ -41,7 +40,7 @@ PHRASES = [
 
 
 def load_json(path: Path) -> dict:
-    with path.open(encoding="utf-8") as f:
+    with path.open(encoding="utf-8-sig") as f:
         return json.load(f)
 
 
@@ -152,9 +151,6 @@ class AtcUi(tk.Tk):
         ttk.Button(btns, text="Refresh callsign from Opus", command=self.refresh_callsign).pack(
             side=tk.LEFT, padx=4
         )
-        ttk.Button(btns, text="Open Stream Deck folder", command=self._open_streamdeck).pack(
-            side=tk.LEFT, padx=4
-        )
         f.columnconfigure(1, weight=1)
 
         # --- Airport ---
@@ -262,10 +258,6 @@ class AtcUi(tk.Tk):
         )
         if path:
             self.var_exe.set(path)
-
-    def _open_streamdeck(self) -> None:
-        STREAMDECK_DIR.mkdir(parents=True, exist_ok=True)
-        os.startfile(str(STREAMDECK_DIR))  # type: ignore[attr-defined]
 
     def _selected_voice(self) -> tuple[str, str]:
         label = self.var_voice_label.get()

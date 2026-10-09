@@ -37,13 +37,18 @@ import version  # noqa: E402
 MAX_BODY = 256_000
 
 # Cursor the whole flight should see. Tanker AAR lives on PilotSession.local_state.
+# atc_role is intentionally NOT in this list — Host role must never be flipped
+# to solo during seat bind (Traffic desync + wrong ExternalAudio SRS target).
 _IDENTITY_CONFIG_KEYS = (
     "opus_user_name",
     "opus_flight_id",
     "opus_seat",
     "opus_flight_label",
     "callsign_override",
-    "atc_role",
+    # Client Route Tester plan — Host has no local map inject for that jet.
+    "_seat_from_map",
+    "_seat_fp_route_string",
+    "_seat_fp_altitude",
 )
 # Client Fly copies these, then drops any key the host omitted so a cache
 # reset does not leave the last sortie (OPS start, pending Delivery, …).
@@ -57,7 +62,9 @@ SHARED_FLOW_KEYS = (
     "last_tx_end_at",
     "last_tx_channel",
     "last_tx_template",
+    "last_tx_confirmed",
     "last_agency",
+    "contact_phase",
     "pending_contact",
     "control_checked_in",
     "control_channel",
@@ -68,12 +75,25 @@ SHARED_FLOW_KEYS = (
     "assigned_altitude_ft",
     "approach_plan",
     "approach_checked_in",
+    "approach_runway",
+    "active_recovery",
+    "landing_intent",
+    "awaiting_on_the_go",
+    "pattern_land_needs_leave",
+    "go_around_plan",
+    "sfo_pattern_open",
+    "sfo_phase",
+    "sfo_high_key_ft",
+    "sfo_base_key_pending",
     "manual_cursor",
     "manual_step_view",
     "active_takeoff_mode",
     "pending_takeoff_offer",
     "takeoff_offer_rolled",
     "ops_sortie",
+    "ops_codes_pending",
+    "ops_codes_last_at",
+    "ops_codes_done",
 )
 
 
@@ -98,6 +118,7 @@ class PilotSession:
         self.local_state: dict[str, Any] = {}
         self.ownship_ll: tuple[float, float] | None = None
         self.ownship_ll_t: float = 0.0
+        self.ownship_alt_ft: float | None = None
 
     @property
     def callsign(self) -> str:
@@ -105,6 +126,26 @@ class PilotSession:
 
     def touch(self) -> None:
         self.last_seen = time.time()
+
+    def apply_map_flight_plan(self, body: dict[str, Any]) -> None:
+        """
+        Client Route Tester FP (route / altitude). Host has no local inject for
+        this jet — without these fields, Delivery kept reading Opus instead of
+        the map plan.
+        """
+        route = str(body.get("fp_route_string") or "").strip()
+        if not route and not body.get("ownship_from_map"):
+            return
+        if route:
+            self.identity["fp_route_string"] = route
+            self.identity["from_map"] = True
+        alt = str(body.get("fp_altitude") or "").strip()
+        if alt:
+            self.identity["fp_altitude"] = alt
+        elif route:
+            self.identity.pop("fp_altitude", None)
+        if body.get("ownship_from_map"):
+            self.identity["from_map"] = True
 
     def apply_ownship(self, body: dict[str, Any]) -> None:
         """
@@ -124,6 +165,13 @@ class PilotSession:
                 ll = None
         self.ownship_ll = ll
         self.ownship_ll_t = time.time() if ll is not None else 0.0
+        raw_alt = body.get("ownship_alt_ft")
+        try:
+            self.ownship_alt_ft = (
+                float(raw_alt) if raw_alt not in (None, "") else None
+            )
+        except (TypeError, ValueError):
+            self.ownship_alt_ft = None
 
     def fresh_ownship_ll(self) -> tuple[float, float] | None:
         """This seat's fix while it is recent enough to gate on."""
@@ -142,14 +190,24 @@ class PilotSession:
                     out.append(float(item))
                 except (TypeError, ValueError):
                     continue
-            self.tuned_freqs_mhz = out
-        self.radio_fresh = bool(body.get("radio_fresh", True if freqs is not None else False))
-        try:
-            sel = body.get("selected_mhz")
-            self.selected_mhz = float(sel) if sel is not None else None
-        except (TypeError, ValueError):
-            self.selected_mhz = None
+            fresh = bool(body.get("radio_fresh", True))
+            # Empty + not fresh = failed client read. Keep the last good bank
+            # so a blip cannot freq-gate the whole sortie.
+            if out or fresh:
+                self.tuned_freqs_mhz = out
+                self.radio_fresh = fresh
+            else:
+                self.radio_fresh = False
+        elif "radio_fresh" in body:
+            self.radio_fresh = bool(body.get("radio_fresh"))
+        if "selected_mhz" in body:
+            try:
+                sel = body.get("selected_mhz")
+                self.selected_mhz = float(sel) if sel is not None else None
+            except (TypeError, ValueError):
+                self.selected_mhz = None
         self.apply_ownship(body)
+        self.apply_map_flight_plan(body)
         if inject:
             self.engine.set_remote_radios(
                 self.tuned_freqs_mhz,
@@ -284,6 +342,48 @@ class AtcServer:
             return None
         return sess
 
+    def _reclaim_stale_sessions(
+        self,
+        keep_key: str,
+        identity: dict[str, Any],
+        *,
+        prior_session_id: str = "",
+    ) -> None:
+        """
+        Drop orphan Traffic rows when one PC re-hellos under a new key.
+
+        Clearing the Opus flight then picking a seat again used to leave the old
+        ``flight:…`` or ``callsign:…`` session alive until SESSION_TTL (15 min),
+        so Host Traffic showed two RAZOR 1 rows (seat ? + seat 1). Only drop
+        callsign-keyed orphans for the same callsign — never another seat's
+        ``flight:fid:N`` row.
+        """
+        drop: list[str] = []
+        prior = str(prior_session_id or "").strip()
+        if prior and prior != keep_key and prior in self.sessions:
+            drop.append(prior)
+        cs = atc_net._slug(
+            str(identity.get("callsign") or identity.get("opus_user_name") or "")
+        )
+        fid = str(identity.get("opus_flight_id") or "").strip()
+        if cs and fid:
+            for sid, sess in self.sessions.items():
+                if sid == keep_key or sid in drop:
+                    continue
+                if not sid.startswith("callsign:"):
+                    continue
+                other = atc_net._slug(
+                    str(
+                        sess.identity.get("callsign")
+                        or sess.identity.get("opus_user_name")
+                        or ""
+                    )
+                )
+                if other == cs:
+                    drop.append(sid)
+        for sid in drop:
+            self.sessions.pop(sid, None)
+
     def hello(self, body: dict[str, Any]) -> dict[str, Any]:
         identity = _identity_from_hello(body, self.config)
         key = atc_net.session_key(
@@ -297,7 +397,11 @@ class AtcServer:
             callsign=str(identity.get("callsign") or ""),
             opus_user_name=str(identity.get("opus_user_name") or ""),
         )
+        prior = str(
+            body.get("prior_session_id") or body.get("replace_session_id") or ""
+        ).strip()
         with self._lock:
+            self._reclaim_stale_sessions(key, identity, prior_session_id=prior)
             engine = self._engine_for_flow(flow, identity)
             sess = self.sessions.get(key)
             if sess is None or time.time() - sess.last_seen > atc_net.SESSION_TTL_S:
@@ -505,10 +609,26 @@ class AtcServer:
                     job = sess.engine.take_pending_tx()
                 finally:
                     sess.engine.defer_tx = False
+                    # Arrows park the shared flight. Do not snap the index back
+                    # to the pre-AAR cursor — that made ◀ ▶ a no-op on tanker.
+                    manual_nav = bool(
+                        isinstance(sess.engine.state, dict)
+                        and sess.engine.state.get("manual_step_view")
+                    )
+                    if manual_nav and (
+                        on_aar or tanker.tanker_overlay_active(sess.engine.state)
+                    ):
+                        try:
+                            tanker.reconcile_aar_overlay(sess.engine)
+                        except Exception:
+                            tanker.clear_aar_state(sess.engine.state)
                     sess.local_state = tanker.snapshot_seat_state(sess.engine.state)
                     tanker.strip_seat_state(sess.engine.state)
-                    # AAR parks on the tanker step only for this element. Do not
-                    # write that (or leave_tanker seeking C2) onto the flight cursor.
+                    # AAR parks on the tanker step only for this element. Always
+                    # put the shared flight cursor back — seat tanker position
+                    # lives in local_state (including ◀ ▶). Skipping restore when
+                    # leave_tanker set manual_step_view left bandsaw on C2 for
+                    # every seat.
                     if on_aar or tanker.tanker_overlay_active(sess.local_state):
                         sess.engine.state["index"] = shared_index
         self._sync_element_overlay(sess)
@@ -519,12 +639,107 @@ class AtcServer:
             job["callsign"] = sess.callsign
             # So the channel worker can stamp when speech actually ends.
             job["flow_state"] = sess.engine.state
+            # Host hub always speaks into local SRS (127.0.0.1), never the
+            # squadron hostname Clients use. pin_host_tx_target also runs in
+            # hub.submit as a second belt.
+            try:
+                import atc_net
+
+                atc_net.pin_host_tx_target(job)
+            except Exception:
+                raw_cfg = job.get("config")
+                if isinstance(raw_cfg, dict):
+                    tx_cfg = dict(raw_cfg)
+                    tx_cfg["atc_role"] = "host"
+                    job["config"] = tx_cfg
             pos = self.hub.submit(job)
             result = dict(result)
-            result["queued"] = True
             result["queue_pos"] = pos
+            # Speak before the Client paints the card. Otherwise Fly shows
+            # "contact Ground" / the readback and the pilot leaves the
+            # frequency while Tower is still talking.
+            done = job.get("done")
+            finished = True
+            if isinstance(done, threading.Event):
+                finished = done.wait(timeout=100.0)
+            code = job.get("exit_code")
+            err = str(job.get("error") or job.get("prerender_error") or "").strip()
+            try:
+                failed = code is not None and int(code) != 0
+            except (TypeError, ValueError):
+                failed = True
+            if not finished or failed or code is None:
+                result["queued"] = False
+                result["action"] = "blocked"
+                result["detail"] = (
+                    err
+                    or ("radio transmit timed out" if not finished else "")
+                    or f"radio transmit failed ({code})"
+                )
+                # play_step may have queued readback/advance — undo so Clients
+                # do not paint a phrase ExternalAudio never spoke, and the
+                # cursor stays on the step that still needs a successful TX.
+                try:
+                    if hasattr(sess.engine, "abandon_deferred_tx"):
+                        sess.engine.abandon_deferred_tx()
+                    else:
+                        atc_phrase.revert_failed_radio_tx(sess.engine.state)
+                        if hasattr(sess.engine, "save_state"):
+                            sess.engine.save_state()
+                except Exception:
+                    pass
+                try:
+                    import app_diag
+
+                    app_diag.error(
+                        app_diag.CAT_TX,
+                        "Host TX blocked after radio failure",
+                        channel=str(job.get("channel") or ""),
+                        exit_code=code,
+                        detail=str(result.get("detail") or "")[:200],
+                    )
+                except Exception:
+                    pass
+            else:
+                result["queued"] = True
+                result["exit_code"] = int(code)
+                # Cursor / LAST HEARD / readback / agency handoff waited for
+                # ExternalAudio exit 0 — apply them now.
+                # Element AAR: run_action already restored the shared C2 index.
+                # Do not let a deferred advance walk the flight timeline.
+                apply_advance = not (
+                    on_aar or tanker.tanker_overlay_active(sess.local_state)
+                )
+                try:
+                    if hasattr(sess.engine, "commit_deferred_tx_success"):
+                        sess.engine.commit_deferred_tx_success(
+                            apply_advance=apply_advance
+                        )
+                except Exception:
+                    pass
             result["channel"] = job.get("channel")
-            result["action"] = result.get("action") or "queued"
+            # Voice often wraps play_id as action=play + detail={...}. Promote
+            # spoken text so Clients log/hear the real phrase, not the label.
+            detail = result.get("detail")
+            if isinstance(detail, dict):
+                for key in ("text", "label", "freq", "step_id", "callsign"):
+                    if result.get(key) in (None, "") and detail.get(key) not in (
+                        None,
+                        "",
+                    ):
+                        result[key] = detail[key]
+            if not result.get("text") and job.get("text"):
+                result["text"] = job.get("text")
+            if result.get("action") == "blocked":
+                pass
+            elif int(result.get("exit_code") or -1) == 0 and result.get("queued"):
+                # Hub waited for a real exit 0 — report transmit, not a
+                # premature "queued" success that Fly can misread as fired.
+                result["action"] = "transmit"
+            elif result.get("action") in (None, "", "play", "none"):
+                result["action"] = "queued"
+            else:
+                result["action"] = result.get("action") or "queued"
         sess.last_result = {
             "action": result.get("action"),
             "label": result.get("label"),
@@ -572,6 +787,9 @@ class AtcServer:
                 return engine.play_id(sid)
             if cmd == "tanker_chat":
                 return run_tanker_chat_command(engine, body)
+            if cmd == "ops_codes_finalize":
+                # Client schedules codes idle on the flying PC, then Host TXes.
+                return voice_engine.execute_ops_action(engine, "ops_codes_finalize")
             if cmd == "seek":
                 return engine.seek(int(body.get("index") or 0))
             if cmd == "seek_relative":
@@ -721,6 +939,7 @@ def _shared_flow_state(state: dict[str, Any] | None) -> dict[str, Any]:
     out.setdefault("awaiting_readback", False)
     out.setdefault("blackjack_checked_in", False)
     out.setdefault("bandsaw_checked_in", False)
+    out.setdefault("contact_phase", "field")
     return out
 
 
@@ -769,13 +988,25 @@ def _identity_from_hello(body: dict[str, Any], host_config: dict[str, Any]) -> d
     if not callsign:
         cfg = dict(host_config)
         _apply_identity_to_config(cfg, ident)
+        # Client seat resolve must not hit Host-without-flight → synthetic
+        # "HOST" (Traffic then listed Razor 1 as Host). Treat as solo so the
+        # client's flight_id / username can resolve normally.
+        cfg["atc_role"] = "solo"
         try:
             ctx = atc_phrase.resolve_active_opus_flight(cfg)
-            callsign = str(getattr(ctx, "radio_callsign", "") or "")
+            callsign = str(getattr(ctx, "radio_callsign", "") or "") if ctx else ""
         except Exception:
             callsign = ""
+    # Never paint a Traffic pilot as the Host box placeholder / offline stub.
+    weak = {"", "host", "host · no own jet", "callsign", "map"}
+    if str(callsign or "").strip().casefold() in weak:
+        callsign = ""
     if not callsign:
-        callsign = ident["opus_user_name"] or "CALLSIGN"
+        callsign = (
+            atc_phrase.clean_flight_callsign(ident["opus_flight_label"])
+            or ident["opus_user_name"]
+            or "CALLSIGN"
+        )
     ident["callsign"] = callsign
     return ident
 
@@ -785,10 +1016,40 @@ def _apply_identity_to_config(config: dict[str, Any], identity: dict[str, Any]) 
     config["opus_flight_id"] = identity.get("opus_flight_id")
     config["opus_seat"] = identity.get("opus_seat")
     config["opus_flight_label"] = identity.get("opus_flight_label") or ""
-    config["callsign_override"] = identity.get("callsign_override") or ""
-    # Resolve this jet as a pilot, not as the Host router (Host skips Opus
-    # when it has no flight_id of its own).
-    config["atc_role"] = "solo"
+    # Hello stores the Traffic name on identity["callsign"] (e.g. RAZOR 1).
+    # Clients often leave callsign_override empty — without seeding it here,
+    # Host-role resolve_active_opus_flight hits the no-flight synthetic and
+    # TTS says "HOST, Ops" instead of "Razor one, Wool Ops".
+    override = str(identity.get("callsign_override") or "").strip()
+    if not override:
+        cs = str(identity.get("callsign") or "").strip()
+        if cs.casefold() not in {"", "host", "host · no own jet", "callsign", "map"}:
+            override = cs
+    if not override:
+        override = atc_phrase.clean_flight_callsign(
+            str(identity.get("opus_flight_label") or "")
+        )
+    config["callsign_override"] = override
+    # Client map plan (Route Tester) — Host TX must use this route, not Opus.
+    if identity.get("from_map") and str(identity.get("fp_route_string") or "").strip():
+        config["_seat_from_map"] = True
+        config["_seat_fp_route_string"] = str(identity.get("fp_route_string") or "").strip()
+        alt = str(identity.get("fp_altitude") or "").strip()
+        if alt:
+            config["_seat_fp_altitude"] = alt
+        else:
+            config.pop("_seat_fp_altitude", None)
+    else:
+        config.pop("_seat_from_map", None)
+        config.pop("_seat_fp_route_string", None)
+        config.pop("_seat_fp_altitude", None)
+    # Keep atc_role as Host. Session engines (and the shared Host Fly engine
+    # during bind) used to flip to solo so Opus would resolve the client's
+    # flight_id — but Host-without-flight_id already skips Opus only when
+    # selected_id is None, and with the client's flight_id bound it resolves.
+    # Stamping solo onto the shared config made Traffic paint "Solo" while
+    # Setup still showed Host, and ExternalAudio targeted squadron SRS
+    # instead of 127.0.0.1 — silent TX on every agency. Never mutate role.
 
 
 @contextmanager
@@ -844,6 +1105,7 @@ def _session_engine_binding(
 _SEAT_POSITION_CONFIG_KEYS = (
     atc_phrase.OWNSHIP_SEAT_BOUND_KEY,
     atc_phrase.OWNSHIP_SEAT_LL_KEY,
+    atc_phrase.OWNSHIP_SEAT_ALT_KEY,
 )
 
 
@@ -867,11 +1129,17 @@ def _bind_seat_position(
     state = engine.state if isinstance(getattr(engine, "state", None), dict) else None
     if ll is None:
         cfg.pop(atc_phrase.OWNSHIP_SEAT_LL_KEY, None)
+        cfg.pop(atc_phrase.OWNSHIP_SEAT_ALT_KEY, None)
         if state is not None:
             state.pop("ownship_ll", None)
             state.pop("ownship_ll_t", None)
         return
     cfg[atc_phrase.OWNSHIP_SEAT_LL_KEY] = [ll[0], ll[1]]
+    alt = getattr(sess, "ownship_alt_ft", None)
+    if alt is not None:
+        cfg[atc_phrase.OWNSHIP_SEAT_ALT_KEY] = alt
+    else:
+        cfg.pop(atc_phrase.OWNSHIP_SEAT_ALT_KEY, None)
     if state is not None:
         state["ownship_ll"] = [ll[0], ll[1]]
         state["ownship_ll_t"] = sess.ownship_ll_t

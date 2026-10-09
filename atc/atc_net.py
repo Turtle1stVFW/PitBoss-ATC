@@ -22,11 +22,72 @@ ROLES = ("solo", "host", "client")
 FIREWALL_RULE_PREFIX = "DCS ATC Host"
 # Fly NET LINK sparkline — health GET must finish before the next 1 Hz tick.
 ATC_HOST_PROBE_TIMEOUT_S = 0.8
+# ExternalAudio SRS target: Host speaks into local SRS; Solo/Client use squadron.
+SQUADRON_SRS_HOST = "showtime.455aew.com"
+HOST_LOCAL_SRS_HOST = "127.0.0.1"
+_KNOWN_SRS_HOSTS = frozenset(
+    {SQUADRON_SRS_HOST.lower(), HOST_LOCAL_SRS_HOST, "localhost", ""}
+)
 
 
 def role_of(config: dict[str, Any] | None) -> str:
     raw = str((config or {}).get("atc_role") or "solo").strip().lower()
     return raw if raw in ROLES else "solo"
+
+
+def default_srs_host(role: str | None = None, *, config: dict[str, Any] | None = None) -> str:
+    """127.0.0.1 while hosting; squadron hostname for Solo / Client."""
+    r = role_of(config if config is not None else {"atc_role": role or "solo"})
+    return HOST_LOCAL_SRS_HOST if r == "host" else SQUADRON_SRS_HOST
+
+
+def apply_role_srs_host(current: str | None, role: str | None = None, *, config: dict[str, Any] | None = None) -> str:
+    """
+    Swap known defaults when the squadron role changes.
+    Custom hosts (LAN IP, alternate server) are left alone.
+    """
+    want = default_srs_host(role, config=config)
+    cur = str(current or "").strip()
+    if cur.lower() in _KNOWN_SRS_HOSTS:
+        return want
+    return cur or want
+
+
+def effective_srs_host(
+    airport: dict[str, Any] | None,
+    config: dict[str, Any] | None = None,
+) -> str:
+    """SRS host ExternalAudio should use for this role."""
+    # Host TX must always hit local SRS. Solo/Client desync used to leave
+    # atc_role=solo on the shared config (or airport srs_host=showtime) so
+    # ExternalAudio got --ip=showtime.455aew.com and nobody heard ATC.
+    if (config or {}).get("_force_local_srs") or role_of(config) == "host":
+        return HOST_LOCAL_SRS_HOST
+    return apply_role_srs_host(
+        str((airport or {}).get("srs_host") or ""),
+        config=config,
+    )
+
+
+def pin_host_tx_target(job: dict[str, Any]) -> dict[str, Any]:
+    """
+    ChannelTxHub runs only on the Host PC — ExternalAudio must use 127.0.0.1.
+
+    Copies config/airport so a concurrent seat bind cannot flip role or swap
+    srs_host to the squadron hostname under a live launch.
+    """
+    raw_cfg = job.get("config")
+    if isinstance(raw_cfg, dict):
+        tx_cfg = dict(raw_cfg)
+        tx_cfg["atc_role"] = "host"
+        tx_cfg["_force_local_srs"] = True
+        job["config"] = tx_cfg
+    raw_ap = job.get("airport")
+    if isinstance(raw_ap, dict):
+        tx_ap = dict(raw_ap)
+        tx_ap["srs_host"] = HOST_LOCAL_SRS_HOST
+        job["airport"] = tx_ap
+    return job
 
 
 def token_of(config: dict[str, Any] | None) -> str:
@@ -41,6 +102,16 @@ def tokens_match(expected: str, got: str) -> bool:
     return hmac.compare_digest(want.encode("utf-8"), have.encode("utf-8"))
 
 
+def _norm_id(value: Any) -> str:
+    """Stable id token — int(55) and 55.0 both become \"55\"."""
+    if value is None or value == "":
+        return ""
+    try:
+        return str(int(value))
+    except (TypeError, ValueError):
+        return str(value).strip()
+
+
 def session_key(
     *,
     opus_flight_id: Any = None,
@@ -49,8 +120,8 @@ def session_key(
     opus_user_name: str = "",
 ) -> str:
     """Per-seat connection id (radios, TTS cap, Traffic row)."""
-    fid = str(opus_flight_id or "").strip()
-    seat = str(opus_seat if opus_seat is not None else "").strip()
+    fid = _norm_id(opus_flight_id)
+    seat = _norm_id(opus_seat)
     if fid:
         return f"flight:{fid}:{seat or '1'}"
     cs = _slug(callsign) or _slug(opus_user_name)
@@ -66,7 +137,7 @@ def flow_key(
     opus_user_name: str = "",
 ) -> str:
     """Shared timeline id — one cursor for every seat on the same Opus flight."""
-    fid = str(opus_flight_id or "").strip()
+    fid = _norm_id(opus_flight_id)
     if fid:
         return f"flight:{fid}"
     return session_key(

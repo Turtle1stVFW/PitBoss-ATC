@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import re
+import time
 from typing import Any
 
 import atc_phrase
@@ -18,6 +19,8 @@ import picture_labels as pl
 GROUP_RADIUS_NM = pl.GROUP_RADIUS_NM
 MAX_GROUPS = pl.MAX_DETAIL_GROUPS
 PICTURE_MAX_RANGE_NM = 150.0
+_PICTURE_GROUPS_KEY = "picture_groups"
+_PICTURE_GROUPS_TTL_S = 45 * 60
 
 
 def picture_max_range_nm(config: dict[str, Any] | None = None) -> float:
@@ -116,6 +119,9 @@ def _cluster(tracks: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
 
 
 def _close(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    # Random civil traffic stays its own group so it cannot relabel a fighter.
+    if bool(a.get("assumed_friendly")) != bool(b.get("assumed_friendly")):
+        return False
     # Prefer lat/lon haversine when both have positions
     if None not in (a.get("lat"), a.get("lon"), b.get("lat"), b.get("lon")):
         try:
@@ -138,17 +144,26 @@ def _ownship(
     *,
     opus: Any,
     config: dict[str, Any],
+    callsign: str | None = None,
 ) -> tuple[dict[str, Any] | None, tuple[float, float] | None]:
+    """
+    Fighter position for picture / declare.
+
+    A bound client seat (the fix the flying PC sent the host) wins. Otherwise
+    use the matched CAOC unit's lat/lon. Other tracks are still read when the
+    unit match fails, as long as this position exists.
+    """
     hostile_side = _hostile_coalition(airport)
-    own = atc_phrase.match_caoc_unit_for_flight(units, opus=opus, config=config)
+    own = atc_phrase.match_caoc_unit_for_flight(
+        units, callsign=callsign, opus=opus, config=config
+    )
     if own and str(own.get("coalition") or "").lower() == hostile_side:
         own = None
     own_ll: tuple[float, float] | None = None
-    if own:
-        try:
-            own_ll = atc_phrase.caoc_xz_to_ll(float(own["xMeters"]), float(own["zMeters"]))
-        except (KeyError, TypeError, ValueError):
-            own_ll = None
+    if atc_phrase.ownship_seat_bound(config):
+        own_ll = atc_phrase.seat_ownship_latlon(config)
+    if own_ll is None and own is not None:
+        own_ll = atc_phrase.caoc_unit_latlon(own)
     return own, own_ll
 
 
@@ -183,6 +198,7 @@ def _track_dict(
         "display_callsign": str(
             unit.get("displayCallsign") or unit.get("display_callsign") or ""
         ).strip(),
+        "assumed_friendly": pl.unit_is_assumed_friendly_traffic(unit),
     }
 
 
@@ -218,7 +234,7 @@ def _groups_from_tracks(
         ]
         coal = ""
         if coalitions:
-            # Majority coalition; enemy-side wins a tie so we don't friendly-wash.
+            # DCS side only. The spoken call comes from affiliation, not this.
             red_or_blue = [c for c in coalitions if c in ("red", "blue")]
             if hostile_side in red_or_blue:
                 coal = hostile_side
@@ -239,6 +255,7 @@ def _groups_from_tracks(
             for extra in affs[1:]:
                 cluster_aff = pl.higher_declaration(cluster_aff, extra)
         ti = any(bool(t.get("ti_training")) for t in cluster)
+        assumed = bool(cluster) and all(t.get("assumed_friendly") for t in cluster)
         decl = book.assign(
             ids,
             brg=int(lead["bearing"]),
@@ -247,12 +264,10 @@ def _groups_from_tracks(
             coalition=coal,
             hostile_side=hostile_side,
             upgrade_hostile=upgrade_hostile,
-            affiliation=cluster_aff or None,
-            ti_training=ti,
+            affiliation="assumed friendly" if assumed else (cluster_aff or None),
+            ti_training=False if assumed else ti,
         )
-        label = str(
-            lead.get("display_callsign") or lead.get("label") or ""
-        ).strip()
+        label = str(lead.get("display_callsign") or "").strip()
         groups.append(
             pl.FightGroup(
                 bearing=int(lead["bearing"]),
@@ -285,13 +300,15 @@ def collect_hostile_groups(
     opus: Any = None,
     state: dict[str, Any] | None = None,
     upgrade_hostile: bool = False,
+    callsign: str | None = None,
 ) -> tuple[list[pl.FightGroup], dict[str, Any] | None, tuple[float, float] | None]:
     """
     Hostile air groups from the live CAOC feed, nearest first.
 
     Skips fixtures and groups outside picture_max_range_nm. Returns
-    (groups, own_unit, own_ll). OPUS affiliation drives the spoken label;
-    UNKNOWN / TI get a VID cue instead of a random bandit/hostile roll.
+    (groups, own_unit, own_ll). The CAOC affiliation token is the picture
+    call. UNKNOWN and undeclared TI stay bogey until a VID writes BANDIT
+    or HOSTILE. Red coalition is not a hostile call.
     """
     radar = atc_phrase.fetch_caoc_radar(config)
     if not radar:
@@ -303,7 +320,9 @@ def collect_hostile_groups(
 
     max_nm = picture_max_range_nm(config)
     hostile_side = _hostile_coalition(airport)
-    own, own_ll = _ownship(units, airport, opus=opus, config=config)
+    own, own_ll = _ownship(
+        units, airport, opus=opus, config=config, callsign=callsign
+    )
     if own_ll is None:
         return [], own, None
 
@@ -367,6 +386,22 @@ _DECLARE_TENS = {
     "thirty": 30,
     "forty": 40,
     "fifty": 50,
+    "sixty": 60,
+    "seventy": 70,
+    "eighty": 80,
+    "ninety": 90,
+}
+_DECLARE_TEENS = {
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+    "fifteen": 15,
+    "sixteen": 16,
+    "seventeen": 17,
+    "eighteen": 18,
+    "nineteen": 19,
 }
 # Whisper often writes angel / angles for angels.
 _DECLARE_ANGELS = r"(?:angels?|angles?)"
@@ -429,11 +464,178 @@ def theater_bullseye_name(config: dict[str, Any] | None = None) -> str:
     return raw or "ELVIS"
 
 
+_DECLARE_CUE_START_WORDS = frozenset(
+    {
+        "declare",
+        "vid",
+        "upgrade",
+        "id",
+        "group",
+        "groups",
+        "elvis",
+        "ellis",
+        "alvis",
+        "bullseye",
+        "bull",
+    }
+)
+
+
+def _parse_packed_bullseye(first: str) -> tuple[int, int, int | None] | None:
+    """
+    Split a glued bullseye digit run into bearing / range / optional altitude.
+
+    Whisper + normalize() turn '09017-19000' into '0901719000' and
+    '357.005.9000' into '3570059000'. For a 7-digit body prefer RR+AAAAA
+    when that range is nonzero; otherwise RRR+AAAA.
+    """
+    if not first.isdigit() or len(first) < 4:
+        return None
+    bearing = int(first[:3]) % 360
+    body = first[3:]
+
+    def _ok(rng: int, alt: int | None) -> bool:
+        if rng < 0 or rng > 400:
+            return False
+        if alt is None:
+            return True
+        return 1000 <= alt <= 80000
+
+    # Book form for picture/declare: BBB + RR + AAAAA (090 + 17 + 19000).
+    if len(body) >= 7:
+        rng2 = int(body[:2])
+        alt5 = int(body[2:7])
+        rest = body[7:]
+        if _ok(rng2, alt5) and rng2 >= 1 and not rest:
+            return bearing, rng2, alt5
+        # BBB + RRR + AAAA (357 + 005 + 9000).
+        rng3 = int(body[:3])
+        alt4 = int(body[3:7])
+        rest = body[7:]
+        if _ok(rng3, alt4) and not rest:
+            return bearing, rng3, alt4
+        # Longer packs: try scoring both with trailing ignored (should not happen).
+    if len(body) == 6:
+        # BBB + RR + AAAA glued short alt, or BBB + R + AAAAA — uncommon.
+        rng2 = int(body[:2])
+        alt4 = int(body[2:])
+        if _ok(rng2, alt4) and rng2 >= 1:
+            return bearing, rng2, alt4
+    if len(body) >= 5:
+        for alt_len in (5, 4):
+            if len(body) <= alt_len:
+                continue
+            mid = body[:-alt_len]
+            if not mid.isdigit():
+                continue
+            rng = int(mid)
+            alt = int(body[-alt_len:])
+            if _ok(rng, alt) and (rng >= 1 or alt_len == 4):
+                return bearing, rng, alt
+    if len(body) <= 3 and body.isdigit():
+        rng = int(body)
+        if 0 <= rng <= 400:
+            return bearing, rng, None
+    try:
+        rng = int(body)
+    except ValueError:
+        return None
+    if 0 <= rng <= 500:
+        return bearing, rng, None
+    return None
+
+
+def _split_glued_hundreds(text: str) -> str:
+    """
+    '2951 hundred' is bearing digits plus the 'one' of 'one hundred'.
+
+    normalize() glues every digit word, so 'two niner fife, one hundred'
+    arrives as '2951 hundred'. Put the last digit back in front of hundred.
+    """
+    toks = str(text or "").split()
+    out: list[str] = []
+    i = 0
+    while i < len(toks):
+        tok = toks[i]
+        if (
+            tok.isdigit()
+            and len(tok) > 1
+            and i + 1 < len(toks)
+            and toks[i + 1] == "hundred"
+        ):
+            if tok[:-1]:
+                out.append(tok[:-1])
+            out.append(tok[-1])
+            i += 1
+            continue
+        out.append(tok)
+        i += 1
+    return " ".join(out)
+
+
+def _fold_declare_spoken_numbers(text: str) -> str:
+    """
+    Turn picture-call range words into digits before the bullseye split.
+
+    Bearing digits are already collapsed ('one four four' → 144). The range
+    is spoken as a whole number ('sixty eight', 'one hundred fourteen').
+    Leaving 'sixty' as a word made the following 'eight' the range, so
+    ELVIS 144/68 was matched as 144/8 and every declare came back unable.
+    """
+    toks = str(text or "").split()
+    out: list[str] = []
+    i = 0
+    while i < len(toks):
+        tok = toks[i]
+        hundreds = _declare_ones_value(tok)
+        if (
+            hundreds is not None
+            and 1 <= hundreds <= 9
+            and i + 1 < len(toks)
+            and toks[i + 1] == "hundred"
+        ):
+            total = hundreds * 100
+            i += 2
+            if i < len(toks) and toks[i] in _DECLARE_TEENS:
+                total += _DECLARE_TEENS[toks[i]]
+                i += 1
+            elif i < len(toks) and toks[i] in _DECLARE_TENS:
+                total += _DECLARE_TENS[toks[i]]
+                i += 1
+                if i < len(toks):
+                    ones = _declare_ones_value(toks[i])
+                    if ones is not None:
+                        total += ones
+                        i += 1
+            elif i < len(toks) and toks[i].isdigit() and len(toks[i]) <= 2:
+                total += int(toks[i])
+                i += 1
+            out.append(str(total))
+            continue
+        if tok in _DECLARE_TENS:
+            total = _DECLARE_TENS[tok]
+            if i + 1 < len(toks):
+                ones = _declare_ones_value(toks[i + 1])
+                if ones is not None:
+                    total += ones
+                    i += 1
+            out.append(str(total))
+            i += 1
+            continue
+        if tok in _DECLARE_TEENS:
+            out.append(str(_DECLARE_TEENS[tok]))
+            i += 1
+            continue
+        out.append(tok)
+        i += 1
+    return " ".join(out)
+
+
 def parse_declare_cue(
     text: str, *, config: dict[str, Any] | None = None
 ) -> dict[str, Any] | None:
     """
-    Pull bearing / range / altitude from a DECLARE call.
+    Pull bearing / range / altitude from a DECLARE / VID / upgrade call.
 
     Bullseye name is always the theater bullseye (ELVIS). Pilots may say
     elvis, bullseye, or omit the name — Whisper mishears of the name are ignored.
@@ -451,23 +653,47 @@ def parse_declare_cue(
     except Exception:
         norm = re.sub(r"[^a-z0-9\s]", " ", raw.lower())
         norm = re.sub(r"\s+", " ", norm).strip()
+    norm = _fold_declare_spoken_numbers(_split_glued_hundreds(norm))
     toks = norm.split()
     if not toks:
         return None
 
-    # Search after 'declare' when present; otherwise whole utterance.
+    # Prefer digits after the cue word / bullseye name so callsign seat
+    # numbers ('RAZOR 1') are not mistaken for bearing.
     start = 0
     for i, t in enumerate(toks):
-        if t == "declare":
+        if t in _DECLARE_CUE_START_WORDS or t in _DECLARE_BE_WORDS:
             start = i + 1
-            break
-
-    # First digit token after declare (skip group / elvis / bullseye / fluff).
+    # If we never saw a cue word, still scan — but skip lone seat digits.
     digit_i = -1
     for i in range(start, len(toks)):
-        if toks[i].isdigit():
-            digit_i = i
-            break
+        tok = toks[i]
+        if not tok.isdigit():
+            continue
+        # Seat / flight number alone is never a bullseye packing.
+        if len(tok) <= 2 and i + 1 < len(toks) and not toks[i + 1].isdigit():
+            # Allow '056 67' pairs: short digit followed by another digit later.
+            if not any(t.isdigit() and len(t) <= 3 for t in toks[i + 1 : i + 3]):
+                continue
+        if len(tok) == 1:
+            # Never start on a single seat digit when a longer pack exists later.
+            if any(t.isdigit() and len(t) >= 4 for t in toks[i + 1 :]):
+                continue
+        digit_i = i
+        break
+    if digit_i < 0 and start > 0:
+        # Cue word present but no digits after it — fall back to whole utterance,
+        # still skipping lone seat digits.
+        for i, tok in enumerate(toks):
+            if not tok.isdigit():
+                continue
+            if len(tok) == 1 and any(t.isdigit() and len(t) >= 4 for t in toks[i + 1 :]):
+                continue
+            if len(tok) >= 3 or (
+                i + 1 < len(toks) and toks[i + 1].isdigit()
+            ):
+                digit_i = i
+                break
     if digit_i < 0:
         return None
 
@@ -481,25 +707,10 @@ def parse_declare_cue(
     first = nums[0]
     rest: list[str] = []
 
-    # normalize() merges digit tokens: '05667-21000' → '0566721000'
-    if len(first) >= 8:
-        bearing = int(first[:3]) % 360
-        parsed = False
-        for alt_len in (5, 4):
-            if len(first) <= 3 + alt_len:
-                continue
-            alt_n = int(first[-alt_len:])
-            mid = first[3:-alt_len]
-            if not mid or not mid.isdigit():
-                continue
-            rng = int(mid)
-            if 1000 <= alt_n <= 80000 and 0 <= rng <= 400:
-                range_nm = rng
-                altitude_ft = alt_n
-                parsed = True
-                break
-        if not parsed:
-            range_nm = int(first[3:])
+    packed = _parse_packed_bullseye(first) if len(first) >= 4 else None
+    if packed is not None:
+        bearing, range_nm, altitude_ft = packed
+        rest = nums[1:]
     elif len(first) == 7:
         # normalize() glues '056 67 28' → '0566728' (then 'k' / thousand).
         bearing = int(first[:3]) % 360
@@ -676,6 +887,7 @@ def collect_declare_groups(
     cue: dict[str, Any] | None = None,
     state: dict[str, Any] | None = None,
     upgrade_hostile: bool = False,
+    callsign: str | None = None,
 ) -> tuple[list[pl.FightGroup], dict[str, Any] | None, tuple[float, float] | None]:
     """
     Air groups for DECLARE.
@@ -694,7 +906,9 @@ def collect_declare_groups(
 
     max_nm = picture_max_range_nm(config)
     hostile_side = _hostile_coalition(airport)
-    own, own_ll = _ownship(units, airport, opus=opus, config=config)
+    own, own_ll = _ownship(
+        units, airport, opus=opus, config=config, callsign=callsign
+    )
     if cue is None and own_ll is None:
         return [], own, None
 
@@ -803,14 +1017,22 @@ def build_picture_reply(
     Raises RadarUnavailable when the feed is down.
     """
     cs = atc_phrase.speak_callsign(callsign)
-    groups, _own, _own_ll = collect_hostile_groups(
-        config, airport, opus=opus, state=state
+    groups, _own, own_ll = collect_hostile_groups(
+        config, airport, opus=opus, state=state, callsign=callsign
     )
+    if own_ll is None:
+        if isinstance(state, dict):
+            state[_PICTURE_GROUPS_KEY] = []
+        return f"{cs}, {agency}, unable picture.", []
     if not groups:
+        if isinstance(state, dict):
+            state[_PICTURE_GROUPS_KEY] = []
         return f"{cs}, {agency}, picture clean.", []
 
     classified = pl.classify_picture(groups)
     if classified.kind == "clean" or not classified.groups:
+        if isinstance(state, dict):
+            state[_PICTURE_GROUPS_KEY] = []
         return f"{cs}, {agency}, picture clean.", []
 
     # Head: agency may omit "picture" word when label is traditional — AFTTP
@@ -821,6 +1043,7 @@ def build_picture_reply(
         clause = pl.core_group_clause(g, include_bullseye=True, include_track=True)
         # SINGLE GROUP folds into one sentence
         body = clause.replace("Single group", "single group", 1)
+        remember_picture_groups(state, classified.groups)
         return _with_vid_cue(f"{cs}, {agency}, {body}.", classified.groups), classified.groups
 
     sentences = [f"{cs}, {agency}, {classified.head}"]
@@ -837,6 +1060,7 @@ def build_picture_reply(
             g, include_bullseye=include_be, include_track=include_track
         )
         sentences.append(clause)
+    remember_picture_groups(state, classified.groups)
     return _with_vid_cue(". ".join(sentences) + ".", classified.groups), classified.groups
 
 
@@ -852,7 +1076,7 @@ def build_bogey_dope_reply(
     """Ch V §11 — magnetic BRAA relative to ownship on closest hostile group."""
     cs = atc_phrase.speak_callsign(callsign)
     groups, _own, own_ll = collect_hostile_groups(
-        config, airport, opus=opus, state=state
+        config, airport, opus=opus, state=state, callsign=callsign
     )
     if own_ll is None:
         return f"{cs}, {agency}, unable bogey dope, no ownship track.", []
@@ -879,9 +1103,15 @@ def build_bogey_dope_reply(
         bits.append(alt)
     if aspect:
         bits.append(aspect)
+    call = pl.ti_display_callsign(g)
+    if call:
+        bits.append(call)
     bits.append(g.declaration)
     if g.count > 1:
         bits.append(f"{atc_phrase.speak_natural_number(g.count)} contacts")
+    # Bogey dope names the closest as a usable "group" / "single group" handle.
+    g.name = g.name or "group"
+    remember_picture_groups(state, [g])
     return _with_vid_cue(f"{cs}, {agency}, {', '.join(bits)}.", [g]), [g]
 
 
@@ -914,6 +1144,7 @@ def build_declare_reply(
         cue=cue,
         state=state,
         upgrade_hostile=False,
+        callsign=callsign,
     )
     if cue is None and own_ll is None:
         return f"{cs}, {agency}, unable.", []
@@ -928,16 +1159,167 @@ def build_declare_reply(
 
 
 _VID_AFFILIATION_PATTERNS: tuple[tuple[str, str], ...] = (
-    (r"\bhostiles?\b", "hostile"),
+    (r"\bhostiles?\b|\bhostels?\b|\bhostals?\b", "hostile"),
     (r"\bbandits?\b", "bandit"),
     (r"\bfriend(?:ly)?\b", "friendly"),
     (r"\bbogey\s+spades\b|\bspades\b", "bogey spades"),
     (r"\bbogeys?\b|\bbogies?\b|\bunknown\b", "bogey"),
 )
 
+_VID_SET_MARKERS = (
+    "vid",
+    "visual id",
+    "visual i-d",
+    "visual identification",
+    "id group",
+    "eye dee",
+    "upgrade",
+    "upgrade group",
+    "declare as",
+    "group is",
+    "that's a",
+    "thats a",
+    "that is a",
+)
+
+# Spoken AFTTP labels from the last picture — used for "ID north group, MiG".
+_PICTURE_GROUP_LABELS = (
+    "north lead group",
+    "south lead group",
+    "east lead group",
+    "west lead group",
+    "north trail group",
+    "south trail group",
+    "east trail group",
+    "west trail group",
+    "north middle group",
+    "south middle group",
+    "east middle group",
+    "west middle group",
+    "northeast group",
+    "northwest group",
+    "southeast group",
+    "southwest group",
+    "north group",
+    "south group",
+    "east group",
+    "west group",
+    "lead group",
+    "trail group",
+    "middle group",
+    "single group",
+    "second group",
+    "third group",
+    "fourth group",
+)
+
+
+def remember_picture_groups(
+    state: dict[str, Any] | None,
+    groups: list[pl.FightGroup],
+) -> None:
+    """Keep the last picture's spoken labels so the crew can ID by name."""
+    if not isinstance(state, dict):
+        return
+    now = time.time()
+    rows: list[dict[str, Any]] = []
+    for g in groups:
+        name = re.sub(r"\s+", " ", str(g.name or "group").strip().casefold())
+        if not name:
+            name = "group"
+        rows.append(
+            {
+                "name": name,
+                "ids": [str(i) for i in (g.unit_ids or []) if str(i).strip()],
+                "brg": int(g.bearing),
+                "rng": int(g.range_nm),
+                "feet": g.feet,
+                "declaration": pl.normalize_declaration(g.declaration),
+                "seen": now,
+            }
+        )
+    state[_PICTURE_GROUPS_KEY] = rows
+
+
+def _picture_group_rows(state: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(state, dict):
+        return []
+    raw = state.get(_PICTURE_GROUPS_KEY)
+    if not isinstance(raw, list):
+        return []
+    now = time.time()
+    out: list[dict[str, Any]] = []
+    for row in raw:
+        if not isinstance(row, dict) or not row.get("name"):
+            continue
+        seen = float(row.get("seen") or 0)
+        if seen and now - seen > _PICTURE_GROUPS_TTL_S:
+            continue
+        out.append(row)
+    return out
+
+
+def _group_name_aliases(name: str) -> list[str]:
+    """Longest-first aliases for a pictured label (north group → north, …)."""
+    text = re.sub(r"\s+", " ", str(name or "").strip().casefold())
+    if not text:
+        return []
+    aliases = [text]
+    if text.endswith(" group"):
+        stem = text[: -len(" group")].strip()
+        if stem:
+            aliases.append(stem)
+    # "north lead" from "north lead group"
+    parts = text.split()
+    if len(parts) >= 2 and parts[-1] == "group":
+        aliases.append(" ".join(parts[:-1]))
+    # de-dupe, longest first
+    return sorted(dict.fromkeys(aliases), key=len, reverse=True)
+
+
+def match_picture_group_ref(
+    transcript: str | None,
+    state: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """
+    Resolve 'north group' / 'lead group' / 'the group' against the last picture.
+    """
+    rows = _picture_group_rows(state)
+    if not rows:
+        return None
+    text = re.sub(r"[^a-z0-9\s]", " ", str(transcript or "").casefold())
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return None
+
+    scored: list[tuple[int, dict[str, Any]]] = []
+    for row in rows:
+        for alias in _group_name_aliases(str(row.get("name") or "")):
+            if not alias:
+                continue
+            if re.search(rf"(?<!\w){re.escape(alias)}(?!\w)", text):
+                scored.append((len(alias), row))
+                break
+    if scored:
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return scored[0][1]
+
+    # One pictured group: "ID group" / "the group" / "that group" is enough.
+    if len(rows) == 1 and re.search(
+        r"\b(?:the |that |this )?groups?\b", text
+    ):
+        return rows[0]
+    return None
+
 
 def parse_vid_affiliation(transcript: str | None) -> str | None:
-    """Last bandit / hostile / friendly / bogey in a VID / 'declare as' call."""
+    """
+    Affiliation from a VID / ID / upgrade call.
+
+    Explicit bandit / hostile / friendly wins. If the crew only VIDs the
+    type (MiG-23, Flanker, …) with no ROE word, default to **bandit** —
+    known enemy, not cleared to engage. Say hostile when ROE allows.
+    """
     text = re.sub(r"[^a-z0-9\s]", " ", str(transcript or "").casefold())
     text = re.sub(r"\s+", " ", text).strip()
     last: str | None = None
@@ -947,7 +1329,40 @@ def parse_vid_affiliation(transcript: str | None) -> str | None:
             if match.start() >= last_pos:
                 last_pos = match.start()
                 last = decl
-    return last
+    if last is not None:
+        return last
+    # Type-only / bare ID with bullseye or named group → bandit (not hostile).
+    if any(marker in text for marker in _VID_SET_MARKERS):
+        return "bandit"
+    if any(
+        re.search(rf"(?<!\w){re.escape(label)}(?!\w)", text)
+        for label in _PICTURE_GROUP_LABELS
+    ):
+        return "bandit"
+    if re.search(r"(?<!\w)id(?!\w)", text) and re.search(
+        r"(?<!\w)groups?(?!\w)", text
+    ):
+        return "bandit"
+    return None
+
+
+def _fight_group_from_picture_row(row: dict[str, Any]) -> pl.FightGroup:
+    feet = row.get("feet")
+    try:
+        feet_i = int(feet) if feet is not None else None
+    except (TypeError, ValueError):
+        feet_i = None
+    return pl.FightGroup(
+        bearing=int(row.get("brg") or 0),
+        range_nm=int(row.get("rng") or 0),
+        bullseye_name="ELVIS",
+        distance_nm=0.0,
+        feet=feet_i,
+        feet_list=[feet_i] if feet_i is not None else [],
+        declaration=pl.normalize_declaration(row.get("declaration")),
+        unit_ids=[str(i) for i in (row.get("ids") or []) if str(i).strip()],
+        name=str(row.get("name") or "group"),
+    )
 
 
 def build_vid_affiliation_reply(
@@ -964,29 +1379,55 @@ def build_vid_affiliation_reply(
     """
     Crew VID / affiliation set: confirm on radio and PATCH OPUS.
 
-    Distinct from DECLARE (query). Bare 'declare Elvis xxx' never lands here.
+    Prefer the last picture's label ('north group', 'lead group'). Else
+    bullseye digits. Aircraft type is fluff. No ROE word → bandit.
     """
     del channel
     cs = atc_phrase.speak_callsign(callsign)
     target = parse_vid_affiliation(transcript)
     if not target:
-        return f"{cs}, {agency}, unable, say affiliation.", []
-    cue = parse_declare_cue(transcript or "", config=config)
-    groups, _own, own_ll = collect_declare_groups(
-        config,
-        airport,
-        opus=opus,
-        cue=cue,
-        state=state,
-        upgrade_hostile=False,
-    )
-    if cue is None and own_ll is None:
-        return f"{cs}, {agency}, unable.", []
-    g = prefer_declare_group(groups, cue=cue)
-    if g is None:
-        if cue is not None:
+        # No ROE word and no ID/upgrade marker — they asked, they did not assign.
+        return build_declare_reply(
+            config,
+            airport,
+            callsign,
+            agency=agency,
+            channel=channel,
+            opus=opus,
+            transcript=transcript,
+            state=state,
+        )
+
+    named = match_picture_group_ref(transcript, state)
+    g: pl.FightGroup | None = None
+    if named is not None:
+        g = _fight_group_from_picture_row(named)
+    else:
+        cue = parse_declare_cue(transcript or "", config=config)
+        if cue is None:
+            return f"{cs}, {agency}, unable, say group or bullseye.", []
+        groups, _own, _own_ll = collect_declare_groups(
+            config,
+            airport,
+            opus=opus,
+            cue=cue,
+            state=state,
+            upgrade_hostile=False,
+            callsign=callsign,
+        )
+        g = prefer_declare_group(groups, cue=cue)
+        if g is None:
             return f"{cs}, {agency}, unable, say again.", []
-        return f"{cs}, {agency}, clean.", []
+        try:
+            cue_err = float(g.distance_nm)
+        except (TypeError, ValueError):
+            cue_err = DECLARE_CUE_MATCH_NM + 1.0
+        if cue_err > DECLARE_CUE_MATCH_NM:
+            return f"{cs}, {agency}, unable, say again.", []
+
+    if g is None or not g.unit_ids:
+        return f"{cs}, {agency}, unable, say again.", []
+
     g.declaration = target
     book = pl.DeclarationMemory.from_state(state)
     book.force(
@@ -997,15 +1438,27 @@ def build_vid_affiliation_reply(
         feet=g.feet,
     )
     book.to_state(state)
+    # Keep the pictured label in sync for the next ID call.
+    if named is not None and isinstance(state, dict):
+        for row in list(state.get(_PICTURE_GROUPS_KEY) or []):
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("name") or "") == str(named.get("name") or ""):
+                row["declaration"] = target
+                row["seen"] = time.time()
     opus_aff = pl.spoken_to_opus_affiliation(target)
     for uid in g.unit_ids:
         if uid:
             atc_phrase.patch_caoc_unit_affiliation(config, uid, opus_aff)
+    label = str(g.name or "").strip()
+    if label and label not in ("group", "single group"):
+        return f"{cs}, {agency}, {label}, {target}.", [g]
     return f"{cs}, {agency}, {target}.", [g]
 
 
 def _with_vid_cue(text: str, groups: list[pl.FightGroup]) -> str:
-    if not any(pl.needs_vid_cue(g) for g in groups):
+    cue = pl.recommend_cue(groups)
+    if not cue:
         return text
     body = text[:-1] if text.endswith(".") else text
-    return f"{body}, {pl.VID_INTERCEPT_CUE}."
+    return f"{body}, {cue}."

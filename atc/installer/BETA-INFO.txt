@@ -1,0 +1,28 @@
+PitBoss ATC open beta
+
+This setup installs everything the app needs on this PC:
+
+  - PitBoss ATC
+  - A private Python (you do not install Python yourself)
+  - Voice recognition (numpy and faster-whisper)
+  - The speech model used in the jet
+
+You still need DCS and SRS installed, the same as any other flight.
+
+Leave the default install folder. Setup does not need administrator
+rights, and the app saves your callsign and token there.
+
+Windows SmartScreen may say the publisher is unknown. That is expected
+for this unsigned beta. Choose More info, then Run anyway.
+
+After setup finishes:
+  1. Launch PitBoss ATC.
+  2. Fill in the first-run window (Opus name, Client, ATC address, token).
+  3. Restart DCS once so the radio hook loads.
+  4. Pick your flight in the title bar, then hold your normal SRS PTT and talk.
+
+Ask the person running ATC for the address and the shared token only.
+Do not copy anyone else's config.json or Google key.
+
+Later builds ask before downloading a newer installer. Close PitBoss ATC
+before you install an update by hand over this one.

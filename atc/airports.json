@@ -157,7 +157,8 @@
     "bandsaw": {
       "freq_mhz": 378.225,
       "mod": "AM",
-      "source": "local"
+      "source": "opus",
+      "local_preset": 15
     },
     "joshua": {
       "freq_mhz": 348.7,

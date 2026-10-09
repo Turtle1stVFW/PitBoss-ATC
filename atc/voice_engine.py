@@ -23,6 +23,7 @@ import threading
 import time
 import warnings
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 try:
@@ -56,6 +57,34 @@ MODEL_CHOICES = ("tiny.en", "base.en", "small.en", "distil-small.en")
 MIN_UTTERANCE_S = 0.4
 MAX_UTTERANCE_S = 20.0
 DEFAULT_MIN_CONFIDENCE = 0.6
+
+
+def bundled_model_dir(model_size: str) -> Path | None:
+    """Installer layout: atc/runtime/models/<size>/model.bin (real files, not hub links)."""
+    folder = Path(__file__).resolve().parent / "runtime" / "models" / model_size
+    if (folder / "model.bin").is_file():
+        return folder
+    return None
+
+
+def whisper_model_ref(model_size: str) -> str:
+    """Local weights when this size shipped with the app, otherwise the hub name."""
+    folder = bundled_model_dir(model_size)
+    return str(folder) if folder is not None else model_size
+
+
+def _prefer_bundled_hf_cache() -> None:
+    """Point Hugging Face at the cache shipped beside the bundled interpreter.
+
+    The VAD model is small and separate from base.en. Setting this in-process
+    still works after an elevated restart, which does not keep launcher env vars.
+    """
+    hf = Path(__file__).resolve().parent / "runtime" / "hf"
+    if not hf.is_dir():
+        return
+    os.environ.setdefault("HF_HOME", str(hf))
+    os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(hf / "hub"))
+    os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 
 
 def _context_seat(context: dict[str, Any] | None) -> int | None:
@@ -124,6 +153,7 @@ class Transcriber:
                     pass
                 return False
             try:
+                _prefer_bundled_hf_cache()
                 _quiet_huggingface_hub()
                 with warnings.catch_warnings():
                     warnings.filterwarnings(
@@ -137,7 +167,7 @@ class Transcriber:
                         category=UserWarning,
                     )
                     self._model = WhisperModel(
-                        self.model_size,
+                        whisper_model_ref(self.model_size),
                         device=self.device,
                         compute_type=self.compute_type,
                     )
@@ -452,6 +482,7 @@ class VoiceController:
             seat=_context_seat(context),
             tuned_channel=str(context.get("tuned_channel") or "") or None,
             cursor_channel=str(context.get("cursor_channel") or ""),
+            sfo_active=bool(context.get("sfo_active")),
         )
         if evaluation.match is None:
             try:
@@ -614,6 +645,8 @@ def execute_intent(
                 "say_again",
                 "request_winds",
                 "request_altimeter",
+                "tower_check_in",
+                "tower_initial",
             )
         ):
             text = agencies_mod.build_field_redirect(
@@ -811,7 +844,11 @@ def execute_intent(
 
     if intent == "request_alpha_check":
         fix = atc_phrase.resolve_alpha_bullseye(
-            config, callsign=callsign, opus=opus, weather=weather
+            config,
+            callsign=callsign,
+            opus=opus,
+            weather=weather,
+            state=getattr(engine, "state", None),
         )
         channel = _resolve_tx_channel(engine, airport, match)
         if channel not in ("blackjack", "bandsaw", "joshua", "ops", "other"):
@@ -851,6 +888,13 @@ def execute_intent(
         return _play_clear_takeoff(engine)
 
     if intent == "request_low_approach":
+        # Readback of option / low-approach clearance — not a fresh request.
+        if atc_phrase.awaiting_option_on_the_go(engine.state) or (
+            atc_phrase.landing_already_cleared(engine.state)
+            and atc_phrase.resolve_landing_intent(engine.state)
+            == atc_phrase.LANDING_INTENT_LOW_APPROACH
+        ):
+            return _acknowledge(engine, match)
         atc_phrase.apply_pilot_request(
             "request_low_approach",
             mission=engine.mission,
@@ -861,13 +905,13 @@ def execute_intent(
             config=getattr(engine, "config", None),
         )
         engine.save_state()
-        # On SFO Low Key / SI final, or already due for pattern land — clear
+        # On SFO Base Key / SI final, or already due for pattern land — clear
         # the option now instead of only "expect the option".
         if _sfo_should_clear_now(engine) or _pattern_option_clear_due(engine):
             if atc_phrase.is_sfo_recovery(state=engine.state):
                 phase = atc_phrase.sfo_phase(engine.state)
-                if phase in ("high_key", "approved", "low_key"):
-                    atc_phrase.note_sfo_low_key(engine.state)
+                if phase in ("high_key", "approved", "low_key", "base_key"):
+                    atc_phrase.note_sfo_base_key(engine.state)
             played = _play_sfo_or_pattern_clear_land(engine)
             if played.get("action") != "none":
                 atc_phrase.note_sfo_cleared(engine.state)
@@ -883,6 +927,7 @@ def execute_intent(
         "report_low_key",
         "report_base_key",
         "report_sfo_final",
+        "request_closed_traffic",
     ):
         return _handle_sfo_action(
             intent, engine, airport, callsign, weather, match, opus=opus
@@ -890,7 +935,15 @@ def execute_intent(
 
     if intent == "going_around":
         if hasattr(engine, "execute_go_around"):
-            detail = engine.execute_go_around()
+            slots = match.slots or {}
+            after = str(slots.get("after") or "").strip().casefold()
+            prefer = None
+            if after in ("high_key", "sfo_continue"):
+                prefer = "sfo_continue"
+            elif after in ("closed_traffic", "closed"):
+                prefer = "closed_traffic"
+            slot_rwy = str(slots.get("runway") or "").strip() or None
+            detail = engine.execute_go_around(prefer=prefer, runway=slot_rwy)
             if detail.get("acknowledged"):
                 return {
                     "action": "acknowledged",
@@ -1027,7 +1080,11 @@ def execute_intent(
                     engine.save_state()
             alpha_spoken = None
             fix = atc_phrase.resolve_alpha_bullseye(
-                engine.config, callsign=callsign, opus=opus, weather=weather
+                engine.config,
+                callsign=callsign,
+                opus=opus,
+                weather=weather,
+                state=getattr(engine, "state", None),
             )
             if fix and fix.get("spoken"):
                 alpha_spoken = str(fix["spoken"])
@@ -1041,23 +1098,30 @@ def execute_intent(
                 )
             if isinstance(getattr(engine, "state", None), dict):
                 engine.state["bandsaw_checked_in"] = True
-            return _transmit(engine, airport, text, "bandsaw")
+            tmpl = (
+                "bandsaw_continue"
+                if already_in or from_tanker
+                else "bandsaw_check_in"
+            )
+            return _transmit(engine, airport, text, "bandsaw", template=tmpl)
         # Bandsaw checkout advances past the optional Bandsaw steps.
         if intent == "bandsaw_check_out" or match.template == "bandsaw_check_out":
             played = _play_step(engine, match)
             if isinstance(getattr(engine, "state", None), dict):
                 engine.state.pop("bandsaw_checked_in", None)
             if played.get("action") != "none":
-                _advance_past_bandsaw(engine)
+                _schedule_bandsaw_advance(engine)
                 return played
             # No bandsaw_check_out step in this mission — reply and skip ahead
             # past any remaining Bandsaw / Joshua cursor.
             text = atc_phrase.build_bandsaw_check_out(airport, callsign)
-            result = _transmit(engine, airport, text, "bandsaw")
+            result = _transmit(
+                engine, airport, text, "bandsaw", template="bandsaw_check_out"
+            )
             if isinstance(getattr(engine, "state", None), dict):
                 engine.state.pop("bandsaw_checked_in", None)
             if result.get("action") == "transmit":
-                _advance_past_bandsaw(engine)
+                _schedule_bandsaw_advance(engine)
             return result
         if intent == "joshua_check_in" or match.template == "joshua_check_in":
             import tanker as tanker_mod
@@ -1091,12 +1155,14 @@ def execute_intent(
         if intent == "joshua_check_out" or match.template == "joshua_check_out":
             played = _play_step(engine, match)
             if played.get("action") != "none":
-                _advance_past_bandsaw(engine)
+                _schedule_bandsaw_advance(engine)
                 return played
             text = atc_phrase.build_joshua_check_out(airport, callsign)
-            result = _transmit(engine, airport, text, "joshua")
+            result = _transmit(
+                engine, airport, text, "joshua", template="joshua_check_out"
+            )
             if result.get("action") == "transmit":
-                _advance_past_bandsaw(engine)
+                _schedule_bandsaw_advance(engine)
             return result
         if intent == "control_check_in" or match.template == "control_check_in":
             cur = engine.current_step() or {}
@@ -1413,7 +1479,12 @@ def _play_template(engine: Any, template: str) -> dict[str, Any]:
     step = _find_step(engine.steps, template, index)
     if step is None:
         return {"action": "none", "detail": f"no {template} step"}
-    return {"action": "play", "detail": engine.play_id(step.get("id"))}
+    played = engine.play_id(step.get("id"))
+    if isinstance(played, dict):
+        out = dict(played)
+        out.setdefault("action", "transmit")
+        return out
+    return {"action": "play", "detail": played}
 
 
 def _acknowledge(engine: Any, match: voice_intent.Match) -> dict[str, Any]:
@@ -1435,7 +1506,14 @@ def _acknowledge(engine: Any, match: voice_intent.Match) -> dict[str, Any]:
         index = int(engine.state.get("index") or 0)
         step = _find_step(engine.steps, confirm, index)
         if step is not None:
-            return {"action": "play", "detail": engine.play_id(step.get("id"))}
+            # Return the play_id payload at the top level so Host queueing and
+            # LAST HEARD see the spoken text (not just the step label).
+            played = engine.play_id(step.get("id"))
+            if isinstance(played, dict):
+                out = dict(played)
+                out.setdefault("action", "transmit")
+                return out
+            return {"action": "play", "detail": played}
     return {"action": "acknowledged", "detail": "readback noted"}
 
 
@@ -1839,7 +1917,7 @@ def _speak_reply(
             elif intent == "request_declare":
                 what = "declare"
             elif intent == "report_vid":
-                what = "VID"
+                what = "visual ID"
             else:
                 what = "picture"
             text = atc_phrase.build_blackjack_c2_redirect(airport, callsign, what)
@@ -1895,7 +1973,7 @@ def _speak_reply(
             elif intent == "request_declare":
                 what = "declare"
             elif intent == "report_vid":
-                what = "VID"
+                what = "visual ID"
             else:
                 what = "picture"
             text = f"{cs}, {agency}, unable {what}, radar is down."
@@ -1978,25 +2056,36 @@ def _transmit(
         )
     st = getattr(engine, "state", None)
     if isinstance(st, dict) and str(text or "").strip():
-        st["last_tx_text"] = text
-        st["last_tx_channel"] = str(channel or "")
         tmpl = str(template or "").strip()
-        if tmpl:
-            st["last_tx_template"] = tmpl
-        elif not st.get("awaiting_readback"):
-            # Boom / ad-hoc TX is not a clearance hinge — don't invent a template.
-            st["last_tx_template"] = ""
-        atc_phrase.stamp_last_tx(
-            st,
-            text=text,
-            deferred=bool(getattr(engine, "defer_tx", False)),
-        )
-        try:
-            import agencies as agencies_mod
+        if getattr(engine, "defer_tx", False):
+            # Do not paint LAST HEARD until ExternalAudio exits 0.
+            # Stash agency + phrase for commit_deferred_tx_success.
+            if tmpl:
+                pending_tmpl = tmpl
+            elif not st.get("awaiting_readback"):
+                pending_tmpl = ""
+            else:
+                pending_tmpl = str(st.get("last_tx_template") or "")
+            engine._deferred_agency = (str(channel or ""), pending_tmpl)
+            engine._deferred_voice_tx = {
+                "text": text,
+                "channel": str(channel or ""),
+                "template": pending_tmpl,
+            }
+        else:
+            st["last_tx_text"] = text
+            st["last_tx_channel"] = str(channel or "")
+            if tmpl:
+                st["last_tx_template"] = tmpl
+            elif not st.get("awaiting_readback"):
+                st["last_tx_template"] = ""
+            atc_phrase.stamp_last_tx(st, text=text, deferred=False)
+            try:
+                import agencies as agencies_mod
 
-            agencies_mod.note_tx(st, channel, str(st.get("last_tx_template") or ""))
-        except Exception:
-            pass
+                agencies_mod.note_tx(st, channel, str(st.get("last_tx_template") or ""))
+            except Exception:
+                pass
     return {
         "action": "transmit",
         "text": text,
@@ -2139,14 +2228,35 @@ def execute_ops_action(
 
     if action == "ops_status":
         codes = ops_mod.parse_aircraft_codes(transcript, flight_callsign=callsign)
+        if not codes:
+            return {
+                "action": "none",
+                "detail": "no aircraft codes heard",
+            }
+        merged = ops_mod.merge_pending_codes(state, codes)
+        ready, pending, why = ops_mod.codes_collection_ready(state, opus=opus)
+        if not ready:
+            ack = ops_mod.build_codes_copy_ack(
+                callsign, airport=ap, opus=opus, config=config
+            )
+            result = _transmit(engine, ap, ack, "ops", template="ops_status")
+            result["deferred"] = {
+                "kind": "ops_codes",
+                "delay_s": float(ops_mod.CODES_IDLE_S),
+                "detail": why,
+            }
+            if hasattr(engine, "save_state"):
+                engine.save_state()
+            return result
         sortie = ops_mod.record_status(
             state,
-            codes,
+            pending or merged,
             config=config,
             opus=opus,
             callsign=callsign,
             when=when,
         )
+        ops_mod.mark_codes_done(state)
         text = ops_mod.build_status_reply(
             callsign,
             sortie,
@@ -2157,7 +2267,39 @@ def execute_ops_action(
         )
         if hasattr(engine, "save_state"):
             engine.save_state()
-        return _transmit(engine, ap, text, "ops")
+        return _transmit(engine, ap, text, "ops", template="ops_status")
+
+    if action == "ops_codes_finalize":
+        ready, pending, why = ops_mod.codes_collection_ready(state, opus=opus)
+        if not ready or not pending:
+            result = {"action": "none", "detail": why or "waiting for codes"}
+            if pending and not state.get(ops_mod._CODES_DONE_KEY):
+                result["deferred"] = {
+                    "kind": "ops_codes",
+                    "delay_s": float(ops_mod.CODES_IDLE_S),
+                    "detail": why,
+                }
+            return result
+        sortie = ops_mod.record_status(
+            state,
+            pending,
+            config=config,
+            opus=opus,
+            callsign=callsign,
+            when=when,
+        )
+        ops_mod.mark_codes_done(state)
+        text = ops_mod.build_status_reply(
+            callsign,
+            sortie,
+            airport=ap,
+            when=when,
+            opus=opus,
+            config=config,
+        )
+        if hasattr(engine, "save_state"):
+            engine.save_state()
+        return _transmit(engine, ap, text, "ops", template="ops_status")
 
     return {"action": "none", "detail": f"unknown OPS action {action}"}
 
@@ -2215,7 +2357,11 @@ def execute_tanker_action(
         channel = _c2_channel()
         alpha_spoken = None
         fix = atc_phrase.resolve_alpha_bullseye(
-            engine.config, callsign=callsign, opus=opus, weather=weather
+            engine.config,
+            callsign=callsign,
+            opus=opus,
+            weather=weather,
+            state=getattr(engine, "state", None),
         )
         if fix and fix.get("spoken"):
             alpha_spoken = str(fix["spoken"])
@@ -2605,6 +2751,14 @@ def resolve_tanker_chat(
     return result
 
 
+def _schedule_bandsaw_advance(engine: Any) -> None:
+    """Move past C2 only after ExternalAudio exits 0 when Host is queueing TX."""
+    if getattr(engine, "defer_tx", False):
+        engine._pending_bandsaw_advance = True
+        return
+    _advance_past_bandsaw(engine)
+
+
 def _advance_past_bandsaw(engine: Any) -> None:
     """Move the cursor past consecutive optional C2 steps (Bandsaw / Joshua)."""
     steps = list(engine.steps or [])
@@ -2621,7 +2775,23 @@ def _advance_past_bandsaw(engine: Any) -> None:
             idx += 1
             continue
         break
+    # Checkout hands back to Blackjack range exit. Check-in holds the cursor
+    # for the whole range, so stopping on the next non-C2 step left Fly on
+    # "Blackjack check-in" (or Center) instead of range exit.
+    exit_i = next(
+        (
+            i
+            for i, row in enumerate(steps)
+            if str(row.get("template") or "") == "bj_range_exit"
+        ),
+        None,
+    )
+    if exit_i is not None and idx < exit_i:
+        idx = exit_i
     engine.state["index"] = idx
+    if isinstance(engine.state, dict):
+        engine.state["await_blackjack_checkin"] = True
+        engine.state["range_exit_skip_until_inside"] = True
     if hasattr(engine, "_advance_past_skippable"):
         engine._advance_past_skippable()
     engine.save_state()
@@ -2834,7 +3004,7 @@ def _sfo_should_clear_now(engine: Any) -> bool:
     if not atc_phrase.is_sfo_recovery(state=st):
         return False
     phase = atc_phrase.sfo_phase(st)
-    return phase in ("low_key", "sfo_final") or bool(
+    return phase in ("low_key", "base_key", "sfo_final") or bool(
         isinstance(st, dict) and st.get("sfo_base_key_pending")
     )
 
@@ -2931,7 +3101,9 @@ def _handle_sfo_action(
         return _transmit(engine, airport, text, "tower", template="sfo_approve")
 
     if intent == "report_high_key":
-        if not atc_phrase.is_sfo_recovery(state=st):
+        ga = st.get("go_around_plan") if isinstance(st, dict) else None
+        continuing = isinstance(ga, dict) and str(ga.get("kind") or "") == "sfo_continue"
+        if not atc_phrase.is_sfo_recovery(state=st) and not continuing:
             # Treat as a late request.
             return _handle_sfo_action(
                 "request_sfo",
@@ -2941,6 +3113,10 @@ def _handle_sfo_action(
                 weather,
                 match,
                 opus=opus,
+            )
+        if continuing and not atc_phrase.is_sfo_recovery(state=st):
+            atc_phrase.note_sfo_continue_after_go_around(
+                st, mission=engine.mission
             )
         heard = slots.get("high_key_ft")
         if heard is None:
@@ -2972,21 +3148,58 @@ def _handle_sfo_action(
             state=st,
             mission=engine.mission,
         )
-    elif landing == "low_approach" or not landing:
-        # Default at Low Key / SI final: the option (7110.65).
+    elif landing == "low_approach" or (
+        intent in ("report_low_key", "report_base_key", "report_sfo_final")
+        and not landing
+    ):
+        # Default at Low Key / SI final: low approach (7110.65 3-10-13).
         atc_phrase.set_landing_intent(
             atc_phrase.LANDING_INTENT_LOW_APPROACH,
             state=st,
             mission=engine.mission,
         )
 
+    if intent == "request_closed_traffic":
+        rwy = str(
+            st.get("approach_runway")
+            or (atc_phrase.approach_plan_from_state(st, airport=airport) or {}).get(
+                "runway"
+            )
+            or ""
+        )
+        atc_phrase.exit_sfo_for_closed_traffic(
+            airport,
+            mission=engine.mission,
+            state=st,
+            runway=rwy,
+        )
+        if hasattr(engine, "_seek_template"):
+            engine._seek_template("clear_land")
+        engine.save_state()
+        text = atc_phrase.build_closed_traffic_approved(
+            airport, callsign, runway=rwy
+        )
+        return _transmit(engine, airport, text, "tower", template="closed_traffic")
+
     if intent == "report_low_key":
+        if not atc_phrase.is_sfo_recovery(state=st):
+            atc_phrase.note_sfo_continue_after_go_around(
+                st, mission=engine.mission
+            )
+        atc_phrase.set_landing_intent(
+            atc_phrase.LANDING_INTENT_LOW_APPROACH,
+            state=st,
+            mission=engine.mission,
+        )
         atc_phrase.note_sfo_low_key(st)
         engine.save_state()
         played = _play_sfo_or_pattern_clear_land(engine)
-        atc_phrase.note_sfo_cleared(st)
-        engine.save_state()
-        return played
+        if played.get("action") != "none":
+            atc_phrase.note_sfo_cleared(st)
+            engine.save_state()
+            return played
+        text = atc_phrase.build_sfo_low_key_ack(airport, callsign)
+        return _transmit(engine, airport, text, "tower", template="sfo_low_key")
 
     if intent == "report_sfo_final":
         atc_phrase.note_sfo_final(st)
@@ -2999,15 +3212,13 @@ def _handle_sfo_action(
     if intent == "report_base_key":
         need_clear = atc_phrase.note_sfo_base_key(st)
         engine.save_state()
-        if need_clear and not atc_phrase.landing_already_cleared(st):
-            # Safety net: missed Low Key — clear now.
-            atc_phrase.note_sfo_low_key(st)
+        if need_clear:
             played = _play_sfo_or_pattern_clear_land(engine)
             atc_phrase.note_sfo_cleared(st)
             engine.save_state()
             return played
         # Already cleared at Low Key — roger only.
-        text = f"{atc_phrase.speak_callsign(callsign)}, {airport['name']} Tower, roger."
+        text = f"{atc_phrase.speak_callsign(callsign)}, roger."
         return _transmit(engine, airport, text, "tower", template="sfo_base_key")
 
     return {"action": "none", "detail": f"unhandled sfo action {intent}"}
@@ -3028,6 +3239,34 @@ def _resolve_tx_channel(
     addressed = ""
     if match is not None:
         addressed = str(match.slots.get("channel") or "").strip().lower()
+    remote = getattr(engine, "remote_radios", None)
+    tuned = srs_radio.channel_for_tuned_freq(
+        airport,
+        engine.config,
+        state=remote if isinstance(remote, srs_radio.RadioState) else None,
+    )
+    # NATCF East and West are one agency with two UHFs. A Control call goes
+    # out on the sector the pilot is actually tuned to. If they are not on
+    # either yet, use the sector the last handoff named — not a hardcoded
+    # East step. Other agencies (Blackjack, Approach, …) keep their address.
+    control_call = addressed in ("control_east", "control_west") or (
+        not addressed and tuned in ("control_east", "control_west")
+    )
+    if control_call:
+        if tuned in ("control_east", "control_west"):
+            return tuned
+        try:
+            import agencies as agencies_mod
+
+            assigned = agencies_mod.assigned_control_channel(
+                getattr(engine, "state", None)
+            )
+        except Exception:
+            assigned = ""
+        if assigned:
+            return assigned
+        if addressed in ("control_east", "control_west"):
+            return addressed
     if addressed:
         return addressed
     intent = str(match.intent or "") if match is not None else ""

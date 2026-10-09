@@ -30,6 +30,16 @@ Next (on this PC)
 Ask the Host for the address and token only — never the Google JSON key.
 """
 
+INSTALLER_NEXT = """
+Next (on this PC)
+  1. Launch PitBoss ATC from the desktop or Start menu when setup finishes.
+  2. First-run window: Opus username, Client, ATC address, shared token.
+  3. Restart DCS once so the radio-export hook loads.
+  4. Title bar: pick your Opus flight. Hold your normal SRS PTT and talk.
+
+Ask the Host for the address and token only — never the Google JSON key.
+"""
+
 
 def ensure_config() -> tuple[bool, str]:
     if CONFIG.is_file():
@@ -72,7 +82,10 @@ def install_voice_packages(*, warm_model: bool = False) -> tuple[bool, str]:
         notes = [msg]
         if not ok:
             return False, msg
-    if warm_model:
+    bundled = HERE / "runtime" / "models" / "base.en" / "model.bin"
+    if bundled.is_file():
+        notes.append("Whisper base.en is bundled")
+    elif warm_model:
         print("Warming Whisper base.en (~150 MB, first time only) …", flush=True)
         try:
             from faster_whisper import WhisperModel
@@ -116,6 +129,11 @@ def run_cli(argv: list[str] | None = None) -> int:
         "--skip-radio-export",
         action="store_true",
         help="Do not install the DCS Export.lua hook",
+    )
+    parser.add_argument(
+        "--from-installer",
+        action="store_true",
+        help="Wording for the Windows setup wizard (packages and model are already bundled)",
     )
     args = parser.parse_args(argv)
 
@@ -198,7 +216,7 @@ def run_cli(argv: list[str] | None = None) -> int:
         except Exception:
             pass
 
-    print(NEXT_STEPS)
+    print(INSTALLER_NEXT if args.from_installer else NEXT_STEPS)
     try:
         import app_diag
 

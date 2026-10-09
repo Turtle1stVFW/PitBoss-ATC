@@ -297,7 +297,7 @@
       "enabled": true,
       "text": null,
       "handoff_channel": "approach",
-      "_comment": "Auto-fires once inside control_handoff_nm of the field (default 42). The 18 NM on dep_handoff is the other end of the flight: Departure letting go to Blackjack."
+      "_comment": "Auto-fires once inside control_handoff_nm of the field (default 45). The 18 NM on dep_handoff is the other end of the flight: Departure letting go to Blackjack."
     },
     {
       "id": "app_checkin",
@@ -395,6 +395,17 @@
       "channel": "ground",
       "mode": "tts",
       "template": "taxi_in",
+      "file": null,
+      "enabled": true,
+      "text": null
+    },
+    {
+      "id": "ops_codes",
+      "phase": "approach",
+      "label": "Ops \u2014 codes after parking",
+      "channel": "ops",
+      "mode": "tts",
+      "template": "ops_status",
       "file": null,
       "enabled": true,
       "text": null

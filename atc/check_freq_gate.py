@@ -224,6 +224,48 @@ def main() -> int:
         if eam.selected_mhz is None or abs(eam.selected_mhz - VHF_MHZ) > 0.01:
             print(f"  FAIL EAM selected should be VHF, got {eam.selected_mhz}")
             bad += 1
+
+        # Assigned NATCF sector wins over the step's hardcoded East channel.
+        WEST = float((AIRPORT.get("control_west") or {}).get("freq_mhz") or 254.4)
+        west_radio = srs_radio.RadioState(
+            source="srs",
+            freqs_mhz=[WEST, 138.250],
+            selected_mhz=WEST,
+            fresh=True,
+            age_s=0.1,
+        )
+        allowed_w, msg_w, result_w = srs_radio.check_freq_gate(
+            cfg,
+            AIRPORT,
+            {"channel": "control_east", "template": "control_check_in"},
+            state={"control_channel": "control_west"},
+            radio=west_radio,
+        )
+        if not allowed_w or result_w != "match":
+            print(f"  FAIL West assignment must open the East step gate: {msg_w!r}")
+            bad += 1
+        else:
+            print("control gate follows assigned West sector — ok")
+
+        import agencies as agencies_mod
+
+        adopted: dict = {
+            "pending_contact": "control_west",
+            "control_channel": "control_west",
+        }
+        agencies_mod.note_tx(adopted, "control_east", "control_check_in")
+        if adopted.get("control_channel") != "control_east" or adopted.get("pending_contact"):
+            print(f"  FAIL East check-in should adopt East and clear West pending: {adopted}")
+            bad += 1
+        else:
+            print("NATCF check-in adopts the sector that answered — ok")
+
+        parked = {"await_blackjack_checkin": True, "range_exit_skip_until_inside": True}
+        if agencies_mod.range_exit_auto_wait(parked) != "waiting for Blackjack check-in":
+            print("  FAIL range exit must wait for Blackjack check-in after Bandsaw")
+            bad += 1
+        else:
+            print("range exit waits for Blackjack check-in — ok")
     finally:
         srs_radio.read_dcs_radios = orig_dcs
         srs_radio.ensure_srs_udp_listener = orig_ensure

@@ -14,7 +14,15 @@ if defined ATC_PYTHON_OVERRIDE (
   )
 )
 
-REM 1) Official py launcher (often missing on dedicated servers)
+REM 1) Private runtime from the beta installer. Prefer it over a system
+REM    Python that does not have numpy / faster-whisper.
+if exist "%~dp0runtime\python.exe" (
+  set "ATC_PYTHON=%~dp0runtime\python.exe"
+  set "PYTHONNOUSERSITE=1"
+  goto :check
+)
+
+REM 2) Official py launcher (often missing on dedicated servers)
 where py >nul 2>&1
 if not errorlevel 1 (
   for /f "delims=" %%I in ('py -3 -c "import sys; print(sys.executable)" 2^>nul') do (
@@ -23,7 +31,7 @@ if not errorlevel 1 (
 )
 if defined ATC_PYTHON goto :check
 
-REM 2) python.exe on PATH — skip the Microsoft Store stub
+REM 3) python.exe on PATH — skip the Microsoft Store stub
 where python >nul 2>&1
 if not errorlevel 1 (
   for /f "delims=" %%I in ('where python 2^>nul') do (
@@ -50,7 +58,7 @@ if not errorlevel 1 (
   )
 )
 
-REM 3) Standard install folders (PATH not required)
+REM 4) Standard install folders (PATH not required)
 for /d %%D in ("%LocalAppData%\Programs\Python\Python3*") do (
   if exist "%%~D\python.exe" (
     set "ATC_PYTHON=%%~D\python.exe"
@@ -79,12 +87,6 @@ for /d %%D in ("%SystemDrive%\Python3*" "%SystemDrive%\Python*") do (
   )
 )
 
-REM 4) Optional private runtime next to this folder
-if exist "%~dp0runtime\python.exe" (
-  set "ATC_PYTHON=%~dp0runtime\python.exe"
-  goto :check
-)
-
 goto :missing
 
 :check
@@ -111,6 +113,12 @@ if errorlevel 1 (
   echo.
   pause
   exit /b 1
+)
+REM GUI launchers use pythonw so routine warnings do not sit in a second window.
+REM Fall back to python.exe only when the windowless twin is missing.
+set "ATC_PYTHONW=%ATC_PYTHON%"
+for %%I in ("%ATC_PYTHON%") do (
+  if exist "%%~dpIpythonw.exe" set "ATC_PYTHONW=%%~dpIpythonw.exe"
 )
 exit /b 0
 

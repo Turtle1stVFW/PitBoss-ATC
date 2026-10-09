@@ -185,10 +185,8 @@ def point_xz(obj: Any) -> tuple[float, float] | None:
 
 
 def unit_xz(unit: dict[str, Any] | None) -> tuple[float, float] | None:
-    try:
-        return float(unit["xMeters"]), float(unit["zMeters"])
-    except (KeyError, TypeError, ValueError):
-        return None
+    """Planar metres. Lat/lon on the radar unit wins over xMeters/zMeters."""
+    return atc_phrase.caoc_unit_xz(unit)
 
 
 # --- drawn zones ----------------------------------------------------------

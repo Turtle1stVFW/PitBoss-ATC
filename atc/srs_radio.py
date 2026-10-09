@@ -519,6 +519,15 @@ def _ingest_srs_udp_payload(data: bytes) -> None:
         _srs_udp_error = ""
 
 
+def is_uhf_mhz(mhz: float | None) -> bool:
+    """Military UHF airband (225.000–399.975). VHF airband and intra-flight are not."""
+    try:
+        freq = float(mhz)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return False
+    return 225.0 <= freq < 400.0
+
+
 def maybe_force_eam_tx_freq(
     config: dict[str, Any] | None,
     freq: float,
@@ -526,30 +535,20 @@ def maybe_force_eam_tx_freq(
     radio: RadioState | None = None,
 ) -> tuple[float, str]:
     """
-    Common-PTT EAM mode: ExternalAudio must TX only on the selected radio.
+    Frequency ExternalAudio transmits on.
 
-    Prefer the calling pilot's radios (host session), then this PC's SRS
-    client, then the manual EAM strip. A dedicated host must not steal the
-    TX frequency from its own (or empty) radio bank.
+    Agency calls are UHF. They stay on that UHF frequency. The selected radio
+    is only the pilot's PTT — keying intra-flight VHF must not move the call
+    onto VHF, and the Host PC's own radio must not replace it.
     """
+    del radio
     apply_config(config)
+    agency = float(freq)
     if not _eam_enabled:
-        return float(freq), mod
-    if radio is not None and radio.fresh:
-        if radio.selected_mhz is not None:
-            return float(radio.selected_mhz), mod
-        if radio.freqs_mhz:
-            return float(radio.freqs_mhz[0]), mod
-    srs = read_srs_client_selected()
-    if srs.fresh:
-        if srs.selected_mhz is not None:
-            return float(srs.selected_mhz), mod
-        if srs.freqs_mhz:
-            return float(srs.freqs_mhz[0]), mod
-    active = eam_active_mhz()
-    if active is None:
-        return float(freq), mod
-    return float(active), mod
+        return agency, mod
+    if is_uhf_mhz(agency):
+        return agency, mod
+    return agency, mod
 
 
 def apply_config(config: dict[str, Any] | None) -> None:
@@ -720,6 +719,11 @@ def current_radio_state(
         elif srs.age_s is not None:
             age = min(age if age is not None else srs.age_s, srs.age_s)
 
+    # EAM strip fills gaps when SRS/DCS is fresh but missing a radio (UHF
+    # dropped from the export while Approach still needs 273.55).
+    if fresh and _eam_enabled:
+        _merge_mhz(freqs, eam_freqs_mhz())
+
     if fresh:
         return RadioState(
             source=source,
@@ -825,6 +829,16 @@ def check_freq_gate(
     freq = target_mhz
     if freq is None and step is not None:
         ch = ch or str(step.get("channel") or step.get("phase") or "other")
+        tmpl = str(step.get("template") or "").strip().lower()
+        if tmpl in ("control_check_in", "control_handoff"):
+            try:
+                import agencies as agencies_mod
+
+                assigned = agencies_mod.assigned_control_channel(state)
+            except Exception:
+                assigned = ""
+            if assigned:
+                ch = assigned
         try:
             freq, _mod, _name = atc_phrase.step_radio(
                 airport, ch, step, state=state, config=config
@@ -1033,6 +1047,83 @@ def channel_for_tuned_freq(
         if matched and matched not in skip_stack:
             return matched
     return None
+
+
+def bank_has_agency(
+    airport: dict[str, Any],
+    channel: str,
+    config: dict[str, Any] | None = None,
+    *,
+    state: RadioState | None = None,
+    tol_mhz: float | None = None,
+) -> bool:
+    """True when any tuned radio matches this agency's published freq."""
+    import atc_phrase
+
+    ch = str(channel or "").strip().lower()
+    if not ch:
+        return False
+    cfg = config or {}
+    tol = float(
+        tol_mhz if tol_mhz is not None else cfg.get("freq_gate_tolerance_mhz") or DEFAULT_TOL_MHZ
+    )
+    st = state if state is not None else current_radio_state(cfg)
+    if not st.freqs_mhz:
+        return False
+    try:
+        want, _mod, _name = atc_phrase.channel_radio(airport, ch)
+    except Exception:
+        return False
+    if want is None:
+        return False
+    try:
+        target = float(want)
+    except (TypeError, ValueError):
+        return False
+    return any(abs(float(freq) - target) <= tol for freq in st.freqs_mhz)
+
+
+def tip_radio_channel(
+    airport: dict[str, Any],
+    config: dict[str, Any] | None = None,
+    *,
+    pending_contact: str = "",
+    ops_start_done: bool = False,
+    state: RadioState | None = None,
+) -> str | None:
+    """
+    Agency Fly tips / ON FREQ hero should follow.
+
+    Ops is timeline step 1 — until start is approved, stay on Ops even if
+    Delivery is already keyed (otherwise Fly jumps to Clearance and Back
+    cannot reach step 1 because the cursor never left Ops).
+
+    After start, if the pending handoff agency is already in the radio bank
+    while an earlier field radio is still selected, tip the pending agency.
+    """
+    cfg = config or {}
+    pending = str(pending_contact or "").strip().lower()
+    selected = channel_for_tuned_freq(airport, cfg, state=state)
+    # Preflight: Ops owns the card until start. Delivery keyed early must not
+    # remount Clearance or tip "tune Ops" in a loop.
+    if not ops_start_done:
+        return "ops"
+    field = frozenset({"ops", "delivery", "ground", "tower", "departure"})
+    if (
+        pending
+        and pending in field
+        and pending != (selected or "")
+        and bank_has_agency(airport, pending, cfg, state=state)
+    ):
+        if (selected or "") in field:
+            try:
+                order = ("ops", "delivery", "ground", "tower", "departure")
+                if order.index(selected or "ops") < order.index(pending):
+                    return pending
+            except ValueError:
+                return pending
+        return pending
+    return selected
 
 
 def try_seed_from_srs_awacs() -> list[float]:

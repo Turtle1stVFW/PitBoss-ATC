@@ -991,6 +991,10 @@ def reconcile_aar_overlay(engine: Any) -> bool:
     """
     flow_state.json / a leftover request can keep tanker_overlay and
     tanker_rejoined while the timeline is back on Delivery. Strip that.
+
+    Seek off the tanker parking step (resume index still set) must clear the
+    overlay so Play is not stuck on tanker UHF. Overlay on airborne C2 without
+    a prior tanker park (no tanker step / no resume) still stays.
     """
     if engine is None:
         return False
@@ -1005,6 +1009,19 @@ def reconcile_aar_overlay(engine: Any) -> bool:
     steps = list(getattr(engine, "steps", None) or [])
     idx = int(state.get("index") or 0)
     cur = steps[idx] if 0 <= idx < len(steps) else None
+    if is_tanker_step(cur):
+        return False
+    # enter_tanker_overlay stamps resume_* then parks on the tanker step.
+    # Seek/advance away without leave_tanker_overlay leaves resume set — clear.
+    if (
+        tanker_overlay_active(state)
+        and state.get("tanker_resume_index") is not None
+        and not is_tanker_step(cur)
+    ):
+        clear_aar_state(state)
+        if hasattr(engine, "save_state"):
+            engine.save_state()
+        return True
     if step_allows_aar(cur):
         return False
     clear_aar_state(state)
@@ -1373,10 +1390,9 @@ def _unit_latlon(
 ) -> tuple[float, float] | None:
     if not unit:
         return None
-    try:
-        return atc_phrase.caoc_xz_to_ll(float(unit["xMeters"]), float(unit["zMeters"]))
-    except (KeyError, TypeError, ValueError):
-        pass
+    ll = atc_phrase.caoc_unit_latlon(unit)
+    if ll is not None:
+        return ll
     try:
         fix = atc_phrase.bullseye_for_caoc_unit(unit, config or {}, opus=opus)
         if fix and fix.get("lat") is not None and fix.get("lon") is not None:

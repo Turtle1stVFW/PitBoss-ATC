@@ -336,7 +336,7 @@ Calls it understands:
 | "Blackjack, request picture" | AFTTP picture from live CAOC affiliation (UNKNOWN → bogey / recommend VID; BANDIT/HOSTILE spoken as-is) |
 | "Blackjack, bogey dope" / "BRAA" | BRAA to the closest pictured group relative to you |
 | "Blackjack / Bandsaw, declare Elvis 056 67" | **Query only** — current affiliation (`Fleece 1, Bandsaw, bogey spades.`). Never writes CAOC |
-| "Bandsaw, VID hostile" / "declare as bandit" / "group is friendly" | After VID: confirm + PATCH OPUS affiliation |
+| "Bandsaw, ID north group MiG" / "ID lead group hostile" / "ID group Elvis 020 21 MiG" | After picture: ID by **picture label** or Elvis. Type optional. No ROE word → **bandit**; say **hostile** when ROE allows |
 | "Bandsaw, checking in" / picture / bogey dope / declare | Optional C2 on Bandsaw |
 | "Bandsaw, checking out / switch Blackjack" | Leave Bandsaw → contact Blackjack (not check-in) |
 | "Blackjack, request Bandsaw" | Push to Bandsaw (optional; you can also self-tune) |

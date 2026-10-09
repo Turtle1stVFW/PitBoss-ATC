@@ -427,10 +427,10 @@ These are not pinned to a single agency (or are available broadly).
 #### `report_vid`
 
 - **Pilot call:** Bandsaw, <Callsign>, VID hostile
-- **Does:** set CAOC affiliation after VID (PATCH)
-- **Keywords:** `vid` | `declare as` | `group is` | `that's a` **AND** `bandit` | `hostile` | `friendly`
+- **Does:** set CAOC affiliation after visual ID (PATCH)
+- **Keywords:** `vid` | `id group` | `upgrade` | `declare as` | `group is` | `that's a` **AND** `bandit` | `hostile` | `hostel` | `friendly`
 - **Response:** <Callsign>, <Agency>, <bandit|hostile|friendly>.
-- **Note:** `declare Elvis xxx/xxx` stays `request_declare` even if "hostile" is in the transcript.
+- **Note:** `declare Elvis xxx/xxx` stays `request_declare` even if "hostile" is in the transcript. Affiliation writes require a bullseye cue so the wrong group is not upgraded. Unknown picture/dope ends with *recommend intercept for visual ID*.
 
 #### `request_joshua`
 
@@ -542,11 +542,11 @@ These are not pinned to a single agency (or are available broadly).
 
 #### `report_vid`
 
-- **Pilot call:** Bandsaw, <Callsign>, VID hostile / declare as bandit / group is friendly
-- **Does:** set CAOC affiliation after VID (PATCH)
-- **Keywords:** `vid` | `declare as` | `group is` | `that's a` **AND** `bandit` | `hostile` | `friendly`
+- **Pilot call:** Bandsaw, <Callsign>, VID hostile / ID group Elvis 090 17 bandit / declare as bandit / upgrade … hostel
+- **Does:** set CAOC affiliation after visual ID (PATCH)
+- **Keywords:** `vid` | `id group` | `upgrade` | `declare as` | `group is` | `that's a` **AND** `bandit` | `hostile` | `hostel` | `friendly`
 - **Response:** <Callsign>, <Agency>, <bandit|hostile|friendly>.
-- **Note:** DECLARE [Elvis] is a query. VID / "declare as" writes the label.
+- **Note:** DECLARE [Elvis] is a query. ID / upgrade / "declare as" writes the label and needs bullseye digits. Unknown calls end with *recommend intercept for visual ID*.
 
 #### `request_picture`
 

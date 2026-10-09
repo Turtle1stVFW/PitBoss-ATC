@@ -60,22 +60,10 @@ def _default_transmit(job: dict[str, Any]) -> int:
 
 
 def _prerender(job: dict[str, Any]) -> None:
-    """Synth TTS to WAV while the job waits in the channel queue."""
-    try:
-        if job.get("file_path") or not str(job.get("text") or "").strip():
-            return
-        if job.get("config", {}).get("dry_run"):
-            return
-        wav = atc_phrase.synthesize_tts_wav(
-            job["config"],
-            str(job["text"]),
-            channel=job.get("channel"),
-            voice_override=job.get("voice"),
-            step=job.get("step"),
-        )
-        job["wav_path"] = wav
-    except Exception as exc:  # noqa: BLE001
-        job["prerender_error"] = str(exc)
+    """Pre-render is disabled — ExternalAudio --file was exiting before audio
+    was hearable on SRS while Fly already painted LAST HEARD. Live --text /
+    Google synth (same path as Play Previous) is the reliable Host TX."""
+    del job
 
 
 class ChannelTxHub:
@@ -113,17 +101,30 @@ class ChannelTxHub:
                 pass
 
     def submit(self, job: dict[str, Any]) -> int:
-        """Enqueue a TX job. Returns 1-based queue position on that channel."""
+        """Enqueue a TX job. Returns 1-based queue position on that channel.
+
+        Mutates and enqueues the same dict the Host holds so run_action can
+        wait on ``done`` / read ``exit_code``. A shallow copy broke that: Fly
+        painted \"sent\" while ExternalAudio was still speaking (or had failed).
+        """
         ch = str(job.get("channel") or "other").strip().lower() or "other"
         if ch not in self._queues:
             ch = "other"
-        job = dict(job)
         job["channel"] = ch
         job.setdefault("queued_at", time.time())
         job.setdefault("done", threading.Event())
-        threading.Thread(
-            target=_prerender, args=(job,), name="atc-tts-prep", daemon=True
-        ).start()
+        # Hub exists only on the Host PC. Pin --ip=127.0.0.1 even if Setup /
+        # seat-bind left atc_role=solo or airport srs_host=showtime (that was
+        # the intermittent silent-ATC path: TX logged, SRS never heard it).
+        try:
+            import atc_net
+
+            atc_net.pin_host_tx_target(job)
+        except Exception:
+            pass
+        # Do not pre-render to WAV. Queued --file TX was the silent-success
+        # path (exit 0 / LAST HEARD, nothing on frequency); Play Previous
+        # worked because it used a fresh live TTS launch.
         q = self._queues[ch]
         q.put(job)
         with self._lock:
@@ -159,20 +160,36 @@ class ChannelTxHub:
                 self._busy[channel] = job
             wav: Path | None = None
             try:
-                # Give pre-render a moment so the channel goes hot with a WAV.
-                deadline = time.time() + 8.0
-                while (
-                    time.time() < deadline
-                    and not job.get("wav_path")
-                    and not job.get("prerender_error")
-                    and str(job.get("text") or "").strip()
-                    and not job.get("file_path")
-                    and not (job.get("config") or {}).get("dry_run")
-                ):
-                    time.sleep(0.05)
-                wav_obj = job.get("wav_path")
-                wav = Path(str(wav_obj)) if wav_obj else None
-                job["exit_code"] = int(self._transmit(job) or 0)
+                # Prefer live TTS (--text / Google synth). Ignore any leftover
+                # prerender WAV so we never take the silent --file path.
+                job.pop("wav_path", None)
+                raw = self._transmit(job)
+                try:
+                    code = int(raw) if raw is not None else 2
+                except (TypeError, ValueError):
+                    code = 2
+                # ExternalAudio sometimes exits non-zero on a transient SRS
+                # glitch while the next identical launch works. One retry.
+                if code != 0 and str(job.get("text") or "").strip():
+                    try:
+                        import app_diag
+
+                        app_diag.warn(
+                            app_diag.CAT_TX,
+                            "channel TX retry after non-zero exit",
+                            channel=channel,
+                            exit_code=code,
+                        )
+                    except Exception:
+                        pass
+                    time.sleep(0.5)
+                    job.pop("wav_path", None)
+                    raw = self._transmit(job)
+                    try:
+                        code = int(raw) if raw is not None else 2
+                    except (TypeError, ValueError):
+                        code = 2
+                job["exit_code"] = code
                 try:
                     import app_diag
 
@@ -209,15 +226,25 @@ class ChannelTxHub:
                 done = job.get("done")
                 if isinstance(done, threading.Event):
                     done.set()
-                # Gap timers wait until speech finishes, not until it was queued.
+                # Confirm speech end only when LAST HEARD was already stamped
+                # (solo / non-deferred). Host deferred TX leaves last_tx_text
+                # empty until run_action.commit_deferred_tx_success after exit 0
+                # — painting confirmed here early made Clients show TX success
+                # before the phrase was committed (or after a silent wrong-SRS).
                 flow_state = job.get("flow_state")
                 if isinstance(flow_state, dict):
                     try:
-                        import atc_phrase as atc_phrase_mod
+                        ok = int(job.get("exit_code") or 0) == 0 and not job.get("error")
+                    except (TypeError, ValueError):
+                        ok = False
+                    if ok and str(flow_state.get("last_tx_text") or "").strip():
+                        try:
+                            import atc_phrase as atc_phrase_mod
 
-                        atc_phrase_mod.note_tx_finished(flow_state)
-                    except Exception:
-                        flow_state["last_tx_end_at"] = time.time()
+                            atc_phrase_mod.note_tx_finished(flow_state)
+                        except Exception:
+                            flow_state["last_tx_end_at"] = time.time()
+                            flow_state["last_tx_confirmed"] = True
                 with self._lock:
                     self._busy[channel] = None
                 q.task_done()

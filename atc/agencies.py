@@ -37,6 +37,14 @@ AIRBORNE: frozenset[str] = frozenset(
     }
 )
 DEFAULT_FLOW_NAME = "nellis_default.json"
+# Packaged Nellis plans — agency sandbox (tune Delivery → Delivery cues).
+# Custom / Untitled plans stay cursor-locked so Plan Flight authorship wins.
+_SANDBOX_FLOW_NAMES = frozenset(
+    {
+        "nellis_default.json",
+        "nellis_standard.json",
+    }
+)
 
 # kind: field | natcf | control | c2 | tanker | center | gci | ops
 _CORE: dict[str, dict[str, Any]] = {
@@ -158,6 +166,8 @@ HANDOFF_PENDING_BY_TEMPLATE: dict[str, str] = {
     # OPS start / WORDS+start → Clearance Delivery (Ops is flow step 1).
     "ops_words": "delivery",
     "ops_start": "delivery",
+    # Delivery readback correct → Ground for taxi.
+    "clearance_readback": "ground",
 }
 
 
@@ -223,9 +233,9 @@ def is_control(channel: str) -> bool:
 
 
 def is_default_sandbox(config: dict[str, Any] | None) -> bool:
-    """True when the Host is on Nellis Default (agency sandbox, not a custom Plan)."""
+    """True for packaged Nellis plans (agency sandbox), not a custom Plan."""
     raw = str((config or {}).get("flow_file") or "").strip() or DEFAULT_FLOW_NAME
-    return Path(raw).name.lower() == DEFAULT_FLOW_NAME
+    return Path(raw).name.lower() in _SANDBOX_FLOW_NAMES
 
 
 # After these, Fly should show the next call on that agency (checkout / handoff).
@@ -282,12 +292,38 @@ def display_step_for_agency(
             pick = step
             break
     last = str(last_tx_template or "").strip().lower()
+    # After C2 checkout (or when the shared cursor already sits on range
+    # exit), never pin Fly back to the Blackjack check-in hold.
+    range_exit = next(
+        (
+            (i, step)
+            for i, step in matches
+            if str(step.get("template") or "").strip().lower() == "bj_range_exit"
+        ),
+        None,
+    )
+    if range_exit is not None:
+        exit_i, exit_step = range_exit
+        if last in ("bandsaw_check_out", "joshua_check_out"):
+            return exit_step
+        if exit_i <= cur and last in (
+            "bj_check_in",
+            "bj_continue",
+            "bj_range_entry",
+            "bj_alpha_check",
+            "",
+        ):
+            return exit_step
     if not last:
         return pick
     for i, step in matches:
         tmpl = str(step.get("template") or "").strip().lower()
         if tmpl != last:
             continue
+        # Cursor already past this TX — show the live agency step (e.g. after
+        # LUAW → clear_takeoff / in position, not stuck on "ready for departure").
+        if cur > i:
+            return pick
         later = [m for m in matches if m[0] > i]
         if later and str(later[0][1].get("template") or "").strip().lower() in (
             _AGENCY_FOLLOW_ON
@@ -765,6 +801,36 @@ def pending_contact(state: dict[str, Any] | None) -> str:
     return str((state or {}).get("pending_contact") or "").strip().lower()
 
 
+def assigned_control_channel(state: dict[str, Any] | None) -> str:
+    """NATCF sector this sortie is working. Empty until a handoff names one."""
+    ch = str((state or {}).get("control_channel") or "").strip().lower()
+    return ch if ch in CONTROL else ""
+
+
+def range_exit_auto_wait(
+    state: dict[str, Any] | None,
+    *,
+    inside_blackjack: bool | None = None,
+) -> str:
+    """
+    Why Watch must not auto-play Blackjack range exit.
+
+    After Bandsaw / Joshua checkout the pilot still has to check in.
+    If they are already outside the range polygon, that is not a fresh
+    exit — they say "off station" when they are actually done.
+    """
+    if not isinstance(state, dict):
+        return ""
+    if state.get("await_blackjack_checkin"):
+        return "waiting for Blackjack check-in"
+    if state.get("range_exit_skip_until_inside"):
+        if inside_blackjack:
+            state.pop("range_exit_skip_until_inside", None)
+            return ""
+        return "say off station when you are ready to leave the range"
+    return ""
+
+
 def note_tx(
     state: dict[str, Any] | None,
     channel: str,
@@ -780,14 +846,27 @@ def note_tx(
     state.pop("manual_step_view", None)
     if ch:
         state["last_agency"] = ch
-        if pending_contact(state) == ch:
+        pending = pending_contact(state)
+        if pending == ch:
+            state.pop("pending_contact", None)
+        elif pending in CONTROL and ch in CONTROL:
+            # They were sent to one NATCF sector and the other one answered.
+            # Stay with the sector that is actually talking — cues and the
+            # gate follow that UHF, not the polygon guess.
+            state["control_channel"] = ch
             state.pop("pending_contact", None)
     if tmpl in ("bj_check_in", "bj_continue", "bj_alpha_check", "bj_range_entry"):
         state["blackjack_checked_in"] = True
+        state.pop("await_blackjack_checkin", None)
     if tmpl == "bandsaw_check_in":
         state["bandsaw_checked_in"] = True
-    if tmpl == "bandsaw_check_out":
+    if tmpl in ("bandsaw_check_out", "joshua_check_out"):
         state.pop("bandsaw_checked_in", None)
+        # Back on Blackjack is a check-in, not an immediate range exit.
+        # Tuning the UHF must not play the exit while they are already
+        # outside the polygon (northern ranges).
+        state["await_blackjack_checkin"] = True
+        state["range_exit_skip_until_inside"] = True
     dest = ""
     if tmpl == "bj_range_exit":
         dest = str(state.get("control_channel") or "control_east").strip().lower()
@@ -809,7 +888,16 @@ def note_tx(
         if phase != "field":
             state["contact_phase"] = "recovery"
         return
-    if ch in AIRBORNE and ch != "approach":
+    # Delivery / Ground are always field sequence — even if a prior TX wrongly
+    # flipped contact_phase (Ops lives in AIRBORNE for sandbox answering but
+    # Start/WORDS happen on the ground).
+    if ch in ("delivery", "ground"):
+        state["contact_phase"] = "field"
+        return
+    # Ops answers on the ground and airborne. Do NOT mark the sortie airborne
+    # on Ops TX — that made sandbox_mission_phase return "flight" and hid
+    # every Delivery/Ground advance cue (clearance on request, ready taxi, …).
+    if ch in AIRBORNE and ch not in ("approach", "ops"):
         state["contact_phase"] = "airborne"
         return
     if ch in FIELD and phase != "airborne":
@@ -820,7 +908,8 @@ def reset_contact(state: dict[str, Any] | None) -> None:
     if not isinstance(state, dict):
         return
     state["contact_phase"] = "field"
-    state["last_agency"] = "delivery"
+    # Ops is timeline step 1 — not Delivery.
+    state["last_agency"] = "ops"
     state.pop("control_checked_in", None)
     state.pop("control_channel", None)
     state.pop("blackjack_checked_in", None)
@@ -835,11 +924,22 @@ def field_agency(engine: Any) -> str:
     """Current sequenced field agency from the cursor (or last_agency)."""
     step = engine.current_step() if engine is not None and hasattr(engine, "current_step") else None
     ch = str((step or {}).get("channel") or "").strip().lower()
+    state = getattr(engine, "state", None) if engine is not None else None
+    phase = contact_phase(state)
+    # Approach / Tower recovery is not the departure sequence. Defaulting to
+    # Delivery made Tower answer "contact Delivery" on the initial call.
+    if phase in ("airborne", "recovery") or ch in ("approach", "tower"):
+        if ch in FIELD:
+            return ch
+        if phase in ("airborne", "recovery") or ch == "approach":
+            return ""
     if ch in FIELD:
         return ch
-    last = last_agency(getattr(engine, "state", None))
-    if last in FIELD:
+    last = last_agency(state)
+    if last in FIELD and phase == "field":
         return last
+    if phase in ("airborne", "recovery"):
+        return ""
     return "delivery"
 
 
@@ -969,6 +1069,10 @@ def sandbox_mission_phase(
     if phase == "airborne":
         if tuned == "approach" or cursor_ch == "approach":
             return "approach"
+        # Still on Departure after takeoff — keep the radar-contact cue.
+        # Flight phase hides it and the kneeboard goes blank.
+        if tuned == "departure" or (not tuned and cursor_ch == "departure"):
+            return "departure"
         return "flight"
     return cursor_p
 
