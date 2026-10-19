@@ -532,6 +532,15 @@ These are not pinned to a single agency (or are available broadly).
 - **Keywords:** `bogey dope` | `bogie dope` | `braa` | `snaplock`
 - **Response:** <Callsign>, <Agency>, clean. | <Callsign>, <Agency>, group <BRAA>, [<Altitude>,] [<Aspect>,] <Declaration> [, <N> contacts].
 
+#### `request_rangeback`
+
+- **Pilot call:** Bandsaw, <Callsign>, request rangeback
+- **Does:** range to the group for the flight — closest, or closest and trail
+- **Keywords:** `rangeback` | `range back`
+- **Veto:** `picture`, `bogey`, `declare`, `checking in`, `checking out`, `tanker`, `range entry`
+- **Response:** <Flight>, <Agency>, range <Nm>. | <Flight>, <Agency>, closest <Nm>, trail <Nm>. | clean.
+- **Note:** Saying "out" does not fire this. One number when the flight is within 5 NM (the closest ship). Split flights get closest and trail — not a roll call. Asked on Blackjack, C2 pushes to Bandsaw.
+
 #### `request_declare`
 
 - **Pilot call:** Bandsaw, <Callsign>, declare bullseye 056 67
@@ -542,11 +551,11 @@ These are not pinned to a single agency (or are available broadly).
 
 #### `report_vid`
 
-- **Pilot call:** Bandsaw, <Callsign>, VID hostile / ID group Elvis 090 17 bandit / declare as bandit / upgrade … hostel
-- **Does:** set CAOC affiliation after visual ID (PATCH)
-- **Keywords:** `vid` | `id group` | `upgrade` | `declare as` | `group is` | `that's a` **AND** `bandit` | `hostile` | `hostel` | `friendly`
-- **Response:** <Callsign>, <Agency>, <bandit|hostile|friendly>.
-- **Note:** DECLARE [Elvis] is a query. ID / upgrade / "declare as" writes the label and needs bullseye digits. Unknown calls end with *recommend intercept for visual ID*.
+- **Pilot call:** Bandsaw, <Callsign>, ID single group, MiG-29, bandit / ID north group Fulcrum hostile / VID hostile
+- **Does:** visual ID — type optional, hostile or bandit
+- **Keywords:** `vid` | `id group` | `id single` | `identify` | `single group` | `mig 29` | `upgrade` | `declare as` | `group is`
+- **Response:** <Callsign>, <Agency>, [<Group>,] [<Type>,] <bandit|hostile|friendly>.
+- **Note:** Aircraft type is optional (MiG-29, Fulcrum, F-16, “MiG twenty nine”). It is read back when said and is not a bullseye. No ROE word → **bandit**. “Singer group” is heard as “single group”. DECLARE [Elvis] is still a query.
 
 #### `request_picture`
 

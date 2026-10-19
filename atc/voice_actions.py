@@ -2,7 +2,7 @@
 ATC replies that exist only as voice responses — they are not timeline steps.
 
 Winds and altimeter come from the same METAR the scripted phrases use. Picture,
-bogey dope, and declare calls follow AFTTP 3-2.8 using the live Opus CAOC feed.
+bogey dope, declare, and rangeback calls use the live Opus CAOC feed.
 """
 
 from __future__ import annotations
@@ -21,6 +21,9 @@ MAX_GROUPS = pl.MAX_DETAIL_GROUPS
 PICTURE_MAX_RANGE_NM = 150.0
 _PICTURE_GROUPS_KEY = "picture_groups"
 _PICTURE_GROUPS_TTL_S = 45 * 60
+# Ships inside this spread share one rangeback. Wider than this: closest and trail.
+_RANGEBACK_TOGETHER_NM = 5.0
+_SHIP_DEDUPE_NM = 0.4
 
 
 def picture_max_range_nm(config: dict[str, Any] | None = None) -> float:
@@ -480,6 +483,85 @@ _DECLARE_CUE_START_WORDS = frozenset(
     }
 )
 
+# Spoken back as the pilot said it (model or NATO name). Longest alias wins.
+# Matched after digit-folding, so "MiG twenty nine" and "MiG-29" are both "mig 29".
+_AIRCRAFT_TYPE_ALIASES: tuple[tuple[str, str], ...] = (
+    ("mig 29", "MiG-29"),
+    ("mig29", "MiG-29"),
+    ("mike 29", "MiG-29"),
+    ("fulcrum", "Fulcrum"),
+    ("mig 23", "MiG-23"),
+    ("mig23", "MiG-23"),
+    ("flogger", "Flogger"),
+    ("mig 21", "MiG-21"),
+    ("mig21", "MiG-21"),
+    ("fishbed", "Fishbed"),
+    ("fish bed", "Fishbed"),
+    ("mig 25", "MiG-25"),
+    ("mig25", "MiG-25"),
+    ("foxbat", "Foxbat"),
+    ("mig 31", "MiG-31"),
+    ("mig31", "MiG-31"),
+    ("foxhound", "Foxhound"),
+    ("su 27", "Su-27"),
+    ("su27", "Su-27"),
+    ("sukhoi 27", "Su-27"),
+    ("flanker", "Flanker"),
+    ("su 24", "Su-24"),
+    ("su24", "Su-24"),
+    ("fencer", "Fencer"),
+    ("su 25", "Su-25"),
+    ("su25", "Su-25"),
+    ("frogfoot", "Frogfoot"),
+    ("frog foot", "Frogfoot"),
+    ("su 30", "Su-30"),
+    ("su30", "Su-30"),
+    ("su 34", "Su-34"),
+    ("su34", "Su-34"),
+    ("fullback", "Fullback"),
+    ("f 16", "F-16"),
+    ("f16", "F-16"),
+    ("viper", "Viper"),
+    ("f 15", "F-15"),
+    ("f15", "F-15"),
+    ("f 18", "F-18"),
+    ("f18", "F-18"),
+    ("hornet", "Hornet"),
+    ("f 14", "F-14"),
+    ("f14", "F-14"),
+    ("tomcat", "Tomcat"),
+    ("f 5", "F-5"),
+    ("f5", "F-5"),
+    ("f 4", "F-4"),
+    ("f4", "F-4"),
+    ("phantom", "Phantom"),
+    ("a 10", "A-10"),
+    ("a10", "A-10"),
+    ("warthog", "Warthog"),
+    ("tu 95", "Tu-95"),
+    ("tu95", "Tu-95"),
+    ("tu 22", "Tu-22"),
+    ("tu22", "Tu-22"),
+    ("backfire", "Backfire"),
+    ("mi 24", "Mi-24"),
+    ("mi24", "Mi-24"),
+    ("hind", "Hind"),
+    ("mirage", "Mirage"),
+    ("typhoon", "Typhoon"),
+)
+_GENERIC_AIRCRAFT_TYPE = re.compile(
+    r"(?<!\w)(mig|mike|su|sukhoi|tu|f|a)\s*(\d{2})(?!\w)"
+)
+_GENERIC_TYPE_PREFIX = {
+    "mig": "MiG",
+    "mike": "MiG",
+    "su": "Su",
+    "sukhoi": "Su",
+    "tu": "Tu",
+    "f": "F",
+    "a": "A",
+}
+
 
 def _parse_packed_bullseye(first: str) -> tuple[int, int, int | None] | None:
     """
@@ -654,6 +736,8 @@ def parse_declare_cue(
         norm = re.sub(r"[^a-z0-9\s]", " ", raw.lower())
         norm = re.sub(r"\s+", " ", norm).strip()
     norm = _fold_declare_spoken_numbers(_split_glued_hundreds(norm))
+    # Model numbers (MiG-29, F-16) are the VID type, not a bullseye.
+    norm = strip_aircraft_type(norm)
     toks = norm.split()
     if not toks:
         return None
@@ -1115,6 +1199,162 @@ def build_bogey_dope_reply(
     return _with_vid_cue(f"{cs}, {agency}, {', '.join(bits)}.", [g]), [g]
 
 
+def _dedupe_latlons(
+    points: list[tuple[float, float]],
+    *,
+    within_nm: float = _SHIP_DEDUPE_NM,
+) -> list[tuple[float, float]]:
+    kept: list[tuple[float, float]] = []
+    for lat, lon in points:
+        if any(
+            atc_phrase._haversine_nm(lat, lon, klat, klon) <= within_nm
+            for klat, klon in kept
+        ):
+            continue
+        kept.append((lat, lon))
+    return kept
+
+
+def flight_member_latlons(
+    units: list[dict[str, Any]],
+    airport: dict[str, Any],
+    *,
+    own: dict[str, Any] | None = None,
+    own_ll: tuple[float, float] | None = None,
+    callsign: str | None = None,
+    opus: Any = None,
+) -> list[tuple[float, float]]:
+    """
+    Lat/lon for every tracked ship in this flight, lead included.
+
+    Match Opus flight id when the radar tagged it, otherwise the flight
+    callsign (Fleece 1 ↔ Fleece 11 / Fleece 1-2). Hostile tracks are skipped.
+    """
+    points: list[tuple[float, float]] = []
+    if own_ll is not None:
+        points.append((float(own_ll[0]), float(own_ll[1])))
+    cs = atc_phrase.flight_callsign_base(callsign or "", opus)
+    fid: Any = None
+    if isinstance(own, dict) and own.get("opusFlightId") not in (None, ""):
+        fid = own.get("opusFlightId")
+    elif opus is not None and getattr(opus, "flight_id", None) not in (None, ""):
+        fid = getattr(opus, "flight_id", None)
+    hostile = _hostile_coalition(airport)
+    for unit in atc_phrase.caoc_air_units(units):
+        side = str(unit.get("coalition") or "").lower()
+        if hostile and side == hostile:
+            continue
+        if atc_phrase.caoc_unit_is_picture_fixture(unit):
+            continue
+        matched = False
+        ufid = unit.get("opusFlightId")
+        if fid not in (None, "") and ufid not in (None, ""):
+            try:
+                matched = int(ufid) == int(fid)
+            except (TypeError, ValueError):
+                matched = str(ufid) == str(fid)
+        if not matched and cs:
+            labels = [
+                str(unit.get(k) or "")
+                for k in ("flightLabel", "unitCallsign", "groupName")
+            ]
+            matched = any(
+                atc_phrase.same_flight_callsign(cs, lab) for lab in labels if lab
+            )
+        if not matched:
+            continue
+        ll = atc_phrase.caoc_unit_latlon(unit)
+        if ll is None:
+            continue
+        points.append(ll)
+    return _dedupe_latlons(points)
+
+
+def format_rangeback(callsign: str, agency: str, ranges_nm: list[int]) -> str:
+    """
+    One short rangeback for the flight.
+
+    Together (within 5 NM): the closest ship's range — that is the restrictive
+    number for a turn back in. Split: closest and trail, no per-ship roll call.
+    """
+    cs = atc_phrase.speak_callsign(
+        atc_phrase.flight_callsign_base(callsign) or callsign
+    )
+    if not ranges_nm:
+        return f"{cs}, {agency}, unable rangeback."
+    near = min(int(n) for n in ranges_nm)
+    far = max(int(n) for n in ranges_nm)
+    near_say = atc_phrase.speak_natural_number(near)
+    if far - near <= _RANGEBACK_TOGETHER_NM:
+        return f"{cs}, {agency}, range {near_say}."
+    far_say = atc_phrase.speak_natural_number(far)
+    return f"{cs}, {agency}, closest {near_say}, trail {far_say}."
+
+
+def build_rangeback_reply(
+    config: dict[str, Any],
+    airport: dict[str, Any],
+    callsign: str,
+    *,
+    agency: str = "Bandsaw",
+    opus: Any = None,
+    state: dict[str, Any] | None = None,
+) -> tuple[str, list[pl.FightGroup]]:
+    """
+    Range from the flight back to the nearest hostile group.
+
+    Requested — saying \"out\" does not fire this. Uses every tracked ship in
+    the flight, then speaks one range or closest/trail when they are split.
+    """
+    cs = atc_phrase.speak_callsign(
+        atc_phrase.flight_callsign_base(callsign) or callsign
+    )
+    groups, own, own_ll = collect_hostile_groups(
+        config, airport, opus=opus, state=state, callsign=callsign
+    )
+    radar = atc_phrase.fetch_caoc_radar(config) or {}
+    units = list(radar.get("units") or [])
+    ships = flight_member_latlons(
+        units,
+        airport,
+        own=own,
+        own_ll=own_ll,
+        callsign=callsign,
+        opus=opus,
+    )
+    if not ships:
+        return f"{cs}, {agency}, unable rangeback, no ownship track.", []
+    if not groups:
+        return f"{cs}, {agency}, clean.", []
+
+    best: pl.FightGroup | None = None
+    best_min: float | None = None
+    best_ranges: list[float] = []
+    for g in groups:
+        if g.lat is None or g.lon is None:
+            continue
+        dists: list[float] = []
+        for lat, lon in ships:
+            try:
+                dists.append(
+                    atc_phrase._haversine_nm(lat, lon, float(g.lat), float(g.lon))
+                )
+            except (TypeError, ValueError):
+                continue
+        if not dists:
+            continue
+        mn = min(dists)
+        if best_min is None or mn < best_min:
+            best_min = mn
+            best = g
+            best_ranges = dists
+    if best is None:
+        return f"{cs}, {agency}, unable rangeback.", []
+    rounded = [max(0, int(round(d))) for d in best_ranges]
+    remember_picture_groups(state, [best])
+    return format_rangeback(callsign, agency, rounded), [best]
+
+
 def build_declare_reply(
     config: dict[str, Any],
     airport: dict[str, Any],
@@ -1291,6 +1531,12 @@ def match_picture_group_ref(
     text = re.sub(r"\s+", " ", text).strip()
     if not text:
         return None
+    try:
+        import voice_intent
+
+        text = voice_intent._repair_vid_whisper(text)
+    except Exception:
+        pass
 
     scored: list[tuple[int, dict[str, Any]]] = []
     for row in rows:
@@ -1310,6 +1556,59 @@ def match_picture_group_ref(
     ):
         return rows[0]
     return None
+
+
+def _aircraft_type_text(transcript: str | None) -> str:
+    """Normalize, then fold 'twenty nine' so model numbers match one alias."""
+    raw = str(transcript or "")
+    try:
+        import voice_intent
+
+        norm = voice_intent.normalize(raw)
+    except Exception:
+        norm = re.sub(r"[^a-z0-9\s]", " ", raw.lower())
+        norm = re.sub(r"\s+", " ", norm).strip()
+    return _fold_declare_spoken_numbers(_split_glued_hundreds(norm))
+
+
+def parse_aircraft_type(transcript: str | None) -> str | None:
+    """
+    Optional VID type. None when they did not say one.
+
+    Accepts the model (MiG-29, F-16, Su-27) and the NATO name (Fulcrum,
+    Viper, Flanker), including spoken numbers ('MiG twenty nine').
+    """
+    text = _aircraft_type_text(transcript)
+    if not text:
+        return None
+    best: str | None = None
+    best_len = 0
+    for alias, spoken in _AIRCRAFT_TYPE_ALIASES:
+        if len(alias) <= best_len:
+            continue
+        if re.search(rf"(?<!\w){re.escape(alias)}(?!\w)", text):
+            best = spoken
+            best_len = len(alias)
+    if best:
+        return best
+    generic = _GENERIC_AIRCRAFT_TYPE.search(text)
+    if not generic:
+        return None
+    prefix = _GENERIC_TYPE_PREFIX.get(generic.group(1))
+    if not prefix:
+        return None
+    return f"{prefix}-{int(generic.group(2))}"
+
+
+def strip_aircraft_type(text: str) -> str:
+    """Drop a recognized aircraft type so its number is not a bullseye."""
+    cleaned = str(text or "")
+    for alias, _spoken in sorted(
+        _AIRCRAFT_TYPE_ALIASES, key=lambda item: len(item[0]), reverse=True
+    ):
+        cleaned = re.sub(rf"(?<!\w){re.escape(alias)}(?!\w)", " ", cleaned)
+    cleaned = _GENERIC_AIRCRAFT_TYPE.sub(" ", cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip()
 
 
 def parse_vid_affiliation(transcript: str | None) -> str | None:
@@ -1379,12 +1678,14 @@ def build_vid_affiliation_reply(
     """
     Crew VID / affiliation set: confirm on radio and PATCH OPUS.
 
-    Prefer the last picture's label ('north group', 'lead group'). Else
-    bullseye digits. Aircraft type is fluff. No ROE word → bandit.
+    Prefer the last picture's label ('north group', 'lead group', 'single
+    group'). Else bullseye digits. Aircraft type is optional — spoken back
+    when they gave one, ignored when they did not. No ROE word → bandit.
     """
     del channel
     cs = atc_phrase.speak_callsign(callsign)
     target = parse_vid_affiliation(transcript)
+    ac_type = parse_aircraft_type(transcript)
     if not target:
         # No ROE word and no ID/upgrade marker — they asked, they did not assign.
         return build_declare_reply(
@@ -1400,6 +1701,13 @@ def build_vid_affiliation_reply(
 
     named = match_picture_group_ref(transcript, state)
     g: pl.FightGroup | None = None
+    if named is None:
+        # One group on the last picture: "ID, MiG-29, bandit" is enough.
+        # A bullseye still wins when they actually said one.
+        cue_first = parse_declare_cue(transcript or "", config=config)
+        rows = _picture_group_rows(state)
+        if cue_first is None and len(rows) == 1:
+            named = rows[0]
     if named is not None:
         g = _fight_group_from_picture_row(named)
     else:
@@ -1451,9 +1759,15 @@ def build_vid_affiliation_reply(
         if uid:
             atc_phrase.patch_caoc_unit_affiliation(config, uid, opus_aff)
     label = str(g.name or "").strip()
-    if label and label not in ("group", "single group"):
-        return f"{cs}, {agency}, {label}, {target}.", [g]
-    return f"{cs}, {agency}, {target}.", [g]
+    parts: list[str] = []
+    # Bare "single group" stays off the radio unless they also named a type,
+    # so a short "bandit" confirm does not grow. With a type, say the group.
+    if label and (label not in ("group", "single group") or ac_type):
+        parts.append(label)
+    if ac_type:
+        parts.append(ac_type)
+    parts.append(target)
+    return f"{cs}, {agency}, {', '.join(parts)}.", [g]
 
 
 def _with_vid_cue(text: str, groups: list[pl.FightGroup]) -> str:

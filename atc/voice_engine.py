@@ -667,6 +667,7 @@ def execute_intent(
         "request_altimeter",
         "request_picture",
         "request_bogey_dope",
+        "request_rangeback",
         "request_declare",
         "report_vid",
     ):
@@ -1909,11 +1910,14 @@ def _speak_reply(
         if channel == "blackjack" and intent in (
             "request_picture",
             "request_bogey_dope",
+            "request_rangeback",
             "request_declare",
             "report_vid",
         ):
             if intent == "request_bogey_dope":
                 what = "bogey dope"
+            elif intent == "request_rangeback":
+                what = "rangeback"
             elif intent == "request_declare":
                 what = "declare"
             elif intent == "report_vid":
@@ -1927,6 +1931,15 @@ def _speak_reply(
         try:
             if intent == "request_bogey_dope":
                 text, _groups = voice_actions.build_bogey_dope_reply(
+                    engine.config,
+                    airport,
+                    callsign,
+                    agency=agency,
+                    opus=opus,
+                    state=engine.state,
+                )
+            elif intent == "request_rangeback":
+                text, _groups = voice_actions.build_rangeback_reply(
                     engine.config,
                     airport,
                     callsign,
@@ -1970,6 +1983,8 @@ def _speak_reply(
         except voice_actions.RadarUnavailable:
             if intent == "request_bogey_dope":
                 what = "bogey dope"
+            elif intent == "request_rangeback":
+                what = "rangeback"
             elif intent == "request_declare":
                 what = "declare"
             elif intent == "report_vid":

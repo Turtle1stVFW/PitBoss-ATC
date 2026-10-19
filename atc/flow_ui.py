@@ -9144,7 +9144,7 @@ class MissionPlanner(tk.Tk):
         "request_landing": "Gear down full stop",
         "request_low_approach": "The option",
         "request_sfo": "High Key / SFO",
-        "request_closed_traffic": "Closed traffic / full stop",
+        "request_closed_traffic": "Closed traffic / exit SFO",
         "request_go_around": "On the go",
         "request_handoff": "Request handoff",
         "request_tanker": "Request tanker",
@@ -9492,6 +9492,28 @@ class MissionPlanner(tk.Tk):
 
             threading.Thread(target=sfo_work, daemon=True).start()
             return
+        if result.get("execute_closed_traffic"):
+            def closed_work() -> None:
+                try:
+                    played = voice_engine.execute_intent(
+                        voice_intent.Match(
+                            intent="request_closed_traffic",
+                            kind="action",
+                            template="",
+                            confidence=1.0,
+                            slots={"channel": "tower"},
+                        ),
+                        self.engine,
+                    )
+                    self._ui_call(lambda p=played: self._on_closed_traffic_done(p))
+                except Exception as exc:  # noqa: BLE001
+                    err = str(exc)
+                    self._ui_call(
+                        lambda m=err: messagebox.showerror("Closed traffic", m)
+                    )
+
+            threading.Thread(target=closed_work, daemon=True).start()
+            return
         if result.get("execute_departure_handoff"):
             def ho_work() -> None:
                 try:
@@ -9732,6 +9754,22 @@ class MissionPlanner(tk.Tk):
             return
         freq = played.get("freq") or ""
         label = played.get("text") or "SFO approved"
+        self.fly_log.insert(tk.END, f"TX  {label}  ·  {freq}  ·  TOWER\n")
+        self.fly_log.see(tk.END)
+        self._refresh_fly_status()
+
+    def _on_closed_traffic_done(self, played: dict[str, Any] | None) -> None:
+        played = played or {}
+        if played.get("action") == "blocked":
+            self._note_no_tx(
+                str(played.get("detail") or "Blocked"),
+                action="closed_traffic",
+                channel=str(played.get("channel") or "tower"),
+            )
+            self._refresh_fly_status()
+            return
+        freq = played.get("freq") or ""
+        label = played.get("text") or "closed traffic approved"
         self.fly_log.insert(tk.END, f"TX  {label}  ·  {freq}  ·  TOWER\n")
         self.fly_log.see(tk.END)
         self._refresh_fly_status()
@@ -10033,15 +10071,18 @@ class MissionPlanner(tk.Tk):
                 )
             except Exception:
                 next_mhz = None
+        # Bandsaw keeps picture / dope / rangeback / declare on the card.
+        cue_limit = 6 if cue_ch == "bandsaw" else 5
+        cue_optional = 4 if cue_ch == "bandsaw" else 3
         lines = voice_intent.suggestions(
             phase=str(context.get("phase") or ""),
             channel=cue_ch,
             expected=str(context.get("expected") or ""),
             callsign=str(context.get("callsign") or ""),
             airport_name=str(airport.get("name") or ""),
-            limit=5,
+            limit=cue_limit,
             advance_limit=2,
-            optional_limit=3,
+            optional_limit=cue_optional,
             awaiting_readback=awaiting,
             readback_items=context.get("readback_items")
             if awaiting and isinstance(context.get("readback_items"), list)

@@ -1124,6 +1124,25 @@ INTENTS: tuple[Intent, ...] = (
         does="BRAA to the closest hostile",
     ),
     Intent(
+        "request_rangeback",
+        (("rangeback", "range back"),),
+        channels=("blackjack", "bandsaw", "joshua", "ops", "other", "control_east", "control_west", "center"),
+        phases=("flight",),
+        weight=1.3,
+        example="request rangeback",
+        does="range to the group for the flight — closest, or closest and trail",
+        veto=(
+            "picture",
+            "pitcher",
+            "bogey",
+            "declare",
+            "checking in",
+            "checking out",
+            "tanker",
+            "range entry",
+        ),
+    ),
+    Intent(
         "request_declare",
         (("declare", "affiliation"),),
         channels=("blackjack", "bandsaw", "joshua", "ops", "other", "control_east", "control_west", "center"),
@@ -1150,6 +1169,8 @@ INTENTS: tuple[Intent, ...] = (
                 "visual i-d",
                 "visual identification",
                 "id group",
+                "id single",
+                "identify",
                 "eye dee",
                 "upgrade",
                 "upgrade group",
@@ -1166,6 +1187,13 @@ INTENTS: tuple[Intent, ...] = (
                 "trail group",
                 "middle group",
                 "single group",
+                "mig 29",
+                "mig 23",
+                "mig 21",
+                "su 27",
+                "f 16",
+                "f 15",
+                "f 18",
                 "north lead group",
                 "south lead group",
                 "east lead group",
@@ -1179,8 +1207,8 @@ INTENTS: tuple[Intent, ...] = (
         channels=("blackjack", "bandsaw", "joshua", "ops", "other", "control_east", "control_west", "center"),
         phases=("flight",),
         weight=1.45,
-        example="ID north group MiG",
-        does="set CAOC affiliation after visual ID (defaults to bandit)",
+        example="ID single group MiG-29 bandit",
+        does="visual ID — type optional, hostile or bandit",
         veto=("picture", "pitcher", "bogey dope", "braa"),
     ),
     Intent(
@@ -2323,8 +2351,8 @@ INTENTS: tuple[Intent, ...] = (
         channels=("tower",),
         phases=("approach",),
         weight=1.35,
-        example="on the go high key",
-        does="on the go — High Key again, or request closed",
+        example="on the go",
+        does="go-around / missed / pattern reentry",
     ),
     Intent(
         "clear_of_runway",
@@ -2789,6 +2817,7 @@ _C2_INTENT_IDS = frozenset(
     {
         "request_picture",
         "request_bogey_dope",
+        "request_rangeback",
         "request_declare",
         "report_vid",
         "request_alpha_check",
@@ -2999,7 +3028,13 @@ _ADDRESS_OPTIONAL_INTENTS = frozenset(
 )
 
 _PICTURE_INTENT_IDS = frozenset(
-    {"request_picture", "request_bogey_dope", "request_declare", "report_vid"}
+    {
+        "request_picture",
+        "request_bogey_dope",
+        "request_rangeback",
+        "request_declare",
+        "report_vid",
+    }
 )
 
 
@@ -3758,6 +3793,23 @@ def looks_like_radio_check_not_winds(text: str) -> bool:
 def _tower_asked_report_high_key(last_tx_text: str = "") -> bool:
     """Tower already said 'report high key' — the next High Key is the report."""
     return "report high key" in str(last_tx_text or "").lower()
+
+
+def _repair_vid_whisper(text: str) -> str:
+    """
+    Whisper often hears 'single group' as 'singer group' or 'signal group'.
+
+    'singer' is also a crew brevity, so an ID call was dropped as chatter.
+    Only rewrite when the rest of the call is an ID, not a bare 'singer'.
+    """
+    if not re.search(r"(?<!\w)(?:singer|signal) group(?!\w)", text):
+        return text
+    if not re.search(
+        r"(?<!\w)(?:id|identify|vid|eye dee|bandit|hostile|hostel|friendly|fulcrum|flogger|flanker|mig|mike|hornet|viper)(?!\w)",
+        text,
+    ):
+        return text
+    return re.sub(r"(?<!\w)(?:singer|signal) group(?!\w)", "single group", text)
 
 
 def _is_declare_query(text: str) -> bool:
@@ -4602,6 +4654,7 @@ def echoes_last_atc(
         "request_alpha_check",
         "request_picture",
         "request_bogey_dope",
+        "request_rangeback",
         "request_declare",
         "report_vid",
     ):
@@ -4719,6 +4772,7 @@ def evaluate(
     text = normalize(transcript)
     if not text:
         return Evaluation(transcript=transcript, reason="nothing heard")
+    text = _repair_vid_whisper(text)
 
     seat_n: int | None = None
     if seat is not None:
@@ -5506,7 +5560,8 @@ def suggestions(
             "sfo_approve",
             "clear_land",
         ):
-            rank = 0
+            # Safety net — below High/Low Key and the SFO exit tip.
+            rank = 2 if sfo_active else 0
         elif intent.id == "report_sfo_final" and last_tx_template == "sfo_approve":
             rank = 0
         elif (
@@ -5519,7 +5574,9 @@ def suggestions(
         elif intent.id == "request_closed_traffic" and (
             sfo_active or last_tx_template.startswith("sfo_") or last_tx_template == "go_around"
         ):
-            rank = 0
+            # After low-approach clear / waveoff: tip exit ahead of reports.
+            # Otherwise keep it with High/Low Key (ahead of winds / runway).
+            rank = -1 if last_tx_template in ("clear_land", "go_around") else 0
         elif intent.id == "range_entry" and expected_l == "bj_range_exit":
             # Back from Bandsaw / still on the range — tip check-in (continue).
             rank = 0
@@ -5559,14 +5616,29 @@ def suggestions(
             expected_l in _LANDING_GO_AROUND_TEMPLATES
             or (channel_l == "tower" and phase_l == "approach")
         ):
-            rank = 0
+            # On SFO after low approach: tip "on the go, request closed" first.
+            if sfo_active and last_tx_template in (
+                "clear_land",
+                "go_around",
+                "sfo_low_key",
+            ):
+                rank = -1
+            elif sfo_active:
+                # Don't crowd High Key / Low Key report tips.
+                rank = 1
+            else:
+                rank = 0
         elif intent.id in ("request_winds", "request_altimeter") and channel_l in (
             "approach",
             "tower",
             "ground",
         ):
             # Prefer on ALSO AVAILABLE; rank still orders within optional.
-            rank = 0 if intent.id == "request_winds" else 1
+            # While on SFO, keep winds below High Key / exit closed tips.
+            if sfo_active:
+                rank = 2 if intent.id == "request_winds" else 3
+            else:
+                rank = 0 if intent.id == "request_winds" else 1
         elif expected_l == "ops_check_in" and intent.id in (
             "ops_request_words",
             "ops_request_start",
@@ -5666,7 +5738,28 @@ def suggestions(
             if n_opt >= opt_cap:
                 continue
             n_opt += 1
-        out.append((intent.example, intent.does, role, cue_needs_agency(
+        say = intent.example
+        does = intent.does
+        if intent.id == "going_around" and sfo_active:
+            # Bare "on the go" keeps the SFO loop; tip the exit wording
+            # once they are cleared low approach / waving off.
+            if last_tx_template in ("clear_land", "go_around", "sfo_low_key"):
+                say = "on the go, request closed"
+                does = (
+                    "leave SFO — closed traffic / full stop "
+                    "(or high key to stay)"
+                )
+            else:
+                say = "on the go, high key"
+                does = "another SFO — or request closed traffic to leave"
+        elif intent.id == "request_closed_traffic" and (
+            sfo_active
+            or last_tx_template.startswith("sfo_")
+            or last_tx_template == "go_around"
+        ):
+            say = "request closed traffic"
+            does = "leave SFO — closed traffic / full stop"
+        out.append((say, does, role, cue_needs_agency(
             intent, expected=expected_l, awaiting_readback=awaiting_readback
         )))
     return out

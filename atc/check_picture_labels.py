@@ -650,6 +650,24 @@ def main() -> int:
     ):
         print("FAIL type-only ID should default to bandit")
         bad += 1
+    elif voice_actions.parse_aircraft_type("ID single group, MiG-29, bandit") != "MiG-29":
+        print("FAIL MiG-29 type")
+        bad += 1
+    elif voice_actions.parse_aircraft_type("ID single group, MiG twenty nine, hostile") != "MiG-29":
+        print("FAIL spoken MiG twenty nine")
+        bad += 1
+    elif voice_actions.parse_aircraft_type("ID north group fulcrum bandit") != "Fulcrum":
+        print("FAIL Fulcrum NATO name")
+        bad += 1
+    elif voice_actions.parse_aircraft_type("ID single group, F sixteen, hostile") != "F-16":
+        print("FAIL spoken F sixteen")
+        bad += 1
+    elif voice_actions.parse_aircraft_type("ID single group bandit") is not None:
+        print("FAIL type must stay optional")
+        bad += 1
+    elif voice_actions.parse_declare_cue("ID single group, MiG-29, bandit") is not None:
+        print("FAIL MiG-29 must not become a bullseye")
+        bad += 1
     elif voice_actions.parse_vid_affiliation("declare Elvis 056 67") is not None:
         print("FAIL declare Elvis should not parse an affiliation")
         bad += 1
@@ -739,6 +757,32 @@ def main() -> int:
         bad += 1
     else:
         print(f"OK named-group VID defaults to bandit ({text})")
+
+    patched.clear()
+    try:
+        typed, _tg = voice_actions.build_vid_affiliation_reply(
+            {},
+            {"coalition": 2},
+            "RAZOR 1",
+            agency="Bandsaw",
+            transcript="Bandsaw, ID Single group, MiG-29, hostile",
+            state={"picture_groups": [{
+                "name": "single group",
+                "ids": ["u1"],
+                "brg": 20,
+                "rng": 40,
+                "feet": 21000,
+                "declaration": "bogey",
+                "seen": __import__("time").time(),
+            }]},
+        )
+    except Exception as exc:
+        typed = f"EXC {exc}"
+    if "mig-29" not in str(typed).casefold() or "hostile" not in str(typed).casefold():
+        print(f"FAIL type should be spoken back on single-group ID: {typed}")
+        bad += 1
+    else:
+        print(f"OK single-group ID keeps the type ({typed})")
 
     no_key = atc_phrase.patch_caoc_unit_affiliation(
         {"opus_backend_url": "", "caoc_affiliation_key": ""}, "u9", "BANDIT"

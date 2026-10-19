@@ -68,6 +68,10 @@ CASES = [
     ("Bands off, lease one, request picture", "bandsaw", "flight", True, "request_picture"),
     ("Bandsaw, Fleece 1, request picture", "bandsaw", "flight", True, "request_picture"),
     ("Bandsaw, Fleece 1, bogey dope", "bandsaw", "flight", True, "request_bogey_dope"),
+    ("Bandsaw, Fleece 1, request rangeback", "bandsaw", "flight", True, "request_rangeback"),
+    ("Bandsaw, Fleece 1, range back", "bandsaw", "flight", True, "request_rangeback"),
+    ("Bandsaw, Fleece 1, out", "bandsaw", "flight", False, None),
+    ("Bandsaw, Fleece 1, going out", "bandsaw", "flight", False, None),
     ("Bandsaw, Fleece 1, declare", "bandsaw", "flight", True, "request_declare"),
     ("Bandsaw, Fleece 1, declare Elvis 056 67", "bandsaw", "flight", True, "request_declare"),
     ("Bandsaw, Fleece 1, declare Elvis 056 67 hostile", "bandsaw", "flight", True, "request_declare"),
@@ -82,6 +86,9 @@ CASES = [
     ("Bandsaw, Razor 1, ID group elvis 020 21, 21000, mig 23.", "bandsaw", "flight", True, "report_vid"),
     ("Bandsaw, Razor 1, ID north group, MiG 23.", "bandsaw", "flight", True, "report_vid"),
     ("Bandsaw, Razor 1, ID lead group hostile.", "bandsaw", "flight", True, "report_vid"),
+    ("Bandsaw, Razor 1, ID single, MiG-29, bandit", "bandsaw", "flight", True, "report_vid"),
+    ("Bandsaw, Razor 1, ID singer group, MiG-29, hostile", "bandsaw", "flight", True, "report_vid"),
+    ("Bandsaw, Razor 1, ID single group, MiG twenty nine, bandit", "bandsaw", "flight", True, "report_vid"),
     ("Blackjack, Fleece 1, request Bandsaw", "blackjack", "flight", True, "request_bandsaw"),
     ("Blackjack, Fleece 1, request Joshua", "blackjack", "flight", True, "request_joshua"),
     ("Joshua, Fleece 1, checking in", "joshua", "flight", True, "joshua_check_in"),
@@ -4000,6 +4007,58 @@ def extras() -> int:
                 "High Key / closed, option still for pattern"
             )
 
+        # Fly kneeboard must tip how to leave the SFO (optional_limit=3).
+        sfo_cues = voice_intent.suggestions(
+            phase="approach",
+            channel="tower",
+            expected="clear_land",
+            limit=5,
+            advance_limit=2,
+            optional_limit=3,
+            sfo_active=True,
+            last_tx_template="clear_land",
+        )
+        sfo_cue_says = " | ".join(str(t[0]).casefold() for t in sfo_cues)
+        sfo_btn = {
+            k
+            for k, _ in atc_phrase.pilot_requests_for_channel(
+                "tower",
+                {
+                    "active_recovery": "sfo_overhead",
+                    "sfo_pattern_open": True,
+                },
+                phase="approach",
+                template="clear_land",
+            )
+        }
+        sfo_btn_off = {
+            k
+            for k, _ in atc_phrase.pilot_requests_for_channel(
+                "tower",
+                {"active_recovery": "tactical_overhead"},
+                phase="approach",
+                template="clear_land",
+            )
+        }
+        if (
+            "request closed" not in sfo_cue_says
+            and "closed traffic" not in sfo_cue_says
+        ):
+            print(f"  FAIL SFO cues must tip exit closed traffic: {sfo_cues}")
+            bad += 1
+        elif "request_closed_traffic" not in sfo_btn:
+            print(f"  FAIL SFO approach should offer closed-traffic button: {sfo_btn}")
+            bad += 1
+        elif "request_closed_traffic" in sfo_btn_off:
+            print(
+                f"  FAIL closed-traffic button only while on SFO: {sfo_btn_off}"
+            )
+            bad += 1
+        else:
+            print(
+                "SFO cues — tip on the go request closed / request closed traffic"
+            )
+
         # After SFO on-the-go, High Key must stay a report (not re-approve).
         after_go = voice_intent.evaluate(
             "Raise your one one high key",
@@ -6948,6 +7007,74 @@ def extras() -> int:
         bad += 1
     else:
         print("bandsaw picture — fires while cursor is on optional tanker")
+
+    import voice_actions
+
+    rb_cues = voice_intent.suggestions(
+        phase="flight",
+        channel="bandsaw",
+        expected="bandsaw_check_in",
+        limit=6,
+        advance_limit=2,
+        optional_limit=4,
+    )
+    rb_says = " | ".join(str(t[0]).casefold() for t in rb_cues)
+    together = voice_actions.format_rangeback("Fleece 1", "Bandsaw", [22, 18, 20])
+    split = voice_actions.format_rangeback("Fleece 1", "Bandsaw", [15, 28])
+    members = voice_actions.flight_member_latlons(
+        [
+            {
+                "type": "air",
+                "name": "lead",
+                "flightLabel": "Fleece 11",
+                "lat": 36.24,
+                "lon": -115.03,
+                "coalition": "blue",
+            },
+            {
+                "type": "air",
+                "name": "two",
+                "flightLabel": "Fleece 12",
+                "lat": 36.40,
+                "lon": -115.03,
+                "coalition": "blue",
+            },
+            {
+                "type": "air",
+                "name": "bandit",
+                "flightLabel": "Enemy 1",
+                "lat": 36.80,
+                "lon": -115.03,
+                "coalition": "red",
+            },
+        ],
+        {"coalition": 2},
+        own_ll=(36.24, -115.03),
+        callsign="Fleece 1",
+    )
+    out_only = voice_intent.evaluate(
+        "Bandsaw, Fleece 1, out",
+        channel="bandsaw",
+        phase="flight",
+        callsign="Fleece 1",
+    )
+    if "rangeback" not in rb_says:
+        print(f"  FAIL Bandsaw cues must tip rangeback: {rb_cues}")
+        bad += 1
+    elif "range eighteen" not in together.lower() or "closest" in together.lower():
+        print(f"  FAIL tight flight should be one rangeback: {together}")
+        bad += 1
+    elif "closest fifteen" not in split.lower() or "trail twenty eight" not in split.lower():
+        print(f"  FAIL split flight should be closest and trail: {split}")
+        bad += 1
+    elif len(members) != 2:
+        print(f"  FAIL rangeback should use lead and wingman only: {members}")
+        bad += 1
+    elif out_only.fired and out_only.match and out_only.match.intent == "request_rangeback":
+        print(f"  FAIL bare out must not request rangeback: {out_only.describe()}")
+        bad += 1
+    else:
+        print("bandsaw rangeback — request only; flight closest / trail")
 
     bj_far = agencies.blackjack_exit_handoff(nellis, 37.4, -114.5, "approach")
     if bj_far == "approach":

@@ -5159,6 +5159,7 @@ _APPROACH_TOWER_REQUESTS: list[tuple[str, str]] = [
     ("request_landing", "Gear down full stop"),
     ("request_low_approach", "Request the option"),
     ("request_sfo", "Request High Key / SFO"),
+    ("request_closed_traffic", "Closed traffic / exit SFO"),
     ("request_go_around", "On the go / go around"),
 ]
 _APPROACH_REQUEST_KEYS = frozenset(k for k, _ in _APPROACH_TOWER_REQUESTS)
@@ -5551,11 +5552,26 @@ def pilot_requests_for_channel(
         rows = list(PILOT_REQUESTS_BY_CHANNEL.get(ch) or [])
 
     pending = pending_takeoff_offer(state)
+    sfo_open = False
+    if state is not None:
+        ga = state.get("go_around_plan") if isinstance(state, dict) else None
+        sfo_open = bool(
+            sfo_pattern_is_open(state)
+            or is_sfo_recovery(state=state)
+            or (
+                isinstance(ga, dict)
+                and str(ga.get("kind") or "") == "sfo_continue"
+            )
+            or resolve_active_recovery(None, None, state=state) in SFO_RECOVERIES
+        )
     out: list[tuple[str, str]] = []
     for key, lab in rows:
         if key in _TAKEOFF_REQUEST_KEYS and phase_key != "departure":
             continue
         if key in _APPROACH_REQUEST_KEYS and phase_key != "approach":
+            continue
+        # Closed-traffic exit tip is for the SFO pattern only.
+        if key == "request_closed_traffic" and not sfo_open:
             continue
         if key in ("accept_rolling", "deny_rolling") and pending != "rolling":
             continue
@@ -5801,6 +5817,15 @@ def apply_pilot_request(
             "pending_offer": pending_takeoff_offer(state),
             "ack_kind": "",
             "execute_sfo_approve": True,
+        }
+    if key == "request_closed_traffic":
+        # Leave SFO for closed traffic / full stop (Tower TX via Flow UI).
+        return {
+            "key": key,
+            "takeoff_mode": resolve_active_takeoff_mode(mission, state),
+            "pending_offer": pending_takeoff_offer(state),
+            "ack_kind": "",
+            "execute_closed_traffic": True,
         }
     if key == "request_go_around":
         # Full go-around / missed is played by FlowEngine.execute_go_around.
