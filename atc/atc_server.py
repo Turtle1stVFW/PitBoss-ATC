@@ -94,6 +94,20 @@ SHARED_FLOW_KEYS = (
     "ops_codes_pending",
     "ops_codes_last_at",
     "ops_codes_done",
+    "flight_split",
+)
+# Split party bound per seat; read by atc_phrase.apply_flight_party.
+_PARTY_CONFIG_KEYS = (
+    "_party_callsign",
+    "_party_flight_callsign",
+    "_party_seats",
+    "_party_excluded_seats",
+)
+# Per-ship landing bookkeeping restarts when the ships in a timeline change.
+_LANDING_SEQUENCE_KEYS = (
+    "landing_cleared_seats",
+    "landing_ships_total",
+    "_landing_clear_built_seat",
 )
 
 
@@ -119,10 +133,22 @@ class PilotSession:
         self.ownship_ll: tuple[float, float] | None = None
         self.ownship_ll_t: float = 0.0
         self.ownship_alt_ft: float | None = None
+        # Set by AtcServer when this flight is split; see _party_for.
+        self.party: dict[str, Any] | None = None
 
     @property
     def callsign(self) -> str:
+        if self.party and self.party.get("callsign"):
+            return str(self.party["callsign"])
         return str(self.identity.get("callsign") or "CALLSIGN")
+
+    @property
+    def seat(self) -> int | None:
+        try:
+            n = int(self.identity.get("opus_seat"))
+        except (TypeError, ValueError):
+            return None
+        return n if n > 0 else None
 
     def touch(self) -> None:
         self.last_seen = time.time()
@@ -255,6 +281,7 @@ class PilotSession:
             "step_freq_mhz": step_freq,
             "step_mod": step_mod,
             "on_tanker": bool(flow_state.get("tanker_overlay")),
+            "flight_split": flow_state.get("flight_split"),
             "flow_state": flow_state,
             "awaiting_readback": bool(flow_state.get("awaiting_readback")),
             "last_tx_text": str(flow_state.get("last_tx_text") or ""),
@@ -283,6 +310,8 @@ class AtcServer:
         )
         self.sessions: dict[str, PilotSession] = {}
         self.engines: dict[str, flow_engine.FlowEngine] = {}
+        # Split timelines by flow key: {root, parent, seats, callsign, flight_callsign}.
+        self.splits: dict[str, dict[str, Any]] = {}
         self._lock = threading.Lock()
         self._httpd: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
@@ -402,7 +431,12 @@ class AtcServer:
         ).strip()
         with self._lock:
             self._reclaim_stale_sessions(key, identity, prior_session_id=prior)
-            engine = self._engine_for_flow(flow, identity)
+            split_flow = self._split_flow_for_seat(flow, identity.get("opus_seat"))
+            if split_flow:
+                flow = split_flow
+                engine = self.engines[split_flow]
+            else:
+                engine = self._engine_for_flow(flow, identity)
             sess = self.sessions.get(key)
             if sess is None or time.time() - sess.last_seen > atc_net.SESSION_TTL_S:
                 sess = PilotSession(key, engine, identity)
@@ -412,6 +446,7 @@ class AtcServer:
                 sess.identity.update(identity)
                 sess.engine = engine
                 sess.flow_key = flow
+            self._refresh_parties(self._root_flow(flow))
         sess.touch()
         sess.apply_radios(body, inject=False)
         client_ver = str(body.get("client_version") or "").strip()
@@ -531,13 +566,8 @@ class AtcServer:
         return out
 
     def _live_on_flow(self, flow: str) -> list[PilotSession]:
-        now = time.time()
         with self._lock:
-            return [
-                s
-                for s in self.sessions.values()
-                if s.flow_key == flow and now - s.last_seen <= atc_net.SESSION_TTL_S
-            ]
+            return self._live_on_flow_unlocked(flow)
 
     def _align_element_overlay(self, sess: PilotSession) -> None:
         """A late-joining dash-4 inherits dash-3's tanker side trip."""
@@ -586,6 +616,238 @@ class AtcServer:
         sess.local_state.pop("tanker_resume_channel", None)
         sess.local_state.pop("tanker_seen_tune", None)
         self._sync_element_overlay(sess)
+
+    # ---- flight split / rejoin -------------------------------------------
+    #
+    # A split gives one jet (SFO, ILS) or one element (fuel) its own copy of
+    # the flight's timeline, called "Fleece 1-3". Splits nest: dash-4 can
+    # split off the 1-3 element. Rejoin folds the party back into whatever
+    # it split from, once ATC approves it.
+
+    def _root_flow(self, flow: str) -> str:
+        row = self.splits.get(flow)
+        return str(row["root"]) if row else flow
+
+    def _split_flow_for_seat(self, root: str, seat: Any) -> str | None:
+        """Smallest live split on this flight that holds the seat."""
+        try:
+            n = int(seat)
+        except (TypeError, ValueError):
+            return None
+        best: str | None = None
+        best_len = 0
+        for flow, row in self.splits.items():
+            if row.get("root") != root or n not in row.get("seats", ()):
+                continue
+            if flow not in self.engines:
+                continue
+            if best is None or len(row["seats"]) < best_len:
+                best, best_len = flow, len(row["seats"])
+        return best
+
+    def _party_for(self, flow: str) -> dict[str, Any] | None:
+        excluded = sorted(
+            {
+                n
+                for row in self.splits.values()
+                if row.get("parent") == flow
+                for n in row.get("seats", ())
+            }
+        )
+        row = self.splits.get(flow)
+        if row is None:
+            return {"excluded": excluded} if excluded else None
+        seats = [n for n in row["seats"] if n not in excluded] or list(row["seats"])
+        base = str(row.get("flight_callsign") or "")
+        return {
+            "split": True,
+            "seats": seats,
+            "callsign": atc_phrase.element_radio_callsign(base, seats[0]),
+            "flight_callsign": base,
+            "excluded": excluded,
+        }
+
+    def _refresh_parties(self, root: str) -> None:
+        for sess in self.sessions.values():
+            if self._root_flow(sess.flow_key) == root:
+                sess.party = self._party_for(sess.flow_key)
+
+    def _flow_callsign(self, flow: str, fallback: str) -> str:
+        party = self._party_for(flow) or {}
+        return str(party.get("callsign") or fallback)
+
+    def split_flight(
+        self,
+        sess: PilotSession,
+        match: voice_intent.Match,
+        body: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Approve a split: this jet, or its element, gets its own clearance."""
+        seat = sess.seat
+        if seat is None or sess.identity.get("opus_flight_id") in (None, ""):
+            return {
+                "action": "blocked",
+                "detail": "split needs an Opus flight and seat on this Client",
+            }
+        element = str((match.slots or {}).get("party") or "").lower() == "element"
+        with self._lock:
+            cur = sess.flow_key
+            root = self._root_flow(cur)
+            party = self._party_for(cur) or {}
+            excluded = set(party.get("excluded") or [])
+            pool = set(party.get("seats") or []) if cur in self.splits else None
+            wanted = tanker.element_seats(seat) if element else (seat,)
+            seats = sorted(
+                n
+                for n in wanted
+                if (n in pool if pool is not None else n not in excluded)
+            )
+            if seat not in seats:
+                seats = [seat]
+            if pool is not None and set(seats) == pool:
+                return {
+                    "action": "acknowledged",
+                    "detail": f"already split as {sess.callsign}",
+                }
+            staying = {
+                s.seat for s in self._live_on_flow_unlocked(cur) if s.seat not in seats
+            }
+            if not staying:
+                return {
+                    "action": "blocked",
+                    "detail": "nobody else on this flight's clearance is connected",
+                }
+            if cur in self.splits:
+                base = str(self.splits[cur].get("flight_callsign") or "")
+            else:
+                base = atc_phrase.parse_element_callsign(
+                    str(sess.identity.get("callsign") or "")
+                )[0] or sess.callsign
+            src = sess.engine
+        with src.mutex:
+            state = copy.deepcopy(src.state)
+            mission = copy.deepcopy(src.mission)
+            for key in _LANDING_SEQUENCE_KEYS:
+                src.state.pop(key, None)
+        for key in tanker.SEAT_STATE_KEYS + ("ownship_ll", "ownship_ll_t"):
+            state.pop(key, None)
+        for key in _LANDING_SEQUENCE_KEYS:
+            state.pop(key, None)
+        engine = _new_session_engine(self.config, self.airports, mission, sess.identity)
+        engine.state = state
+        new_flow = f"{root}:split:{'-'.join(str(n) for n in seats)}"
+        with self._lock:
+            self.engines[new_flow] = engine
+            self.splits[new_flow] = {
+                "root": root,
+                "parent": cur,
+                "seats": seats,
+                "flight_callsign": base,
+            }
+            for other in self.sessions.values():
+                if other.flow_key == cur and other.seat in seats:
+                    other.flow_key = new_flow
+                    other.engine = engine
+            self._refresh_parties(root)
+
+        def work(eng: flow_engine.FlowEngine) -> dict[str, Any]:
+            airport = eng.airport()
+            channel = voice_engine._resolve_tx_channel(eng, airport, match)
+            text = atc_phrase.build_split_approved(airport, sess.callsign, channel)
+            return voice_engine._transmit(
+                eng,
+                airport,
+                text,
+                channel,
+                template=str(eng.state.get("last_tx_template") or ""),
+            )
+
+        result = self.run_action(sess, work, body)
+        if result.get("action") == "blocked":
+            # ATC never said "split approved" — the party stays with the flight.
+            self._merge_split(new_flow)
+        else:
+            result["split"] = {"callsign": sess.callsign, "seats": seats}
+        return result
+
+    def rejoin_flight(
+        self,
+        sess: PilotSession,
+        match: voice_intent.Match,
+        body: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Approve a rejoin: the split party goes back on the flight's clearance."""
+        with self._lock:
+            flow = sess.flow_key
+            row = self.splits.get(flow)
+            if row is None:
+                return {
+                    "action": "acknowledged",
+                    "detail": "not split — already on the flight's clearance",
+                }
+            target = self._merge_target(row)
+            joining = self._flow_callsign(target, str(row.get("flight_callsign") or ""))
+
+        def work(eng: flow_engine.FlowEngine) -> dict[str, Any]:
+            airport = eng.airport()
+            channel = voice_engine._resolve_tx_channel(eng, airport, match)
+            text = atc_phrase.build_rejoin_approved(
+                airport, sess.callsign, joining, channel
+            )
+            return voice_engine._transmit(
+                eng,
+                airport,
+                text,
+                channel,
+                template=str(eng.state.get("last_tx_template") or ""),
+            )
+
+        result = self.run_action(sess, work, body)
+        if result.get("action") == "blocked":
+            return result
+        self._merge_split(flow)
+        result["rejoined"] = joining
+        return result
+
+    def _merge_target(self, row: dict[str, Any]) -> str:
+        parent = str(row.get("parent") or row.get("root") or "")
+        if parent != row.get("root") and parent not in self.splits:
+            return str(row.get("root") or parent)
+        return parent
+
+    def _merge_split(self, flow: str) -> str | None:
+        """Fold a split party back into what it split from (no TX)."""
+        with self._lock:
+            row = self.splits.get(flow)
+            if row is None:
+                return None
+            target = self._merge_target(row)
+            members = [s for s in self.sessions.values() if s.flow_key == flow]
+            engine = self.engines.get(target)
+            if engine is None:
+                ident = members[0].identity if members else {}
+                engine = self._engine_for_flow(target, ident)
+            del self.splits[flow]
+            self.engines.pop(flow, None)
+            for other in members:
+                other.flow_key = target
+                other.engine = engine
+            for child in self.splits.values():
+                if child.get("parent") == flow:
+                    child["parent"] = target
+            self._refresh_parties(str(row.get("root") or target))
+        with engine.mutex:
+            for key in _LANDING_SEQUENCE_KEYS:
+                engine.state.pop(key, None)
+        return target
+
+    def _live_on_flow_unlocked(self, flow: str) -> list[PilotSession]:
+        now = time.time()
+        return [
+            s
+            for s in self.sessions.values()
+            if s.flow_key == flow and now - s.last_seen <= atc_net.SESSION_TTL_S
+        ]
 
     def run_action(
         self,
@@ -758,7 +1020,12 @@ class AtcServer:
         def work(engine: flow_engine.FlowEngine) -> dict[str, Any]:
             return voice_engine.execute_intent(match, engine)
 
-        result = self.run_action(sess, work, body)
+        if match.intent == "request_split":
+            result = self.split_flight(sess, match, body)
+        elif match.intent == "request_rejoin":
+            result = self.rejoin_flight(sess, match, body)
+        else:
+            result = self.run_action(sess, work, body)
         result["ok"] = result.get("action") != "blocked"
         return _attach_fly_status(result, self._host_status(sess))
 
@@ -944,7 +1211,19 @@ def _shared_flow_state(state: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def _status_view(sess: PilotSession) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Flight cursor, plus this seat's tanker overlay when they peeled off."""
+    """Flight cursor, plus this seat's tanker overlay and split party."""
+    st, fs = _status_view_inner(sess)
+    party = sess.party or {}
+    if party.get("split"):
+        fs["flight_split"] = {
+            "callsign": party.get("callsign"),
+            "flight_callsign": party.get("flight_callsign"),
+            "seats": list(party.get("seats") or []),
+        }
+    return st, fs
+
+
+def _status_view_inner(sess: PilotSession) -> tuple[dict[str, Any], dict[str, Any]]:
     engine = sess.engine
     lock = getattr(engine, "mutex", None)
 
@@ -1052,6 +1331,23 @@ def _apply_identity_to_config(config: dict[str, Any], identity: dict[str, Any]) 
     # instead of 127.0.0.1 — silent TX on every agency. Never mutate role.
 
 
+def _apply_party_to_config(
+    config: dict[str, Any], party: dict[str, Any] | None
+) -> None:
+    for key in _PARTY_CONFIG_KEYS:
+        config.pop(key, None)
+    if not party:
+        return
+    if party.get("split"):
+        config["callsign_override"] = str(party.get("callsign") or "")
+        config["_party_callsign"] = str(party.get("callsign") or "")
+        config["_party_flight_callsign"] = str(party.get("flight_callsign") or "")
+        config["_party_seats"] = list(party.get("seats") or [])
+    excluded = list(party.get("excluded") or [])
+    if excluded:
+        config["_party_excluded_seats"] = excluded
+
+
 @contextmanager
 def _session_engine_binding(
     sess: PilotSession,
@@ -1070,9 +1366,12 @@ def _session_engine_binding(
     saved_radios = getattr(engine, "remote_radios", None)
     saved_ident = {key: cfg.get(key) for key in _IDENTITY_CONFIG_KEYS}
     saved_tts = cfg.get("_tts_session_id")
-    saved_seat_pos = {key: cfg.get(key) for key in _SEAT_POSITION_CONFIG_KEYS}
+    saved_seat_pos = {
+        key: cfg.get(key) for key in _SEAT_POSITION_CONFIG_KEYS + _PARTY_CONFIG_KEYS
+    }
     try:
         _apply_identity_to_config(cfg, sess.identity)
+        _apply_party_to_config(cfg, sess.party)
         cfg["_tts_session_id"] = sess.session_id
         if body is not None:
             sess.apply_radios(body, inject=inject_radios)

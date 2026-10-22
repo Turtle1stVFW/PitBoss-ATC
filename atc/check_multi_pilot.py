@@ -7,6 +7,7 @@ Run: py -3 check_multi_pilot.py
 from __future__ import annotations
 
 import copy
+import dataclasses
 import json
 import sys
 import threading
@@ -1081,6 +1082,290 @@ def test_element_tanker_peel() -> list[str]:
     return fails
 
 
+def _four_ship(
+    server: atc_server.AtcServer, fid: int = 77
+) -> list[atc_server.PilotSession]:
+    out: list[atc_server.PilotSession] = []
+    for seat in (1, 2, 3, 4):
+        hello = server.hello(
+            {
+                "callsign_override": "Fleece 1",
+                "opus_flight_id": fid,
+                "opus_seat": seat,
+                "radio_fresh": False,
+            }
+        )
+        sess = server.get_session(hello["session_id"])
+        assert sess is not None
+        out.append(sess)
+    return out
+
+
+def _split_body(intent: str, party: str = "single", channel: str = "approach") -> dict:
+    slots = {"channel": channel}
+    if intent == "request_split":
+        slots["party"] = party
+    return {
+        "intent": intent,
+        "kind": "request",
+        "confidence": 1.0,
+        "slots": slots,
+        "radio_fresh": False,
+    }
+
+
+def _bound_opus(sess: atc_server.PilotSession):
+    with atc_server._session_engine_binding(sess):
+        return atc_phrase.resolve_active_opus_flight(sess.engine.config)
+
+
+def test_split_single_ship_and_rejoin() -> list[str]:
+    """Dash-3 splits for an SFO as Fleece 1-3, then rejoins once approved."""
+    fails: list[str] = []
+    spoken: list[tuple[str, str]] = []
+
+    def tx(job: dict) -> int:
+        spoken.append((str(job.get("callsign") or ""), str(job.get("text") or "")))
+        return 0
+
+    server = atc_server.AtcServer(
+        _host_config(), AIRPORTS, lambda: copy.deepcopy(MISSION), transmit_fn=tx
+    )
+    s1, s2, s3, s4 = _four_ship(server)
+    server.handle_command(s1, "next", {"radio_fresh": False})
+    idx_before = int(s1.engine.state.get("index") or 0)
+
+    out = server.handle_intent(s3, _split_body("request_split"))
+    if out.get("action") == "blocked":
+        return [f"split should be approved, got {out}"]
+    if s3.engine is s1.engine:
+        fails.append("dash-3 should have its own timeline after split")
+    if s4.engine is not s1.engine or s2.engine is not s1.engine:
+        fails.append("single-ship split must leave 2 and 4 with lead")
+    if s3.callsign != "Fleece 1-3":
+        fails.append(f"split callsign should be Fleece 1-3, got {s3.callsign!r}")
+    said = spoken[-1][1].casefold() if spoken else ""
+    if "fleece one tree" not in said or "split approved" not in said:
+        fails.append(f"ATC should say 'Fleece one tree … split approved', got {said!r}")
+    if int(s3.engine.state.get("index") or 0) != idx_before:
+        fails.append("split timeline should start where the flight was")
+    fs = (out.get("flow_state") or {}).get("flight_split") or {}
+    if fs.get("seats") != [3] or fs.get("callsign") != "Fleece 1-3":
+        fails.append(f"Fly status should carry the split party, got {fs}")
+
+    server.handle_command(s3, "next", {"radio_fresh": False})
+    if int(s1.engine.state.get("index") or 0) != idx_before:
+        fails.append("Fleece 1-3 stepping must not move the flight")
+    idx3 = int(s3.engine.state.get("index") or 0)
+    server.handle_command(s1, "next", {"radio_fresh": False})
+    if int(s3.engine.state.get("index") or 0) != idx3:
+        fails.append("lead stepping must not move Fleece 1-3")
+
+    opus3 = _bound_opus(s3)
+    if opus3 is None or opus3.radio_callsign != "Fleece 1-3":
+        fails.append(f"bound resolve for dash-3 should be Fleece 1-3, got {opus3}")
+    elif opus3.party_seats != (3,) or atc_phrase.flight_ship_count(opus3) != 1:
+        fails.append(f"dash-3 party should be one ship, got {opus3.party_seats}")
+    opus1 = _bound_opus(s1)
+    if opus1 is None or 3 in (opus1.party_seats or ()):
+        fails.append(f"flight must drop seat 3 while split, got {opus1}")
+    if opus1 is not None and opus1.radio_callsign != "Fleece 1":
+        fails.append(f"flight keeps Fleece 1, got {opus1.radio_callsign!r}")
+
+    again = server.handle_intent(s3, _split_body("request_split"))
+    if again.get("action") != "acknowledged":
+        fails.append(f"repeat split should be a quiet ack, got {again.get('action')}")
+
+    back = server.handle_intent(s3, _split_body("request_rejoin"))
+    said = spoken[-1][1].casefold() if spoken else ""
+    if back.get("action") == "blocked":
+        fails.append(f"rejoin should be approved, got {back}")
+    if "rejoin approved" not in said or "fleece one tree" not in said:
+        fails.append(f"rejoin TX should address Fleece one tree, got {said!r}")
+    if "continue as fleece one" not in said:
+        fails.append(f"rejoin TX should hand back to Fleece one, got {said!r}")
+    if s3.engine is not s1.engine:
+        fails.append("dash-3 should share the flight timeline after rejoin")
+    if s3.callsign != "Fleece 1" or s3.party is not None:
+        fails.append(f"rejoined callsign should be Fleece 1, got {s3.callsign!r}")
+    if (back.get("flow_state") or {}).get("flight_split"):
+        fails.append("rejoined Fly status must drop flight_split")
+    if server.splits:
+        fails.append(f"split registry should be empty, got {server.splits}")
+    server.hub.stop()
+    return fails
+
+
+def test_split_element_nested() -> list[str]:
+    """3-4 split as an element; 4 then splits alone; both rejoin in any order."""
+    fails: list[str] = []
+    server = atc_server.AtcServer(
+        _host_config(), AIRPORTS, lambda: copy.deepcopy(MISSION), transmit_fn=lambda _j: 0
+    )
+    s1, s2, s3, s4 = _four_ship(server)
+    out = server.handle_intent(s3, _split_body("request_split", party="element"))
+    if out.get("action") == "blocked":
+        return [f"element split should be approved, got {out}"]
+    if s3.engine is not s4.engine or s3.engine is s1.engine:
+        fails.append("3 and 4 should share one element timeline")
+    if s4.callsign != "Fleece 1-3":
+        fails.append(f"element callsign is Fleece 1-3 for both, got {s4.callsign!r}")
+    opus3 = _bound_opus(s3)
+    if opus3 is None or opus3.party_seats != (3, 4):
+        fails.append(f"element party seats should be (3, 4), got {opus3}")
+    opus1 = _bound_opus(s1)
+    if opus1 is None or opus1.party_seats != (1, 2):
+        fails.append(f"lead element should be (1, 2), got {opus1}")
+
+    out4 = server.handle_intent(s4, _split_body("request_split"))
+    if out4.get("action") == "blocked":
+        fails.append(f"dash-4 split off the element should be approved, got {out4}")
+    if s4.engine is s3.engine:
+        fails.append("dash-4 should leave the element timeline")
+    if s4.callsign != "Fleece 1-4" or s3.callsign != "Fleece 1-3":
+        fails.append(f"callsigns should be 1-3 / 1-4, got {s3.callsign} / {s4.callsign}")
+    opus3 = _bound_opus(s3)
+    if opus3 is None or opus3.party_seats != (3,):
+        fails.append(f"element left with dash-3 only, got {opus3}")
+
+    server.handle_intent(s3, _split_body("request_rejoin"))
+    if s3.engine is not s1.engine:
+        fails.append("dash-3 should rejoin the flight")
+    if s4.engine is s1.engine:
+        fails.append("dash-4 is still split until it asks")
+    row = next(iter(server.splits.values()), {})
+    if row.get("parent") != row.get("root"):
+        fails.append(f"orphaned dash-4 split should re-parent to the flight: {row}")
+    server.handle_intent(s4, _split_body("request_rejoin"))
+    if s4.engine is not s1.engine or server.splits:
+        fails.append("dash-4 should be back with the flight")
+    if {s.callsign for s in (s1, s2, s3, s4)} != {"Fleece 1"}:
+        fails.append("everyone should be Fleece 1 again")
+    server.hub.stop()
+    return fails
+
+
+def test_split_tx_failure_and_rehello() -> list[str]:
+    """No 'split approved' heard → no split. A reconnect keeps a real split."""
+    fails: list[str] = []
+    server = atc_server.AtcServer(
+        _host_config(), AIRPORTS, lambda: copy.deepcopy(MISSION), transmit_fn=lambda _j: 99
+    )
+    s1, _s2, s3, _s4 = _four_ship(server)
+    out = server.handle_intent(s3, _split_body("request_split"))
+    if out.get("action") != "blocked":
+        fails.append(f"failed TX should block the split, got {out.get('action')}")
+    if s3.engine is not s1.engine or server.splits or s3.party:
+        fails.append("failed split TX must leave dash-3 with the flight")
+    server.hub.stop()
+
+    server2 = atc_server.AtcServer(
+        _host_config(), AIRPORTS, lambda: copy.deepcopy(MISSION), transmit_fn=lambda _j: 0
+    )
+    t1, _t2, t3, _t4 = _four_ship(server2, fid=78)
+    server2.handle_intent(t3, _split_body("request_split"))
+    split_engine = t3.engine
+    hello = server2.hello(
+        {
+            "callsign_override": "Fleece 1",
+            "opus_flight_id": 78,
+            "opus_seat": 3,
+            "radio_fresh": False,
+            "prior_session_id": t3.session_id,
+        }
+    )
+    again = server2.get_session(hello["session_id"])
+    if again is None or again.engine is not split_engine:
+        fails.append("re-hello must stay on the split timeline")
+    if str(hello.get("callsign") or "") != "Fleece 1-3":
+        fails.append(f"re-hello status should say Fleece 1-3, got {hello.get('callsign')}")
+    alone = server2.hello(
+        {"callsign_override": "Wild 6", "opus_flight_id": 79, "opus_seat": 1}
+    )
+    solo = server2.get_session(alone["session_id"])
+    if solo is not None:
+        blocked = server2.handle_intent(solo, _split_body("request_split"))
+        if blocked.get("action") != "blocked":
+            fails.append("a lone jet has nobody to split from")
+    if t1.engine is split_engine:
+        fails.append("lead must not be on the split timeline")
+    server2.hub.stop()
+    return fails
+
+
+def test_split_landing_sequence() -> list[str]:
+    """Per-ship ILS clearances walk only the ships in the party."""
+    fails: list[str] = []
+    base = atc_phrase.synthetic_flight_context("Fleece 1")
+    base = dataclasses.replace(base, signup_count=4)
+    element = atc_phrase.apply_flight_party(
+        {
+            "_party_seats": [3, 4],
+            "_party_callsign": "Fleece 1-3",
+            "_party_flight_callsign": "Fleece 1",
+        },
+        base,
+    )
+    if element is None or element.radio_callsign != "Fleece 1-3":
+        return [f"element context should be Fleece 1-3, got {element}"]
+    first = atc_phrase.peek_next_landing_clear_seat(
+        element, element.radio_callsign, recovery="instrument", state={}
+    )
+    nxt = atc_phrase.peek_next_landing_clear_seat(
+        element,
+        element.radio_callsign,
+        recovery="instrument",
+        state={"landing_cleared_seats": [3]},
+    )
+    if (first, nxt) != (3, 4):
+        fails.append(f"element ILS should clear 1-3 then 1-4, got {first}, {nxt}")
+    rest = atc_phrase.apply_flight_party({"_party_excluded_seats": [3, 4]}, base)
+    seq = []
+    state: dict = {}
+    for _ in range(2):
+        seat = atc_phrase.peek_next_landing_clear_seat(
+            rest, "Fleece 1", recovery="instrument", state=state
+        )
+        seq.append(seat)
+        state.setdefault("landing_cleared_seats", []).append(seat)
+    if seq != [1, 2]:
+        fails.append(f"remaining flight should clear 1-1, 1-2, got {seq}")
+    single = atc_phrase.apply_flight_party(
+        {"_party_seats": [3], "_party_flight_callsign": "Fleece 1"}, base
+    )
+    if single is None or atc_phrase.peek_next_landing_clear_seat(
+        single, single.radio_callsign, recovery="instrument", state={}
+    ) is not None:
+        fails.append("single-ship split clears with its own callsign, no per-ship walk")
+    return fails
+
+
+def test_split_voice_seat_address() -> list[str]:
+    """Dash-3's PC hears its own 1-3 split call; 'element' widens the party."""
+    fails: list[str] = []
+    ev = voice_intent.evaluate(
+        "Nellis Approach, Fleece 1-3, request split, element",
+        channel="approach",
+        phase="approach",
+        callsign="Fleece 1",
+        seat=3,
+    )
+    if not ev.fired or ev.match is None or ev.match.intent != "request_split":
+        fails.append(f"dash-3 split call should fire, got {ev.match} / {ev.reason}")
+    elif ev.match.slots.get("party") != "element":
+        fails.append(f"'element' should set party=element, got {ev.match.slots}")
+    ev1 = voice_intent.evaluate(
+        "Tower, Fleece 1-3, request split",
+        channel="tower",
+        phase="approach",
+        callsign="Fleece 1",
+        seat=3,
+    )
+    if ev1.match is None or ev1.match.slots.get("party") != "single":
+        fails.append(f"plain split should be single ship, got {ev1.match}")
+    return fails
+
+
 def test_tanker_fly_freq_matches_pick() -> list[str]:
     """Blackjack can send Texaco 2; Fly must not show Texaco 1's 322.3."""
     fails: list[str] = []
@@ -2018,6 +2303,11 @@ def main() -> int:
         test_clear_flight_cache_scoped,
         test_flight_shared_cursor,
         test_element_tanker_peel,
+        test_split_single_ship_and_rejoin,
+        test_split_element_nested,
+        test_split_tx_failure_and_rehello,
+        test_split_landing_sequence,
+        test_split_voice_seat_address,
         test_tanker_fly_freq_matches_pick,
         test_cross_flight_status_isolation,
         test_client_freq_gate,

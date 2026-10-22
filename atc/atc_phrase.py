@@ -299,6 +299,8 @@ class OpusFlightContext:
     vul_start: str | None = None
     vul_end: str | None = None
     squadron_name: str | None = None
+    # Seats ATC is working on this timeline after a split; () = whole flight.
+    party_seats: tuple[int, ...] = ()
 
     @property
     def element_callsign(self) -> str:
@@ -1029,6 +1031,69 @@ def _merge_opus_list_metadata(
 
 
 def resolve_active_opus_flight(config: dict[str, Any]) -> OpusFlightContext | None:
+    """Opus flight for this seat, narrowed to its split party when the flight split."""
+    return apply_flight_party(config, _resolve_whole_opus_flight(config))
+
+
+def _party_seat_list(raw: Any) -> list[int]:
+    out: list[int] = []
+    if not isinstance(raw, (list, tuple)):
+        return out
+    for item in raw:
+        try:
+            n = int(item)
+        except (TypeError, ValueError):
+            continue
+        if n > 0 and n not in out:
+            out.append(n)
+    return sorted(out)
+
+
+def apply_flight_party(
+    config: dict[str, Any], ctx: OpusFlightContext | None
+) -> OpusFlightContext | None:
+    """
+    Split flights: Fleece 1-3 single ship, or the 1-3 / 1-4 element.
+
+    The Host binds ``_party_*`` keys for a seat on a split timeline. ATC then
+    calls the party by its element callsign and sequences only its ships.
+    Seats that split away are dropped from the flight they left.
+    """
+    if ctx is None:
+        return None
+    seats = _party_seat_list(config.get("_party_seats"))
+    excluded = set(_party_seat_list(config.get("_party_excluded_seats")))
+    if seats:
+        kept = [n for n in seats if n not in excluded] or seats
+        base = str(config.get("_party_flight_callsign") or "").strip()
+        if not base:
+            base = parse_element_callsign(ctx.flight_callsign)[0] or ctx.flight_callsign
+        radio = str(config.get("_party_callsign") or "").strip() or element_radio_callsign(
+            base, kept[0]
+        )
+        return replace(
+            ctx,
+            radio_callsign=radio,
+            flight_callsign=base,
+            signup_count=len(kept),
+            flight_qty=len(kept),
+            party_seats=tuple(kept),
+        )
+    if excluded:
+        total = max(flight_ship_count(ctx), max(excluded))
+        kept = [n for n in range(1, total + 1) if n not in excluded]
+        if not kept:
+            return ctx
+        return replace(
+            ctx,
+            signup_count=len(kept),
+            flight_qty=len(kept),
+            party_seats=tuple(kept),
+        )
+    return ctx
+
+
+def _resolve_whole_opus_flight(config: dict[str, Any]) -> OpusFlightContext | None:
     """
     Load filed FP + callsign from Opus.
 
@@ -5916,6 +5981,30 @@ def apply_pilot_request(
     raise ValueError(f"Unknown pilot request '{request_key}'")
 
 
+def build_split_approved(
+    airport: dict[str, Any], callsign: str, channel: str | None = None
+) -> str:
+    """'Fleece one tree, Nellis Approach, split approved.'"""
+    name = airport.get("name") or "Tower"
+    agency = speak_agency_name(channel or "tower")
+    return f"{speak_callsign(callsign)}, {name} {agency}, split approved."
+
+
+def build_rejoin_approved(
+    airport: dict[str, Any],
+    callsign: str,
+    flight_callsign: str,
+    channel: str | None = None,
+) -> str:
+    """'Fleece one tree, Nellis Approach, rejoin approved, continue as Fleece one.'"""
+    name = airport.get("name") or "Tower"
+    agency = speak_agency_name(channel or "tower")
+    return (
+        f"{speak_callsign(callsign)}, {name} {agency}, rejoin approved, "
+        f"continue as {speak_callsign(flight_callsign)}."
+    )
+
+
 def build_pilot_request_ack(
     ack_kind: str,
     airport: dict[str, Any],
@@ -6794,17 +6883,18 @@ def peek_next_landing_clear_seat(
     _flight, seat_from_cs = parse_element_callsign(callsign)
     if mode != "per_ship" or ships <= 1 or not flight_cs:
         return None
+    seats = list(getattr(opus, "party_seats", ()) or ()) or list(range(1, ships + 1))
     cleared = set(landing_cleared_seats(state))
     if ship is not None:
         try:
             target = int(ship)
         except (TypeError, ValueError):
             target = 0
-        if 1 <= target <= ships:
+        if target in seats:
             return target
-    if seat_from_cs is not None and 1 <= seat_from_cs <= ships and seat_from_cs not in cleared:
+    if seat_from_cs is not None and seat_from_cs in seats and seat_from_cs not in cleared:
         return seat_from_cs
-    for n in range(1, ships + 1):
+    for n in seats:
         if n not in cleared:
             return n
     return seat_from_cs if seat_from_cs is not None else 1

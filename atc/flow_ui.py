@@ -9160,7 +9160,74 @@ class MissionPlanner(tk.Tk):
         "ops_request_words": "Request current WORDS",
         "ops_request_start": "Request start",
         "clear_runway_request": "Reset runway to winds",
+        "request_split_single": "Split single ship",
+        "request_split_element": "Split element",
+        "request_flight_rejoin": "Rejoin flight",
     }
+    _FLY_SPLIT_KEYS = frozenset(
+        {"request_split_single", "request_split_element", "request_flight_rejoin"}
+    )
+
+    def _fly_split_requests(self, channel: str) -> list[tuple[str, str]]:
+        """Split / rejoin buttons — Client seats on an Opus flight only."""
+        if self._atc_role() != "client" or getattr(self, "_atc_client", None) is None:
+            return []
+        if channel in ("", "tanker", "ops"):
+            return []
+        if atc_phrase.configured_opus_seat(self.config_data) is None:
+            return []
+        split = (self.engine.state or {}).get("flight_split")
+        if isinstance(split, dict) and split.get("seats"):
+            return [("request_flight_rejoin", "Rejoin flight")]
+        return [
+            ("request_split_single", "Split single ship"),
+            ("request_split_element", "Split element"),
+        ]
+
+    def _send_fly_split_request(self, request_key: str) -> None:
+        client = self._atc_client
+        if client is None:
+            return
+        rejoin = request_key == "request_flight_rejoin"
+        slots: dict[str, Any] = {"channel": self._fly_request_context()[0]}
+        if not rejoin:
+            slots["party"] = "element" if request_key.endswith("element") else "single"
+        match = voice_intent.Match(
+            intent="request_rejoin" if rejoin else "request_split",
+            kind="request",
+            template="",
+            confidence=1.0,
+            slots=slots,
+        )
+
+        def work() -> None:
+            try:
+                played = client.post_intent(match)
+                self._ui_call(lambda p=played: self._on_split_request_done(p))
+            except Exception as exc:  # noqa: BLE001
+                err = str(exc)
+                self._ui_call(lambda m=err: messagebox.showerror("Split / rejoin", m))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_split_request_done(self, played: dict[str, Any] | None) -> None:
+        played = played or {}
+        if played.get("action") == "blocked":
+            self._note_no_tx(
+                str(played.get("detail") or "Blocked"),
+                action="split",
+                channel=str(played.get("channel") or ""),
+            )
+        elif played.get("action") == "acknowledged":
+            self.fly_log.insert(tk.END, f"ATC  {played.get('detail') or ''}\n")
+        else:
+            freq = played.get("freq") or ""
+            label = played.get("text") or played.get("label") or "Split"
+            ch = str(played.get("channel") or "").upper()
+            self.fly_log.insert(tk.END, f"TX  {label}  ·  {freq}  ·  {ch}\n")
+        self.fly_log.see(tk.END)
+        self._refresh_client_fly()
+        self._sync_fly_pilot_request_ui()
 
     def _sync_fly_recovery_ui(self, channel: str | None = None) -> None:
         """Show recovery buttons on Approach, and VFR patterns on approach Tower."""
@@ -9366,6 +9433,7 @@ class MissionPlanner(tk.Tk):
             )
             if k not in ("accept_rolling", "deny_rolling")
         ]
+        reqs.extend(self._fly_split_requests(ch))
         if not reqs:
             self._fly_req_box.pack_forget()
             return
@@ -9407,6 +9475,9 @@ class MissionPlanner(tk.Tk):
 
     def _apply_fly_pilot_request(self, request_key: str, *, tx_ack: bool = True) -> None:
         """Apply Accept/Deny/Request — update takeoff mode and optionally TX Tower ack."""
+        if request_key in self._FLY_SPLIT_KEYS:
+            self._send_fly_split_request(request_key)
+            return
         try:
             ap = self._airport()
             opus, weather = atc_phrase.resolve_opus_and_metar(

@@ -1065,6 +1065,33 @@ _RADAR_CHANNELS: tuple[str, ...] = (
     "bandsaw",
 )
 
+# Controlling agencies that can approve a flight split / rejoin.
+_SPLIT_CHANNELS: tuple[str, ...] = (
+    "delivery",
+    "ground",
+    "tower",
+    "departure",
+    "approach",
+    "control_east",
+    "control_west",
+    "center",
+    "joshua",
+    "blackjack",
+    "bandsaw",
+    "other",
+)
+
+# "Request split, element" takes the wingman along; otherwise single ship.
+_SPLIT_ELEMENT_TERMS: tuple[str, ...] = (
+    "element",
+    "2 ship",
+    "two ship",
+    "flight of 2",
+    "flight of two",
+    "with my wingman",
+    "with wingman",
+)
+
 # Multiplier for an intent that does not fit the agency or the stage of flight.
 # Kept under the default min-confidence so off-context calls stay silent.
 _OFF_CONTEXT = 0.55
@@ -2080,6 +2107,53 @@ INTENTS: tuple[Intent, ...] = (
         example="request closed traffic",
         does="leave SFO — closed traffic / full stop",
         veto=("high key", "low key", "on the go", "going around"),
+    ),
+    Intent(
+        "request_split",
+        (
+            (
+                "request split",
+                "requesting split",
+                "request to split",
+                "request a split",
+                "split the flight",
+                "split up",
+                "splitting",
+                "split off",
+                "request individual",
+                "individual clearance",
+                "single ship clearance",
+            ),
+        ),
+        kind="request",
+        channels=_SPLIT_CHANNELS,
+        weight=1.3,
+        example="request split",
+        does="split your jet (or say element) onto its own clearance",
+        veto=("rejoin", "split approved", "split s", "texaco", "tanker"),
+    ),
+    Intent(
+        "request_rejoin",
+        (
+            (
+                "request rejoin",
+                "requesting rejoin",
+                "request to rejoin",
+                "rejoin the flight",
+                "rejoin with",
+                "rejoining",
+                "request join up",
+                "join back up",
+                "request reform",
+                "reform the flight",
+            ),
+        ),
+        kind="request",
+        channels=_SPLIT_CHANNELS,
+        weight=1.3,
+        example="request rejoin",
+        does="put a split jet back on the flight's clearance",
+        veto=("rejoin left", "reform left", "cleared rejoin", "texaco", "tanker", "boom"),
     ),
     Intent(
         "report_sfo_final",
@@ -4287,6 +4361,12 @@ def _score_intents(
             point = _resolved_nav_point(text)
             if point is not None:
                 slots["nav_point"] = point
+        if intent.id == "request_split":
+            slots["party"] = (
+                "element"
+                if _group_hit(text, _SPLIT_ELEMENT_TERMS, fuzzy=False)
+                else "single"
+            )
         recovery = extract_recovery(text)
         if recovery and intent.id in (
             "inbound_recovery",

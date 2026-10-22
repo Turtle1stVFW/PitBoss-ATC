@@ -622,6 +622,13 @@ def execute_intent(
             return {"action": "none", "detail": "nothing to repeat"}
         return {"action": "replay", "detail": engine.play_id(last)}
 
+    if intent in ("request_split", "request_rejoin"):
+        # The Host owns flight timelines; atc_server intercepts these first.
+        return {
+            "action": "none",
+            "detail": "split / rejoin needs the ATC Host with each jet on a Client",
+        }
+
     config = engine.config
     airport = engine.airport()
     opus, weather = atc_phrase.resolve_opus_and_metar(config, airport["icao"])
