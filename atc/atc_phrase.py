@@ -1169,7 +1169,7 @@ def _resolve_whole_opus_flight(config: dict[str, Any]) -> OpusFlightContext | No
 
     Preference order:
       1. Bound client map plan (Host TX for a Route Tester seat)
-      2. Local map tester inject when ownship_from_map is on
+      2. Local map inject when ownship_from_map is on and no Opus flight is selected
       3. config opus_flight_id (chosen in the flights picker)
       4. Scan flights for opus_user_name signup (legacy auto-match)
       5. Manual callsign / offline placeholder
@@ -1177,7 +1177,7 @@ def _resolve_whole_opus_flight(config: dict[str, Any]) -> OpusFlightContext | No
     Seat: opus_seat if set, else matching signup for opus_user_name, else seat 1.
     callsign_override replaces the spoken callsign (FP still from map/Opus when available).
     """
-    # Host-bound client: map FP rode in on hello/heartbeat (no local inject here).
+    # Host-bound client: an explicit Route Tester plan rode in on hello.
     if config.get("_seat_from_map") and str(
         config.get("_seat_fp_route_string") or ""
     ).strip():
@@ -1188,7 +1188,12 @@ def _resolve_whole_opus_flight(config: dict[str, Any]) -> OpusFlightContext | No
                 f"route={mapped.fp_route_string} alt={mapped.fp_altitude}"
             )
             return apply_callsign_override(config, mapped)
-    if ownship_from_map_enabled(config):
+    # Local "map is my jet" places the aircraft. A selected Opus flight keeps
+    # its filed route and remarks — the tester's last route must not replace them.
+    if (
+        configured_opus_flight_id(config) is None
+        and ownship_from_map_enabled(config)
+    ):
         mapped = map_flight_context(config)
         if mapped is not None:
             print(
@@ -6537,29 +6542,41 @@ def build_approach_change(
     weather: Weather,
     *,
     plan: dict[str, Any] | None = None,
+    on_control: bool = False,
 ) -> str:
     """Acknowledge a pilot-requested change of recovery / approach."""
     name = airport["name"]
     cs = speak_callsign(callsign)
+    who = "Control" if on_control else "Approach"
     p = dict(plan or {})
     rec_key = normalize_recovery_key(p.get("pattern"))
     rwy = speak_runway(str(p.get("runway") or ""))
+    descend = ""
+    if on_control and p.get("descend_ft"):
+        spoken_alt = speak_descend_pilot_discretion(p.get("descend_ft"))
+        if spoken_alt:
+            descend = f", {spoken_alt}"
     if rec_key == "instrument" or p.get("iaf"):
         iaf = str(p.get("iaf_say") or p.get("iaf") or "the IAF")
         inst = str(p.get("instrument_say") or "instrument approach")
         body = f"roger, proceed direct {iaf}, expect {inst}"
         if rwy and "runway" not in inst.lower():
             body += f" runway {rwy}"
+        body += descend
     else:
         vfr = str(p.get("vfr_recovery_say") or p.get("vfr_recovery") or "").strip()
+        direct = str(p.get("direct_say") or p.get("direct_fix") or "").strip()
         cleared = speak_recovery_clearance(rec_key)
         body = f"roger, {cleared}"
-        if vfr:
+        if vfr and direct:
+            body = f"roger, proceed direct {direct}, expect {vfr} recovery, {cleared}"
+        elif vfr:
             body = f"roger, cleared {vfr} recovery, {cleared}"
         if rwy:
             body += f" runway {rwy}"
+        body += descend
     alt = speak_altimeter(weather.altimeter_inhg or 29.92)
-    return f"{cs}, {name} Approach, {body}, {name} altimeter {alt}."
+    return f"{cs}, {name} {who}, {body}, {name} altimeter {alt}."
 
 
 def build_hold_clearance(

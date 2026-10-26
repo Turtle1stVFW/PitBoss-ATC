@@ -597,7 +597,16 @@ _AGENCY_TERMS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("blackjack", ("blackjack", "black jack", "magic", "darkstar", "awacs")),
     ("bandsaw", _BANDSAW_TERMS),
     ("joshua", _JOSHUA_TERMS),
-    ("control_east", ("sally", "nellis control", "control east", "natcf", "control")),
+    # "controlled" is Whisper for "control" ("Nellis controlled, Viper…").
+    ("control_east", (
+        "sally",
+        "nellis control",
+        "nellis controlled",
+        "control east",
+        "natcf",
+        "control",
+        "controlled",
+    )),
     ("control_west", ("lee", "control west", "nellis control west")),
     ("center", ("los angeles center", "la center", "center", "centre")),
     ("ops", (
@@ -1017,6 +1026,35 @@ def vectors_name_a_fix_not_a_tanker(text: str) -> bool:
     return bool(_group_hit(text, ("arcoe", "waypoint"), fuzzy=False))
 
 
+def recovery_names_a_fix_not_a_tanker(text: str) -> bool:
+    """
+    'Request RCO recovery' is the ARCOE recovery, not the ARCO tanker.
+
+    Whisper hears ARCOE as 'rco', or drops the trailing E ('arco'). 'arco' is
+    also a tanker callsign, and one edit from 'rco' scores request_tanker on
+    Nellis Control. An explicit tanker / Texaco call still wins. Bare
+    'request arco' stays the tanker.
+    """
+    if _group_hit(
+        text,
+        (
+            "tanker",
+            "texaco",
+            "shell",
+            "boom",
+            "esso",
+            "air refuel",
+            "air refueling",
+            "aar",
+        ),
+        fuzzy=False,
+    ):
+        return False
+    if _group_hit(text, ("recovery", "recover"), fuzzy=False):
+        return True
+    return bool(_group_hit(text, ("arcoe", "rco", "our co"), fuzzy=False))
+
+
 def _resolved_nav_point(text: str) -> dict[str, Any] | None:
     """The point in a 'vectors to …' call, resolved against the nav catalogs."""
     phrase = extract_nav_point(text)
@@ -1318,7 +1356,28 @@ INTENTS: tuple[Intent, ...] = (
         weight=1.15,
         example="",
         does="",
-        veto=("picture", "pitcher", "bogey", "declare", "tanker", "texaco", "joshua"),
+        veto=(
+            "picture",
+            "pitcher",
+            "bogey",
+            "declare",
+            "tanker",
+            "texaco",
+            "joshua",
+            # "Nellis Control, request Alamo recovery" is a recovery change
+            # on the freq they are already on, not a Blackjack push.
+            "recovery",
+            "alamo",
+            "stryk",
+            "strike",
+            "torye",
+            "arcoe",
+            "rco",
+            "our co",
+            "mintt",
+            "overhead",
+            "ils",
+        ),
     ),
     Intent(
         "request_tanker",
@@ -2071,13 +2130,16 @@ INTENTS: tuple[Intent, ...] = (
                 "torye",
                 "acton",
                 "arcoe",
+                "rco",
+                "our co",
                 "mintt",
+                "alamo",
                 "dudbe",
                 "recovery",
             ),
         ),
         kind="action",
-        channels=("approach", "tower"),
+        channels=("approach", "tower", "control_east", "control_west"),
         phases=("flight", "approach"),
         weight=1.15,
         example="request overhead",
@@ -4171,8 +4233,12 @@ def _score_intents(
         # shape before it can score as request_winds on every agency.
         if intent.id == "request_winds" and looks_like_radio_check_not_winds(text):
             continue
-        # "request vectors to arcoe" fuzzy-matches tanker callsign "arco".
-        if intent.id == "request_tanker" and vectors_name_a_fix_not_a_tanker(text):
+        # "request vectors to arcoe" and "request RCO recovery" fuzzy-match
+        # tanker callsign "arco". The recovery / fix is not a tanker ask.
+        if intent.id == "request_tanker" and (
+            vectors_name_a_fix_not_a_tanker(text)
+            or recovery_names_a_fix_not_a_tanker(text)
+        ):
             continue
         if intent.id in _C2_INTENT_IDS and not step_offers_c2(
             current_step, channel=channel
@@ -4975,6 +5041,7 @@ def echoes_last_atc(
         "request_rangeback",
         "request_declare",
         "report_vid",
+        "request_approach",
     ):
         return False
     # Contact / switch readback — even after retune to the destination agency.
@@ -5351,6 +5418,16 @@ def evaluate(
         sfo_active
         or str(last_tx_template or "").strip().lower()
         in ("clear_land", "go_around", "sfo_low_key", "sfo_high_key", "sfo_approve")
+    ):
+        address_optional = True
+    # Already on Control / Approach. "request Alamo recovery" after the
+    # check-in does not need the agency repeated.
+    if candidate.intent == "request_approach" and channel in (
+        "control_east",
+        "control_west",
+        "approach",
+        "departure",
+        "tower",
     ):
         address_optional = True
     if require_address and not address_optional and not address.to_atc:

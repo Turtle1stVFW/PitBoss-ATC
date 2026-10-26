@@ -159,6 +159,13 @@ class PilotSession:
         this jet — without these fields, Delivery kept reading Opus instead of
         the map plan.
         """
+        if body.get("fp_from_opus"):
+            # Drop a tester route left on this seat so the selected Opus
+            # flight (route + remarks) is what Approach assigns.
+            self.identity.pop("fp_route_string", None)
+            self.identity.pop("fp_altitude", None)
+            self.identity.pop("from_map", None)
+            return
         route = str(body.get("fp_route_string") or "").strip()
         if not route and not body.get("ownship_from_map"):
             return
@@ -1377,6 +1384,9 @@ def _session_engine_binding(
         cfg["_tts_session_id"] = sess.session_id
         if body is not None:
             sess.apply_radios(body, inject=inject_radios)
+            # Map-plan clear lands on identity inside apply_radios. Restamp
+            # so this same check-in reads the Opus flight, not the old route.
+            _apply_identity_to_config(cfg, sess.identity)
         elif inject_radios:
             engine.set_remote_radios(
                 sess.tuned_freqs_mhz,

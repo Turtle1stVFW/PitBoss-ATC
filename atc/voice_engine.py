@@ -2223,38 +2223,6 @@ def _seek_delivery_after_ops(engine: Any) -> None:
             pass
 
 
-def _ops_flight_is_post_landing(engine: Any) -> bool:
-    """True once the flight has landed or the card is on the recovery-codes steps."""
-    import ops as ops_mod
-
-    state = getattr(engine, "state", None)
-    step = None
-    if hasattr(engine, "current_step"):
-        try:
-            got = engine.current_step()
-        except Exception:
-            got = None
-        if isinstance(got, dict):
-            step = got
-    steps = None
-    mission = getattr(engine, "mission", None)
-    if isinstance(mission, dict):
-        try:
-            import flow_engine as flow_engine_mod
-
-            steps = flow_engine_mod.enabled_steps(mission)
-        except Exception:
-            raw = mission.get("steps")
-            steps = raw if isinstance(raw, list) else None
-    idx = state.get("index") if isinstance(state, dict) else None
-    return ops_mod.flight_is_post_landing(
-        state if isinstance(state, dict) else None,
-        steps=steps if isinstance(steps, list) else None,
-        index=idx,
-        current_step=step,
-    )
-
-
 def execute_ops_action(
     engine: Any,
     action: str,
@@ -2407,45 +2375,21 @@ def execute_ops_action(
                 "action": "none",
                 "detail": "no aircraft codes heard",
             }
-        if not _ops_flight_is_post_landing(engine):
-            text = ops_mod.build_inflight_codes_ack(
-                callsign, airport=ap, opus=opus, config=config
-            )
-            if hasattr(engine, "save_state"):
-                engine.save_state()
-            return _transmit(engine, ap, text, "ops", template="ops_status")
-        ready, pending, why = ops_mod.codes_collection_ready(state, opus=opus)
-        if not ready:
-            ack = ops_mod.build_codes_copy_ack(
-                callsign, airport=ap, opus=opus, config=config
-            )
-            result = _transmit(engine, ap, ack, "ops", template="ops_status")
-            result["deferred"] = {
-                "kind": "ops_codes",
-                "delay_s": float(ops_mod.CODES_IDLE_S),
-                "detail": why,
-            }
-            if hasattr(engine, "save_state"):
-                engine.save_state()
-            return result
-        return _close_sortie(pending or pending_now)
+        # A code pass never ends the sortie. The card may already be on the
+        # Ops-codes step, or a runway exit may be remembered, while the jet
+        # is still airborne. Time now / total time waits for "no change"
+        # or "no codes".
+        text = ops_mod.build_inflight_codes_ack(
+            callsign, airport=ap, words=words, opus=opus, config=config
+        )
+        if hasattr(engine, "save_state"):
+            engine.save_state()
+        return _transmit(engine, ap, text, "ops", template="ops_status")
 
     if action == "ops_codes_finalize":
-        # Idle closeout is only the after-landing sequence. An in-flight
-        # copy must not stamp total time when the timer fires.
-        if not _ops_flight_is_post_landing(engine):
-            return {"action": "none", "detail": "in flight — codes copied, clock open"}
-        ready, pending, why = ops_mod.codes_collection_ready(state, opus=opus)
-        if not ready or not pending:
-            result = {"action": "none", "detail": why or "waiting for codes"}
-            if pending and not state.get(ops_mod._CODES_DONE_KEY):
-                result["deferred"] = {
-                    "kind": "ops_codes",
-                    "delay_s": float(ops_mod.CODES_IDLE_S),
-                    "detail": why,
-                }
-            return result
-        return _close_sortie(pending)
+        # Older builds scheduled this after a code pass. It must not stamp
+        # total time; the pilot closes with "no change" or "no codes".
+        return {"action": "none", "detail": "codes stay open until no change or no codes"}
 
     return {"action": "none", "detail": f"unknown OPS action {action}"}
 
@@ -3091,10 +3035,15 @@ def _handle_approach_action(
                 plan=plan,
             )
             return _transmit(engine, airport, text, "tower")
+        tx = _resolve_tx_channel(engine, airport, match)
         text = atc_phrase.build_approach_change(
-            airport, callsign, weather, plan=plan
+            airport,
+            callsign,
+            weather,
+            plan=plan,
+            on_control=tx in ("control_east", "control_west"),
         )
-        return _transmit(engine, airport, text, "approach")
+        return _transmit(engine, airport, text, tx)
 
     plan = atc_phrase.assign_approach_plan(
         airport,

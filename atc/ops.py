@@ -851,48 +851,6 @@ def mark_codes_done(state: dict[str, Any] | None) -> None:
     state.pop(_CODES_LAST_AT_KEY, None)
 
 
-# Steps that only exist once the flight is on the ground after landing.
-_POST_LANDING_TEMPLATES = frozenset({"exit_runway", "taxi_in", "ops_status"})
-_POST_LANDING_IDS = frozenset({"ops_codes", "twr_exit", "gnd_taxi_in"})
-
-
-def flight_is_post_landing(
-    state: dict[str, Any] | None,
-    *,
-    steps: list[Any] | None = None,
-    index: int | None = None,
-    current_step: dict[str, Any] | None = None,
-) -> bool:
-    """
-    True after landing, when a code call may close the sortie.
-
-    In-flight code passes (before the exit / taxi / Ops-codes step, and
-    before a runway exit is recorded) only get a copy.
-    """
-    if isinstance(state, dict) and str(state.get("landed_runway") or "").strip():
-        return True
-    step = current_step if isinstance(current_step, dict) else None
-    if step and (
-        str(step.get("template") or "").strip().lower() in _POST_LANDING_TEMPLATES
-        or str(step.get("id") or "").strip().lower() in _POST_LANDING_IDS
-    ):
-        return True
-    if not isinstance(steps, list):
-        return False
-    try:
-        idx = int(index if index is not None else (state or {}).get("index") or 0)
-    except (TypeError, ValueError):
-        idx = 0
-    for i, raw in enumerate(steps):
-        if not isinstance(raw, dict):
-            continue
-        tmpl = str(raw.get("template") or "").strip().lower()
-        sid = str(raw.get("id") or "").strip().lower()
-        if tmpl in _POST_LANDING_TEMPLATES or sid in _POST_LANDING_IDS:
-            return idx >= i
-    return False
-
-
 def _ops_plain(transcript: str) -> str:
     text = re.sub(r"[^a-z0-9\s]", " ", (transcript or "").casefold())
     return re.sub(r"\s+", " ", text).strip()
@@ -1017,13 +975,22 @@ def build_inflight_codes_ack(
     callsign: str,
     *,
     airport: dict[str, Any] | None = None,
+    words: WordsBulletin | None = None,
     opus: Any = None,
     config: dict[str, Any] | None = None,
 ) -> str:
-    """In-flight code pass. Copy only — the clock stays open until after landing."""
+    """
+    Airborne code pass. Copy the codes and pass the current WORDS.
+
+    The sortie clock stays open until "no change" or "no codes".
+    """
     cs = atc_phrase.speak_callsign(callsign)
     agency = spoken_ops_name(airport, opus=opus, config=config)
-    return f"{cs}, {agency}, copy codes."
+    if words is not None and words_are_current(words):
+        words_bit = f"WORDS {words.spoken_id()} current"
+    else:
+        words_bit = "no words"
+    return f"{cs}, {agency}, copy codes, {words_bit}."
 
 
 def build_codes_copy_ack(

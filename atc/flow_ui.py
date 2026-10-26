@@ -8919,7 +8919,7 @@ class MissionPlanner(tk.Tk):
         )
         self._fly_map_chk = ttk.Checkbutton(
             foot,
-            text="Test: map is my jet + route",
+            text="Test: map is my jet",
             variable=self.var_ownship_from_map,
             command=self._on_ownship_from_map_changed,
         )

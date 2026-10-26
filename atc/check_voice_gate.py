@@ -179,6 +179,13 @@ CASES = [
     ("Approach, Fleece 1, with you", "approach", "approach", True, "inbound_recovery"),
     ("Approach, Fleece 1, inbound for recovery", "approach", "approach", True, "inbound_recovery"),
     ("Approach, Fleece 1, request ARCOE recovery", "approach", "approach", True, "request_approach"),
+    # ARCOE recovery. Whisper hears "RCO" or drops the E ("ARCO"). "ARCO" is
+    # also a tanker callsign — the recovery word keeps it off the boom.
+    ("Nellis Control, Fleece 1, request RCO recovery", "control_east", "flight", True, "request_approach"),
+    ("Nellis controlled, Fleece 1, request RCO recovery", "control_east", "flight", True, "request_approach"),
+    ("Nellis Control, Fleece 1, request ARCO recovery", "control_east", "flight", True, "request_approach"),
+    ("Nellis Control, Fleece 1, request ARCO", "control_east", "flight", True, "request_tanker"),
+    ("Nellis Control, Fleece 1, request tanker", "control_east", "flight", True, "request_tanker"),
     ("Approach, Fleece 1, request tactical overhead", "approach", "approach", True, "request_approach"),
     ("Approach, Fleece 1, request overhead", "approach", "approach", True, "request_approach"),
     ("Approach, Fleece 1, request straight in", "approach", "approach", True, "request_approach"),
@@ -1466,6 +1473,165 @@ def extras() -> int:
         bad += 1
     else:
         print("approach remarks request — Req ILSZ / ILS Zulu, Mode 3 ignored")
+
+    # Viper 1 (flight 30): ARCOE is the last fix, remarks are "RMKS: REQ ILS Z 21L".
+    # A sticky Stryk/Sarah plan from the route-tester sample must yield.
+    viper_route = "KLSV.DREAM7.DREAM.ILC200050/D0+15.RVELE.R4807.DREAM.ARCOE.KLSV"
+    viper_remarks = "RMKS: REQ ILS Z 21L"
+    viper_opus = type(
+        "O",
+        (),
+        {
+            "fp_route_string": viper_route,
+            "fp_altitude": "190",
+            "fp_remarks": viper_remarks,
+        },
+    )()
+    plan_viper = atc_phrase.assign_approach_plan(
+        nellis,
+        vmc,
+        state={
+            "approach_assigned": True,
+            "active_recovery": "visual_overhead",
+            "active_vfr_recovery": "STRYK",
+            "ownship_ll": [37.61423141542417, -115.08178710937501],
+            "ownship_ll_t": __import__("time").time(),
+            "approach_plan": {
+                "pattern": "visual_overhead",
+                "runway": "21R",
+                "vfr_recovery": "STRYK",
+                "vfr_recovery_say": "Stryk",
+                "direct_fix": "SARAH",
+                "direct_say": "Sarah",
+                "source": "route",
+                "fp_route": "KLSV FLEX DREAM SARAH KLSV",
+                "fp_request": None,
+            },
+        },
+        opus=viper_opus,
+    )
+    viper_phrase = atc_phrase.build_control_check_in(
+        "Viper 1", airport=nellis, plan=plan_viper
+    )
+    if (
+        plan_viper.get("instrument_id") != "ILS_Z_21L"
+        or plan_viper.get("iaf") != "ARCOE"
+        or plan_viper.get("vfr_recovery")
+        or plan_viper.get("direct_fix") == "SARAH"
+    ):
+        print(f"  FAIL Viper ILS Z request must not stay on Sarah/Stryk: {plan_viper}")
+        bad += 1
+    elif "sarah" in viper_phrase.lower() or "stryk" in viper_phrase.lower():
+        print(f"  FAIL Control phrase still names Sarah/Stryk: {viper_phrase}")
+        bad += 1
+    elif "arcoe" not in viper_phrase.lower() or "ils zulu" not in viper_phrase.lower():
+        print(f"  FAIL Control phrase should be ILS Z via Arcoe: {viper_phrase}")
+        bad += 1
+    else:
+        print(f"approach Viper ILS Z — {viper_phrase}")
+
+    import time as _time
+
+    last_sarah = (
+        "Viper one, Nellis Control, radar contact, forty one miles northeast "
+        "of Groom Lake, proceed direct Sarah, descend pilot discretion to ten "
+        "thousand, Nellis landing south, expect Stryk recovery for the overhead "
+        "runway two one right."
+    )
+    for said in (
+        "Viper one, request, Alamo recovery.",
+        "Nellis control, Viper 1, request, Alamo recovery.",
+    ):
+        heard = voice_intent.evaluate(
+            said,
+            channel="control_east",
+            phase="flight",
+            callsign="Viper 1",
+            runways=RUNWAYS,
+            last_tx_text=last_sarah,
+            last_tx_at=_time.time(),
+            last_tx_channel="control_east",
+            tuned_channel="control_east",
+        )
+        match = heard.match
+        if (
+            not heard.fired
+            or match is None
+            or match.intent != "request_approach"
+            or (match.slots or {}).get("vfr_recovery") != "ALAMO"
+        ):
+            print(
+                f"  FAIL Control Alamo request: {said!r} -> "
+                f"{heard.reason} heard={getattr(heard.candidate, 'intent', None)} "
+                f"slots={getattr(match or heard.candidate, 'slots', None)}"
+            )
+            bad += 1
+        else:
+            print(f"approach voice Alamo on Control — {said}")
+    for said in (
+        "Nellis controlled Viper one request, RCO recovery.",
+        "Nellis control Viper one, request RCO recovery.",
+        "Nellis Control, Viper one, request ARCO recovery.",
+        "Nellis Control, Viper one, request ARCOE recovery.",
+    ):
+        heard = voice_intent.evaluate(
+            said,
+            channel="control_east",
+            phase="flight",
+            callsign="Viper 1",
+            runways=RUNWAYS,
+            last_tx_text=last_sarah,
+            last_tx_at=_time.time(),
+            last_tx_channel="control_east",
+            tuned_channel="control_east",
+        )
+        match = heard.match
+        if (
+            not heard.fired
+            or match is None
+            or match.intent != "request_approach"
+            or (match.slots or {}).get("vfr_recovery") != "ARCOE"
+        ):
+            print(
+                f"  FAIL Control ARCOE recovery: {said!r} -> "
+                f"{heard.describe()} slots={getattr(match or heard.candidate, 'slots', None)}"
+            )
+            bad += 1
+        else:
+            print(f"approach voice ARCOE on Control — {said}")
+    arco_tanker = voice_intent.evaluate(
+        "Nellis Control, Viper one, request ARCO.",
+        channel="control_east",
+        phase="flight",
+        callsign="Viper 1",
+        runways=RUNWAYS,
+        tuned_channel="control_east",
+    )
+    if (
+        not arco_tanker.fired
+        or arco_tanker.match is None
+        or arco_tanker.match.intent != "request_tanker"
+    ):
+        print(f"  FAIL bare ARCO is still the tanker: {arco_tanker.describe()}")
+        bad += 1
+    else:
+        print("approach voice — bare request ARCO stays the tanker")
+    bj = voice_intent.evaluate(
+        "Blackjack, Viper 1, request Nellis Control.",
+        channel="blackjack",
+        phase="flight",
+        callsign="Viper 1",
+        runways=RUNWAYS,
+        tuned_channel="blackjack",
+    )
+    if not bj.fired or bj.match is None or bj.match.intent != "request_control":
+        print(
+            f"  FAIL Blackjack push still request_control: "
+            f"{bj.reason} heard={getattr(bj.candidate, 'intent', None)}"
+        )
+        bad += 1
+    else:
+        print("approach voice Alamo — Blackjack push unchanged")
 
     plan_iaf_route = atc_phrase.assign_approach_plan(
         nellis,
@@ -7714,8 +7880,15 @@ def extras() -> int:
     if inflight.get("action") not in ("transmit", "queued"):
         print(f"  FAIL in-flight codes must transmit: {inflight}")
         bad += 1
-    elif "copy codes" not in inflight_text or "time now" in inflight_text or "total time" in inflight_text:
-        print(f"  FAIL in-flight codes must be copy only: {inflight.get('text')}")
+    elif (
+        "copy codes" not in inflight_text
+        or "words" not in inflight_text
+        or "current" not in inflight_text
+        or "alpha alpha" not in inflight_text
+        or "time now" in inflight_text
+        or "total time" in inflight_text
+    ):
+        print(f"  FAIL in-flight codes must copy and pass WORDS: {inflight.get('text')}")
         bad += 1
     elif inflight_sortie is None or inflight_sortie.end_utc or inflight_state.get("ops_codes_done"):
         print(f"  FAIL in-flight codes must leave the clock open: {inflight_sortie}")
@@ -7791,11 +7964,37 @@ def extras() -> int:
         callsign="FLEECE 1",
     )
     ground_text = str(ground.get("text") or "").casefold()
-    if "copy codes" not in ground_text or "time now" not in ground_text or "total time" not in ground_text:
-        print(f"  FAIL codes on the Ops step must still close: {ground.get('text')}")
+    ground_sortie = ops_mod.sortie_from_state(ground_state)
+    if "copy codes" not in ground_text or "time now" in ground_text or "total time" in ground_text:
+        print(f"  FAIL a code pass must not close, even on the Ops step: {ground.get('text')}")
+        bad += 1
+    elif ground_sortie is None or ground_sortie.end_utc or ground_state.get("ops_codes_done"):
+        print(f"  FAIL Ops-step codes must leave the clock open: {ground_sortie}")
         bad += 1
     else:
-        print(f"OPS after landing — codes close — {ground.get('text')}")
+        ground_state["landed_runway"] = "21L"
+        landed = _ve.execute_ops_action(
+            _CodesEng(ground_state, 2),
+            "ops_status",
+            match=voice_intent.Match(
+                intent="ops_status",
+                kind="request",
+                template="",
+                confidence=1.0,
+                transcript="11, code 1, vector 1, 2, code 1",
+            ),
+            callsign="FLEECE 1",
+        )
+        landed_text = str(landed.get("text") or "").casefold()
+        landed_sortie = ops_mod.sortie_from_state(ground_state)
+        if "copy codes" not in landed_text or "time now" in landed_text or "total time" in landed_text:
+            print(f"  FAIL codes after a runway exit must still be copy only: {landed.get('text')}")
+            bad += 1
+        elif landed_sortie is None or landed_sortie.end_utc:
+            print(f"  FAIL runway-exit codes must not stamp total time: {landed_sortie}")
+            bad += 1
+        else:
+            print(f"OPS code pass — copy only, even if the card thinks they landed — {landed.get('text')}")
 
     if agencies.resolve(
         tuned_channel="ops",
