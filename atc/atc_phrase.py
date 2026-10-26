@@ -9600,23 +9600,27 @@ def _apply_affiliation_overlay(data: dict[str, Any]) -> dict[str, Any]:
     return merged
 
 
-def _pull_opus_affiliations(config: dict[str, Any]) -> None:
+def _pull_opus_radar(config: dict[str, Any]) -> dict[str, Any] | None:
     """
-    One Opus radar GET, only to copy picture labels onto local tracks.
+    One Opus radar GET for a picture, declare, bogey dope, or VID.
 
-    Called when a pilot asks for picture, declare, or bogey dope — not on a timer.
-    Positions stay on the local export. A failed pull keeps the last labels.
+    The local export has lat/lon and coalition, not Opus flight ids, picture
+    labels, or the bullseye string the pilot is reading. Copying labels by
+    unit id misses, so the ask itself uses this payload. A failed pull
+    returns None and the caller falls back to the local file.
     """
     backend = str((config or {}).get("opus_backend_url") or "").rstrip("/")
     if not backend:
-        return
+        return None
     ua = str((config or {}).get("user_agent") or "DCS-ATC-Phrase/1.0")
     try:
         remote = http_get_json(f"{backend}/opus/caoc/radar", ua)
     except Exception:
-        return
-    if isinstance(remote, dict):
-        _harvest_affiliations(remote)
+        return None
+    if not isinstance(remote, dict) or not isinstance(remote.get("units"), list):
+        return None
+    _harvest_affiliations(remote)
+    return remote
 
 
 def _fetch_caoc_radar_network(
@@ -9671,21 +9675,28 @@ def fetch_caoc_radar(
     export already uploaded to Opus). ``GET /opus/caoc/radar`` is the fallback
     when that file is stale, and not more often than ``caoc_radar_network_min_s``.
 
-    ``affiliations=True`` pulls Opus once for this call and copies bandit /
-    hostile labels onto the local tracks. Picture and declare set that flag.
-    The position loop does not.
+    ``affiliations=True`` (picture, declare, bogey dope, VID) uses that one
+    Opus download as the picture. The DCS file cannot answer those calls:
+    it has no flight id to find the jet, and no bullseye text to match a
+    declare. The position loop leaves the flag off and stays on the file.
     """
     now = time.time()
-    local = read_local_radar_snapshot(config)
-    if local is not None:
-        if affiliations:
-            _pull_opus_affiliations(config)
-        data: Any = _apply_affiliation_overlay(local)
-        _caoc_radar_cache["t"] = now
-        _caoc_radar_cache["data"] = data
-        _caoc_radar_cache["src"] = "local"
-    else:
-        data = _fetch_caoc_radar_network(config, max_age_s=max_age_s, now=now)
+    data: Any = None
+    if affiliations:
+        remote = _pull_opus_radar(config)
+        if remote is not None:
+            # Do not park this over a fresh local export. The next position
+            # tick must keep reading the file, not this one-shot picture.
+            data = remote
+    if data is None:
+        local = read_local_radar_snapshot(config)
+        if local is not None:
+            data = _apply_affiliation_overlay(local)
+            _caoc_radar_cache["t"] = now
+            _caoc_radar_cache["data"] = data
+            _caoc_radar_cache["src"] = "local"
+        else:
+            data = _fetch_caoc_radar_network(config, max_age_s=max_age_s, now=now)
     merged = merge_ownship_inject(data if isinstance(data, dict) else None, config)
     merged = merge_traffic_inject(merged, config)
     return apply_mission_clock_inject(merged)
@@ -12164,15 +12175,15 @@ def build_readback_checklist(
         add(
             "accept",
             "Accept",
-            "rolling",
-            "we'll take the rolling",
+            "affirm",
+            "affirm, roger, or we'll take the rolling",
             hinge=True,
         )
         add(
             "deny",
             "Decline",
             "unable",
-            "unable rolling",
+            "unable, negative, or no",
             hinge=True,
         )
         return items

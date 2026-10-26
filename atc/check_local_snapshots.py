@@ -60,7 +60,7 @@ def test_radar_path_accepts_profile_or_logs_folder() -> list[str]:
     atc_phrase.http_get_json = boom  # type: ignore[assignment]
     try:
         with tempfile.TemporaryDirectory() as tmp:
-            logs = Path(tmp) / "455AEWDS1" / "Logs"
+            logs = Path(tmp) / "ServerProfile" / "Logs"
             logs.mkdir(parents=True)
             _radar(
                 logs / "radar-snapshot.json",
@@ -88,7 +88,7 @@ def test_search_finds_non_dcs_profile() -> list[str]:
     fails: list[str] = []
     with tempfile.TemporaryDirectory() as tmp:
         saved = Path(tmp) / "Saved Games"
-        logs = saved / "455AEWDS1" / "Logs"
+        logs = saved / "ServerProfile" / "Logs"
         logs.mkdir(parents=True)
         snap = logs / "radar-snapshot.json"
         snap.write_text("{}", encoding="utf-8")
@@ -96,7 +96,7 @@ def test_search_finds_non_dcs_profile() -> list[str]:
         decoy.mkdir()
         found = atc_phrase._snapshot_files_under(saved, "radar-snapshot.json")
         if found != [snap]:
-            fails.append(f"expected only 455AEWDS1, got {found}")
+            fails.append(f"expected only ServerProfile, got {found}")
     return fails
 
 
@@ -285,15 +285,18 @@ def test_affiliations_only_when_requested() -> list[str]:
                 fails.append("local track was replaced")
             asked = atc_phrase.fetch_caoc_radar(cfg, affiliations=True)
             unit = ((asked or {}).get("units") or [{}])[0]
-            if unit.get("name") != "Turtle":
-                fails.append(f"picture pull replaced the local track: {unit}")
-            if unit.get("affiliation") != "HOSTILE":
-                fails.append(f"affiliation not copied: {unit}")
+            if unit.get("name") != "OPUS" or unit.get("affiliation") != "HOSTILE":
+                fails.append(f"picture call should use the opus picture, got {unit}")
             if len(calls) != 1:
                 fails.append(f"expected one picture pull, got {calls}")
             atc_phrase.fetch_caoc_radar(cfg, affiliations=True)
             if len(calls) != 2:
                 fails.append(f"a later picture call should pull again, got {len(calls)}")
+            after = atc_phrase.fetch_caoc_radar(cfg, max_age_s=0.0)
+            if ((after or {}).get("units") or [{}])[0].get("name") != "Turtle":
+                fails.append("position read after a picture call left the local file")
+            if len(calls) != 2:
+                fails.append(f"position read pulled opus again: {calls}")
     finally:
         atc_phrase.http_get_json = orig  # type: ignore[assignment]
     return fails

@@ -153,9 +153,9 @@ These are not pinned to a single agency (or are available broadly).
 #### `accept_rolling`
 
 - **Pilot call:** <Airport> Tower, <Callsign>, we'll take the rolling
-- **Does:** accept a rolling takeoff
-- **Keywords:** `rolling` | `roll` **AND** `take` | `accept` | `affirm` | `affirmative` | `roger` | `we ll` | `will` | `ready`
-- **Veto:** `unable`, `negative`, `full length`
+- **Does:** accept a rolling takeoff. After Tower asks, affirm / roger / yes is enough.
+- **Keywords:** `rolling` | `roll` **AND** `take` | `accept` | `affirm` | `affirmative` | `roger` | `wilco` | `yes` | `we ll` | `will` | `ready`
+- **Veto:** `unable`, `negative`, `full length`, `rather not`, `cannot`, `nope`
 - **Response:** *(sets rolling accept → next clear_takeoff wording)*
 
 #### `clear_of_runway` → template `taxi_in`
@@ -167,9 +167,9 @@ These are not pinned to a single agency (or are available broadly).
 
 #### `deny_rolling`
 
-- **Pilot call:** <Airport> Tower, <Callsign>, unable rolling
-- **Does:** decline the rolling takeoff
-- **Keywords:** `rolling` | `roll` **AND** `unable` | `negative` | `rather not` | `full length`
+- **Pilot call:** <Airport> Tower, <Callsign>, unable — or just “unable” / “negative” / “no” after Tower asks
+- **Does:** decline the rolling takeoff. Once Tower has asked, the word “rolling” is optional.
+- **Keywords:** `rolling` | `roll` **AND** `unable` | `negative` | `rather not` | `full length` | `cannot` | `nope` — bare unable / negative / no while the offer is open
 - **Response:** *(sets deny → LUAW wording)*
 
 #### `going_around`

@@ -44,9 +44,9 @@ PitBoss used to download the full Opus radar picture every couple of seconds (ab
 
 On **Host** and **Solo**, a fresh radar file is the position source. Opus radar is only used for positions when that file is missing or older than 30 seconds, and then at most every 15 seconds. Filed routes are cached for 3 minutes per flight. Weather still comes from Opus, once every 30 minutes.
 
-Picture labels (bandit / hostile) are not in the DCS file. They are pulled from Opus only when a pilot asks for picture, declare, bogey dope, or a VID — not on a timer. A VID on this box applies immediately.
+Picture, declare, bogey dope, and VID each download the Opus radar once for that ask. The DCS file has positions, not the flight id or the bullseye text those calls match on. Nothing polls that picture on a timer. A VID on this box applies immediately.
 
-The profile folder does not have to be named DCS. Setup → Basics → **Radar export** can be the Logs folder or the profile above it, for example `C:\Users\455\Saved Games\455AEWDS1\Logs`. Leave it blank and Pitboss uses the newest `radar-snapshot.json` under any `Saved Games\*\Logs` on this PC.
+The profile folder does not have to be named DCS. Setup → Basics → **Radar export** can be the Logs folder or the profile above it, for example `C:\Users\<account>\Saved Games\<profile>\Logs`. Leave it blank and Pitboss uses the newest `radar-snapshot.json` under any `Saved Games\*\Logs` on this PC.
 
 ## Traffic tab
 

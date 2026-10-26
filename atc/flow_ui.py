@@ -11950,7 +11950,7 @@ class MissionPlanner(tk.Tk):
             text=(
                 "Host only. Folder that contains radar-snapshot.json "
                 "(the profile does not have to be named DCS). "
-                "Example: C:\\Users\\455\\Saved Games\\455AEWDS1\\Logs. "
+                "Example: C:\\Users\\<account>\\Saved Games\\<profile>\\Logs. "
                 "Leave blank to search every Saved Games profile on this PC."
             ),
             bg=C_PANEL,

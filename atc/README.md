@@ -395,7 +395,7 @@ Calls it understands:
 | "Request High Key" / "request SFO" / "straight-in SFO" | Tower SFO approved (no canned altitude — say it if you want it echoed); report **High Key** then **Low Key** — cleared for the option at Low Key (or land if you asked full stop). Straight-in SFO: report *N mile simulated flameout final* |
 | "High Key" / "Low Key" / "Base Key" | SFO position reports. Clearance is at Low Key; Base Key + gear/option still clears if Low Key was missed |
 | "Alpha check" | Bullseye position for your aircraft |
-| "We'll take the rolling" / "unable rolling" | Accepts or declines the rolling departure. After Tower asks, **Next / Advance accepts** and **Previous declines** (HOTAS, hotkey, Stream Deck) — no voice or alt-tab needed. |
+| "We'll take the rolling" / "unable" / "negative" | Accepts or declines the rolling departure. After Tower asks, **unable**, **negative**, or **no** is enough — you do not have to say “rolling.” **Affirm**, **roger**, or **yes** accepts. **Next / Advance accepts** and **Previous declines** (HOTAS, hotkey, Stream Deck). |
 | "Gear down full stop" / "request the option" / "on the go" / "clear of the runway" | Land / option / go-around / taxi-in. **On the go** is the waveoff after the option (not a request for the option) |
 | "Say again" | Replays the last transmission |
 

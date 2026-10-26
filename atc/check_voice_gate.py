@@ -2992,7 +2992,22 @@ def extras() -> int:
     for text, want in (
         ("Tower, Fleece 1, we'll take the rolling", "accept_rolling"),
         ("accept rolling", "accept_rolling"),
+        ("Unable", "deny_rolling"),
         ("unable rolling", "deny_rolling"),
+        ("negative", "deny_rolling"),
+        ("Negative", "deny_rolling"),
+        ("no", "deny_rolling"),
+        ("nope", "deny_rolling"),
+        ("can't", "deny_rolling"),
+        ("cannot", "deny_rolling"),
+        ("rather not", "deny_rolling"),
+        ("full length", "deny_rolling"),
+        ("yes", "accept_rolling"),
+        ("affirm", "accept_rolling"),
+        ("roger", "accept_rolling"),
+        ("we'll take it", "accept_rolling"),
+        ("we'll take the rolling", "accept_rolling"),
+        ("no problem, we'll take the rolling", "accept_rolling"),
         ("line up and wait", "request_lineup"),
     ):
         result = voice_intent.evaluate(
@@ -3009,6 +3024,41 @@ def extras() -> int:
         if not result.fired or result.match.intent != want:
             print(
                 f"  FAIL rolling offer {text!r} → {want}: {result.describe()}"
+            )
+            bad += 1
+    no_problem = voice_intent.evaluate(
+        "no problem",
+        channel="tower",
+        phase="departure",
+        expected="rolling_accept",
+        callsign=CALLSIGN,
+        runways=RUNWAYS,
+        awaiting_readback=True,
+        readback_items=rolling_items,
+        require_address=True,
+    )
+    if no_problem.fired and no_problem.match.intent == "deny_rolling":
+        print(f"  FAIL 'no problem' must not decline rolling: {no_problem.describe()}")
+        bad += 1
+    # Bare unable / no is only an answer while Tower is waiting on the offer.
+    for text in ("Unable", "negative", "no", "yes", "roger"):
+        off_offer = voice_intent.evaluate(
+            text,
+            channel="tower",
+            phase="departure",
+            expected="lineup",
+            callsign=CALLSIGN,
+            runways=RUNWAYS,
+            awaiting_readback=False,
+            require_address=True,
+        )
+        if off_offer.fired and off_offer.match.intent in (
+            "accept_rolling",
+            "deny_rolling",
+        ):
+            print(
+                f"  FAIL {text!r} must not answer rolling when Tower has not asked: "
+                f"{off_offer.describe()}"
             )
             bad += 1
     ready_on_offer = voice_intent.evaluate(
@@ -3193,6 +3243,63 @@ def extras() -> int:
             print(f"  FAIL climb bare roger must stay silent: {text!r}")
             bad += 1
     print("awaiting climb readback — flexible altitude; wrong gets correction")
+
+    # FL190 readback. Whisper splits 'one niner zero' into '1, 9R0' and
+    # hears 'flight level' as 'flat level', then eats the rest as the callsign.
+    fl190_items = [
+        {
+            "key": "climb",
+            "label": "Climb / maintain",
+            "value": "19,000 ft",
+            "spoken": "climb unrestricted up to flight level one niner zero",
+            "hinge": True,
+            "highlight": True,
+        },
+    ]
+
+    def fl190_rb(text: str):
+        return voice_intent.evaluate(
+            text,
+            channel="departure",
+            phase="departure",
+            expected="radar_contact",
+            callsign="VIPER 1",
+            runways=RUNWAYS,
+            awaiting_readback=True,
+            readback_items=fl190_items,
+            require_address=True,
+        )
+
+    for text in (
+        "19,000 Viper 1",
+        "Up to flight level 1, 9R0, Viper 1.",
+        "Up to flat level 1, Nellis, you are Viper 1.",
+        "up to flight level one niner zero, Viper 1",
+        "flight level 190",
+        "flight level 19",
+        "flat level 190",
+    ):
+        result = fl190_rb(text)
+        if not result.fired or result.match.intent != "acknowledge_readback":
+            print(f"  FAIL FL190 readback should fire: {text!r} — {result.describe()}")
+            bad += 1
+    for text in (
+        "flight level two two zero",
+        "Up to flat level 2, Viper 1",
+        "eighteen thousand",
+    ):
+        result = fl190_rb(text)
+        if text.startswith("Up to flat level 2"):
+            if result.fired and result.match.intent == "acknowledge_readback":
+                print(f"  FAIL truncated wrong level must not close FL190: {text!r}")
+                bad += 1
+        elif not result.fired or result.match.intent != "correct_climb_readback":
+            print(f"  FAIL wrong FL190 readback should correct: {text!r} — {result.describe()}")
+            bad += 1
+    if voice_intent.normalize("runway 21R") != "runway 21r":
+        print(f"  FAIL niner glue ate runway 21R: {voice_intent.normalize('runway 21R')!r}")
+        bad += 1
+    print("FL190 readback — 9R0 / flat level still close the card")
 
     # Blackjack check-in: bare callsign closes the readback.
     bj_items = [

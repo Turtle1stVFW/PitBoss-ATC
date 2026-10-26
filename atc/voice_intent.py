@@ -365,7 +365,7 @@ def normalize(text: str) -> str:
     intent patterns so the two always agree.
     """
     lowered = re.sub(r"[^a-z0-9\s]", " ", str(text or "").lower())
-    tokens = [t for t in lowered.split() if t]
+    tokens = _repair_niner_glue([t for t in lowered.split() if t])
 
     # Pass 1: unambiguous digit words and literal numbers.
     staged: list[tuple[str, bool]] = []  # (token, is_digit)
@@ -400,6 +400,36 @@ def normalize(text: str) -> str:
     if run:
         out.append("".join(run))
     return _fold_taxi_via(_fold_eor(" ".join(out)))
+
+
+def _repair_niner_glue(tokens: list[str]) -> list[str]:
+    """
+    Pull the 'er' of 'niner' back out of a number.
+
+    Whisper writes 'one niner zero' as '1, 9R0'. The R sits between the
+    digits, so the 1 and the 90 never join and flight level 190 disappears.
+    A trailing R is a runway (21R) and is left alone.
+    """
+    glued: list[str] = []
+    for token in tokens:
+        m = re.fullmatch(r"(\d+)(?:er|r)(\d+)", token)
+        glued.append(m.group(1) + m.group(2) if m else token)
+    out: list[str] = []
+    for i, token in enumerate(glued):
+        if token in ("r", "er") and out and out[-1].isdigit():
+            nxt = glued[i + 1] if i + 1 < len(glued) else ""
+            if nxt.isdigit():
+                continue
+        out.append(token)
+    return out
+
+
+def _fold_flight_level_whisper(text: str) -> str:
+    """'flat level' / 'fight level' are Whisper for 'flight level'."""
+    if not text:
+        return text
+    folded = re.sub(r"\b(?:flat|fight|flite)\s+levels?\b", "flight level", text)
+    return re.sub(r"\bflightlevels?\b", "flight level", folded)
 
 
 # Whisper almost never writes the acronym "eor". Pilots say the letters;
@@ -1634,22 +1664,70 @@ INTENTS: tuple[Intent, ...] = (
         "accept_rolling",
         (
             ("rolling", "roll"),
-            ("take", "accept", "affirm", "affirmative", "roger", "we ll", "will", "ready"),
+            (
+                "take",
+                "accept",
+                "affirm",
+                "affirmative",
+                "roger",
+                "wilco",
+                "yes",
+                "yep",
+                "yeah",
+                "we ll",
+                "will",
+                "ready",
+                "can do",
+                "we can",
+            ),
         ),
         channels=("tower",),
         phases=("departure",),
-        veto=("unable", "negative", "full length"),
+        veto=(
+            "unable",
+            "un able",
+            "negative",
+            "full length",
+            "rather not",
+            "cannot",
+            "can not",
+            "can t",
+            "cant",
+            "decline",
+            "nope",
+            "nah",
+            "no thanks",
+            "no way",
+        ),
         example="we'll take the rolling",
         does="accept a rolling takeoff",
     ),
     Intent(
         "deny_rolling",
-        (("rolling", "roll"), ("unable", "negative", "rather not", "full length")),
+        (
+            ("rolling", "roll"),
+            (
+                "unable",
+                "un able",
+                "negative",
+                "rather not",
+                "full length",
+                "cannot",
+                "can not",
+                "can t",
+                "cant",
+                "decline",
+                "nope",
+                "nah",
+                "no thanks",
+                "no way",
+            ),
+        ),
         channels=("tower",),
         phases=("departure",),
         weight=1.1,
-        example="unable rolling",
-        does="decline the rolling takeoff",
+        example="unable",
+        does="decline the rolling takeoff — unable, negative, or no",
     ),
     Intent(
         "request_rolling",
@@ -1668,7 +1746,24 @@ INTENTS: tuple[Intent, ...] = (
         ),
         channels=("tower",),
         phases=("departure",),
-        veto=("unable", "negative", "full length", "line up", "lineup"),
+        veto=(
+            "unable",
+            "un able",
+            "negative",
+            "full length",
+            "rather not",
+            "cannot",
+            "can not",
+            "can t",
+            "cant",
+            "decline",
+            "nope",
+            "nah",
+            "no thanks",
+            "no way",
+            "line up",
+            "lineup",
+        ),
         example="request rolling",
         does="request a rolling takeoff",
     ),
@@ -3186,6 +3281,75 @@ def _is_rolling_mode_call(text: str) -> bool:
         )
     )
 
+
+# Yes/no once Tower has asked "will you accept rolling?". The word "rolling"
+# is optional — "ready" and bare "will" stay out, those are not an answer.
+_ROLLING_BARE_DENY = (
+    "unable",
+    "un able",
+    "negative",
+    "rather not",
+    "full length",
+    "cannot",
+    "can not",
+    "can t",
+    "cant",
+    "decline",
+    "nope",
+    "nah",
+    "no thanks",
+    "no thank you",
+    "no way",
+    "don t",
+    "won t",
+    "no",
+)
+_ROLLING_BARE_ACCEPT = (
+    "affirmative",
+    "affirm",
+    "wilco",
+    "roger",
+    "yep",
+    "yeah",
+    "yes",
+    "we ll take it",
+    "we will take it",
+    "take it",
+    "can do",
+    "will do",
+    "we can",
+    "able",
+)
+
+
+def _rolling_offer_is_open(expected: str, last_tx_template: str) -> bool:
+    """True while the live question is 'will you accept rolling?'."""
+    exp = (expected or "").strip().lower()
+    last = (last_tx_template or "").strip().lower()
+    return exp == "rolling_accept" or last == "rolling_accept"
+
+
+def _rolling_offer_bare_reply(text: str) -> str | None:
+    """
+    Short answer to the rolling offer.
+
+    Deny wins when both show up ('cannot accept'). A bare 'no' declines,
+    but 'no problem' / 'no worries' does not.
+    """
+    deny = _group_hit(text, _ROLLING_BARE_DENY, fuzzy=False)
+    if deny == "no" and _group_hit(text, ("no problem", "no worries"), fuzzy=False):
+        if not _group_hit(
+            text,
+            tuple(word for word in _ROLLING_BARE_DENY if word != "no"),
+            fuzzy=False,
+        ):
+            deny = None
+    if deny:
+        return "deny"
+    if _group_hit(text, _ROLLING_BARE_ACCEPT, fuzzy=False):
+        return "accept"
+    return None
+
 # Tower steps that "ready for departure" may answer (not cleared takeoff,
 # and not the random "will you accept rolling?" question).
 _DEPARTURE_READY_TEMPLATES = frozenset(
@@ -3476,6 +3640,7 @@ def _heard_altitudes_ft(text: str) -> list[int]:
     found: list[int] = []
     if not text:
         return found
+    text = _fold_flight_level_whisper(text)
     # Optional trailing feet/ft must not be required for a hit.
     text = re.sub(r"\b(?:feet|foot|ft)\b", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
@@ -3543,6 +3708,27 @@ def _altitudes_equivalent(a: int, b: int) -> bool:
     return abs(a - b) < 50
 
 
+def _flight_level_code(feet: int) -> str:
+    """19000 → '190'. The digits a pilot says after 'flight level'."""
+    if feet <= 0:
+        return ""
+    return str(int(round(feet / 100.0)))
+
+
+def _flight_level_digit_prefix(text: str) -> str:
+    """
+    Digits Whisper kept right after 'flight level'.
+
+    'flat level 1, Nellis…' keeps only the leading 1. A full '190' is left
+    to the normal parser.
+    """
+    folded = _fold_flight_level_whisper(text)
+    match = re.search(r"(?:flight\s+levels?|\bfl)\s*(\d{1,3})\b", folded)
+    if not match:
+        return ""
+    return match.group(1)
+
+
 def _climb_readback_hit(text: str, item: dict[str, Any] | None) -> bool:
     """True when the assigned climb altitude was heard (flexible phrasing)."""
     if item is None:
@@ -3550,14 +3736,27 @@ def _climb_readback_hit(text: str, item: dict[str, Any] | None) -> bool:
     assigned = _assigned_climb_ft(item)
     if assigned is None:
         return False
-    for heard in _heard_altitudes_ft(text):
-        if _altitudes_equivalent(heard, assigned):
+    heard_list = _heard_altitudes_ft(text)
+    if any(_altitudes_equivalent(heard, assigned) for heard in heard_list):
+        return True
+    # Whisper drops the tail of 'one niner zero' ('flight level 1', 'flat
+    # level 19'). A leading prefix of the assigned level still closes it.
+    # A different complete altitude does not — that is a correction.
+    code = _flight_level_code(assigned)
+    prefix = _flight_level_digit_prefix(text)
+    if prefix and code.startswith(prefix) and len(prefix) < len(code):
+        if not heard_list:
             return True
+        short = int(prefix) * 100
+        if all(heard == short for heard in heard_list):
+            return True
+        return False
     # Spoken cue substring (climb and maintain … / flight level …)
     spoken = normalize(str(item.get("spoken") or ""))
+    spoken = _fold_flight_level_whisper(spoken)
     spoken = re.sub(r"\b(?:feet|foot|ft)\b", " ", spoken)
     spoken = re.sub(r"\s+", " ", spoken).strip()
-    if spoken and spoken in text:
+    if spoken and spoken in _fold_flight_level_whisper(text):
         return True
     # Altitude-only spoken form still counts (never require trailing 'feet')
     spoken_alt = normalize(
@@ -3567,9 +3766,11 @@ def _climb_readback_hit(text: str, item: dict[str, Any] | None) -> bool:
             spoken,
         )
     )
+    spoken_alt = _fold_flight_level_whisper(spoken_alt)
     spoken_alt = re.sub(r"\b(?:feet|foot|ft)\b", " ", spoken_alt)
     spoken_alt = re.sub(r"\s+", " ", spoken_alt).strip()
-    if spoken_alt and re.search(rf"(?<!\w){re.escape(spoken_alt)}(?!\w)", text):
+    folded = _fold_flight_level_whisper(text)
+    if spoken_alt and re.search(rf"(?<!\w){re.escape(spoken_alt)}(?!\w)", folded):
         return True
     return False
 
@@ -3950,8 +4151,21 @@ def _score_intents(
     """Highest-scoring intent for a transcript, before any addressing gate."""
     best: Match | None = None
     current_step = step_by_id(steps, current_step_id)
+    # "will you accept rolling?" — "unable" / "negative" / "yes" are enough.
+    bare_roll = (
+        _rolling_offer_bare_reply(text)
+        if _rolling_offer_is_open(expected, last_tx_template)
+        else None
+    )
     for intent in tuple(INTENTS) + tuple(extra):
         if intent.veto and _group_hit(text, intent.veto, fuzzy=False):
+            continue
+        if bare_roll == "deny" and intent.id in (
+            "accept_rolling",
+            "request_rolling",
+        ):
+            continue
+        if bare_roll == "accept" and intent.id == "deny_rolling":
             continue
         # "wind check" still fuzzy-matches "check wind". Reject the radio-check
         # shape before it can score as request_winds on every agency.
@@ -4282,8 +4496,15 @@ def _score_intents(
         outstanding_runway = (
             _runway_readback_item(readback_items) if awaiting_readback else None
         )
+        bare_this = (bare_roll == "deny" and intent.id == "deny_rolling") or (
+            bare_roll == "accept" and intent.id == "accept_rolling"
+        )
         if hinge_hit:
             confidence = min(1.0, 0.98 * intent.weight)
+            coverage = 1.0
+        elif bare_this:
+            # The offer is a yes/no. "Unable" answers it; "rolling" is optional.
+            confidence = min(1.0, 0.96 * intent.weight)
             coverage = 1.0
         elif intent.groups:
             # Say-again must be literal — fuzzy "repeat" near-misses used to

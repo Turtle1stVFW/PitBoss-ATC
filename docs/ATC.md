@@ -362,7 +362,7 @@ Calls it understands:
 | "Request vectors" | Radar vector clearance toward recovery / field |
 | "Airport in sight, request tower" | Cleared approach / contact Tower |
 | "Alpha check" | Bullseye position for your aircraft |
-| "We'll take the rolling" / "unable rolling" | Accepts or declines the rolling departure. After Tower asks, **Next / Advance accepts** and **Previous declines** (HOTAS, hotkey, Stream Deck) — no voice or alt-tab needed. |
+| "We'll take the rolling" / "unable" / "negative" | Accepts or declines the rolling departure. After Tower asks, **unable**, **negative**, or **no** is enough — you do not have to say “rolling.” **Affirm**, **roger**, or **yes** accepts. **Next / Advance accepts** and **Previous declines** (HOTAS, hotkey, Stream Deck). |
 | "Gear down full stop" / "going around" / "clear of the runway" | Fires the matching step |
 | "Say again" | Replays the last transmission |
 
