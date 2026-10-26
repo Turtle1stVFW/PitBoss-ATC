@@ -1017,8 +1017,10 @@ class AtcServer:
         if not match.intent:
             return {"ok": False, "error": "missing intent"}
 
+        from_ptt = bool(body.get("from_ptt"))
+
         def work(engine: flow_engine.FlowEngine) -> dict[str, Any]:
-            return voice_engine.execute_intent(match, engine)
+            return voice_engine.execute_intent(match, engine, from_ptt=from_ptt)
 
         if match.intent == "request_split":
             result = self.split_flight(sess, match, body)

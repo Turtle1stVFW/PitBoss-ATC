@@ -1061,6 +1061,7 @@ class FlowEngine:
             step,
             state=self.state,
             radio=self.remote_radios,
+            keyed_only=srs_radio.voice_keyed_gate_active(),
         )
         if not allowed:
             raise RuntimeError(msg)

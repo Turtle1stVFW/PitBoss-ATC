@@ -431,8 +431,11 @@ Zulu runway 21L* (one procedure only — ILS **or** LOC, not both). Assignment o
 2. A recovery or IAF named near the **end of the Opus filed route** (e.g. `… STRYK KLSV`). Filed **KRYSS** with no ARCOE is **ILS X** (KRYSS at 8800), not ILS Zulu via ARCOE at 15k. ARCOE still in the route keeps ILS Z.  
 3. METAR: VMC → runway-side VFR default (ARCOE/TORYE/STRYK on 21, MINTT on 03); IFR → instrument + IAF (nothing filed → ILS Z / ARCOE on 21)  
 
-Per NellisAFBI 11-250 §4.13.5 the four VFR recoveries are **STRYK, TORYE, ARCOE,
-MINTT** — TORYE and ARCOE are separate initial fixes (Elgin pick-up is TORYE).
+Per NellisAFBI 11-250 §4.13.5 the VFR recoveries are **STRYK, TORYE, ARCOE,
+MINTT, and ALAMO** — TORYE and ARCOE are separate initial fixes (Elgin pick-up is TORYE).
+ALAMO (§4.13.5.4) is assigned only when it is filed, or when the remarks
+request it. A remarks note such as **Req ILSZ** or **Request Stryk** selects
+that approach or recovery ahead of the route fix.
 Check-in sounds like: *“Fleece 1, Nellis Approach, Nellis landing south, expect
 TAC Overhead runway two one right, cleared direct Arcoe, …”* (or Torye / Stryk /
 Mintt for that recovery; landing north when the 03s are active; instrument uses

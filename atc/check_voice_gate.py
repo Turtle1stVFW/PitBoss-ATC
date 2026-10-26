@@ -161,8 +161,13 @@ CASES = [
     ("Knight Ops, Fleece 1, checking in", "ops", "departure", True, "ops_check_in"),
     ("Knight Ops, Fleece 1, with you", "ops", "departure", True, "ops_check_in"),
     ("Knight Ops, Fleece 1, request current WORDS", "delivery", "departure", True, "ops_request_words"),
+    ("Knight Ops, Fleece 1, airborne with codes", "ops", "flight", True, "ops_status"),
+    ("Ops, Fleece 1, airborne with codes", "ops", "flight", True, "ops_status"),
     ("Knight Ops, Fleece 1, Fleece 1-1 Code 1, Fleece 1-2 Code 2", "ops", "approach", True, "ops_status"),
     ("Knight Ops, Fleece 1, code 1", "ops", "approach", True, "ops_status"),
+    ("Knight Ops, Fleece 1, no change", "ops", "approach", True, "ops_status"),
+    ("Knight Ops, Fleece 1, no codes", "ops", "approach", True, "ops_status"),
+    ("Ops, Fleece 1, no change", "ops", "flight", True, "ops_status"),
     ("Knight Ops, Fleece 1, request picture", "ops", "flight", False, None),
     ("Ops check", "ops", "departure", False, None),
     ("Two, ops check", "ops", "departure", False, None),
@@ -1306,6 +1311,161 @@ def extras() -> int:
             f"approach assign route — {plan_route.get('vfr_recovery')} "
             f"source={plan_route.get('source')} desc {plan_route.get('descend_ft')}"
         )
+
+    # §4.13.5.4 Alamo is filed-only. Position near the fix stays on the
+    # runway-side recovery. A spoken request still counts as the pilot asking.
+    plan_alamo = atc_phrase.assign_approach_plan(
+        nellis,
+        vmc,
+        state={},
+        force=True,
+        opus=type(
+            "O",
+            (),
+            {"fp_route_string": "KLSV DREAM ALAMO KLSV", "fp_altitude": "FL240"},
+        )(),
+    )
+    plan_alamo_ask = atc_phrase.assign_approach_plan(
+        nellis, vmc, state={}, force=True, vfr_recovery="ALAMO"
+    )
+    plan_alamo_pos = atc_phrase.assign_approach_plan(
+        nellis, vmc, state={}, force=True, position=(37.283, -115.230833)
+    )
+    plan_alamo_note = atc_phrase.assign_approach_plan(
+        nellis,
+        vmc,
+        state={},
+        force=True,
+        opus=type(
+            "O",
+            (),
+            {
+                "fp_route_string": "KLSV DREAM ARCOE KLSV",
+                "fp_altitude": "FL240",
+                "fp_remarks": "REQ ALAMO / MODE3 4321",
+            },
+        )(),
+    )
+    if voice_intent.extract_vfr_recovery("request alamo recovery") != "ALAMO":
+        print("  FAIL voice should hear Alamo recovery")
+        bad += 1
+    elif (
+        plan_alamo.get("vfr_recovery") != "ALAMO"
+        or plan_alamo.get("source") != "route"
+        or int(plan_alamo.get("descend_ft") or 0) != 15000
+        or str(plan_alamo.get("direct_fix") or "") != "ALAMO"
+    ):
+        print(f"  FAIL filed ALAMO should assign Alamo / 15000: {plan_alamo}")
+        bad += 1
+    elif plan_alamo_ask.get("vfr_recovery") != "ALAMO":
+        print(f"  FAIL requested ALAMO should assign Alamo: {plan_alamo_ask}")
+        bad += 1
+    elif plan_alamo_pos.get("vfr_recovery") == "ALAMO":
+        print(f"  FAIL position must not assign Alamo: {plan_alamo_pos}")
+        bad += 1
+    elif plan_alamo_note.get("vfr_recovery") != "ALAMO" or plan_alamo_note.get("source") != "request":
+        print(f"  FAIL remarks Req Alamo should outrank filed ARCOE: {plan_alamo_note}")
+        bad += 1
+    else:
+        print(
+            f"approach Alamo recovery — filed/remarks only "
+            f"(position {plan_alamo_pos.get('vfr_recovery')})"
+        )
+
+    # Opus remarks: 'Req ILSZ' is the plate, even in VMC with ARCOE on the route.
+    plan_req_ils = atc_phrase.assign_approach_plan(
+        nellis,
+        vmc,
+        state={},
+        force=True,
+        opus=type(
+            "O",
+            (),
+            {
+                "fp_route_string": "KLSV DREAM ARCOE KLSV",
+                "fp_altitude": "FL240",
+                "fp_remarks": "Req ILSZ / TCN 17Y",
+            },
+        )(),
+    )
+    plan_req_sticky = atc_phrase.assign_approach_plan(
+        nellis,
+        vmc,
+        state={
+            "approach_assigned": True,
+            "active_recovery": "tactical_overhead",
+            "approach_plan": {
+                "pattern": "tactical_overhead",
+                "runway": "21R",
+                "vfr_recovery": "ARCOE",
+                "vfr_recovery_say": "Arcoe",
+                "source": "route",
+                "fp_route": "KLSV DREAM ARCOE KLSV",
+            },
+        },
+        opus=type(
+            "O",
+            (),
+            {
+                "fp_route_string": "KLSV DREAM ARCOE KLSV",
+                "fp_altitude": "FL240",
+                "fp_remarks": "REQUEST ILS ZULU",
+            },
+        )(),
+    )
+    plan_req_voice = atc_phrase.assign_approach_plan(
+        nellis,
+        vmc,
+        state={},
+        force=True,
+        vfr_recovery="TORYE",
+        opus=type(
+            "O",
+            (),
+            {
+                "fp_route_string": "KLSV DREAM ARCOE KLSV",
+                "fp_altitude": "FL240",
+                "fp_remarks": "REQ ILSZ",
+            },
+        )(),
+    )
+    plan_mode3 = atc_phrase.assign_approach_plan(
+        nellis,
+        vmc,
+        state={},
+        force=True,
+        opus=type(
+            "O",
+            (),
+            {
+                "fp_route_string": "KLSV DREAM ARCOE KLSV",
+                "fp_altitude": "FL240",
+                "fp_remarks": "MODE3 4321 / TCN 17Y",
+            },
+        )(),
+    )
+    if (
+        plan_req_ils.get("pattern") != "instrument"
+        or plan_req_ils.get("instrument_id") != "ILS_Z_21L"
+        or plan_req_ils.get("iaf") != "ARCOE"
+        or plan_req_ils.get("source") != "request"
+    ):
+        print(f"  FAIL Req ILSZ should be ILS Z / ARCOE: {plan_req_ils}")
+        bad += 1
+    elif (
+        plan_req_sticky.get("instrument_id") != "ILS_Z_21L"
+        or plan_req_sticky.get("pattern") != "instrument"
+    ):
+        print(f"  FAIL sticky VFR must yield to Req ILS Zulu: {plan_req_sticky}")
+        bad += 1
+    elif plan_req_voice.get("vfr_recovery") != "TORYE":
+        print(f"  FAIL voice fix must outrank remarks: {plan_req_voice}")
+        bad += 1
+    elif plan_mode3.get("vfr_recovery") != "ARCOE" or plan_mode3.get("pattern") == "instrument":
+        print(f"  FAIL Mode 3 remarks must not change the recovery: {plan_mode3}")
+        bad += 1
+    else:
+        print("approach remarks request — Req ILSZ / ILS Zulu, Mode 3 ignored")
 
     plan_iaf_route = atc_phrase.assign_approach_plan(
         nellis,
@@ -7262,6 +7422,45 @@ def extras() -> int:
     else:
         print("Opus WORDS fallback — mock when backend unset")
 
+    ops_mod._WORDS_CACHE.update({"key": "", "exp": 0.0, "current": None})
+
+    def _empty_words_get(url: str, _ua: str) -> dict:
+        if "/opus/words" not in url:
+            raise AssertionError(url)
+        return {"current": None}
+
+    atc_phrase.http_get_json = _empty_words_get  # type: ignore[assignment]
+    try:
+        empty_words = ops_mod.current_words(
+            {
+                "ops_words_provider": "opus",
+                "opus_backend_url": "https://example.test/backend",
+                "opus_theater_id": 1,
+            },
+            when=datetime(2026, 9, 7, tzinfo=timezone.utc),
+        )
+    finally:
+        atc_phrase.http_get_json = orig_get
+        ops_mod._WORDS_CACHE.update({"key": "", "exp": 0.0, "current": None})
+    empty_spoken = ops_mod.build_words_reply(
+        "FLEECE 1",
+        empty_words,
+        start=True,
+        when=datetime(2026, 9, 7, 21, 25, tzinfo=timezone.utc),
+    )
+    empty_low = empty_spoken.casefold()
+    if empty_words.source != "none" or empty_words.id:
+        print(f"  FAIL empty Opus WORDS must not invent an id: {empty_words}")
+        bad += 1
+    elif "no words" not in empty_low or "current" in empty_low:
+        print(f"  FAIL OPS must say no words: {empty_spoken}")
+        bad += 1
+    elif "start approved" not in empty_low:
+        print(f"  FAIL no-words start must still approve: {empty_spoken}")
+        bad += 1
+    else:
+        print(f"Opus WORDS empty — {empty_spoken}")
+
     if abs(ops_mod.decimal_hours(1 * 3600 + 42 * 60) - 1.7) > 0.05:
         print(f"  FAIL 1h42m should be 1.7: {ops_mod.decimal_hours(6120)}")
         bad += 1
@@ -7312,6 +7511,184 @@ def extras() -> int:
                 bad += 1
             else:
                 print("OPS reset — start timer cleared, Start approved again")
+
+    import voice_engine as _ve
+
+    class _CodesEng:
+        def __init__(self, state: dict, index: int = 0) -> None:
+            self.config = {
+                "dry_run": True,
+                "freq_gate_enabled": False,
+                "ops_words_provider": "mock",
+                "ops_words_id": "AA01",
+            }
+            self.state = state
+            self.state["index"] = index
+            self.mission = {
+                "steps": [
+                    {
+                        "id": "air",
+                        "channel": "blackjack",
+                        "template": "bj_check_in",
+                        "enabled": True,
+                    },
+                    {
+                        "id": "twr_exit",
+                        "channel": "tower",
+                        "template": "exit_runway",
+                        "enabled": True,
+                    },
+                    {
+                        "id": "ops_codes",
+                        "channel": "ops",
+                        "template": "ops_status",
+                        "enabled": True,
+                    },
+                ]
+            }
+
+        def airport(self) -> dict:
+            return nellis
+
+        def current_step(self) -> dict | None:
+            steps = self.mission["steps"]
+            idx = int(self.state.get("index") or 0)
+            if 0 <= idx < len(steps):
+                return steps[idx]
+            return None
+
+        def save_state(self) -> None:
+            return None
+
+    invite_state: dict = {}
+    ops_mod.approve_start(invite_state, callsign="FLEECE 1", when=t0)
+    invite = _ve.execute_ops_action(
+        _CodesEng(invite_state, 0),
+        "ops_status",
+        match=voice_intent.Match(
+            intent="ops_status",
+            kind="request",
+            template="",
+            confidence=1.0,
+            transcript="Ops, Fleece 1, airborne with codes",
+        ),
+        callsign="FLEECE 1",
+    )
+    invite_text = str(invite.get("text") or "").casefold()
+    invite_sortie = ops_mod.sortie_from_state(invite_state)
+    if invite.get("action") not in ("transmit", "queued"):
+        print(f"  FAIL airborne codes check-in must transmit: {invite}")
+        bad += 1
+    elif "go with codes" not in invite_text or "time now" in invite_text or "copy codes" in invite_text:
+        print(f"  FAIL airborne codes check-in must invite the pass: {invite.get('text')}")
+        bad += 1
+    elif invite_sortie is None or invite_sortie.end_utc or invite_state.get("ops_codes_done"):
+        print(f"  FAIL airborne codes check-in must leave the clock open: {invite_sortie}")
+        bad += 1
+    else:
+        print(f"OPS airborne codes — go with codes — {invite.get('text')}")
+
+    inflight_state: dict = {}
+    ops_mod.approve_start(inflight_state, callsign="FLEECE 1", when=t0)
+    inflight = _ve.execute_ops_action(
+        _CodesEng(inflight_state, 0),
+        "ops_status",
+        match=voice_intent.Match(
+            intent="ops_status",
+            kind="request",
+            template="",
+            confidence=1.0,
+            transcript="Knight Ops, Fleece 1, code 1",
+        ),
+        callsign="FLEECE 1",
+    )
+    inflight_text = str(inflight.get("text") or "").casefold()
+    inflight_sortie = ops_mod.sortie_from_state(inflight_state)
+    if inflight.get("action") not in ("transmit", "queued"):
+        print(f"  FAIL in-flight codes must transmit: {inflight}")
+        bad += 1
+    elif "copy codes" not in inflight_text or "time now" in inflight_text or "total time" in inflight_text:
+        print(f"  FAIL in-flight codes must be copy only: {inflight.get('text')}")
+        bad += 1
+    elif inflight_sortie is None or inflight_sortie.end_utc or inflight_state.get("ops_codes_done"):
+        print(f"  FAIL in-flight codes must leave the clock open: {inflight_sortie}")
+        bad += 1
+    else:
+        early = _ve.execute_ops_action(
+            _CodesEng(inflight_state, 0),
+            "ops_codes_finalize",
+            callsign="FLEECE 1",
+        )
+        if early.get("action") not in (None, "", "none") or (
+            inflight_sortie and ops_mod.sortie_from_state(inflight_state).end_utc
+        ):
+            print(f"  FAIL in-flight idle must not close the sortie: {early}")
+            bad += 1
+        else:
+            closed = _ve.execute_ops_action(
+                _CodesEng(inflight_state, 0),
+                "ops_status",
+                match=voice_intent.Match(
+                    intent="ops_status",
+                    kind="request",
+                    template="",
+                    confidence=1.0,
+                    transcript="Knight Ops, Fleece 1, no change",
+                ),
+                callsign="FLEECE 1",
+            )
+            closed_text = str(closed.get("text") or "").casefold()
+            closed_sortie = ops_mod.sortie_from_state(inflight_state)
+            if "time now" not in closed_text or "total time" not in closed_text:
+                print(f"  FAIL no change must finish with time: {closed.get('text')}")
+                bad += 1
+            elif closed_sortie is None or not closed_sortie.end_utc or not inflight_state.get("ops_codes_done"):
+                print(f"  FAIL no change must close the sortie: {closed_sortie}")
+                bad += 1
+            else:
+                print(f"OPS in-flight codes — copy only; no change closes — {closed.get('text')}")
+
+    parked_state: dict = {}
+    ops_mod.approve_start(parked_state, callsign="FLEECE 1", when=t0)
+    parked = _ve.execute_ops_action(
+        _CodesEng(parked_state, 2),
+        "ops_status",
+        match=voice_intent.Match(
+            intent="ops_status",
+            kind="request",
+            template="",
+            confidence=1.0,
+            transcript="Knight Ops, Fleece 1, no codes",
+        ),
+        callsign="FLEECE 1",
+    )
+    parked_text = str(parked.get("text") or "").casefold()
+    if "time now" not in parked_text or "total time" not in parked_text:
+        print(f"  FAIL no codes after landing must finish: {parked.get('text')}")
+        bad += 1
+    else:
+        print(f"OPS after landing — no codes closes — {parked.get('text')}")
+
+    ground_state: dict = {}
+    ops_mod.approve_start(ground_state, callsign="FLEECE 1", when=t0)
+    ground = _ve.execute_ops_action(
+        _CodesEng(ground_state, 2),
+        "ops_status",
+        match=voice_intent.Match(
+            intent="ops_status",
+            kind="request",
+            template="",
+            confidence=1.0,
+            transcript="Knight Ops, Fleece 1, code 1",
+        ),
+        callsign="FLEECE 1",
+    )
+    ground_text = str(ground.get("text") or "").casefold()
+    if "copy codes" not in ground_text or "time now" not in ground_text or "total time" not in ground_text:
+        print(f"  FAIL codes on the Ops step must still close: {ground.get('text')}")
+        bad += 1
+    else:
+        print(f"OPS after landing — codes close — {ground.get('text')}")
 
     if agencies.resolve(
         tuned_channel="ops",

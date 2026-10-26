@@ -313,7 +313,7 @@ def collect_hostile_groups(
     call. UNKNOWN and undeclared TI stay bogey until a VID writes BANDIT
     or HOSTILE. Red coalition is not a hostile call.
     """
-    radar = atc_phrase.fetch_caoc_radar(config)
+    radar = atc_phrase.fetch_caoc_radar(config, affiliations=True)
     if not radar:
         raise RadarUnavailable("CAOC radar feed is unreachable")
     units = list(radar.get("units") or [])
@@ -980,7 +980,7 @@ def collect_declare_groups(
     ELVIS) and altitude when the pilot said one. Without a cue: nearest air
     in the bubble.
     """
-    radar = atc_phrase.fetch_caoc_radar(config)
+    radar = atc_phrase.fetch_caoc_radar(config, affiliations=True)
     if not radar:
         raise RadarUnavailable("CAOC radar feed is unreachable")
     units = list(radar.get("units") or [])

@@ -116,7 +116,93 @@ def main() -> int:
         else:
             print(f"Blackjack step allowed while keyed VHF — {msg}")
 
-        # Tips / voice TX: VHF is not an agency, so fall through to Blackjack.
+        # Spoken calls do not use that any-radio match. Keyed VHF is not ATC.
+        voice_ok, voice_msg, voice_result = srs_radio.check_freq_gate(
+            cfg, AIRPORT, {"channel": "blackjack"}, radio=bank, keyed_only=True
+        )
+        if voice_ok or voice_result != "mismatch":
+            print(
+                f"  FAIL voice on keyed VHF must not count as Blackjack: {voice_msg!r}"
+            )
+            bad += 1
+        elif "132.650" not in voice_msg:
+            print(f"  FAIL voice block should name the keyed VHF: {voice_msg!r}")
+            bad += 1
+        else:
+            print(f"voice on keyed VHF blocked — {voice_msg}")
+        reason = srs_radio.keyed_voice_block_reason(AIRPORT, cfg, bank)
+        if "132.650" not in reason:
+            print(f"  FAIL keyed VHF utterance must be ignored: {reason!r}")
+            bad += 1
+        else:
+            print(f"keyed VHF utterance ignored — {reason}")
+        on_bj = srs_radio.RadioState(
+            source="srs",
+            freqs_mhz=[BLACKJACK_MHZ, VHF_MHZ],
+            selected_mhz=BLACKJACK_MHZ,
+            fresh=True,
+            age_s=0.1,
+        )
+        if srs_radio.keyed_voice_block_reason(AIRPORT, cfg, on_bj):
+            print("  FAIL keyed Blackjack must still be heard")
+            bad += 1
+        voice_bj, _bj_msg, bj_result = srs_radio.check_freq_gate(
+            cfg, AIRPORT, {"channel": "blackjack"}, radio=on_bj, keyed_only=True
+        )
+        if not voice_bj or bj_result != "match":
+            print(f"  FAIL voice keyed on Blackjack must match, got {bj_result}")
+            bad += 1
+        else:
+            print("voice keyed on Blackjack matches — ok")
+
+        import voice_engine
+        import voice_intent
+
+        advanced: list[str] = []
+
+        class _Earshot:
+            config = cfg
+            state: dict = {}
+            remote_radios = srs_radio.RadioState(
+                source="client",
+                freqs_mhz=[BLACKJACK_MHZ, VHF_MHZ],
+                selected_mhz=VHF_MHZ,
+                fresh=True,
+                age_s=0.0,
+            )
+
+            def airport(self) -> dict:
+                return AIRPORT
+
+            def play_id(self, step_id: str, **_k: object) -> dict:
+                advanced.append(str(step_id))
+                return {"action": "play"}
+
+            def next(self) -> dict:
+                advanced.append("next")
+                return {"action": "next"}
+
+        heard = voice_engine.execute_intent(
+            voice_intent.Match(
+                intent="request_taxi",
+                kind="request",
+                template="taxi",
+                confidence=1.0,
+                slots={"channel": "blackjack"},
+                transcript="Blackjack, Fleece one, checking in",
+            ),
+            _Earshot(),
+            from_ptt=True,
+        )
+        if heard.get("action") != "blocked" or advanced:
+            print(
+                f"  FAIL VHF PTT must not advance the flow: {heard!r} {advanced}"
+            )
+            bad += 1
+        else:
+            print(f"VHF PTT did not advance — {heard.get('detail')}")
+
+        # Tips: VHF is not an agency, so fall through to Blackjack.
         tuned = srs_radio.channel_for_tuned_freq(AIRPORT, cfg, state=bank)
         if tuned != "blackjack":
             print(f"  FAIL fall-through agency should be blackjack, got {tuned!r}")

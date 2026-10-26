@@ -38,6 +38,16 @@ Commits do not update installed copies. Testers are prompted only for a **publis
 
 The repo has to be public (no token is built into the app). Do not attach `config.json` or anything from `atc\secrets\`.
 
+## Bandwidth
+
+PitBoss used to download the full Opus radar picture every couple of seconds (about 600 KB a pull — several megabits, continuously). The dedicated server already writes that picture to `Saved Games\DCS*\Logs\radar-snapshot.json`.
+
+On **Host** and **Solo**, a fresh radar file is the position source. Opus radar is only used for positions when that file is missing or older than 30 seconds, and then at most every 15 seconds. Filed routes are cached for 3 minutes per flight. Weather still comes from Opus, once every 30 minutes.
+
+Picture labels (bandit / hostile) are not in the DCS file. They are pulled from Opus only when a pilot asks for picture, declare, bogey dope, or a VID — not on a timer. A VID on this box applies immediately.
+
+If DCS runs as a different Windows user than PitBoss, set `radar_snapshot_path` in `atc\config.json` to the full path under that user's `Saved Games\...\Logs\`.
+
 ## Traffic tab
 
 After the first Client connects, **Traffic** lists who is on and the per-frequency TX queue. Same Opus flight = one timeline.

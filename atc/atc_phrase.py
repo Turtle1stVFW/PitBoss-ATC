@@ -544,6 +544,7 @@ def patch_caoc_unit_affiliation(
         )
     except Exception:
         return False
+    _affiliation_by_unit[uid] = aff
     cached = _caoc_radar_cache.get("data")
     if isinstance(cached, dict):
         for unit in list(cached.get("units") or []):
@@ -647,10 +648,50 @@ def _opus_cache_key(config: dict[str, Any]) -> str:
     )
 
 
+def _config_seconds(
+    config: dict[str, Any] | None,
+    key: str,
+    default: float,
+    *,
+    minimum: float = 0.0,
+) -> float:
+    raw = (config or {}).get(key)
+    if raw in (None, ""):
+        val = float(default)
+    else:
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            val = float(default)
+    return max(float(minimum), val)
+
+
 def invalidate_opus_cache() -> None:
-    _OPUS_CACHE["key"] = ""
-    _OPUS_CACHE["exp"] = 0.0
-    _OPUS_CACHE["ctx"] = None
+    _OPUS_CACHE.clear()
+    _OPUS_FLIGHTS_LIST.clear()
+
+
+def _opus_flight_cache_ttl(config: dict[str, Any] | None) -> float:
+    """How long a filed route / callsign may be reused. Routes rarely change."""
+    return _config_seconds(config, "opus_flight_cache_s", _OPUS_CACHE_TTL_SEC, minimum=15.0)
+
+
+def _opus_cache_get(config: dict[str, Any]) -> OpusFlightContext | None:
+    slot = _OPUS_CACHE.get(_opus_cache_key(config))
+    if not isinstance(slot, dict):
+        return None
+    if float(slot.get("exp") or 0) <= time.time():
+        return None
+    ctx = slot.get("ctx")
+    return ctx if isinstance(ctx, OpusFlightContext) else None
+
+
+def _opus_cache_put(config: dict[str, Any], ctx: OpusFlightContext, now: float | None = None) -> None:
+    stamp = time.time() if now is None else now
+    _OPUS_CACHE[_opus_cache_key(config)] = {
+        "exp": stamp + _opus_flight_cache_ttl(config),
+        "ctx": ctx,
+    }
 
 
 def invalidate_metar_cache() -> None:
@@ -977,6 +1018,40 @@ def _context_from_opus_flight(
     return ctx
 
 
+def _cached_opus_flights(config: dict[str, Any]) -> list[Any] | None:
+    """
+    GET /opus/flights, shared across every seat on this process.
+
+    The position loop used to download the full list once per flight. One
+    copy lasts opus_flight_cache_s (default three minutes).
+    """
+    backend = (config.get("opus_backend_url") or "").rstrip("/")
+    if not backend:
+        return None
+    now = time.time()
+    slot = _OPUS_FLIGHTS_LIST.get(backend)
+    if (
+        isinstance(slot, dict)
+        and float(slot.get("exp") or 0) > now
+        and isinstance(slot.get("rows"), list)
+    ):
+        return slot["rows"]
+    ua = config.get("user_agent", "DCS-ATC-Phrase/1.0")
+    try:
+        flights = http_get_json(f"{backend}/opus/flights", ua)
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, RuntimeError):
+        if isinstance(slot, dict) and isinstance(slot.get("rows"), list):
+            return slot["rows"]
+        return None
+    if not isinstance(flights, list):
+        return None
+    _OPUS_FLIGHTS_LIST[backend] = {
+        "exp": now + _opus_flight_cache_ttl(config),
+        "rows": flights,
+    }
+    return flights
+
+
 def _opus_flights_list_row(
     config: dict[str, Any], flight_id: int
 ) -> dict[str, Any] | None:
@@ -985,14 +1060,9 @@ def _opus_flights_list_row(
 
     Flight detail omits those fields — Blackjack airspace + VUL need the list row.
     """
-    backend = (config.get("opus_backend_url") or "").rstrip("/")
-    if not backend or not flight_id:
+    if not flight_id:
         return None
-    ua = config.get("user_agent", "DCS-ATC-Phrase/1.0")
-    try:
-        flights = http_get_json(f"{backend}/opus/flights", ua)
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, RuntimeError):
-        return None
+    flights = _cached_opus_flights(config)
     if not isinstance(flights, list):
         return None
     for flight in flights:
@@ -1170,39 +1240,33 @@ def _resolve_whole_opus_flight(config: dict[str, Any]) -> OpusFlightContext | No
         print(f"Host has no Opus flight selected — using {label} (clients carry FP)")
         return apply_callsign_override(config, synthetic_flight_context(label))
 
-    cache_key = _opus_cache_key(config)
     now = time.time()
-    if (
-        _OPUS_CACHE.get("key") == cache_key
-        and float(_OPUS_CACHE.get("exp") or 0) > now
-        and _OPUS_CACHE.get("ctx") is not None
-    ):
-        ctx = _OPUS_CACHE["ctx"]
-        print(f"Opus callsign (cached): {ctx.radio_callsign}")
-        return apply_callsign_override(config, replace(ctx))
+    cached_ctx = _opus_cache_get(config)
+    if cached_ctx is not None:
+        print(f"Opus callsign (cached): {cached_ctx.radio_callsign}")
+        return apply_callsign_override(config, replace(cached_ctx))
 
     ua = config.get("user_agent", "DCS-ATC-Phrase/1.0")
     flight_list: dict[str, Any] | None = None
     signups: list[dict[str, Any]] = []
+    detail_fetched = False
 
     if selected_id is not None:
         try:
             fetched = http_get_json(f"{backend}/opus/flights/{selected_id}", ua)
             if isinstance(fetched, dict):
                 flight_list = fetched
+                detail_fetched = True
         except urllib.error.URLError as exc:
             print(f"WARNING: Opus flight {selected_id} fetch failed ({exc})", file=sys.stderr)
         if flight_list is None:
             # Fall back to list endpoint row
-            try:
-                flights = http_get_json(f"{backend}/opus/flights", ua)
-                if isinstance(flights, list):
-                    for flight in flights:
-                        if int(flight.get("id") or 0) == selected_id:
-                            flight_list = flight
-                            break
-            except urllib.error.URLError as exc:
-                print(f"WARNING: Opus flights fetch failed ({exc})", file=sys.stderr)
+            flights = _cached_opus_flights(config)
+            if isinstance(flights, list):
+                for flight in flights:
+                    if int(flight.get("id") or 0) == selected_id:
+                        flight_list = flight
+                        break
         if flight_list is not None:
             try:
                 fetched_signups = http_get_json(
@@ -1216,14 +1280,13 @@ def _resolve_whole_opus_flight(config: dict[str, Any]) -> OpusFlightContext | No
                 print(f"WARNING: Opus signups fetch failed ({exc})", file=sys.stderr)
     else:
         # Legacy: find newest flight where opus_user_name is signed up
-        try:
-            flights = http_get_json(f"{backend}/opus/flights", ua)
-        except urllib.error.URLError as exc:
-            print(f"WARNING: Opus flights fetch failed ({exc})", file=sys.stderr)
+        flights = _cached_opus_flights(config)
+        if not isinstance(flights, list):
+            print("WARNING: Opus flights fetch failed", file=sys.stderr)
             if override:
                 return synthetic_flight_context(override)
             return None
-        if not isinstance(flights, list) or not flights:
+        if not flights:
             if override:
                 return synthetic_flight_context(override)
             return None
@@ -1265,16 +1328,19 @@ def _resolve_whole_opus_flight(config: dict[str, Any]) -> OpusFlightContext | No
             flight_list, _opus_flights_list_row(config, fid)
         )
     detail: dict[str, Any] = dict(flight_list)
-    # Always pull /opus/flights/{id}. The list row often has route + altitude
-    # already, and we used to skip this fetch — Mode 3 / dest / remarks live
-    # on the detail payload, so a filed squawk never reached the clearance.
-    try:
-        fetched = http_get_json(f"{backend}/opus/flights/{fid}", ua)
-        if isinstance(fetched, dict):
-            # Keep list VUL/event — detail never carries them.
-            detail = _merge_opus_list_metadata(fetched, flight_list)
-    except urllib.error.URLError as exc:
-        print(f"WARNING: Opus flight detail fetch failed ({exc}); using list fields", file=sys.stderr)
+    # Mode 3 / dest / remarks live on the detail payload. Skip the second GET
+    # when the selected-id branch already downloaded /opus/flights/{id}.
+    if not detail_fetched:
+        try:
+            fetched = http_get_json(f"{backend}/opus/flights/{fid}", ua)
+            if isinstance(fetched, dict):
+                # Keep list VUL/event — detail never carries them.
+                detail = _merge_opus_list_metadata(fetched, flight_list)
+        except urllib.error.URLError as exc:
+            print(
+                f"WARNING: Opus flight detail fetch failed ({exc}); using list fields",
+                file=sys.stderr,
+            )
 
     base = str(flight_list.get("callsign") or detail.get("callsign") or "").strip()
     if not base or not fid:
@@ -1286,9 +1352,7 @@ def _resolve_whole_opus_flight(config: dict[str, Any]) -> OpusFlightContext | No
     ctx = _context_from_opus_flight(
         config, flight_list, detail, signups, seat=seat, user=user
     )
-    _OPUS_CACHE["key"] = cache_key
-    _OPUS_CACHE["exp"] = now + _OPUS_CACHE_TTL_SEC
-    _OPUS_CACHE["ctx"] = ctx
+    _opus_cache_put(config, ctx, now)
     return apply_callsign_override(config, replace(ctx))
 
 
@@ -1309,7 +1373,7 @@ def cached_radio_callsign(config: dict[str, Any]) -> str:
     override = callsign_override(config)
     if override:
         return override
-    ctx = _OPUS_CACHE.get("ctx")
+    ctx = _opus_cache_get(config)
     return str(getattr(ctx, "radio_callsign", "") or "")
 
 
@@ -2210,6 +2274,8 @@ def nearest_vfr_recovery_for_position(
     for entry in catalog.get("vfr_recoveries") or []:
         if not isinstance(entry, dict):
             continue
+        if entry.get("position_eligible") is False:
+            continue
         sides = [str(s) for s in (entry.get("runway_sides") or [])]
         if side and sides and side not in sides:
             continue
@@ -2252,13 +2318,13 @@ def pick_default_vfr_recovery(
     order = list((defs.get("vfr_by_runway_side") or {}).get(side) or [])
     for rid in order:
         found = find_vfr_recovery(catalog, rid)
-        if found:
+        if found and found.get("position_eligible") is not False:
             sides = [str(s) for s in (found.get("runway_sides") or [])]
             if not sides or side in sides:
                 return found
     # Fallback: first recovery that matches runway side
     for entry in (catalog or {}).get("vfr_recoveries") or []:
-        if not isinstance(entry, dict):
+        if not isinstance(entry, dict) or entry.get("position_eligible") is False:
             continue
         sides = [str(s) for s in (entry.get("runway_sides") or [])]
         if not sides or side in sides:
@@ -2440,6 +2506,121 @@ def _position_vfr_conflicts_plan(
     return bool(want) and want != have
 
 
+_FILED_REQUEST_HEAD = re.compile(
+    r"\b(?:REQUEST(?:ING|ED)?|REQ|RQST)\b[:\s.\-]*",
+    re.IGNORECASE,
+)
+_FILED_REQUEST_STOP = frozenset(
+    {"RECOVERY", "APPROACH", "FOR", "THE", "RUNWAY", "RWY", "TO", "AND", "OR"}
+)
+_FILED_PHONETIC_LETTER = {"ZULU": "Z", "XRAY": "X", "YANKEE": "Y"}
+
+
+def _filed_request_phrases(remarks: str | None) -> list[str]:
+    """Text after each Req / Request in Opus flight-plan remarks."""
+    text = str(remarks or "").upper()
+    if not text.strip():
+        return []
+    phrases: list[str] = []
+    for match in _FILED_REQUEST_HEAD.finditer(text):
+        rest = text[match.end() :]
+        rest = re.split(r"[/;|\n]", rest, maxsplit=1)[0]
+        rest = re.split(
+            r"\b(?:MODE\s*3|MODE3|SQUAWK|TCN|RMK)\b", rest, maxsplit=1
+        )[0]
+        words: list[str] = []
+        for word in re.findall(r"[A-Z0-9]+", rest):
+            if word in _FILED_PHONETIC_LETTER:
+                words.append(_FILED_PHONETIC_LETTER[word])
+                continue
+            if word in _FILED_REQUEST_STOP:
+                if words:
+                    break
+                continue
+            words.append(word)
+            if len(words) >= 6:
+                break
+        if words:
+            phrases.append(" ".join(words))
+    return phrases
+
+
+def _request_token_variants(phrase: str) -> list[str]:
+    """Spoken plate names ('TACAN Z', 'HI ILS Z') beside the compact alias."""
+    compact = re.sub(r"[^A-Z0-9]", "", phrase.upper())
+    variants = [phrase, compact]
+    match = re.fullmatch(r"(?:HI)?(ILS|LOC|TACAN|TAC)([ZXY])", compact)
+    if match:
+        kind, letter = match.group(1), match.group(2)
+        if kind in ("TACAN", "TAC"):
+            variants.append("TAC" + letter)
+        else:
+            variants.append(kind + letter)
+    # Longest first, de-duplicated.
+    out: list[str] = []
+    seen: set[str] = set()
+    for token in variants:
+        key = token.strip().upper()
+        if key and key not in seen:
+            seen.add(key)
+            out.append(token)
+    return out
+
+
+def _instrument_alias_hit(inst: dict[str, Any], token: str) -> bool:
+    want = re.sub(r"[^A-Z0-9]", "", str(token).upper())
+    if not want:
+        return False
+    aliases = [str(inst.get("id") or "")] + [
+        str(a) for a in (inst.get("aliases") or [])
+    ]
+    return any(re.sub(r"[^A-Z0-9]", "", a.upper()) == want for a in aliases)
+
+
+def match_filed_request(
+    catalog: dict[str, Any] | None,
+    remarks: str | None,
+) -> dict[str, Any] | None:
+    """
+    Approach or VFR recovery named in Opus remarks.
+
+    Pilots file notes such as 'Req ILSZ' or 'Request Stryk'. The first clause
+    that matches a published plate or recovery wins. Bare remarks (Mode 3,
+    TACAN channel) do not.
+    """
+    if not catalog:
+        return None
+    for phrase in _filed_request_phrases(remarks):
+        words = phrase.split()
+        for length in range(len(words), 0, -1):
+            chunk = " ".join(words[:length])
+            for token in _request_token_variants(chunk):
+                inst = find_instrument_approach(catalog, token=token)
+                # A miss falls through to the first plate. Keep only an alias hit.
+                if inst and _instrument_alias_hit(inst, token):
+                    return {
+                        "kind": "instrument",
+                        "id": str(inst.get("id") or ""),
+                        "instrument": inst,
+                        "instrument_id": str(inst.get("id") or ""),
+                    }
+                vfr = find_vfr_recovery(catalog, token)
+                if vfr:
+                    return {
+                        "kind": "vfr",
+                        "id": str(vfr.get("id") or ""),
+                        "vfr_id": str(vfr.get("id") or ""),
+                        "entry": vfr,
+                    }
+    return None
+
+
+def _filed_request_id(hit: dict[str, Any] | None) -> str:
+    if not isinstance(hit, dict):
+        return ""
+    return str(hit.get("id") or "")
+
+
 def assign_approach_plan(
     airport: dict[str, Any],
     weather: Weather,
@@ -2459,10 +2640,12 @@ def assign_approach_plan(
 
     Priority for which recovery/IAF:
       1. Explicit pilot/voice/Fly fix override (vfr_recovery / iaf / instrument_id)
-      2. Named fix in the Opus filed route (always re-checked)
-      3. Published fix nearest the aircraft (CAOC position)
-      4. METAR VMC → runway-side VFR default; IFR → instrument + IAF
+      2. Request in the Opus remarks ('Req ILSZ', 'Request Stryk')
+      3. Named fix in the Opus filed route (always re-checked)
+      4. Published fix nearest the aircraft (CAOC position)
+      5. METAR VMC → runway-side VFR default; IFR → instrument + IAF
 
+    A recovery marked position_eligible false (Alamo) is skipped at steps 4 and 5.
     A recovery *pattern* alone (tactical_overhead / instrument) does not suppress
     the flight-plan scan — only an explicit fix name does.
 
@@ -2476,10 +2659,12 @@ def assign_approach_plan(
     # Pattern-only kwargs still allow the filed route to pick the fix.
     named_fix = vfr_recovery
     explicit_fix = bool(vfr_recovery or instrument_id or iaf)
-    route = (opus.fp_route_string if opus else None) or None
+    route = (getattr(opus, "fp_route_string", None) if opus else None) or None
+    remarks = (getattr(opus, "fp_remarks", None) if opus else None) or None
     route_hit = (
         None if explicit_fix else match_recovery_from_route(catalog, route)
     )
+    remark_hit = None if explicit_fix else match_filed_request(catalog, remarks)
     vmc_now = is_vfr_recovery_weather(weather, catalog=catalog)
 
     if (
@@ -2521,9 +2706,17 @@ def assign_approach_plan(
                 force=True,
                 position=position,
             )
-        # Filed route changed, or a position/default plan ignored the FP fix.
+        # Filed route changed, remarks request changed, or a position/default
+        # plan ignored the FP fix.
         route_changed = bool(route) and str(plan.get("fp_route") or "") != str(route)
-        if route_changed or _route_fix_conflicts_plan(plan, route_hit, vmc=vmc_now):
+        request_changed = _filed_request_id(remark_hit) != str(
+            plan.get("fp_request") or ""
+        )
+        if (
+            route_changed
+            or request_changed
+            or _route_fix_conflicts_plan(plan, route_hit, vmc=vmc_now)
+        ):
             return assign_approach_plan(
                 airport,
                 weather,
@@ -2625,6 +2818,26 @@ def assign_approach_plan(
         if kind == "iaf" and not recovery:
             recovery = "instrument"
 
+    # Remarks request outranks the route fix. 'Req ILSZ' is the plate even in
+    # VMC; 'Req Stryk' / 'Req Alamo' is that recovery even if the route names
+    # another fix. A route IAF stays only when it is published on the requested plate.
+    if remark_hit:
+        if str(remark_hit.get("kind") or "") == "vfr":
+            vfr_recovery = str(remark_hit.get("vfr_id") or "") or vfr_recovery
+            instrument_id = None
+            iaf = None
+            entry = remark_hit.get("entry")
+            recovery = str(
+                (entry or {}).get("default_pattern") or "visual_overhead"
+            )
+        else:
+            instrument_id = str(remark_hit.get("instrument_id") or "") or instrument_id
+            recovery = "instrument"
+            inst = remark_hit.get("instrument")
+            if not (isinstance(inst, dict) and iaf and find_iaf(inst, iaf)):
+                iaf = None
+            vfr_recovery = None
+
     # Explicit pattern request, else keep prior, else weather / route default
     if recovery:
         pattern = normalize_recovery_key(recovery)
@@ -2681,11 +2894,16 @@ def assign_approach_plan(
         "iaf_altitude_type": None,
         "vmc": is_vfr_recovery_weather(weather, catalog=catalog),
         "source": (
-            "override"
-            if explicit_fix and not route_hit
-            else ("route" if route_hit else "weather")
+            "request"
+            if remark_hit
+            else (
+                "override"
+                if explicit_fix and not route_hit
+                else ("route" if route_hit else "weather")
+            )
         ),
         "fp_route": route,
+        "fp_request": _filed_request_id(remark_hit) or None,
         "route_fix": str(
             (route_hit or {}).get("vfr_id")
             or (route_hit or {}).get("iaf_id")
@@ -8269,7 +8487,13 @@ _CAOC_XZ_METERS_PER_DEG_LON = 111320.0 * math.cos(math.radians(_CAOC_XZ_ORIGIN_L
 _NTTR_MAG_DECLINATION_E_DEG = 12.0
 _CAOC_DEFAULT_BULLSEYE = {"name": "ELVIS", "lat": 37.25, "lon": -115.75}
 
-_caoc_radar_cache: dict[str, Any] = {"t": 0.0, "data": None}
+_caoc_radar_cache: dict[str, Any] = {"t": 0.0, "data": None, "src": ""}
+# VID / gateway labels keyed by DCS unit id. The local radar file has no
+# affiliation field, so a label learned from Opus (or a VID on this host)
+# is painted back onto each fresh snapshot.
+_affiliation_by_unit: dict[str, str] = {}
+_json_snap_cache: dict[str, dict[str, Any]] = {}
+_SNAPSHOT_LOCK = threading.Lock()
 _theater_nav_cache: dict[int, list[dict[str, Any]]] = {}
 MAP_OWNSHIP_ID = "map-ownship"
 MAP_TRAFFIC_PREFIX = "map-traffic-"
@@ -9156,28 +9380,284 @@ def parse_caoc_bullseye_text(text: str) -> tuple[str, int, int] | None:
     return name, brg, rng
 
 
-def fetch_caoc_radar(config: dict[str, Any], *, max_age_s: float = 5.0) -> dict[str, Any] | None:
-    """Latest CAOC radar snapshot from Opus (`GET /opus/caoc/radar`)."""
+def _local_snapshots_enabled(config: dict[str, Any] | None) -> bool:
+    """
+    Host and solo read the DCS export on this PC. A client keeps using Opus
+    unless Setup points at a snapshot path or turns the flag on.
+    """
+    cfg = config or {}
+    flag = cfg.get("local_dcs_snapshots", None)
+    if isinstance(flag, str):
+        token = flag.strip().casefold()
+        if token in {"0", "false", "off", "no"}:
+            return False
+        if token in {"1", "true", "on", "yes"}:
+            return True
+    elif flag is False:
+        return False
+    elif flag is True:
+        return True
+    if str(cfg.get("radar_snapshot_path") or "").strip():
+        return True
+    role = str(cfg.get("atc_role") or "").strip().casefold()
+    try:
+        import atc_net
+
+        role = atc_net.role_of(cfg)
+    except Exception:
+        role = role or "solo"
+    return role in {"host", "solo"}
+
+
+def _snapshot_search_paths(filename: str) -> list[Path]:
+    """DCS Saved Games logs on this machine (this user, then other local users)."""
+    roots: list[Path] = [Path.home() / "Saved Games"]
+    system = os.environ.get("SystemDrive") or "C:"
+    users = Path(system + "\\Users")
+    if users.is_dir():
+        try:
+            children = list(users.iterdir())
+        except OSError:
+            children = []
+        skip = {"public", "default", "default user", "all users"}
+        for user in children:
+            if user.name.casefold() in skip:
+                continue
+            roots.append(user / "Saved Games")
+    found: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        if not root.is_dir():
+            continue
+        try:
+            profiles = list(root.iterdir())
+        except OSError:
+            continue
+        for profile in profiles:
+            if not profile.is_dir() or not profile.name.upper().startswith("DCS"):
+                continue
+            path = profile / "Logs" / filename
+            if not path.is_file():
+                continue
+            key = str(path).casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            found.append(path)
+    return found
+
+
+def _pick_snapshot_path(
+    config: dict[str, Any] | None,
+    filename: str,
+    config_key: str,
+    *,
+    max_age_s: float,
+) -> Path | None:
+    explicit = str((config or {}).get(config_key) or "").strip()
+    if explicit:
+        path = Path(explicit)
+        return path if path.is_file() else None
+    fresh: list[tuple[float, Path]] = []
     now = time.time()
-    cached = _caoc_radar_cache.get("data")
-    data: Any = None
-    if cached is not None and (now - float(_caoc_radar_cache.get("t") or 0)) < max_age_s:
-        data = cached
+    for path in _snapshot_search_paths(filename):
+        try:
+            age = now - path.stat().st_mtime
+        except OSError:
+            continue
+        if age <= max_age_s:
+            fresh.append((age, path))
+    if not fresh:
+        return None
+    fresh.sort(key=lambda item: item[0])
+    return fresh[0][1]
+
+
+def _read_json_snapshot(path: Path, *, max_age_s: float) -> dict[str, Any] | None:
+    """Last complete JSON if the export is still being written."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    if st.st_size <= 2 or (time.time() - st.st_mtime) > max_age_s:
+        return None
+    key = str(path)
+    with _SNAPSHOT_LOCK:
+        prev = _json_snap_cache.get(key)
+        if (
+            isinstance(prev, dict)
+            and prev.get("mtime_ns") == st.st_mtime_ns
+            and prev.get("size") == st.st_size
+            and isinstance(prev.get("data"), dict)
+        ):
+            return prev["data"]
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeError):
+        with _SNAPSHOT_LOCK:
+            prev = _json_snap_cache.get(key)
+        if (
+            isinstance(prev, dict)
+            and isinstance(prev.get("data"), dict)
+            and (time.time() - float(prev.get("t_read") or 0)) <= max_age_s
+        ):
+            return prev["data"]
+        return None
+    if not isinstance(data, dict):
+        return None
+    with _SNAPSHOT_LOCK:
+        _json_snap_cache[key] = {
+            "mtime_ns": st.st_mtime_ns,
+            "size": st.st_size,
+            "t_read": time.time(),
+            "data": data,
+        }
+    return data
+
+
+def read_local_radar_snapshot(config: dict[str, Any] | None) -> dict[str, Any] | None:
+    """
+    DCS ``Logs/radar-snapshot.json`` when it is fresh.
+
+    This is the file the server already writes for Opus. Reading it here
+    skips the round trip that was pulling the same picture back down.
+    """
+    if not _local_snapshots_enabled(config):
+        return None
+    max_age = _config_seconds(config, "radar_snapshot_max_age_s", 30.0, minimum=2.0)
+    path = _pick_snapshot_path(
+        config, "radar-snapshot.json", "radar_snapshot_path", max_age_s=max_age
+    )
+    if path is None:
+        return None
+    data = _read_json_snapshot(path, max_age_s=max_age)
+    if not isinstance(data, dict) or not isinstance(data.get("units"), list):
+        return None
+    return data
+
+
+def _harvest_affiliations(data: dict[str, Any]) -> None:
+    for unit in data.get("units") or []:
+        if not isinstance(unit, dict):
+            continue
+        uid = str(unit.get("id") or unit.get("unitId") or unit.get("unit_id") or "").strip()
+        aff = str(unit.get("affiliation") or "").strip().upper()
+        if uid and aff:
+            _affiliation_by_unit[uid] = aff
+
+
+def _apply_affiliation_overlay(data: dict[str, Any]) -> dict[str, Any]:
+    if not _affiliation_by_unit:
+        return data
+    units = data.get("units")
+    if not isinstance(units, list):
+        return data
+    out_units: list[Any] = []
+    changed = False
+    for unit in units:
+        if not isinstance(unit, dict):
+            out_units.append(unit)
+            continue
+        uid = str(unit.get("id") or "").strip()
+        aff = _affiliation_by_unit.get(uid)
+        if aff and str(unit.get("affiliation") or "").strip().upper() != aff:
+            unit = dict(unit)
+            unit["affiliation"] = aff
+            changed = True
+        out_units.append(unit)
+    if not changed:
+        return data
+    merged = dict(data)
+    merged["units"] = out_units
+    return merged
+
+
+def _pull_opus_affiliations(config: dict[str, Any]) -> None:
+    """
+    One Opus radar GET, only to copy picture labels onto local tracks.
+
+    Called when a pilot asks for picture, declare, or bogey dope — not on a timer.
+    Positions stay on the local export. A failed pull keeps the last labels.
+    """
+    backend = str((config or {}).get("opus_backend_url") or "").rstrip("/")
+    if not backend:
+        return
+    ua = str((config or {}).get("user_agent") or "DCS-ATC-Phrase/1.0")
+    try:
+        remote = http_get_json(f"{backend}/opus/caoc/radar", ua)
+    except Exception:
+        return
+    if isinstance(remote, dict):
+        _harvest_affiliations(remote)
+
+
+def _fetch_caoc_radar_network(
+    config: dict[str, Any], *, max_age_s: float, now: float
+) -> dict[str, Any] | None:
+    # The dedicated-server host is what blew the traffic cap. Solo and client
+    # keep the caller's freshness when they have no local export.
+    role = str(config.get("atc_role") or "").strip().casefold()
+    try:
+        import atc_net
+
+        role = atc_net.role_of(config)
+    except Exception:
+        role = role or "solo"
+    if role == "host":
+        floor = _config_seconds(config, "caoc_radar_network_min_s", 15.0, minimum=5.0)
     else:
-        backend = (config.get("opus_backend_url") or "").rstrip("/")
-        if backend:
-            ua = str(config.get("user_agent") or "DCS-ATC-Phrase/1.0")
-            try:
-                data = http_get_json(f"{backend}/opus/caoc/radar", ua)
-            except Exception:
-                data = cached if isinstance(cached, dict) else None
-            if isinstance(data, dict) and data is not cached:
-                _caoc_radar_cache["t"] = now
-                _caoc_radar_cache["data"] = data
-            elif not isinstance(data, dict):
-                data = None
-        else:
+        floor = 0.0
+    limit = max(float(max_age_s or 0.0), floor)
+    cached = _caoc_radar_cache.get("data")
+    age = now - float(_caoc_radar_cache.get("t") or 0)
+    if isinstance(cached, dict) and age < limit:
+        return cached
+    backend = (config.get("opus_backend_url") or "").rstrip("/")
+    data: Any = None
+    if backend:
+        ua = str(config.get("user_agent") or "DCS-ATC-Phrase/1.0")
+        try:
+            data = http_get_json(f"{backend}/opus/caoc/radar", ua)
+        except Exception:
+            data = cached if isinstance(cached, dict) else None
+        if isinstance(data, dict) and data is not cached:
+            _harvest_affiliations(data)
+            _caoc_radar_cache["t"] = now
+            _caoc_radar_cache["data"] = data
+            _caoc_radar_cache["src"] = "network"
+        elif not isinstance(data, dict):
             data = None
+    return data if isinstance(data, dict) else None
+
+
+def fetch_caoc_radar(
+    config: dict[str, Any],
+    *,
+    max_age_s: float = 5.0,
+    affiliations: bool = False,
+) -> dict[str, Any] | None:
+    """
+    Latest radar picture.
+
+    Host/solo prefer ``Saved Games\\DCS*\\Logs\\radar-snapshot.json`` (the
+    export already uploaded to Opus). ``GET /opus/caoc/radar`` is the fallback
+    when that file is stale, and not more often than ``caoc_radar_network_min_s``.
+
+    ``affiliations=True`` pulls Opus once for this call and copies bandit /
+    hostile labels onto the local tracks. Picture and declare set that flag.
+    The position loop does not.
+    """
+    now = time.time()
+    local = read_local_radar_snapshot(config)
+    if local is not None:
+        if affiliations:
+            _pull_opus_affiliations(config)
+        data: Any = _apply_affiliation_overlay(local)
+        _caoc_radar_cache["t"] = now
+        _caoc_radar_cache["data"] = data
+        _caoc_radar_cache["src"] = "local"
+    else:
+        data = _fetch_caoc_radar_network(config, max_age_s=max_age_s, now=now)
     merged = merge_ownship_inject(data if isinstance(data, dict) else None, config)
     merged = merge_traffic_inject(merged, config)
     return apply_mission_clock_inject(merged)
@@ -12667,6 +13147,7 @@ def fetch_metar(
     cached = _METAR_CACHE.get(cache_key)
     if cached and float(cached.get("exp") or 0) > now:
         return cached["wx"]
+    ttl = _config_seconds(config, "metar_cache_s", _METAR_CACHE_TTL_SEC, minimum=30.0)
 
     req = urllib.request.Request(
         url,
@@ -12689,7 +13170,7 @@ def fetch_metar(
         except Exception:
             pass
         wx = Weather(None, 0, 29.92, "")
-        _METAR_CACHE[cache_key] = {"exp": now + _METAR_CACHE_TTL_SEC, "wx": wx}
+        _METAR_CACHE[cache_key] = {"exp": now + ttl, "wx": wx}
         return wx
 
     raw = ""
@@ -12704,10 +13185,10 @@ def fetch_metar(
     if not raw:
         print("WARNING: Opus METAR empty; using calm defaults", file=sys.stderr)
         wx = Weather(None, 0, 29.92, "")
-        _METAR_CACHE[cache_key] = {"exp": now + _METAR_CACHE_TTL_SEC, "wx": wx}
+        _METAR_CACHE[cache_key] = {"exp": now + ttl, "wx": wx}
         return wx
     wx = parse_metar(raw)
-    _METAR_CACHE[cache_key] = {"exp": now + _METAR_CACHE_TTL_SEC, "wx": wx}
+    _METAR_CACHE[cache_key] = {"exp": now + ttl, "wx": wx}
     return wx
 
 
@@ -14916,11 +15397,13 @@ def _tts_pause_profile(voice: str | None = None) -> dict[str, Any]:
         "digit_point_gap_ms": 0,
     }
 
-# Short-lived caches — Hear/Preview/TX used to re-hit Opus for every flight signup.
-_OPUS_CACHE_TTL_SEC = 45.0
-_METAR_CACHE_TTL_SEC = 60.0
+# Filed routes and METAR change slowly. The host used to refetch them for
+# every seat on the position loop (one cache slot, so flights evicted each other).
+_OPUS_CACHE_TTL_SEC = 180.0
+_METAR_CACHE_TTL_SEC = 1800.0
 _TTS_WAV_CACHE_TTL_SEC = 180.0
-_OPUS_CACHE: dict[str, Any] = {"key": "", "exp": 0.0, "ctx": None}
+_OPUS_CACHE: dict[str, dict[str, Any]] = {}  # flight key -> {"exp", "ctx"}
+_OPUS_FLIGHTS_LIST: dict[str, dict[str, Any]] = {}  # backend -> {"exp", "rows"}
 _METAR_CACHE: dict[str, Any] = {}  # key -> {"exp": float, "wx": Weather}
 _TTS_WAV_CACHE: dict[str, Any] = {"key": "", "exp": 0.0, "path": None}
 

@@ -449,6 +449,18 @@ class VoiceController:
             self.on_transcript(voice_intent.Evaluation(reason="nothing heard"))
             return
 
+        off_freq = _keyed_listen_block(self._config, context)
+        if off_freq:
+            self.on_status(f"{elapsed:.0f}ms · {text}")
+            self.on_transcript(
+                voice_intent.Evaluation(
+                    transcript=text,
+                    reason=off_freq,
+                    advice="ATC only hears the radio you are transmitting on",
+                )
+            )
+            return
+
         evaluation = voice_intent.evaluate(
             text,
             channel=str(context.get("channel") or ""),
@@ -596,14 +608,74 @@ def resolve_ptt(
 
 
 def execute_intent(
-    match: voice_intent.Match, engine: Any
+    match: voice_intent.Match, engine: Any, *, from_ptt: bool = False
 ) -> dict[str, Any]:
     """
     Carry out a matched intent against a FlowEngine.
 
+    ``from_ptt`` is a spoken radio call. It only counts on the radio actually
+    transmitting. On-screen buttons leave this false so Next-style gates still
+    match any tuned radio.
+
     Returns {action, detail, text} describing what happened. Kept free of UI so
     it can be exercised from tests and the CLI.
     """
+    if not from_ptt:
+        return _execute_intent_body(match, engine)
+    reason = _ptt_off_frequency_reason(engine)
+    if reason:
+        return {"action": "blocked", "detail": f"Blocked: {reason}"}
+    srs_radio.set_voice_keyed_gate(True)
+    try:
+        return _execute_intent_body(match, engine)
+    finally:
+        srs_radio.set_voice_keyed_gate(False)
+
+
+def _keyed_listen_block(config: dict[str, Any], context: dict[str, Any]) -> str:
+    """Drop a PTT utterance when the keyed radio is not an ATC frequency."""
+    airport = context.get("airport")
+    if not isinstance(airport, dict):
+        return ""
+    flow = context.get("flow_state")
+    try:
+        radio = srs_radio.current_radio_state(config if isinstance(config, dict) else {})
+    except Exception:
+        return ""
+    return srs_radio.keyed_voice_block_reason(
+        airport,
+        config if isinstance(config, dict) else {},
+        radio,
+        flow_state=flow if isinstance(flow, dict) else None,
+    )
+
+
+def _ptt_off_frequency_reason(engine: Any) -> str:
+    """Empty when this spoken call is on an ATC frequency, or tune is unknown."""
+    config = getattr(engine, "config", None)
+    cfg = config if isinstance(config, dict) else {}
+    try:
+        airport = engine.airport()
+    except Exception:
+        return ""
+    if not isinstance(airport, dict):
+        return ""
+    radio = getattr(engine, "remote_radios", None)
+    if not isinstance(radio, srs_radio.RadioState):
+        radio = None
+    return srs_radio.keyed_voice_block_reason(
+        airport,
+        cfg,
+        radio,
+        flow_state=getattr(engine, "state", None)
+        if isinstance(getattr(engine, "state", None), dict)
+        else None,
+    )
+
+
+def _execute_intent_body(
+    match: voice_intent.Match, engine: Any
+) -> dict[str, Any]:
     intent = match.intent
     if intent == "say_again":
         text = str((engine.state or {}).get("last_tx_text") or "").strip()
@@ -2034,7 +2106,11 @@ def _transmit(
         None,
         channel=channel,
         target_mhz=freq_mhz,
+        state=getattr(engine, "state", None)
+        if isinstance(getattr(engine, "state", None), dict)
+        else None,
         radio=remote if isinstance(remote, srs_radio.RadioState) else None,
+        keyed_only=srs_radio.voice_keyed_gate_active(),
     )
     if not allowed:
         return {"action": "blocked", "detail": msg, "channel": channel}
@@ -2147,6 +2223,38 @@ def _seek_delivery_after_ops(engine: Any) -> None:
             pass
 
 
+def _ops_flight_is_post_landing(engine: Any) -> bool:
+    """True once the flight has landed or the card is on the recovery-codes steps."""
+    import ops as ops_mod
+
+    state = getattr(engine, "state", None)
+    step = None
+    if hasattr(engine, "current_step"):
+        try:
+            got = engine.current_step()
+        except Exception:
+            got = None
+        if isinstance(got, dict):
+            step = got
+    steps = None
+    mission = getattr(engine, "mission", None)
+    if isinstance(mission, dict):
+        try:
+            import flow_engine as flow_engine_mod
+
+            steps = flow_engine_mod.enabled_steps(mission)
+        except Exception:
+            raw = mission.get("steps")
+            steps = raw if isinstance(raw, list) else None
+    idx = state.get("index") if isinstance(state, dict) else None
+    return ops_mod.flight_is_post_landing(
+        state if isinstance(state, dict) else None,
+        steps=steps if isinstance(steps, list) else None,
+        index=idx,
+        current_step=step,
+    )
+
+
 def execute_ops_action(
     engine: Any,
     action: str,
@@ -2248,31 +2356,13 @@ def execute_ops_action(
         _seek_delivery_after_ops(engine)
         return result
 
-    if action == "ops_status":
-        codes = ops_mod.parse_aircraft_codes(transcript, flight_callsign=callsign)
-        if not codes:
-            return {
-                "action": "none",
-                "detail": "no aircraft codes heard",
-            }
-        merged = ops_mod.merge_pending_codes(state, codes)
-        ready, pending, why = ops_mod.codes_collection_ready(state, opus=opus)
-        if not ready:
-            ack = ops_mod.build_codes_copy_ack(
-                callsign, airport=ap, opus=opus, config=config
-            )
-            result = _transmit(engine, ap, ack, "ops", template="ops_status")
-            result["deferred"] = {
-                "kind": "ops_codes",
-                "delay_s": float(ops_mod.CODES_IDLE_S),
-                "detail": why,
-            }
-            if hasattr(engine, "save_state"):
-                engine.save_state()
-            return result
+    def _close_sortie(codes_for_log: list[Any]) -> dict[str, Any]:
+        """After landing: time now and total time. Ends the sortie clock."""
+        if state.get(ops_mod._CODES_DONE_KEY):
+            return {"action": "none", "detail": "codes already copied"}
         sortie = ops_mod.record_status(
             state,
-            pending or merged,
+            codes_for_log,
             config=config,
             opus=opus,
             callsign=callsign,
@@ -2291,7 +2381,60 @@ def execute_ops_action(
             engine.save_state()
         return _transmit(engine, ap, text, "ops", template="ops_status")
 
+    if action == "ops_status":
+        if state.get(ops_mod._CODES_DONE_KEY):
+            return {"action": "none", "detail": "codes already copied"}
+        closeout = ops_mod.is_ops_closeout_call(transcript)
+        codes = ops_mod.parse_aircraft_codes(transcript, flight_callsign=callsign)
+        if codes:
+            ops_mod.merge_pending_codes(state, codes)
+        pending_now = ops_mod._codes_from_pending(state.get(ops_mod._CODES_PENDING_KEY))
+        # "No change" / "no codes" is the after-landing call. Finish the clock
+        # even when the codes were already copied in flight.
+        if closeout:
+            return _close_sortie(pending_now)
+        # "Ops, Fleece 1, airborne with codes" — invite the pass. The codes
+        # themselves come on the next call.
+        if not codes and ops_mod.is_airborne_codes_checkin(transcript):
+            text = ops_mod.build_go_with_codes(
+                callsign, airport=ap, opus=opus, config=config
+            )
+            if hasattr(engine, "save_state"):
+                engine.save_state()
+            return _transmit(engine, ap, text, "ops", template="ops_status")
+        if not codes:
+            return {
+                "action": "none",
+                "detail": "no aircraft codes heard",
+            }
+        if not _ops_flight_is_post_landing(engine):
+            text = ops_mod.build_inflight_codes_ack(
+                callsign, airport=ap, opus=opus, config=config
+            )
+            if hasattr(engine, "save_state"):
+                engine.save_state()
+            return _transmit(engine, ap, text, "ops", template="ops_status")
+        ready, pending, why = ops_mod.codes_collection_ready(state, opus=opus)
+        if not ready:
+            ack = ops_mod.build_codes_copy_ack(
+                callsign, airport=ap, opus=opus, config=config
+            )
+            result = _transmit(engine, ap, ack, "ops", template="ops_status")
+            result["deferred"] = {
+                "kind": "ops_codes",
+                "delay_s": float(ops_mod.CODES_IDLE_S),
+                "detail": why,
+            }
+            if hasattr(engine, "save_state"):
+                engine.save_state()
+            return result
+        return _close_sortie(pending or pending_now)
+
     if action == "ops_codes_finalize":
+        # Idle closeout is only the after-landing sequence. An in-flight
+        # copy must not stamp total time when the timer fires.
+        if not _ops_flight_is_post_landing(engine):
+            return {"action": "none", "detail": "in flight — codes copied, clock open"}
         ready, pending, why = ops_mod.codes_collection_ready(state, opus=opus)
         if not ready or not pending:
             result = {"action": "none", "detail": why or "waiting for codes"}
@@ -2302,26 +2445,7 @@ def execute_ops_action(
                     "detail": why,
                 }
             return result
-        sortie = ops_mod.record_status(
-            state,
-            pending,
-            config=config,
-            opus=opus,
-            callsign=callsign,
-            when=when,
-        )
-        ops_mod.mark_codes_done(state)
-        text = ops_mod.build_status_reply(
-            callsign,
-            sortie,
-            airport=ap,
-            when=when,
-            opus=opus,
-            config=config,
-        )
-        if hasattr(engine, "save_state"):
-            engine.save_state()
-        return _transmit(engine, ap, text, "ops", template="ops_status")
+        return _close_sortie(pending)
 
     return {"action": "none", "detail": f"unknown OPS action {action}"}
 

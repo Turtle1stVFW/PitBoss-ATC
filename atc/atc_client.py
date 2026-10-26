@@ -95,10 +95,13 @@ class AtcClient:
         if not self.session_id:
             self.hello()
 
-    def post_intent(self, match: voice_intent.Match) -> dict[str, Any]:
+    def post_intent(
+        self, match: voice_intent.Match, *, from_ptt: bool = False
+    ) -> dict[str, Any]:
         self._ensure_session()
         body = {
             "session_id": self.session_id,
+            "from_ptt": bool(from_ptt),
             "intent": match.intent,
             "kind": match.kind,
             "template": match.template,

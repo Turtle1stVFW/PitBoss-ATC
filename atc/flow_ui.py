@@ -1479,8 +1479,8 @@ class MissionPlanner(tk.Tk):
         """
         Watch where the flight actually is and fire the clearance it has earned.
 
-        Runs off the UI thread because it hits the Opus backend. The feed itself
-        is cached, so polling every 2 s costs one request every few seconds.
+        Positions come from the local DCS radar export when that file is fresh.
+        Opus is only the fallback, and the flight plan is cached for minutes.
         """
         try:
             self._position_tick()
@@ -3281,6 +3281,7 @@ class MissionPlanner(tk.Tk):
             tuned=str(tuned or ""),
         )
         context["tuned_channel"] = tuned or ""
+        context["flow_state"] = getattr(self.engine, "state", None)
         context["cursor_channel"] = cursor_channel
         context["phase"] = mission_phase
         # Remap expected tips to the live agency card (Blackjack after Bandsaw
@@ -3645,10 +3646,10 @@ class MissionPlanner(tk.Tk):
         def work() -> None:
             try:
                 if self._atc_role() == "client" and self._atc_client is not None:
-                    result = self._atc_client.post_intent(match)
+                    result = self._atc_client.post_intent(match, from_ptt=True)
                 else:
                     engine = self._live_engine()
-                    result = voice_engine.execute_intent(match, engine)
+                    result = voice_engine.execute_intent(match, engine, from_ptt=True)
             except Exception as exc:  # noqa: BLE001
                 err = str(exc)
 
@@ -8295,7 +8296,6 @@ class MissionPlanner(tk.Tk):
         self.fly_step_num = tk.StringVar(value="")
         self.fly_step_name = tk.StringVar(value="…")
         self.fly_channel = tk.StringVar(value="")
-        self.fly_local_preset = tk.StringVar(value="")
         self.fly_freq = tk.StringVar(value="—")
         self.fly_mod = tk.StringVar(value="")
         self.fly_tx_name = tk.StringVar(value="")
@@ -8529,15 +8529,6 @@ class MissionPlanner(tk.Tk):
         freq_row = tk.Frame(freq_left, bg="#0a0e14")
         self._fly_freq_row = freq_row
         freq_row.pack(fill=tk.X, padx=14, pady=(0, 2))
-        self._fly_local_preset_lbl = tk.Label(
-            freq_row,
-            textvariable=self.fly_local_preset,
-            bg="#0a0e14",
-            fg=C_AMBER,
-            font=("Consolas", 34, "bold"),
-            anchor="w",
-        )
-        self._fly_local_preset_lbl.pack(side=tk.LEFT)
         self._fly_freq_lbl = tk.Label(
             freq_row,
             textvariable=self.fly_freq,
@@ -8971,13 +8962,10 @@ class MissionPlanner(tk.Tk):
 
     def _fly_upcoming_radio(
         self, step: dict[str, Any] | None
-    ) -> tuple[str, str, str, str, str]:
-        """Return (channel_label, local_preset, freq_display, mod, tx_name) for the next step.
-
-        local_preset is '[N] ' when the airport channel has local_preset, else ''.
-        """
+    ) -> tuple[str, str, str, str]:
+        """Return (channel_label, freq_display, mod, tx_name) for the next step."""
         if not step:
-            return ("—", "", "—", "", "")
+            return ("—", "—", "", "")
         channel = str(step.get("channel") or step.get("phase") or "other").strip().lower()
         try:
             ap = self.engine.airport()
@@ -9019,15 +9007,7 @@ class MissionPlanner(tk.Tk):
         # UHF/VFR style: always three decimals for glanceable kneeboard read
         freq_disp = f"{float(freq):.3f}"
         ch_label = channel.upper()
-        local_prefix = ""
-        block = ap.get(channel) or {}
-        raw_preset = block.get("local_preset")
-        if raw_preset is not None:
-            try:
-                local_prefix = f"[{int(raw_preset)}] "
-            except (TypeError, ValueError):
-                local_prefix = ""
-        return ch_label, local_prefix, freq_disp, str(mod or "AM").upper(), str(tx_name or "")
+        return ch_label, freq_disp, str(mod or "AM").upper(), str(tx_name or "")
 
     def _agency_radio(
         self, channel: str, step: dict[str, Any] | None = None
@@ -10457,7 +10437,6 @@ class MissionPlanner(tk.Tk):
             total = st.get("total", 0)
             self.fly_step_num.set(f"STEP — / {total}")
             self.fly_step_name.set("No next step")
-            self.fly_local_preset.set("")
             self.fly_freq.set("—")
             self.fly_mod.set("")
             self.fly_channel.set("NO NEXT TRANSMIT")
@@ -10645,12 +10624,11 @@ class MissionPlanner(tk.Tk):
             else:
                 self.fly_step_num.set(f"STEP {num} / {total}")
                 self.fly_step_name.set(label)
-            ch, local_preset, freq, mod, tx = self._fly_upcoming_radio(step)
+            ch, freq, mod, tx = self._fly_upcoming_radio(step)
             display_ch = ch
             # NEXT TX FREQUENCY is the upcoming step, not the radio you are
             # tuned to (that is YOU ARE ON / ON FREQ). Overwriting with
             # live Ground after a Tower handoff left the hero on GND.
-            self.fly_local_preset.set(local_preset)
             self.fly_freq.set(freq)
             self.fly_mod.set(mod)
             self.fly_channel.set(display_ch)
@@ -10667,9 +10645,8 @@ class MissionPlanner(tk.Tk):
                     self.fly_channel.set(display_ch)
                     self.fly_tx_name.set(f"SRS name: {tx}" if tx else "")
                 except Exception:
-                    ch, local_preset, freq, mod, tx = self._fly_upcoming_radio(step)
+                    ch, freq, mod, tx = self._fly_upcoming_radio(step)
                     display_ch = ch
-                    self.fly_local_preset.set(local_preset)
                     self.fly_freq.set(freq)
                     self.fly_mod.set(mod)
                     self.fly_channel.set(display_ch)
@@ -10690,12 +10667,11 @@ class MissionPlanner(tk.Tk):
                     except Exception:
                         painted_hero = False
                 if not painted_hero:
-                    ch, local_preset, freq, mod, tx = self._fly_upcoming_radio(step)
+                    ch, freq, mod, tx = self._fly_upcoming_radio(step)
                     display_ch = ch
                     # Sandbox Flight: hero is the agency on the radio (Bandsaw
                     # while Blackjack still holds). Field sequence still uses the
                     # upcoming step so a Tower handoff does not snap to Ground.
-                    self.fly_local_preset.set(local_preset)
                     self.fly_freq.set(freq)
                     self.fly_mod.set(mod)
                     self.fly_channel.set(display_ch)

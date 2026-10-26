@@ -326,11 +326,13 @@ _TOWER_RECOVERY_KEYS = frozenset(
 
 # NellisAFBI 11-250 §4.13.5 VFR recoveries (Whisper-tolerant).
 # TORYE and ARCOE are separate; ACTON maps to TORYE (legacy / Elgin name).
+# ALAMO is §4.13.5.4 — assigned when asked or filed, not a runway default.
 _VFR_RECOVERY_TERMS = {
     "STRYK": ("stryk", "strike", "stryker"),
     "TORYE": ("torye", "tory", "torie", "acton", "action"),
     "ARCOE": ("arcoe", "arco", "rco", "our co"),
     "MINTT": ("mintt", "mint", "minute"),
+    "ALAMO": ("alamo", "a lamo", "the alamo"),
 }
 
 # STRYK recovery entries. Blackjack clears direct the entry, not Gass Peak.
@@ -1007,7 +1009,7 @@ def extract_stryk_feeder(text: str) -> str | None:
 
 
 def extract_vfr_recovery(text: str) -> str | None:
-    """Named VFR recovery (STRYK / TORYE / ARCOE / MINTT)."""
+    """Named VFR recovery (STRYK / TORYE / ARCOE / MINTT / ALAMO)."""
     if extract_stryk_feeder(text):
         return "STRYK"
     for key, terms in _VFR_RECOVERY_TERMS.items():
@@ -1556,6 +1558,10 @@ INTENTS: tuple[Intent, ...] = (
         "ops_status",
         (
             (
+                "airborne with codes",
+                "airborne with code",
+                "airborne codes",
+                "with codes",
                 "code 1",
                 "code 2",
                 "code 3",
@@ -1569,6 +1575,10 @@ INTENTS: tuple[Intent, ...] = (
                 "code fife",
                 "parked",
                 "codes",
+                "no change",
+                "no changes",
+                "no code",
+                "no codes",
             ),
         ),
         kind="request",
@@ -1576,7 +1586,7 @@ INTENTS: tuple[Intent, ...] = (
         phases=("departure", "flight", "approach"),
         weight=1.25,
         example="parked, code 1",
-        does="postflight aircraft codes",
+        does="aircraft codes, airborne code check-in, or no change to close",
         veto=("ops check", "words", "start"),
     ),
     Intent(
@@ -2728,7 +2738,14 @@ INTENTS: tuple[Intent, ...] = (
         weight=1.2,
         example="with you",
         does="departure radar contact",
-        veto=("say wind", "say winds", "altimeter", "request wind", "request winds"),
+        veto=(
+            "say wind",
+            "say winds",
+            "altimeter",
+            "request wind",
+            "request winds",
+            "codes",
+        ),
     ),
     Intent(
         "request_handoff",
