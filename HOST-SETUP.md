@@ -46,7 +46,7 @@ On **Host** and **Solo**, a fresh radar file is the position source. Opus radar 
 
 Picture labels (bandit / hostile) are not in the DCS file. They are pulled from Opus only when a pilot asks for picture, declare, bogey dope, or a VID — not on a timer. A VID on this box applies immediately.
 
-If DCS runs as a different Windows user than PitBoss, set `radar_snapshot_path` in `atc\config.json` to the full path under that user's `Saved Games\...\Logs\`.
+The profile folder does not have to be named DCS. Setup → Basics → **Radar export** can be the Logs folder or the profile above it, for example `C:\Users\455\Saved Games\455AEWDS1\Logs`. Leave it blank and Pitboss uses the newest `radar-snapshot.json` under any `Saved Games\*\Logs` on this PC.
 
 ## Traffic tab
 

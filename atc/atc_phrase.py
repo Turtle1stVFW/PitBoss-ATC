@@ -9409,8 +9409,48 @@ def _local_snapshots_enabled(config: dict[str, Any] | None) -> bool:
     return role in {"host", "solo"}
 
 
+def _explicit_snapshot_file(raw: str, filename: str) -> Path | None:
+    """
+    A configured path may be the json file, the Logs folder, or the profile
+    folder above Logs. The dedicated-server profile is not named DCS.
+    """
+    text = str(raw or "").strip().strip('"')
+    if not text:
+        return None
+    path = Path(text)
+    if path.is_file():
+        return path
+    if not path.is_dir():
+        return None
+    direct = path / filename
+    if direct.is_file():
+        return direct
+    nested = path / "Logs" / filename
+    if nested.is_file():
+        return nested
+    return None
+
+
+def _snapshot_files_under(saved_games: Path, filename: str) -> list[Path]:
+    """Any Saved Games profile that has Logs/<filename>, whatever the profile is named."""
+    found: list[Path] = []
+    if not saved_games.is_dir():
+        return found
+    try:
+        profiles = list(saved_games.iterdir())
+    except OSError:
+        return found
+    for profile in profiles:
+        if not profile.is_dir():
+            continue
+        path = profile / "Logs" / filename
+        if path.is_file():
+            found.append(path)
+    return found
+
+
 def _snapshot_search_paths(filename: str) -> list[Path]:
-    """DCS Saved Games logs on this machine (this user, then other local users)."""
+    """Saved Games logs on this machine (this user, then other local users)."""
     roots: list[Path] = [Path.home() / "Saved Games"]
     system = os.environ.get("SystemDrive") or "C:"
     users = Path(system + "\\Users")
@@ -9427,18 +9467,7 @@ def _snapshot_search_paths(filename: str) -> list[Path]:
     found: list[Path] = []
     seen: set[str] = set()
     for root in roots:
-        if not root.is_dir():
-            continue
-        try:
-            profiles = list(root.iterdir())
-        except OSError:
-            continue
-        for profile in profiles:
-            if not profile.is_dir() or not profile.name.upper().startswith("DCS"):
-                continue
-            path = profile / "Logs" / filename
-            if not path.is_file():
-                continue
+        for path in _snapshot_files_under(root, filename):
             key = str(path).casefold()
             if key in seen:
                 continue
@@ -9456,8 +9485,7 @@ def _pick_snapshot_path(
 ) -> Path | None:
     explicit = str((config or {}).get(config_key) or "").strip()
     if explicit:
-        path = Path(explicit)
-        return path if path.is_file() else None
+        return _explicit_snapshot_file(explicit, filename)
     fresh: list[tuple[float, Path]] = []
     now = time.time()
     for path in _snapshot_search_paths(filename):

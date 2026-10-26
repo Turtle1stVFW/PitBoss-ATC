@@ -11931,6 +11931,34 @@ class MissionPlanner(tk.Tk):
             wraplength=640,
             justify="left",
         ).grid(row=3, column=1, sticky="w", pady=(4, 0))
+        self.var_radar_snapshot_path = tk.StringVar(
+            value=str(self.config_data.get("radar_snapshot_path") or "")
+        )
+        radar_row = tk.Frame(lf, bg=C_PANEL)
+        radar_row.grid(row=4, column=1, sticky="we", pady=3, padx=(8, 0))
+        tk.Label(
+            lf, text="Radar export", bg=C_PANEL, fg=C_LABEL, font=("Segoe UI", 10)
+        ).grid(row=4, column=0, sticky="w", pady=3)
+        ttk.Entry(radar_row, textvariable=self.var_radar_snapshot_path, width=52).pack(
+            side=tk.LEFT
+        )
+        ttk.Button(radar_row, text="Browse", command=self._browse_radar_snapshot).pack(
+            side=tk.LEFT, padx=(8, 0)
+        )
+        tk.Label(
+            lf,
+            text=(
+                "Host only. Folder that contains radar-snapshot.json "
+                "(the profile does not have to be named DCS). "
+                "Example: C:\\Users\\455\\Saved Games\\455AEWDS1\\Logs. "
+                "Leave blank to search every Saved Games profile on this PC."
+            ),
+            bg=C_PANEL,
+            fg=C_MUTED,
+            font=("Segoe UI", 8),
+            wraplength=640,
+            justify="left",
+        ).grid(row=5, column=1, sticky="w", pady=(2, 0))
         tk.Label(
             inner,
             textvariable=self.var_atc_net_status,
@@ -11939,6 +11967,23 @@ class MissionPlanner(tk.Tk):
             font=("Segoe UI", 9),
             anchor="w",
         ).pack(fill=tk.X, pady=(16, 0))
+
+    def _browse_radar_snapshot(self) -> None:
+        """Pick the Logs folder (or the profile folder above it) that DCS writes."""
+        current = ""
+        if hasattr(self, "var_radar_snapshot_path"):
+            current = self.var_radar_snapshot_path.get().strip().strip('"')
+        start = Path(current) if current else Path.home() / "Saved Games"
+        if start.is_file():
+            start = start.parent
+        if not start.is_dir():
+            start = Path.home() / "Saved Games"
+        chosen = filedialog.askdirectory(
+            title="Radar export folder",
+            initialdir=str(start) if start.is_dir() else None,
+        )
+        if chosen and hasattr(self, "var_radar_snapshot_path"):
+            self.var_radar_snapshot_path.set(chosen)
 
     def _new_atc_token(self) -> str:
         import secrets
@@ -14120,6 +14165,8 @@ class MissionPlanner(tk.Tk):
             self.var_atc_host.set(str(c.get("atc_host") or "127.0.0.1"))
             self.var_atc_port.set(str(c.get("atc_port") or atc_net.DEFAULT_ATC_PORT))
             self.var_atc_token.set(str(c.get("atc_token") or ""))
+        if hasattr(self, "var_radar_snapshot_path"):
+            self.var_radar_snapshot_path.set(str(c.get("radar_snapshot_path") or ""))
         self.var_user.set(c.get("opus_user_name", ""))
         self.var_backend.set(c.get("opus_backend_url", ""))
         if hasattr(self, "var_caoc_affiliation_key"):
@@ -14239,6 +14286,10 @@ class MissionPlanner(tk.Tk):
             except ValueError:
                 self.config_data["atc_port"] = atc_net.DEFAULT_ATC_PORT
             self.config_data["atc_token"] = self.var_atc_token.get().strip()
+            if hasattr(self, "var_radar_snapshot_path"):
+                self.config_data["radar_snapshot_path"] = (
+                    self.var_radar_snapshot_path.get().strip().strip('"')
+                )
             if str(self.config_data.get("opus_user_name") or "").strip() or (
                 hasattr(self, "var_user") and self.var_user.get().strip()
             ):

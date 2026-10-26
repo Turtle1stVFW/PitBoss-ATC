@@ -47,6 +47,59 @@ def _radar(path: Path, units: list[dict]) -> None:
     )
 
 
+def test_radar_path_accepts_profile_or_logs_folder() -> list[str]:
+    fails: list[str] = []
+    _reset()
+    calls: list[str] = []
+
+    def boom(url: str, _ua: str):
+        calls.append(url)
+        raise AssertionError(url)
+
+    orig = atc_phrase.http_get_json
+    atc_phrase.http_get_json = boom  # type: ignore[assignment]
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            logs = Path(tmp) / "455AEWDS1" / "Logs"
+            logs.mkdir(parents=True)
+            _radar(
+                logs / "radar-snapshot.json",
+                [{"id": "9", "name": "From455", "type": "air", "lat": 36.2, "lon": -115.0}],
+            )
+            for label, pointed in (
+                ("logs", logs),
+                ("profile", logs.parent),
+            ):
+                calls.clear()
+                atc_phrase._json_snap_cache.clear()
+                cfg = _cfg(radar_snapshot_path=str(pointed))
+                data = atc_phrase.fetch_caoc_radar(cfg, max_age_s=0.0)
+                name = ((data or {}).get("units") or [{}])[0].get("name")
+                if name != "From455":
+                    fails.append(f"{label} path did not load the export, got {name}")
+                if calls:
+                    fails.append(f"{label} path still called opus: {calls}")
+    finally:
+        atc_phrase.http_get_json = orig  # type: ignore[assignment]
+    return fails
+
+
+def test_search_finds_non_dcs_profile() -> list[str]:
+    fails: list[str] = []
+    with tempfile.TemporaryDirectory() as tmp:
+        saved = Path(tmp) / "Saved Games"
+        logs = saved / "455AEWDS1" / "Logs"
+        logs.mkdir(parents=True)
+        snap = logs / "radar-snapshot.json"
+        snap.write_text("{}", encoding="utf-8")
+        decoy = saved / "SomethingElse"
+        decoy.mkdir()
+        found = atc_phrase._snapshot_files_under(saved, "radar-snapshot.json")
+        if found != [snap]:
+            fails.append(f"expected only 455AEWDS1, got {found}")
+    return fails
+
+
 def test_fresh_radar_skips_opus() -> list[str]:
     fails: list[str] = []
     _reset()
@@ -287,6 +340,8 @@ def test_flight_cache_keeps_every_seat() -> list[str]:
 def main() -> int:
     bad = 0
     for fn in (
+        test_radar_path_accepts_profile_or_logs_folder,
+        test_search_finds_non_dcs_profile,
         test_fresh_radar_skips_opus,
         test_stale_radar_uses_network_floor,
         test_client_does_not_auto_read_saved_games,
