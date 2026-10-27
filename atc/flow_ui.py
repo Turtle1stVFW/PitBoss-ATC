@@ -3039,8 +3039,20 @@ class MissionPlanner(tk.Tk):
     # ---------- voice control ----------
 
     def _drain_ui_jobs(self) -> None:
-        """Run queued UI callbacks on the Tk thread. Reschedules itself."""
+        """Run queued UI callbacks on the Tk thread. Reschedules itself.
+
+        The next pump is scheduled before any callback runs. A callback may
+        open a modal dialog (``wait_window``), and that dialog still needs
+        this queue — the update download reports progress through it. If the
+        reschedule waited until the callback returned, that dialog would sit
+        on its first message forever.
+        """
         if not getattr(self, "_ui_pumping", False):
+            return
+        try:
+            self.after(20, self._drain_ui_jobs)
+        except (RuntimeError, tk.TclError):
+            self._ui_pumping = False
             return
         budget = 64
         try:
@@ -3055,12 +3067,6 @@ class MissionPlanner(tk.Tk):
                     print(f"UI callback failed: {exc}", file=sys.stderr)
         except queue.Empty:
             pass
-        if not getattr(self, "_ui_pumping", False):
-            return
-        try:
-            self.after(20, self._drain_ui_jobs)
-        except (RuntimeError, tk.TclError):
-            self._ui_pumping = False
 
     def _ui_call(self, fn: Callable[[], None]) -> None:
         """

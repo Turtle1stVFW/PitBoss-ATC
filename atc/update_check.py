@@ -453,7 +453,7 @@ def _download_dialog(
     parent: tk.Misc,
     offer: InstallerRelease,
     shutdown: Callable[[], None],
-    marshal: Callable[[Callable[[], None]], None],
+    _marshal: Callable[[Callable[[], None]], None],
 ) -> None:
     win = tk.Toplevel(parent)
     win.title("Downloading update")
@@ -497,63 +497,64 @@ def _download_dialog(
     ttk.Button(pad, text="Cancel", command=on_cancel).pack(anchor="e", pady=(12, 0))
     win.protocol("WM_DELETE_WINDOW", on_cancel)
 
-    last_paint = {"t": 0.0}
+    # The download thread must not touch Tk. A timer on this dialog paints
+    # progress and finishes the install. Dialog timers still run while the
+    # window is waiting, so a modal parent cannot freeze the bar at 0%.
+    state: dict[str, Any] = {"got": 0, "total": 0, "done": False, "error": "", "quiet": False}
 
     def on_progress(got: int, total: int) -> None:
-        now = time.monotonic()
-        if now - last_paint["t"] < 0.15:
-            return
-        last_paint["t"] = now
-
-        def paint(g: int = got, t: int = total) -> None:
-            if closed["done"]:
-                return
-            if str(bar.cget("mode")) != "determinate" and t > 0:
-                bar.stop()
-                bar.configure(mode="determinate", maximum=max(t, 1))
-            if t > 0:
-                bar.configure(value=g)
-                status.set(f"Downloaded {g / 1e6:.0f} / {t / 1e6:.0f} MB")
-            else:
-                status.set(f"Downloaded {g / 1e6:.0f} MB")
-
-        marshal(paint)
+        state["got"] = got
+        state["total"] = total
 
     def work() -> None:
         try:
             download_installer(offer, dest, on_progress, cancel)
         except UpdateError as exc:
-            def fail(message: str = str(exc), quiet: bool = exc.quiet) -> None:
-                close()
-                if not quiet:
-                    messagebox.showwarning("Updates", message, parent=parent)
-
-            marshal(fail)
-            return
+            state["error"] = str(exc)
+            state["quiet"] = exc.quiet
         except Exception as exc:  # noqa: BLE001
             _log("update download failed", error=str(exc))
+            state["error"] = "The installer download failed."
+        state["done"] = True
 
-            def fail_generic() -> None:
-                close()
-                messagebox.showwarning("Updates", "The installer download failed.", parent=parent)
-
-            marshal(fail_generic)
+    def poll() -> None:
+        if closed["done"]:
             return
-
-        def done() -> None:
-            try:
-                launch_installer(dest)
-            except OSError as exc:
-                close()
-                messagebox.showerror("Updates", f"Couldn't start the installer.\n{exc}", parent=parent)
-                return
-            # Let the progress window close, then exit so the installer can replace files.
-            parent.after(200, shutdown)
+        got = int(state["got"])
+        total = int(state["total"])
+        try:
+            if total > 0 and str(bar.cget("mode")) != "determinate":
+                bar.stop()
+                bar.configure(mode="determinate", maximum=max(total, 1))
+            if total > 0:
+                bar.configure(value=got)
+                status.set(f"Downloaded {got / 1e6:.0f} / {total / 1e6:.0f} MB")
+            elif got > 0:
+                status.set(f"Downloaded {got / 1e6:.0f} MB")
+        except tk.TclError:
+            return
+        if not state["done"]:
+            win.after(100, poll)
+            return
+        if state["error"]:
+            message = str(state["error"])
+            quiet = bool(state["quiet"])
             close()
-
-        marshal(done)
+            if not quiet:
+                messagebox.showwarning("Updates", message, parent=parent)
+            return
+        try:
+            launch_installer(dest)
+        except OSError as exc:
+            close()
+            messagebox.showerror("Updates", f"Couldn't start the installer.\n{exc}", parent=parent)
+            return
+        # Let the progress window close, then exit so the installer can replace files.
+        parent.after(200, shutdown)
+        close()
 
     threading.Thread(target=work, name="pitboss-update-download", daemon=True).start()
+    win.after(100, poll)
     win.wait_window()
 
 
