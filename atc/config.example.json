@@ -1,6 +1,12 @@
 {
   "opus_metar_url": "https://opus.455aew.com/api/metar?icao={icao}",
   "opus_backend_url": "https://opus.455aew.com/backend",
+  "local_dcs_snapshots": true,
+  "radar_snapshot_path": "",
+  "radar_snapshot_max_age_s": 30,
+  "caoc_radar_network_min_s": 15,
+  "opus_flight_cache_s": 180,
+  "metar_cache_s": 1800,
   "caoc_affiliation_key": "",
   "opus_user_name": "",
   "opus_flight_id": null,

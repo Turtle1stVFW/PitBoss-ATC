@@ -182,7 +182,7 @@ class WordsProvider(Protocol):
 
 
 class MockWordsProvider:
-    """File-backed WORDS. Used when provider is mock, or Opus has no current bulletin."""
+    """File-backed WORDS. Used when the provider is mock, or Opus cannot be reached."""
 
     def current_words(
         self,
@@ -231,8 +231,10 @@ class OpusWordsProvider:
         opus: Any = None,
     ) -> WordsBulletin:
         row = fetch_opus_words(config, opus=opus)
+        if _is_no_words_row(row):
+            return no_words_bulletin()
         if row is None:
-            # Offline / no current bulletin — do not invent a live ID.
+            # Backend unset or the request failed — file WORDS, not a made-up ID.
             return MockWordsProvider().current_words(when=when, config=config, opus=None)
         return bulletin_from_payload(row, when=when, source="opus")
 
@@ -372,7 +374,8 @@ def fetch_opus_words(
     """
     Current WORDS row from Opus `GET /opus/words`.
 
-    Returns the `current` object, or None when the backend is unset / empty.
+    Returns the `current` object, a no-words marker when Opus has none,
+    or None when the backend is unset or the request fails.
     Last good snapshot is reused if the request fails.
     """
     cfg = config or {}
@@ -397,11 +400,34 @@ def fetch_opus_words(
         return dict(cached) if isinstance(cached, dict) else None
     row = _extract_opus_current_row(data)
     if row is None:
-        return dict(cached) if isinstance(cached, dict) else None
+        # The check succeeded and there is no current bulletin.
+        empty = {_NO_WORDS_MARK: True}
+        _WORDS_CACHE["key"] = key
+        _WORDS_CACHE["exp"] = now + max_age_s
+        _WORDS_CACHE["current"] = dict(empty)
+        return dict(empty)
     _WORDS_CACHE["key"] = key
     _WORDS_CACHE["exp"] = now + max_age_s
     _WORDS_CACHE["current"] = dict(row)
     return dict(row)
+
+
+_NO_WORDS_MARK = "_no_words"
+
+
+def no_words_bulletin() -> WordsBulletin:
+    """Opus answered and there is no current WORDS bulletin."""
+    return WordsBulletin(id="", ato_day="", update=0, source="none")
+
+
+def words_are_current(words: WordsBulletin | None) -> bool:
+    if words is None or words.source == "none":
+        return False
+    return bool(str(words.id or "").strip())
+
+
+def _is_no_words_row(row: Any) -> bool:
+    return isinstance(row, dict) and bool(row.get(_NO_WORDS_MARK))
 
 
 def bulletin_from_payload(
@@ -825,6 +851,36 @@ def mark_codes_done(state: dict[str, Any] | None) -> None:
     state.pop(_CODES_LAST_AT_KEY, None)
 
 
+def _ops_plain(transcript: str) -> str:
+    text = re.sub(r"[^a-z0-9\s]", " ", (transcript or "").casefold())
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def is_ops_closeout_call(transcript: str) -> bool:
+    """After landing the flight says 'no change' or 'no codes' to finish."""
+    text = _ops_plain(transcript)
+    return bool(
+        re.search(r"\bno\s+changes?\b", text) or re.search(r"\bno\s+codes?\b", text)
+    )
+
+
+def is_airborne_codes_checkin(transcript: str) -> bool:
+    """
+    In-flight check-in before the code pass.
+
+    'Ops, Fleece 1, airborne with codes' — not the codes themselves.
+    """
+    text = _ops_plain(transcript)
+    if re.search(r"\bno\s+codes?\b", text):
+        return False
+    return bool(
+        re.search(r"\bairborne\s+with\s+codes?\b", text)
+        or re.search(r"\bairborne\s+codes?\b", text)
+        or re.search(r"\bwith\s+codes?\b", text)
+        or re.search(r"\bcalling\s+in\s+with\s+codes?\b", text)
+    )
+
+
 def build_words_reply(
     callsign: str,
     words: WordsBulletin,
@@ -840,7 +896,11 @@ def build_words_reply(
     agency = spoken_ops_name(airport, opus=opus, config=config)
     # Radio only passes the current WORDS id (AA01 / Juliet Papa Zero-Two).
     # Bulletin body stays on the object for logs; it is too long and sectioned for OPS.
-    bits = [f"{cs}, {agency}, WORDS {words.spoken_id()} current"]
+    # An empty Opus check is "no words" — do not invent an ATO id.
+    if words_are_current(words):
+        bits = [f"{cs}, {agency}, WORDS {words.spoken_id()} current"]
+    else:
+        bits = [f"{cs}, {agency}, no words"]
     if start and when is not None:
         bits.append(speak_time_now(when).rstrip(".").replace("time now ", "Time now ", 1))
     if start and not already_started:
@@ -896,6 +956,41 @@ def build_status_reply(
     if sortie.total_hours is not None:
         bits.append(f"total time {speak_decimal_hours(float(sortie.total_hours))}")
     return ", ".join(bits) + "."
+
+
+def build_go_with_codes(
+    callsign: str,
+    *,
+    airport: dict[str, Any] | None = None,
+    opus: Any = None,
+    config: dict[str, Any] | None = None,
+) -> str:
+    """Invite the flight to pass codes after an airborne check-in."""
+    cs = atc_phrase.speak_callsign(callsign)
+    agency = spoken_ops_name(airport, opus=opus, config=config)
+    return f"{cs}, {agency}, go with codes."
+
+
+def build_inflight_codes_ack(
+    callsign: str,
+    *,
+    airport: dict[str, Any] | None = None,
+    words: WordsBulletin | None = None,
+    opus: Any = None,
+    config: dict[str, Any] | None = None,
+) -> str:
+    """
+    Airborne code pass. Copy the codes and pass the current WORDS.
+
+    The sortie clock stays open until "no change" or "no codes".
+    """
+    cs = atc_phrase.speak_callsign(callsign)
+    agency = spoken_ops_name(airport, opus=opus, config=config)
+    if words is not None and words_are_current(words):
+        words_bit = f"WORDS {words.spoken_id()} current"
+    else:
+        words_bit = "no words"
+    return f"{cs}, {agency}, copy codes, {words_bit}."
 
 
 def build_codes_copy_ack(

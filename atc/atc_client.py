@@ -95,10 +95,13 @@ class AtcClient:
         if not self.session_id:
             self.hello()
 
-    def post_intent(self, match: voice_intent.Match) -> dict[str, Any]:
+    def post_intent(
+        self, match: voice_intent.Match, *, from_ptt: bool = False
+    ) -> dict[str, Any]:
         self._ensure_session()
         body = {
             "session_id": self.session_id,
+            "from_ptt": bool(from_ptt),
             "intent": match.intent,
             "kind": match.kind,
             "template": match.template,
@@ -428,6 +431,9 @@ def _map_flight_plan_payload(config: dict[str, Any]) -> dict[str, Any]:
             inj = None
     if not isinstance(inj, dict):
         return {}
+    # Selected Opus flight: map moves the jet, the filed route and remarks stay.
+    if atc_phrase.configured_opus_flight_id(config) is not None:
+        return {"fp_from_opus": True}
     route = str(inj.get("fp_route_string") or "").strip()
     if not route and not atc_phrase.ownship_from_map_enabled(config):
         return {}

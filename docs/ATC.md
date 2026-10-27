@@ -35,6 +35,8 @@ Default role is still **Solo** — one PC, same as today. To run ATC for several
 
 **Tanker is a side trip per element.** Seats 1–2 are the lead element, 3–4 the second. Whoever requests tanker (voice or Fly) parks **their element** on Texaco; the other element stays with Blackjack / Bandsaw. Dash-3/4 peeling off does not walk the flight off the CAP. When they check back in or retune C2, they rejoin the flight’s current step. Both elements can tank if both request. Each talking jet still needs the Client app on their PC.
 
+**Split the flight for individual clearances.** For an SFO, an ILS, or a fuel split, the jet leaving asks the controlling agency: *"Approach, Fleece 1-3, request split"* (single ship) or *"…request split, element"* (takes the other ship in its element, 3–4 or 1–2). The Fly tab has **Split single ship** / **Split element** buttons too. ATC answers *"Fleece one tree, Nellis Approach, split approved"* and from then on the party has its own timeline, starting where the flight was, and is called **Fleece 1-3** (an element is named for its lowest seat). The rest of the flight stays **Fleece 1** on its own cursor, and per-ship ILS / straight-in landing clearances only walk the ships still in each party. A split element can split again (dash-4 off the 1-3 element for an SFO). To come back, say *"request rejoin"* (or press **Rejoin flight**). ATC approves with *"…rejoin approved, continue as Fleece one"* and the jet goes back on the timeline it split from (or the whole flight if that has already rejoined). If the approval does not go out on the radio, nothing changes. Reconnecting the Client keeps the split. Tanker *"request rejoin"* on the boom frequency is still the tanker reform, not a flight rejoin.
+
 Ground talks to one jet at a time. Tower / Blackjack can talk at the same time as Ground. Pilots never transmit ATC from their own ExternalAudio.
 
 ### Google TTS key (Host only)
@@ -111,12 +113,15 @@ Other endpoints on the same local server: `/reset`, `/flip`, `/seek?n=7`, `/stat
 
 ### Frequency gate
 
-External Advance / Previous (hotkey, HOTAS, mouse, voice, Stream Deck URL) only
+External Advance / Previous (hotkey, HOTAS, mouse, Stream Deck URL) only
 transmit when **any** of your radios is tuned to the step’s frequency. Keying
-intra-flight VHF does not block UHF ATC / C2 triggers — selected / PTT is TX
-only. On-screen **Play** is never blocked. If radio state is unknown or stale,
-the gate **allows** and Fly shows `Radio tune unknown — gate open`. Fly lists
-every tuned radio and marks the keyed one `TX`.
+intra-flight VHF does not block those UHF triggers — selected / PTT is which
+radio you transmit on. A **spoken** call is different: ATC only hears the radio
+you are actually transmitting on. Coaching a wingman on VHF does not advance
+the flow or get an answer, even when UHF is still tuned on another radio and
+that VHF switch is an SRS PTT. On-screen **Play** is never blocked. If radio
+state is unknown or stale, the gate **allows** and Fly shows `Radio tune
+unknown — gate open`. Fly lists every tuned radio and marks the keyed one `TX`.
 
 **In the jet:** Setup → Controls → **Install DCS radio export…** (or
 `Install-DCS-Radio-Export.cmd`). That copies the Lua script and patches
@@ -336,8 +341,9 @@ Calls it understands:
 | "Blackjack, request picture" | AFTTP picture from live CAOC affiliation (UNKNOWN → bogey / recommend VID; BANDIT/HOSTILE spoken as-is) |
 | "Blackjack, bogey dope" / "BRAA" | BRAA to the closest pictured group relative to you |
 | "Blackjack / Bandsaw, declare Elvis 056 67" | **Query only** — current affiliation (`Fleece 1, Bandsaw, bogey spades.`). Never writes CAOC |
-| "Bandsaw, ID north group MiG" / "ID lead group hostile" / "ID group Elvis 020 21 MiG" | After picture: ID by **picture label** or Elvis. Type optional. No ROE word → **bandit**; say **hostile** when ROE allows |
+| "Bandsaw, ID single group, MiG-29, bandit" / "ID north group Fulcrum hostile" / "ID lead group hostile" | After picture: ID by **picture label** or Elvis. Aircraft type is optional and is read back when you say it (MiG-29, Fulcrum, F-16, …). No ROE word → **bandit**; say **hostile** when ROE allows |
 | "Bandsaw, checking in" / picture / bogey dope / declare | Optional C2 on Bandsaw |
+| "Bandsaw, request rangeback" | Range from the jet that asked to the group. "Out" does not ask |
 | "Bandsaw, checking out / switch Blackjack" | Leave Bandsaw → contact Blackjack (not check-in) |
 | "Blackjack, request Bandsaw" | Push to Bandsaw (optional; you can also self-tune) |
 | "Joshua, checking in" | Optional R-2508 agency (built into Nellis Default). No picture/declare unless you check **C2 services** on that step |
@@ -356,7 +362,7 @@ Calls it understands:
 | "Request vectors" | Radar vector clearance toward recovery / field |
 | "Airport in sight, request tower" | Cleared approach / contact Tower |
 | "Alpha check" | Bullseye position for your aircraft |
-| "We'll take the rolling" / "unable rolling" | Accepts or declines the rolling departure. After Tower asks, **Next / Advance accepts** and **Previous declines** (HOTAS, hotkey, Stream Deck) — no voice or alt-tab needed. |
+| "We'll take the rolling" / "unable" / "negative" | Accepts or declines the rolling departure. After Tower asks, **unable**, **negative**, or **no** is enough — you do not have to say “rolling.” **Affirm**, **roger**, or **yes** accepts. **Next / Advance accepts** and **Previous declines** (HOTAS, hotkey, Stream Deck). |
 | "Gear down full stop" / "going around" / "clear of the runway" | Fires the matching step |
 | "Say again" | Replays the last transmission |
 
@@ -392,8 +398,11 @@ Zulu runway 21L* (one procedure only — ILS **or** LOC, not both). Assignment o
 2. A recovery or IAF named near the **end of the Opus filed route** (e.g. `… STRYK KLSV`)  
 3. METAR: VMC → runway-side VFR default (ARCOE/TORYE/STRYK on 21, MINTT on 03); IFR → instrument + IAF  
 
-Per NellisAFBI 11-250 §4.13.5 the four VFR recoveries are **STRYK, TORYE, ARCOE,
-MINTT** — TORYE and ARCOE are separate initial fixes (Elgin pick-up is TORYE).
+Per NellisAFBI 11-250 §4.13.5 the VFR recoveries are **STRYK, TORYE, ARCOE,
+MINTT, and ALAMO** — TORYE and ARCOE are separate initial fixes (Elgin pick-up is TORYE).
+ALAMO (§4.13.5.4) is assigned only when it is filed, or when the remarks
+request it. A remarks note such as **Req ILSZ** or **Request Stryk** selects
+that approach or recovery ahead of the route fix.
 Check-in sounds like: *“Fleece 1, Nellis Approach, Nellis landing south, expect
 TAC Overhead runway two one right, cleared direct Arcoe, …”* (or Torye / Stryk /
 Mintt for that recovery; landing north when the 03s are active; instrument uses

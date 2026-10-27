@@ -3,7 +3,8 @@ Pilot radio tune state for the Advance / TX frequency gate.
 
 The gate matches if ANY tuned radio is on the step frequency. Selected / PTT
 only chooses which radio you transmit on — keying intra-flight VHF must not
-block UHF ATC / C2 triggers you are still receiving.
+block UHF ATC / C2 triggers you are still receiving. Spoken calls are the
+exception: ATC only hears the radio you are actually transmitting on.
 
 Sources (union when more than one is fresh):
   1. Fresh DCS Export file from ATC-RadioExport.lua (in-jet radio bank)
@@ -63,6 +64,8 @@ _srs_udp_ports_bound: list[int] = []
 _srs_udp_error: str = ""
 _srs_udp_thread: threading.Thread | None = None
 _srs_udp_stop = threading.Event()
+# Voice PTT only. Hotkey / HOTAS Advance still matches any tuned radio.
+_voice_keyed_gate = threading.local()
 
 # Fly-tab SRS link quality ring buffer (TCP RTT + UDP age), filled while toggled on.
 _srs_link_lock = threading.Lock()
@@ -757,27 +760,48 @@ def current_radio_state(
     return RadioState(source="none", fresh=False, age_s=None)
 
 
+def set_voice_keyed_gate(active: bool) -> None:
+    """This thread's voice call must be on the keyed radio, not merely tuned."""
+    _voice_keyed_gate.active = bool(active)
+
+
+def voice_keyed_gate_active() -> bool:
+    return bool(getattr(_voice_keyed_gate, "active", False))
+
+
 def on_frequency(
     target_mhz: float,
     state: RadioState | None = None,
     *,
     tol_mhz: float = DEFAULT_TOL_MHZ,
     config: dict[str, Any] | None = None,
+    keyed_only: bool = False,
 ) -> MatchResult:
-    """match / mismatch / unknown for a target MHz."""
+    """match / mismatch / unknown for a target MHz.
+
+    Default matches any tuned radio (Next / Back). ``keyed_only`` matches the
+    radio actually transmitting — intra-flight VHF must not count as a call
+    just because UHF is still in the stack.
+    """
     st = state if state is not None else current_radio_state(config)
     if not st.fresh:
         return "unknown"
-    if not st.freqs_mhz:
-        # In a unit but no readable radios — treat as unknown (allow)
-        if st.source == "dcs":
-            return "unknown"
-        return "mismatch" if st.source in ("eam", "srs", "client") else "unknown"
     tol = max(0.001, float(tol_mhz))
     try:
         target = float(target_mhz)
     except (TypeError, ValueError):
         return "unknown"
+    if keyed_only:
+        if st.selected_mhz is None:
+            return "unknown"
+        if abs(float(st.selected_mhz) - target) <= tol:
+            return "match"
+        return "mismatch"
+    if not st.freqs_mhz:
+        # In a unit but no readable radios — treat as unknown (allow)
+        if st.source == "dcs":
+            return "unknown"
+        return "mismatch" if st.source in ("eam", "srs", "client") else "unknown"
     for freq in st.freqs_mhz:
         if abs(freq - target) <= tol:
             return "match"
@@ -807,6 +831,7 @@ def check_freq_gate(
     channel: str | None = None,
     state: dict[str, Any] | None = None,
     radio: RadioState | None = None,
+    keyed_only: bool = False,
 ) -> tuple[bool, str, MatchResult]:
     """
     Returns (allowed, status_message, match_result).
@@ -863,7 +888,9 @@ def check_freq_gate(
     if freq is None:
         return True, "Freq gate: no target freq", "unknown"
 
-    result = on_frequency(float(freq), radio, tol_mhz=tol, config=config)
+    result = on_frequency(
+        float(freq), radio, tol_mhz=tol, config=config, keyed_only=keyed_only
+    )
     label = (ch or "step").upper()
     target = format_mhz(freq)
     if result == "match":
@@ -871,6 +898,13 @@ def check_freq_gate(
         return True, f"On freq {target} ({label}) [{src}]", result
     if result == "unknown":
         return True, "Radio tune unknown — gate open", result
+    if keyed_only and radio.selected_mhz is not None:
+        return (
+            False,
+            f"Blocked: transmitting on {format_mhz(radio.selected_mhz)}, "
+            f"not {target} ({label})",
+            result,
+        )
     return (
         False,
         f"Blocked: tune {target} ({label}) — radios {format_freqs(radio.freqs_mhz)}",
@@ -985,6 +1019,85 @@ def format_you_are_on(
     return line
 
 
+def agency_on_mhz(
+    airport: dict[str, Any],
+    mhz: float,
+    config: dict[str, Any] | None = None,
+    *,
+    tol_mhz: float | None = None,
+    flow_state: dict[str, Any] | None = None,
+) -> str | None:
+    """Agency published on this exact frequency, or None for intra-flight VHF."""
+    import atc_phrase
+
+    cfg = config or {}
+    tol = float(
+        tol_mhz if tol_mhz is not None else cfg.get("freq_gate_tolerance_mhz") or DEFAULT_TOL_MHZ
+    )
+    try:
+        target = float(mhz)
+    except (TypeError, ValueError):
+        return None
+    for ch in atc_phrase.CHANNELS:
+        if ch == "tanker":
+            continue
+        try:
+            published, _mod, _name = atc_phrase.channel_radio(airport, ch)
+        except Exception:  # noqa: BLE001
+            continue
+        if published is None:
+            continue
+        try:
+            if abs(float(published) - target) <= tol:
+                return str(ch)
+        except (TypeError, ValueError):
+            continue
+    try:
+        import tanker as tanker_mod
+
+        for published in tanker_mod.tanker_freqs_mhz(cfg):
+            if abs(float(published) - target) <= tol:
+                return "tanker"
+        live = tanker_mod.effective_tanker_mhz(flow_state, cfg)
+        if live is not None and abs(float(live) - target) <= tol:
+            return "tanker"
+    except Exception:
+        pass
+    return None
+
+
+def keyed_voice_block_reason(
+    airport: dict[str, Any],
+    config: dict[str, Any] | None = None,
+    radio: RadioState | None = None,
+    *,
+    flow_state: dict[str, Any] | None = None,
+) -> str:
+    """
+    Why a spoken call must be ignored.
+
+    Empty when the keyed radio is an ATC agency, or when we do not know which
+    radio is transmitting. Intra-flight VHF is not heard by ATC even if UHF
+    is still tuned on another radio.
+    """
+    cfg = config or {}
+    if not bool(cfg.get("freq_gate_enabled", True)):
+        return ""
+    st = radio if radio is not None else current_radio_state(cfg)
+    if not st.fresh or st.selected_mhz is None:
+        return ""
+    if agency_on_mhz(
+        airport,
+        float(st.selected_mhz),
+        cfg,
+        flow_state=flow_state if isinstance(flow_state, dict) else None,
+    ):
+        return ""
+    return (
+        f"transmitting on {format_mhz(st.selected_mhz)}, not an ATC frequency"
+    )
+
+
 def channel_for_tuned_freq(
     airport: dict[str, Any],
     config: dict[str, Any] | None = None,
@@ -995,14 +1108,13 @@ def channel_for_tuned_freq(
     """
     Agency whose published freq matches a currently tuned radio.
 
-    Prefers the keyed / selected radio so voice replies TX on the PTT net.
-    If that radio is intra-flight VHF (no agency) or the airports.json "other"
-    catch-all (251.0), falls through to another tuned agency so Ops /
-    Blackjack / Bandsaw tips still follow the UHF stack. Joshua / Center in
-    the stack do not steal Fly — those are geographic (unless selected).
+    Fly tips only. Spoken calls do not use this fall-through — they have to
+    be on the keyed radio. If that radio is intra-flight VHF (no agency) or
+    the airports.json "other" catch-all (251.0), tips fall through to another
+    tuned agency so Ops / Blackjack / Bandsaw still follow the UHF stack.
+    Joshua / Center in the stack do not steal Fly — those are geographic
+    (unless selected).
     """
-    import atc_phrase
-
     cfg = config or {}
     tol = float(tol_mhz if tol_mhz is not None else cfg.get("freq_gate_tolerance_mhz") or DEFAULT_TOL_MHZ)
     st = state if state is not None else current_radio_state(cfg)
@@ -1013,29 +1125,7 @@ def channel_for_tuned_freq(
     skip_stack = frozenset({"joshua", "center", "other"})
 
     def _channel_for_mhz(target: float) -> str | None:
-        for ch in atc_phrase.CHANNELS:
-            if ch == "tanker":
-                continue
-            try:
-                mhz, _mod, _name = atc_phrase.channel_radio(airport, ch)
-            except Exception:  # noqa: BLE001
-                continue
-            if mhz is None:
-                continue
-            try:
-                if abs(float(mhz) - target) <= tol:
-                    return str(ch)
-            except (TypeError, ValueError):
-                continue
-        try:
-            import tanker as tanker_mod
-
-            for mhz in tanker_mod.tanker_freqs_mhz(cfg):
-                if abs(float(mhz) - target) <= tol:
-                    return "tanker"
-        except Exception:
-            pass
-        return None
+        return agency_on_mhz(airport, target, cfg, tol_mhz=tol)
 
     if st.selected_mhz is not None:
         keyed = _channel_for_mhz(float(st.selected_mhz))

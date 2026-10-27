@@ -326,11 +326,13 @@ _TOWER_RECOVERY_KEYS = frozenset(
 
 # NellisAFBI 11-250 §4.13.5 VFR recoveries (Whisper-tolerant).
 # TORYE and ARCOE are separate; ACTON maps to TORYE (legacy / Elgin name).
+# ALAMO is §4.13.5.4 — assigned when asked or filed, not a runway default.
 _VFR_RECOVERY_TERMS = {
     "STRYK": ("stryk", "strike", "stryker"),
     "TORYE": ("torye", "tory", "torie", "acton", "action"),
     "ARCOE": ("arcoe", "arco", "rco", "our co"),
     "MINTT": ("mintt", "mint", "minute"),
+    "ALAMO": ("alamo", "a lamo", "the alamo"),
 }
 
 # STRYK recovery entries. Blackjack clears direct the entry, not Gass Peak.
@@ -363,7 +365,7 @@ def normalize(text: str) -> str:
     intent patterns so the two always agree.
     """
     lowered = re.sub(r"[^a-z0-9\s]", " ", str(text or "").lower())
-    tokens = [t for t in lowered.split() if t]
+    tokens = _repair_niner_glue([t for t in lowered.split() if t])
 
     # Pass 1: unambiguous digit words and literal numbers.
     staged: list[tuple[str, bool]] = []  # (token, is_digit)
@@ -398,6 +400,36 @@ def normalize(text: str) -> str:
     if run:
         out.append("".join(run))
     return _fold_taxi_via(_fold_eor(" ".join(out)))
+
+
+def _repair_niner_glue(tokens: list[str]) -> list[str]:
+    """
+    Pull the 'er' of 'niner' back out of a number.
+
+    Whisper writes 'one niner zero' as '1, 9R0'. The R sits between the
+    digits, so the 1 and the 90 never join and flight level 190 disappears.
+    A trailing R is a runway (21R) and is left alone.
+    """
+    glued: list[str] = []
+    for token in tokens:
+        m = re.fullmatch(r"(\d+)(?:er|r)(\d+)", token)
+        glued.append(m.group(1) + m.group(2) if m else token)
+    out: list[str] = []
+    for i, token in enumerate(glued):
+        if token in ("r", "er") and out and out[-1].isdigit():
+            nxt = glued[i + 1] if i + 1 < len(glued) else ""
+            if nxt.isdigit():
+                continue
+        out.append(token)
+    return out
+
+
+def _fold_flight_level_whisper(text: str) -> str:
+    """'flat level' / 'fight level' are Whisper for 'flight level'."""
+    if not text:
+        return text
+    folded = re.sub(r"\b(?:flat|fight|flite)\s+levels?\b", "flight level", text)
+    return re.sub(r"\bflightlevels?\b", "flight level", folded)
 
 
 # Whisper almost never writes the acronym "eor". Pilots say the letters;
@@ -565,7 +597,16 @@ _AGENCY_TERMS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("blackjack", ("blackjack", "black jack", "magic", "darkstar", "awacs")),
     ("bandsaw", _BANDSAW_TERMS),
     ("joshua", _JOSHUA_TERMS),
-    ("control_east", ("sally", "nellis control", "control east", "natcf", "control")),
+    # "controlled" is Whisper for "control" ("Nellis controlled, Viper…").
+    ("control_east", (
+        "sally",
+        "nellis control",
+        "nellis controlled",
+        "control east",
+        "natcf",
+        "control",
+        "controlled",
+    )),
     ("control_west", ("lee", "control west", "nellis control west")),
     ("center", ("los angeles center", "la center", "center", "centre")),
     ("ops", (
@@ -584,7 +625,8 @@ _AGENCY_TERMS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "can ops",
         "and ops",
     )),
-    ("tanker", ("texaco", "shell", "arco", "esso", "tanker", "boom")),
+    # ARCO is the ARCOE fix. A tanker call is "tanker" / Texaco / Shell.
+    ("tanker", ("texaco", "shell", "esso", "tanker", "boom")),
     ("other", ()),
 )
 
@@ -886,6 +928,7 @@ _POINT_LEADS: tuple[str, ...] = (
     "vectors to",
     "vector to",
     "vectors for",
+    "vector for",
     "range and bearing to",
     "bearing to",
     "heading to",
@@ -893,6 +936,11 @@ _POINT_LEADS: tuple[str, ...] = (
     "steer for",
     "how far to",
     "distance to",
+    # "request vectors, Arco" — Whisper drops "to" and leaves a comma.
+    # Longer leads above must stay first so "vectors to" is not read as
+    # a point named "to".
+    "vectors",
+    "vector",
 )
 
 # Words that end a point name rather than being part of one. The divert terms
@@ -932,7 +980,18 @@ _POINT_STOP: frozenset[str] = frozenset(
         "with",
     }
 )
-_POINT_ARTICLES: frozenset[str] = frozenset({"a", "an", "the"})
+# "to" / "for" only when a short lead ("vectors") left them behind.
+_POINT_FILLERS: frozenset[str] = frozenset({"a", "an", "the", "to", "for"})
+# Whisper forms of the ARCOE fix. "Arco" is never a tanker callsign.
+_ARCOE_POINT_ALIASES: dict[str, str] = {
+    "arco": "arcoe",
+    "arcoe": "arcoe",
+    "rco": "arcoe",
+    "our co": "arcoe",
+    "ourco": "arcoe",
+    "are co": "arcoe",
+    "areco": "arcoe",
+}
 _POINT_MAX_WORDS = 4
 
 
@@ -949,7 +1008,7 @@ def extract_nav_point(text: str) -> str | None:
             continue
         words: list[str] = []
         for tok in match.group(1).split():
-            if not words and tok in _POINT_ARTICLES:
+            if not words and tok in _POINT_FILLERS:
                 continue
             if tok in _POINT_STOP or tok.isdigit():
                 break
@@ -957,17 +1016,22 @@ def extract_nav_point(text: str) -> str | None:
             if len(words) >= _POINT_MAX_WORDS:
                 break
         if words:
-            return " ".join(words)
+            phrase = " ".join(words)
+            compact = "".join(words)
+            alias = _ARCOE_POINT_ALIASES.get(phrase) or _ARCOE_POINT_ALIASES.get(
+                compact
+            )
+            return alias or phrase
     return None
 
 
 def vectors_name_a_fix_not_a_tanker(text: str) -> bool:
     """
-    'Vectors to Arcoe' is the waypoint, not the ARCO tanker callsign.
+    'Request vectors, Arco' is the ARCOE waypoint, not the ARCO tanker.
 
-    Whisper often drops the trailing E ('arco'). That token is also a tanker
-    name, and a one-edit fuzzy hit used to score request_tanker ahead of the
-    fix. An explicit tanker / Texaco call still wins.
+    Whisper drops 'to' ('vectors, Arco') and the trailing E ('arco' / 'rco').
+    Those are the ARCOE fix. An explicit tanker / Texaco call still wins,
+    including 'vectors to the tanker'.
     """
     if _group_hit(
         text,
@@ -977,12 +1041,45 @@ def vectors_name_a_fix_not_a_tanker(text: str) -> bool:
         return False
     phrase = extract_nav_point(text)
     if phrase:
-        token = "".join(phrase.split())
-        if token in {"arco", "arcoe", "rco"}:
-            return True
         if _resolved_nav_point(text) is not None:
             return True
+        if phrase in _ARCOE_POINT_ALIASES or phrase == "arcoe":
+            return True
+    # "vectors" and an Arcoe miss in the same call, even if the name
+    # did not sit directly on the lead.
+    if _group_hit(text, ("vectors", "vector"), fuzzy=False) and _group_hit(
+        text, tuple(_ARCOE_POINT_ALIASES), fuzzy=False
+    ):
+        return True
     return bool(_group_hit(text, ("arcoe", "waypoint"), fuzzy=False))
+
+
+def recovery_names_a_fix_not_a_tanker(text: str) -> bool:
+    """
+    'Request RCO recovery' is the ARCOE recovery, not the ARCO tanker.
+
+    Whisper hears ARCOE as 'rco', or drops the trailing E ('arco'). Saying
+    Arco is the fix, never a tanker request. An explicit tanker / Texaco
+    call still wins.
+    """
+    if _group_hit(
+        text,
+        (
+            "tanker",
+            "texaco",
+            "shell",
+            "boom",
+            "esso",
+            "air refuel",
+            "air refueling",
+            "aar",
+        ),
+        fuzzy=False,
+    ):
+        return False
+    if _group_hit(text, ("recovery", "recover"), fuzzy=False):
+        return True
+    return bool(_group_hit(text, ("arcoe", "rco", "our co"), fuzzy=False))
 
 
 def _resolved_nav_point(text: str) -> dict[str, Any] | None:
@@ -1007,7 +1104,7 @@ def extract_stryk_feeder(text: str) -> str | None:
 
 
 def extract_vfr_recovery(text: str) -> str | None:
-    """Named VFR recovery (STRYK / TORYE / ARCOE / MINTT)."""
+    """Named VFR recovery (STRYK / TORYE / ARCOE / MINTT / ALAMO)."""
     if extract_stryk_feeder(text):
         return "STRYK"
     for key, terms in _VFR_RECOVERY_TERMS.items():
@@ -1063,6 +1160,33 @@ _RADAR_CHANNELS: tuple[str, ...] = (
     "joshua",
     "blackjack",
     "bandsaw",
+)
+
+# Controlling agencies that can approve a flight split / rejoin.
+_SPLIT_CHANNELS: tuple[str, ...] = (
+    "delivery",
+    "ground",
+    "tower",
+    "departure",
+    "approach",
+    "control_east",
+    "control_west",
+    "center",
+    "joshua",
+    "blackjack",
+    "bandsaw",
+    "other",
+)
+
+# "Request split, element" takes the wingman along; otherwise single ship.
+_SPLIT_ELEMENT_TERMS: tuple[str, ...] = (
+    "element",
+    "2 ship",
+    "two ship",
+    "flight of 2",
+    "flight of two",
+    "with my wingman",
+    "with wingman",
 )
 
 # Multiplier for an intent that does not fit the agency or the stage of flight.
@@ -1121,7 +1245,26 @@ INTENTS: tuple[Intent, ...] = (
         phases=("flight",),
         weight=1.25,
         example="bogey dope",
-        does="BRAA to the closest hostile",
+        does="BRAA from the jet that asked to the closest hostile",
+    ),
+    Intent(
+        "request_rangeback",
+        (("rangeback", "range back"),),
+        channels=("blackjack", "bandsaw", "joshua", "ops", "other", "control_east", "control_west", "center"),
+        phases=("flight",),
+        weight=1.3,
+        example="request rangeback",
+        does="range from the jet that asked to the group",
+        veto=(
+            "picture",
+            "pitcher",
+            "bogey",
+            "declare",
+            "checking in",
+            "checking out",
+            "tanker",
+            "range entry",
+        ),
     ),
     Intent(
         "request_declare",
@@ -1150,6 +1293,8 @@ INTENTS: tuple[Intent, ...] = (
                 "visual i-d",
                 "visual identification",
                 "id group",
+                "id single",
+                "identify",
                 "eye dee",
                 "upgrade",
                 "upgrade group",
@@ -1166,6 +1311,13 @@ INTENTS: tuple[Intent, ...] = (
                 "trail group",
                 "middle group",
                 "single group",
+                "mig 29",
+                "mig 23",
+                "mig 21",
+                "su 27",
+                "f 16",
+                "f 15",
+                "f 18",
                 "north lead group",
                 "south lead group",
                 "east lead group",
@@ -1179,8 +1331,8 @@ INTENTS: tuple[Intent, ...] = (
         channels=("blackjack", "bandsaw", "joshua", "ops", "other", "control_east", "control_west", "center"),
         phases=("flight",),
         weight=1.45,
-        example="ID north group MiG",
-        does="set CAOC affiliation after visual ID (defaults to bandit)",
+        example="ID single group MiG-29 bandit",
+        does="visual ID — type optional, hostile or bandit",
         veto=("picture", "pitcher", "bogey dope", "braa"),
     ),
     Intent(
@@ -1231,7 +1383,28 @@ INTENTS: tuple[Intent, ...] = (
         weight=1.15,
         example="",
         does="",
-        veto=("picture", "pitcher", "bogey", "declare", "tanker", "texaco", "joshua"),
+        veto=(
+            "picture",
+            "pitcher",
+            "bogey",
+            "declare",
+            "tanker",
+            "texaco",
+            "joshua",
+            # "Nellis Control, request Alamo recovery" is a recovery change
+            # on the freq they are already on, not a Blackjack push.
+            "recovery",
+            "alamo",
+            "stryk",
+            "strike",
+            "torye",
+            "arcoe",
+            "rco",
+            "our co",
+            "mintt",
+            "overhead",
+            "ils",
+        ),
     ),
     Intent(
         "request_tanker",
@@ -1241,7 +1414,6 @@ INTENTS: tuple[Intent, ...] = (
                 "tanker",
                 "texaco",
                 "shell",
-                "arco",
                 "esso",
                 "air refuel",
                 "air refueling",
@@ -1501,6 +1673,10 @@ INTENTS: tuple[Intent, ...] = (
         "ops_status",
         (
             (
+                "airborne with codes",
+                "airborne with code",
+                "airborne codes",
+                "with codes",
                 "code 1",
                 "code 2",
                 "code 3",
@@ -1514,6 +1690,10 @@ INTENTS: tuple[Intent, ...] = (
                 "code fife",
                 "parked",
                 "codes",
+                "no change",
+                "no changes",
+                "no code",
+                "no codes",
             ),
         ),
         kind="request",
@@ -1521,7 +1701,7 @@ INTENTS: tuple[Intent, ...] = (
         phases=("departure", "flight", "approach"),
         weight=1.25,
         example="parked, code 1",
-        does="postflight aircraft codes",
+        does="aircraft codes, airborne code check-in, or no change to close",
         veto=("ops check", "words", "start"),
     ),
     Intent(
@@ -1569,22 +1749,70 @@ INTENTS: tuple[Intent, ...] = (
         "accept_rolling",
         (
             ("rolling", "roll"),
-            ("take", "accept", "affirm", "affirmative", "roger", "we ll", "will", "ready"),
+            (
+                "take",
+                "accept",
+                "affirm",
+                "affirmative",
+                "roger",
+                "wilco",
+                "yes",
+                "yep",
+                "yeah",
+                "we ll",
+                "will",
+                "ready",
+                "can do",
+                "we can",
+            ),
         ),
         channels=("tower",),
         phases=("departure",),
-        veto=("unable", "negative", "full length"),
+        veto=(
+            "unable",
+            "un able",
+            "negative",
+            "full length",
+            "rather not",
+            "cannot",
+            "can not",
+            "can t",
+            "cant",
+            "decline",
+            "nope",
+            "nah",
+            "no thanks",
+            "no way",
+        ),
         example="we'll take the rolling",
         does="accept a rolling takeoff",
     ),
     Intent(
         "deny_rolling",
-        (("rolling", "roll"), ("unable", "negative", "rather not", "full length")),
+        (
+            ("rolling", "roll"),
+            (
+                "unable",
+                "un able",
+                "negative",
+                "rather not",
+                "full length",
+                "cannot",
+                "can not",
+                "can t",
+                "cant",
+                "decline",
+                "nope",
+                "nah",
+                "no thanks",
+                "no way",
+            ),
+        ),
         channels=("tower",),
         phases=("departure",),
         weight=1.1,
-        example="unable rolling",
-        does="decline the rolling takeoff",
+        example="unable",
+        does="decline the rolling takeoff — unable, negative, or no",
     ),
     Intent(
         "request_rolling",
@@ -1603,7 +1831,24 @@ INTENTS: tuple[Intent, ...] = (
         ),
         channels=("tower",),
         phases=("departure",),
-        veto=("unable", "negative", "full length", "line up", "lineup"),
+        veto=(
+            "unable",
+            "un able",
+            "negative",
+            "full length",
+            "rather not",
+            "cannot",
+            "can not",
+            "can t",
+            "cant",
+            "decline",
+            "nope",
+            "nah",
+            "no thanks",
+            "no way",
+            "line up",
+            "lineup",
+        ),
         example="request rolling",
         does="request a rolling takeoff",
     ),
@@ -1911,13 +2156,17 @@ INTENTS: tuple[Intent, ...] = (
                 "torye",
                 "acton",
                 "arcoe",
+                "arco",
+                "rco",
+                "our co",
                 "mintt",
+                "alamo",
                 "dudbe",
                 "recovery",
             ),
         ),
         kind="action",
-        channels=("approach", "tower"),
+        channels=("approach", "tower", "control_east", "control_west"),
         phases=("flight", "approach"),
         weight=1.15,
         example="request overhead",
@@ -2054,6 +2303,53 @@ INTENTS: tuple[Intent, ...] = (
         veto=("high key", "low key", "on the go", "going around"),
     ),
     Intent(
+        "request_split",
+        (
+            (
+                "request split",
+                "requesting split",
+                "request to split",
+                "request a split",
+                "split the flight",
+                "split up",
+                "splitting",
+                "split off",
+                "request individual",
+                "individual clearance",
+                "single ship clearance",
+            ),
+        ),
+        kind="request",
+        channels=_SPLIT_CHANNELS,
+        weight=1.3,
+        example="request split",
+        does="split your jet (or say element) onto its own clearance",
+        veto=("rejoin", "split approved", "split s", "texaco", "tanker"),
+    ),
+    Intent(
+        "request_rejoin",
+        (
+            (
+                "request rejoin",
+                "requesting rejoin",
+                "request to rejoin",
+                "rejoin the flight",
+                "rejoin with",
+                "rejoining",
+                "request join up",
+                "join back up",
+                "request reform",
+                "reform the flight",
+            ),
+        ),
+        kind="request",
+        channels=_SPLIT_CHANNELS,
+        weight=1.3,
+        example="request rejoin",
+        does="put a split jet back on the flight's clearance",
+        veto=("rejoin left", "reform left", "cleared rejoin", "texaco", "tanker", "boom"),
+    ),
+    Intent(
         "report_sfo_final",
         (
             (
@@ -2134,6 +2430,9 @@ INTENTS: tuple[Intent, ...] = (
                 "steer for",
                 "how far to",
                 "distance to",
+                # After the longer leads. "request vectors, Arco" has no "to".
+                "vectors",
+                "vector",
             ),
         ),
         kind="action",
@@ -2323,8 +2622,8 @@ INTENTS: tuple[Intent, ...] = (
         channels=("tower",),
         phases=("approach",),
         weight=1.35,
-        example="on the go high key",
-        does="on the go — High Key again, or request closed",
+        example="on the go",
+        does="go-around / missed / pattern reentry",
     ),
     Intent(
         "clear_of_runway",
@@ -2626,7 +2925,14 @@ INTENTS: tuple[Intent, ...] = (
         weight=1.2,
         example="with you",
         does="departure radar contact",
-        veto=("say wind", "say winds", "altimeter", "request wind", "request winds"),
+        veto=(
+            "say wind",
+            "say winds",
+            "altimeter",
+            "request wind",
+            "request winds",
+            "codes",
+        ),
     ),
     Intent(
         "request_handoff",
@@ -2789,6 +3095,7 @@ _C2_INTENT_IDS = frozenset(
     {
         "request_picture",
         "request_bogey_dope",
+        "request_rangeback",
         "request_declare",
         "report_vid",
         "request_alpha_check",
@@ -2999,7 +3306,13 @@ _ADDRESS_OPTIONAL_INTENTS = frozenset(
 )
 
 _PICTURE_INTENT_IDS = frozenset(
-    {"request_picture", "request_bogey_dope", "request_declare", "report_vid"}
+    {
+        "request_picture",
+        "request_bogey_dope",
+        "request_rangeback",
+        "request_declare",
+        "report_vid",
+    }
 )
 
 
@@ -3059,6 +3372,75 @@ def _is_rolling_mode_call(text: str) -> bool:
             fuzzy=False,
         )
     )
+
+
+# Yes/no once Tower has asked "will you accept rolling?". The word "rolling"
+# is optional — "ready" and bare "will" stay out, those are not an answer.
+_ROLLING_BARE_DENY = (
+    "unable",
+    "un able",
+    "negative",
+    "rather not",
+    "full length",
+    "cannot",
+    "can not",
+    "can t",
+    "cant",
+    "decline",
+    "nope",
+    "nah",
+    "no thanks",
+    "no thank you",
+    "no way",
+    "don t",
+    "won t",
+    "no",
+)
+_ROLLING_BARE_ACCEPT = (
+    "affirmative",
+    "affirm",
+    "wilco",
+    "roger",
+    "yep",
+    "yeah",
+    "yes",
+    "we ll take it",
+    "we will take it",
+    "take it",
+    "can do",
+    "will do",
+    "we can",
+    "able",
+)
+
+
+def _rolling_offer_is_open(expected: str, last_tx_template: str) -> bool:
+    """True while the live question is 'will you accept rolling?'."""
+    exp = (expected or "").strip().lower()
+    last = (last_tx_template or "").strip().lower()
+    return exp == "rolling_accept" or last == "rolling_accept"
+
+
+def _rolling_offer_bare_reply(text: str) -> str | None:
+    """
+    Short answer to the rolling offer.
+
+    Deny wins when both show up ('cannot accept'). A bare 'no' declines,
+    but 'no problem' / 'no worries' does not.
+    """
+    deny = _group_hit(text, _ROLLING_BARE_DENY, fuzzy=False)
+    if deny == "no" and _group_hit(text, ("no problem", "no worries"), fuzzy=False):
+        if not _group_hit(
+            text,
+            tuple(word for word in _ROLLING_BARE_DENY if word != "no"),
+            fuzzy=False,
+        ):
+            deny = None
+    if deny:
+        return "deny"
+    if _group_hit(text, _ROLLING_BARE_ACCEPT, fuzzy=False):
+        return "accept"
+    return None
 
 # Tower steps that "ready for departure" may answer (not cleared takeoff,
 # and not the random "will you accept rolling?" question).
@@ -3350,6 +3732,7 @@ def _heard_altitudes_ft(text: str) -> list[int]:
     found: list[int] = []
     if not text:
         return found
+    text = _fold_flight_level_whisper(text)
     # Optional trailing feet/ft must not be required for a hit.
     text = re.sub(r"\b(?:feet|foot|ft)\b", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
@@ -3417,6 +3800,27 @@ def _altitudes_equivalent(a: int, b: int) -> bool:
     return abs(a - b) < 50
 
 
+def _flight_level_code(feet: int) -> str:
+    """19000 → '190'. The digits a pilot says after 'flight level'."""
+    if feet <= 0:
+        return ""
+    return str(int(round(feet / 100.0)))
+
+
+def _flight_level_digit_prefix(text: str) -> str:
+    """
+    Digits Whisper kept right after 'flight level'.
+
+    'flat level 1, Nellis…' keeps only the leading 1. A full '190' is left
+    to the normal parser.
+    """
+    folded = _fold_flight_level_whisper(text)
+    match = re.search(r"(?:flight\s+levels?|\bfl)\s*(\d{1,3})\b", folded)
+    if not match:
+        return ""
+    return match.group(1)
+
+
 def _climb_readback_hit(text: str, item: dict[str, Any] | None) -> bool:
     """True when the assigned climb altitude was heard (flexible phrasing)."""
     if item is None:
@@ -3424,14 +3828,27 @@ def _climb_readback_hit(text: str, item: dict[str, Any] | None) -> bool:
     assigned = _assigned_climb_ft(item)
     if assigned is None:
         return False
-    for heard in _heard_altitudes_ft(text):
-        if _altitudes_equivalent(heard, assigned):
+    heard_list = _heard_altitudes_ft(text)
+    if any(_altitudes_equivalent(heard, assigned) for heard in heard_list):
+        return True
+    # Whisper drops the tail of 'one niner zero' ('flight level 1', 'flat
+    # level 19'). A leading prefix of the assigned level still closes it.
+    # A different complete altitude does not — that is a correction.
+    code = _flight_level_code(assigned)
+    prefix = _flight_level_digit_prefix(text)
+    if prefix and code.startswith(prefix) and len(prefix) < len(code):
+        if not heard_list:
             return True
+        short = int(prefix) * 100
+        if all(heard == short for heard in heard_list):
+            return True
+        return False
     # Spoken cue substring (climb and maintain … / flight level …)
     spoken = normalize(str(item.get("spoken") or ""))
+    spoken = _fold_flight_level_whisper(spoken)
     spoken = re.sub(r"\b(?:feet|foot|ft)\b", " ", spoken)
     spoken = re.sub(r"\s+", " ", spoken).strip()
-    if spoken and spoken in text:
+    if spoken and spoken in _fold_flight_level_whisper(text):
         return True
     # Altitude-only spoken form still counts (never require trailing 'feet')
     spoken_alt = normalize(
@@ -3441,9 +3858,11 @@ def _climb_readback_hit(text: str, item: dict[str, Any] | None) -> bool:
             spoken,
         )
     )
+    spoken_alt = _fold_flight_level_whisper(spoken_alt)
     spoken_alt = re.sub(r"\b(?:feet|foot|ft)\b", " ", spoken_alt)
     spoken_alt = re.sub(r"\s+", " ", spoken_alt).strip()
-    if spoken_alt and re.search(rf"(?<!\w){re.escape(spoken_alt)}(?!\w)", text):
+    folded = _fold_flight_level_whisper(text)
+    if spoken_alt and re.search(rf"(?<!\w){re.escape(spoken_alt)}(?!\w)", folded):
         return True
     return False
 
@@ -3760,6 +4179,23 @@ def _tower_asked_report_high_key(last_tx_text: str = "") -> bool:
     return "report high key" in str(last_tx_text or "").lower()
 
 
+def _repair_vid_whisper(text: str) -> str:
+    """
+    Whisper often hears 'single group' as 'singer group' or 'signal group'.
+
+    'singer' is also a crew brevity, so an ID call was dropped as chatter.
+    Only rewrite when the rest of the call is an ID, not a bare 'singer'.
+    """
+    if not re.search(r"(?<!\w)(?:singer|signal) group(?!\w)", text):
+        return text
+    if not re.search(
+        r"(?<!\w)(?:id|identify|vid|eye dee|bandit|hostile|hostel|friendly|fulcrum|flogger|flanker|mig|mike|hornet|viper)(?!\w)",
+        text,
+    ):
+        return text
+    return re.sub(r"(?<!\w)(?:singer|signal) group(?!\w)", "single group", text)
+
+
 def _is_declare_query(text: str) -> bool:
     """
     Pilot is asking what the group is, not assigning an affiliation.
@@ -3807,15 +4243,33 @@ def _score_intents(
     """Highest-scoring intent for a transcript, before any addressing gate."""
     best: Match | None = None
     current_step = step_by_id(steps, current_step_id)
+    # "will you accept rolling?" — "unable" / "negative" / "yes" are enough.
+    bare_roll = (
+        _rolling_offer_bare_reply(text)
+        if _rolling_offer_is_open(expected, last_tx_template)
+        else None
+    )
     for intent in tuple(INTENTS) + tuple(extra):
         if intent.veto and _group_hit(text, intent.veto, fuzzy=False):
+            continue
+        if bare_roll == "deny" and intent.id in (
+            "accept_rolling",
+            "request_rolling",
+        ):
+            continue
+        if bare_roll == "accept" and intent.id == "deny_rolling":
             continue
         # "wind check" still fuzzy-matches "check wind". Reject the radio-check
         # shape before it can score as request_winds on every agency.
         if intent.id == "request_winds" and looks_like_radio_check_not_winds(text):
             continue
-        # "request vectors to arcoe" fuzzy-matches tanker callsign "arco".
-        if intent.id == "request_tanker" and vectors_name_a_fix_not_a_tanker(text):
+        # "Arco" is the ARCOE fix. Only an explicit tanker / Texaco call is
+        # request_tanker. These guards cover a vectors or recovery call that
+        # also happens to sit next to a tanker word.
+        if intent.id == "request_tanker" and (
+            vectors_name_a_fix_not_a_tanker(text)
+            or recovery_names_a_fix_not_a_tanker(text)
+        ):
             continue
         if intent.id in _C2_INTENT_IDS and not step_offers_c2(
             current_step, channel=channel
@@ -4139,8 +4593,15 @@ def _score_intents(
         outstanding_runway = (
             _runway_readback_item(readback_items) if awaiting_readback else None
         )
+        bare_this = (bare_roll == "deny" and intent.id == "deny_rolling") or (
+            bare_roll == "accept" and intent.id == "accept_rolling"
+        )
         if hinge_hit:
             confidence = min(1.0, 0.98 * intent.weight)
+            coverage = 1.0
+        elif bare_this:
+            # The offer is a yes/no. "Unable" answers it; "rolling" is optional.
+            confidence = min(1.0, 0.96 * intent.weight)
             coverage = 1.0
         elif intent.groups:
             # Say-again must be literal — fuzzy "repeat" near-misses used to
@@ -4235,6 +4696,12 @@ def _score_intents(
             point = _resolved_nav_point(text)
             if point is not None:
                 slots["nav_point"] = point
+        if intent.id == "request_split":
+            slots["party"] = (
+                "element"
+                if _group_hit(text, _SPLIT_ELEMENT_TERMS, fuzzy=False)
+                else "single"
+            )
         recovery = extract_recovery(text)
         if recovery and intent.id in (
             "inbound_recovery",
@@ -4602,8 +5069,10 @@ def echoes_last_atc(
         "request_alpha_check",
         "request_picture",
         "request_bogey_dope",
+        "request_rangeback",
         "request_declare",
         "report_vid",
+        "request_approach",
     ):
         return False
     # Contact / switch readback — even after retune to the destination agency.
@@ -4719,6 +5188,7 @@ def evaluate(
     text = normalize(transcript)
     if not text:
         return Evaluation(transcript=transcript, reason="nothing heard")
+    text = _repair_vid_whisper(text)
 
     seat_n: int | None = None
     if seat is not None:
@@ -4979,6 +5449,16 @@ def evaluate(
         sfo_active
         or str(last_tx_template or "").strip().lower()
         in ("clear_land", "go_around", "sfo_low_key", "sfo_high_key", "sfo_approve")
+    ):
+        address_optional = True
+    # Already on Control / Approach. "request Alamo recovery" after the
+    # check-in does not need the agency repeated.
+    if candidate.intent == "request_approach" and channel in (
+        "control_east",
+        "control_west",
+        "approach",
+        "departure",
+        "tower",
     ):
         address_optional = True
     if require_address and not address_optional and not address.to_atc:
@@ -5506,7 +5986,8 @@ def suggestions(
             "sfo_approve",
             "clear_land",
         ):
-            rank = 0
+            # Safety net — below High/Low Key and the SFO exit tip.
+            rank = 2 if sfo_active else 0
         elif intent.id == "report_sfo_final" and last_tx_template == "sfo_approve":
             rank = 0
         elif (
@@ -5519,7 +6000,9 @@ def suggestions(
         elif intent.id == "request_closed_traffic" and (
             sfo_active or last_tx_template.startswith("sfo_") or last_tx_template == "go_around"
         ):
-            rank = 0
+            # After low-approach clear / waveoff: tip exit ahead of reports.
+            # Otherwise keep it with High/Low Key (ahead of winds / runway).
+            rank = -1 if last_tx_template in ("clear_land", "go_around") else 0
         elif intent.id == "range_entry" and expected_l == "bj_range_exit":
             # Back from Bandsaw / still on the range — tip check-in (continue).
             rank = 0
@@ -5559,14 +6042,29 @@ def suggestions(
             expected_l in _LANDING_GO_AROUND_TEMPLATES
             or (channel_l == "tower" and phase_l == "approach")
         ):
-            rank = 0
+            # On SFO after low approach: tip "on the go, request closed" first.
+            if sfo_active and last_tx_template in (
+                "clear_land",
+                "go_around",
+                "sfo_low_key",
+            ):
+                rank = -1
+            elif sfo_active:
+                # Don't crowd High Key / Low Key report tips.
+                rank = 1
+            else:
+                rank = 0
         elif intent.id in ("request_winds", "request_altimeter") and channel_l in (
             "approach",
             "tower",
             "ground",
         ):
             # Prefer on ALSO AVAILABLE; rank still orders within optional.
-            rank = 0 if intent.id == "request_winds" else 1
+            # While on SFO, keep winds below High Key / exit closed tips.
+            if sfo_active:
+                rank = 2 if intent.id == "request_winds" else 3
+            else:
+                rank = 0 if intent.id == "request_winds" else 1
         elif expected_l == "ops_check_in" and intent.id in (
             "ops_request_words",
             "ops_request_start",
@@ -5666,7 +6164,28 @@ def suggestions(
             if n_opt >= opt_cap:
                 continue
             n_opt += 1
-        out.append((intent.example, intent.does, role, cue_needs_agency(
+        say = intent.example
+        does = intent.does
+        if intent.id == "going_around" and sfo_active:
+            # Bare "on the go" keeps the SFO loop; tip the exit wording
+            # once they are cleared low approach / waving off.
+            if last_tx_template in ("clear_land", "go_around", "sfo_low_key"):
+                say = "on the go, request closed"
+                does = (
+                    "leave SFO — closed traffic / full stop "
+                    "(or high key to stay)"
+                )
+            else:
+                say = "on the go, high key"
+                does = "another SFO — or request closed traffic to leave"
+        elif intent.id == "request_closed_traffic" and (
+            sfo_active
+            or last_tx_template.startswith("sfo_")
+            or last_tx_template == "go_around"
+        ):
+            say = "request closed traffic"
+            does = "leave SFO — closed traffic / full stop"
+        out.append((say, does, role, cue_needs_agency(
             intent, expected=expected_l, awaiting_readback=awaiting_readback
         )))
     return out

@@ -449,6 +449,18 @@ class VoiceController:
             self.on_transcript(voice_intent.Evaluation(reason="nothing heard"))
             return
 
+        off_freq = _keyed_listen_block(self._config, context)
+        if off_freq:
+            self.on_status(f"{elapsed:.0f}ms · {text}")
+            self.on_transcript(
+                voice_intent.Evaluation(
+                    transcript=text,
+                    reason=off_freq,
+                    advice="ATC only hears the radio you are transmitting on",
+                )
+            )
+            return
+
         evaluation = voice_intent.evaluate(
             text,
             channel=str(context.get("channel") or ""),
@@ -596,14 +608,74 @@ def resolve_ptt(
 
 
 def execute_intent(
-    match: voice_intent.Match, engine: Any
+    match: voice_intent.Match, engine: Any, *, from_ptt: bool = False
 ) -> dict[str, Any]:
     """
     Carry out a matched intent against a FlowEngine.
 
+    ``from_ptt`` is a spoken radio call. It only counts on the radio actually
+    transmitting. On-screen buttons leave this false so Next-style gates still
+    match any tuned radio.
+
     Returns {action, detail, text} describing what happened. Kept free of UI so
     it can be exercised from tests and the CLI.
     """
+    if not from_ptt:
+        return _execute_intent_body(match, engine)
+    reason = _ptt_off_frequency_reason(engine)
+    if reason:
+        return {"action": "blocked", "detail": f"Blocked: {reason}"}
+    srs_radio.set_voice_keyed_gate(True)
+    try:
+        return _execute_intent_body(match, engine)
+    finally:
+        srs_radio.set_voice_keyed_gate(False)
+
+
+def _keyed_listen_block(config: dict[str, Any], context: dict[str, Any]) -> str:
+    """Drop a PTT utterance when the keyed radio is not an ATC frequency."""
+    airport = context.get("airport")
+    if not isinstance(airport, dict):
+        return ""
+    flow = context.get("flow_state")
+    try:
+        radio = srs_radio.current_radio_state(config if isinstance(config, dict) else {})
+    except Exception:
+        return ""
+    return srs_radio.keyed_voice_block_reason(
+        airport,
+        config if isinstance(config, dict) else {},
+        radio,
+        flow_state=flow if isinstance(flow, dict) else None,
+    )
+
+
+def _ptt_off_frequency_reason(engine: Any) -> str:
+    """Empty when this spoken call is on an ATC frequency, or tune is unknown."""
+    config = getattr(engine, "config", None)
+    cfg = config if isinstance(config, dict) else {}
+    try:
+        airport = engine.airport()
+    except Exception:
+        return ""
+    if not isinstance(airport, dict):
+        return ""
+    radio = getattr(engine, "remote_radios", None)
+    if not isinstance(radio, srs_radio.RadioState):
+        radio = None
+    return srs_radio.keyed_voice_block_reason(
+        airport,
+        cfg,
+        radio,
+        flow_state=getattr(engine, "state", None)
+        if isinstance(getattr(engine, "state", None), dict)
+        else None,
+    )
+
+
+def _execute_intent_body(
+    match: voice_intent.Match, engine: Any
+) -> dict[str, Any]:
     intent = match.intent
     if intent == "say_again":
         text = str((engine.state or {}).get("last_tx_text") or "").strip()
@@ -621,6 +693,13 @@ def execute_intent(
         if not last:
             return {"action": "none", "detail": "nothing to repeat"}
         return {"action": "replay", "detail": engine.play_id(last)}
+
+    if intent in ("request_split", "request_rejoin"):
+        # The Host owns flight timelines; atc_server intercepts these first.
+        return {
+            "action": "none",
+            "detail": "split / rejoin needs the ATC Host with each jet on a Client",
+        }
 
     config = engine.config
     airport = engine.airport()
@@ -667,6 +746,7 @@ def execute_intent(
         "request_altimeter",
         "request_picture",
         "request_bogey_dope",
+        "request_rangeback",
         "request_declare",
         "report_vid",
     ):
@@ -755,8 +835,13 @@ def execute_intent(
         runway = match.slots.get("runway")
         if not runway:
             return {"action": "none", "detail": "no runway heard"}
+        phase = _pilot_request_phase(engine)
         current = (
-            atc_phrase.requested_runway(mission=engine.mission, state=engine.state)
+            atc_phrase.requested_runway_applies(
+                recovering=phase == "approach",
+                mission=engine.mission,
+                state=engine.state,
+            )
             or str((engine.state or {}).get("runway") or "").strip()
         )
         same = voice_intent._normalize_runway_token(runway) == voice_intent._normalize_runway_token(
@@ -766,7 +851,10 @@ def execute_intent(
         if same and engine.state.get("awaiting_readback"):
             return _acknowledge(engine, match)
         atc_phrase.apply_pilot_request(
-            f"request_runway_{runway}", mission=engine.mission, state=engine.state
+            f"request_runway_{runway}",
+            mission=engine.mission,
+            state=engine.state,
+            phase=phase,
         )
         engine.save_state()
         # Same call with taxi, or a runway change during/after taxi instructions
@@ -1458,6 +1546,21 @@ def _should_reissue_taxi(engine: Any, match: voice_intent.Match) -> bool:
     return str(step.get("template") or "") in ("taxi", "monitor_tower")
 
 
+def _pilot_request_phase(engine: Any) -> str:
+    """Mission phase for a runway request: departure stays off the recovery."""
+    step: dict[str, Any] = {}
+    if hasattr(engine, "current_step"):
+        try:
+            step = engine.current_step() or {}
+        except Exception:
+            step = {}
+    return atc_phrase.resolve_pilot_request_phase(
+        phase=str(step.get("phase") or ""),
+        channel=str(step.get("channel") or ""),
+        template=str(step.get("template") or ""),
+    )
+
+
 def _apply_runway_if_heard(
     engine: Any, match: voice_intent.Match, airport: dict[str, Any]
 ) -> str | None:
@@ -1467,7 +1570,10 @@ def _apply_runway_if_heard(
     if not runway:
         return None
     atc_phrase.apply_pilot_request(
-        f"request_runway_{runway}", mission=engine.mission, state=engine.state
+        f"request_runway_{runway}",
+        mission=engine.mission,
+        state=engine.state,
+        phase=_pilot_request_phase(engine),
     )
     engine.save_state()
     return runway
@@ -1909,11 +2015,14 @@ def _speak_reply(
         if channel == "blackjack" and intent in (
             "request_picture",
             "request_bogey_dope",
+            "request_rangeback",
             "request_declare",
             "report_vid",
         ):
             if intent == "request_bogey_dope":
                 what = "bogey dope"
+            elif intent == "request_rangeback":
+                what = "rangeback"
             elif intent == "request_declare":
                 what = "declare"
             elif intent == "report_vid":
@@ -1927,6 +2036,15 @@ def _speak_reply(
         try:
             if intent == "request_bogey_dope":
                 text, _groups = voice_actions.build_bogey_dope_reply(
+                    engine.config,
+                    airport,
+                    callsign,
+                    agency=agency,
+                    opus=opus,
+                    state=engine.state,
+                )
+            elif intent == "request_rangeback":
+                text, _groups = voice_actions.build_rangeback_reply(
                     engine.config,
                     airport,
                     callsign,
@@ -1970,6 +2088,8 @@ def _speak_reply(
         except voice_actions.RadarUnavailable:
             if intent == "request_bogey_dope":
                 what = "bogey dope"
+            elif intent == "request_rangeback":
+                what = "rangeback"
             elif intent == "request_declare":
                 what = "declare"
             elif intent == "report_vid":
@@ -2012,7 +2132,11 @@ def _transmit(
         None,
         channel=channel,
         target_mhz=freq_mhz,
+        state=getattr(engine, "state", None)
+        if isinstance(getattr(engine, "state", None), dict)
+        else None,
         radio=remote if isinstance(remote, srs_radio.RadioState) else None,
+        keyed_only=srs_radio.voice_keyed_gate_active(),
     )
     if not allowed:
         return {"action": "blocked", "detail": msg, "channel": channel}
@@ -2226,31 +2350,13 @@ def execute_ops_action(
         _seek_delivery_after_ops(engine)
         return result
 
-    if action == "ops_status":
-        codes = ops_mod.parse_aircraft_codes(transcript, flight_callsign=callsign)
-        if not codes:
-            return {
-                "action": "none",
-                "detail": "no aircraft codes heard",
-            }
-        merged = ops_mod.merge_pending_codes(state, codes)
-        ready, pending, why = ops_mod.codes_collection_ready(state, opus=opus)
-        if not ready:
-            ack = ops_mod.build_codes_copy_ack(
-                callsign, airport=ap, opus=opus, config=config
-            )
-            result = _transmit(engine, ap, ack, "ops", template="ops_status")
-            result["deferred"] = {
-                "kind": "ops_codes",
-                "delay_s": float(ops_mod.CODES_IDLE_S),
-                "detail": why,
-            }
-            if hasattr(engine, "save_state"):
-                engine.save_state()
-            return result
+    def _close_sortie(codes_for_log: list[Any]) -> dict[str, Any]:
+        """After landing: time now and total time. Ends the sortie clock."""
+        if state.get(ops_mod._CODES_DONE_KEY):
+            return {"action": "none", "detail": "codes already copied"}
         sortie = ops_mod.record_status(
             state,
-            pending or merged,
+            codes_for_log,
             config=config,
             opus=opus,
             callsign=callsign,
@@ -2269,37 +2375,47 @@ def execute_ops_action(
             engine.save_state()
         return _transmit(engine, ap, text, "ops", template="ops_status")
 
-    if action == "ops_codes_finalize":
-        ready, pending, why = ops_mod.codes_collection_ready(state, opus=opus)
-        if not ready or not pending:
-            result = {"action": "none", "detail": why or "waiting for codes"}
-            if pending and not state.get(ops_mod._CODES_DONE_KEY):
-                result["deferred"] = {
-                    "kind": "ops_codes",
-                    "delay_s": float(ops_mod.CODES_IDLE_S),
-                    "detail": why,
-                }
-            return result
-        sortie = ops_mod.record_status(
-            state,
-            pending,
-            config=config,
-            opus=opus,
-            callsign=callsign,
-            when=when,
-        )
-        ops_mod.mark_codes_done(state)
-        text = ops_mod.build_status_reply(
-            callsign,
-            sortie,
-            airport=ap,
-            when=when,
-            opus=opus,
-            config=config,
+    if action == "ops_status":
+        if state.get(ops_mod._CODES_DONE_KEY):
+            return {"action": "none", "detail": "codes already copied"}
+        closeout = ops_mod.is_ops_closeout_call(transcript)
+        codes = ops_mod.parse_aircraft_codes(transcript, flight_callsign=callsign)
+        if codes:
+            ops_mod.merge_pending_codes(state, codes)
+        pending_now = ops_mod._codes_from_pending(state.get(ops_mod._CODES_PENDING_KEY))
+        # "No change" / "no codes" is the after-landing call. Finish the clock
+        # even when the codes were already copied in flight.
+        if closeout:
+            return _close_sortie(pending_now)
+        # "Ops, Fleece 1, airborne with codes" — invite the pass. The codes
+        # themselves come on the next call.
+        if not codes and ops_mod.is_airborne_codes_checkin(transcript):
+            text = ops_mod.build_go_with_codes(
+                callsign, airport=ap, opus=opus, config=config
+            )
+            if hasattr(engine, "save_state"):
+                engine.save_state()
+            return _transmit(engine, ap, text, "ops", template="ops_status")
+        if not codes:
+            return {
+                "action": "none",
+                "detail": "no aircraft codes heard",
+            }
+        # A code pass never ends the sortie. The card may already be on the
+        # Ops-codes step, or a runway exit may be remembered, while the jet
+        # is still airborne. Time now / total time waits for "no change"
+        # or "no codes".
+        text = ops_mod.build_inflight_codes_ack(
+            callsign, airport=ap, words=words, opus=opus, config=config
         )
         if hasattr(engine, "save_state"):
             engine.save_state()
         return _transmit(engine, ap, text, "ops", template="ops_status")
+
+    if action == "ops_codes_finalize":
+        # Older builds scheduled this after a code pass. It must not stamp
+        # total time; the pilot closes with "no change" or "no codes".
+        return {"action": "none", "detail": "codes stay open until no change or no codes"}
 
     return {"action": "none", "detail": f"unknown OPS action {action}"}
 
@@ -2945,10 +3061,15 @@ def _handle_approach_action(
                 plan=plan,
             )
             return _transmit(engine, airport, text, "tower")
+        tx = _resolve_tx_channel(engine, airport, match)
         text = atc_phrase.build_approach_change(
-            airport, callsign, weather, plan=plan
+            airport,
+            callsign,
+            weather,
+            plan=plan,
+            on_control=tx in ("control_east", "control_west"),
         )
-        return _transmit(engine, airport, text, "approach")
+        return _transmit(engine, airport, text, tx)
 
     plan = atc_phrase.assign_approach_plan(
         airport,

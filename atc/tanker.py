@@ -23,10 +23,10 @@ _TANKER_CACHE: dict[str, Any] = {"key": "", "exp": 0.0, "rows": []}
 _TANKER_CACHE_S = 45.0
 
 # Spoken tanker brands (opening address + named request).
+# ARCO is the ARCOE fix on this freq. It is not a tanker brand.
 TANKER_BRANDS: tuple[str, ...] = (
     "texaco",
     "shell",
-    "arco",
     "esso",
     "tanker",
 )
@@ -494,8 +494,6 @@ _REASSIGN_TANKER_PHRASES = (
     "different texaco",
     "another shell",
     "different shell",
-    "another arco",
-    "different arco",
 )
 
 
@@ -702,7 +700,7 @@ def extract_tanker_name(text: str) -> str | None:
         "nine": "9",
     }
     m = re.search(
-        r"\b(texaco|shell|arco|esso)\s*(one|two|three|four|five|six|seven|eight|nine|\d+)?\b",
+        r"\b(texaco|shell|esso)\s*(one|two|three|four|five|six|seven|eight|nine|\d+)?\b",
         blob,
     )
     if not m:
