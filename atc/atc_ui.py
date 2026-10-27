@@ -25,6 +25,7 @@ PHRASE_SCRIPT = HERE / "atc_phrase.py"
 
 # Ensure sibling imports work when launched as script
 sys.path.insert(0, str(HERE))
+import app_icon  # noqa: E402
 import atc_phrase  # noqa: E402
 
 
@@ -79,6 +80,7 @@ $s.Speak('{safe_text}')
 class AtcUi(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
+        app_icon.apply_window_icon(self)
         self.title("PitBoss ATC — Setup")
         self.geometry("720x620")
         self.minsize(640, 560)
@@ -441,6 +443,7 @@ class AtcUi(tk.Tk):
 
 
 def main() -> int:
+    app_icon.claim_taskbar_identity()
     app = AtcUi()
     app.mainloop()
     return 0

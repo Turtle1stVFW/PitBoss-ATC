@@ -402,7 +402,7 @@ These are not pinned to a single agency (or are available broadly).
 #### `request_bogey_dope`
 
 - **Pilot call:** Blackjack, <Callsign>, bogey dope
-- **Does:** BRAA to the closest hostile
+- **Does:** BRAA from the jet that asked to the closest hostile
 - **Keywords:** `bogey dope` | `bogie dope` | `braa` | `snaplock`
 - **Response:** <Callsign>, <Agency>, clean. | <Callsign>, <Agency>, group <BRAA>, [<Altitude>,] [<Aspect>,] <Declaration> [, <N> contacts].
 - **Note:** If C2 is Bandsaw-only for the step, Blackjack may redirect: <Callsign>, Blackjack, <picture|bogey dope|declare> is with Bandsaw. Contact Bandsaw <BandsawFreq>.
@@ -528,18 +528,18 @@ These are not pinned to a single agency (or are available broadly).
 #### `request_bogey_dope`
 
 - **Pilot call:** Bandsaw, <Callsign>, bogey dope
-- **Does:** BRAA to the closest hostile
+- **Does:** BRAA from the jet that asked to the closest hostile
 - **Keywords:** `bogey dope` | `bogie dope` | `braa` | `snaplock`
 - **Response:** <Callsign>, <Agency>, clean. | <Callsign>, <Agency>, group <BRAA>, [<Altitude>,] [<Aspect>,] <Declaration> [, <N> contacts].
 
 #### `request_rangeback`
 
 - **Pilot call:** Bandsaw, <Callsign>, request rangeback
-- **Does:** range to the group for the flight — closest, or closest and trail
+- **Does:** range from the jet that asked to the group
 - **Keywords:** `rangeback` | `range back`
 - **Veto:** `picture`, `bogey`, `declare`, `checking in`, `checking out`, `tanker`, `range entry`
-- **Response:** <Flight>, <Agency>, range <Nm>. | <Flight>, <Agency>, closest <Nm>, trail <Nm>. | clean.
-- **Note:** Saying "out" does not fire this. One number when the flight is within 5 NM (the closest ship). Split flights get closest and trail — not a roll call. Asked on Blackjack, C2 pushes to Bandsaw.
+- **Response:** <Flight>, <Agency>, range <Nm>. | clean.
+- **Note:** Saying "out" does not fire this. One range, from the requestor's jet. Asked on Blackjack, C2 pushes to Bandsaw.
 
 #### `request_declare`
 
@@ -637,7 +637,7 @@ These are not pinned to a single agency (or are available broadly).
 #### `request_bogey_dope`
 
 - **Pilot call:** Joshua, <Callsign>, bogey dope
-- **Does:** BRAA to the closest hostile
+- **Does:** BRAA from the jet that asked to the closest hostile
 - **Keywords:** `bogey dope` | `bogie dope` | `braa` | `snaplock`
 - **Response:** <Callsign>, <Agency>, clean. | <Callsign>, <Agency>, group <BRAA>, [<Altitude>,] [<Aspect>,] <Declaration> [, <N> contacts].
 
@@ -728,7 +728,7 @@ These are not pinned to a single agency (or are available broadly).
 #### `request_bogey_dope`
 
 - **Pilot call:** Nellis Control, <Callsign>, bogey dope
-- **Does:** BRAA to the closest hostile
+- **Does:** BRAA from the jet that asked to the closest hostile
 - **Keywords:** `bogey dope` | `bogie dope` | `braa` | `snaplock`
 - **Response:** <Callsign>, <Agency>, clean. | <Callsign>, <Agency>, group <BRAA>, [<Altitude>,] [<Aspect>,] <Declaration> [, <N> contacts].
 
@@ -819,7 +819,7 @@ These are not pinned to a single agency (or are available broadly).
 #### `request_bogey_dope`
 
 - **Pilot call:** Nellis Control, <Callsign>, bogey dope
-- **Does:** BRAA to the closest hostile
+- **Does:** BRAA from the jet that asked to the closest hostile
 - **Keywords:** `bogey dope` | `bogie dope` | `braa` | `snaplock`
 - **Response:** <Callsign>, <Agency>, clean. | <Callsign>, <Agency>, group <BRAA>, [<Altitude>,] [<Aspect>,] <Declaration> [, <N> contacts].
 
@@ -902,7 +902,7 @@ These are not pinned to a single agency (or are available broadly).
 #### `request_bogey_dope`
 
 - **Pilot call:** Los Angeles Center, <Callsign>, bogey dope
-- **Does:** BRAA to the closest hostile
+- **Does:** BRAA from the jet that asked to the closest hostile
 - **Keywords:** `bogey dope` | `bogie dope` | `braa` | `snaplock`
 - **Response:** <Callsign>, <Agency>, clean. | <Callsign>, <Agency>, group <BRAA>, [<Altitude>,] [<Aspect>,] <Declaration> [, <N> contacts].
 
@@ -977,7 +977,7 @@ These are not pinned to a single agency (or are available broadly).
 #### `request_bogey_dope`
 
 - **Pilot call:** <Airport> Ops, <Callsign>, bogey dope
-- **Does:** BRAA to the closest hostile
+- **Does:** BRAA from the jet that asked to the closest hostile
 - **Keywords:** `bogey dope` | `bogie dope` | `braa` | `snaplock`
 - **Response:** <Callsign>, <Agency>, clean. | <Callsign>, <Agency>, group <BRAA>, [<Altitude>,] [<Aspect>,] <Declaration> [, <N> contacts].
 
@@ -1127,7 +1127,7 @@ These are not pinned to a single agency (or are available broadly).
 #### `request_bogey_dope`
 
 - **Pilot call:** Control, <Callsign>, bogey dope
-- **Does:** BRAA to the closest hostile
+- **Does:** BRAA from the jet that asked to the closest hostile
 - **Keywords:** `bogey dope` | `bogie dope` | `braa` | `snaplock`
 - **Response:** <Callsign>, <Agency>, clean. | <Callsign>, <Agency>, group <BRAA>, [<Altitude>,] [<Aspect>,] <Declaration> [, <N> contacts].
 

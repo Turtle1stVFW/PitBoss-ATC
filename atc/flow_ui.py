@@ -41,6 +41,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import app_diag  # noqa: E402
+import app_icon  # noqa: E402
 import atc_phrase  # noqa: E402
 import atc_client  # noqa: E402
 import atc_net  # noqa: E402
@@ -146,6 +147,7 @@ def slug_id(label: str) -> str:
 class MissionPlanner(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
+        app_icon.apply_window_icon(self)
         self.title(f"PitBoss ATC {version.display()}")
         self.geometry("1240x820")
         self.minsize(1020, 700)
@@ -7795,6 +7797,7 @@ class MissionPlanner(tk.Tk):
             mission["airport"] = airport
             # New plans always start on wind/ops runways — never inherit a sticky request.
             mission.pop("requested_runway", None)
+            mission.pop("requested_runway_scope", None)
 
             try:
                 save_json(save_path, mission)
@@ -9466,6 +9469,7 @@ class MissionPlanner(tk.Tk):
             mode_change = atc_phrase.takeoff_request_changes_mode(
                 request_key, self.mission, self.engine.state
             )
+            _ch, phase, _tmpl = self._fly_request_context()
             result = atc_phrase.apply_pilot_request(
                 request_key,
                 mission=self.mission,
@@ -9474,6 +9478,7 @@ class MissionPlanner(tk.Tk):
                 weather=weather,
                 opus=opus,
                 config=self.config_data,
+                phase=phase,
             )
         except ValueError as exc:
             messagebox.showerror("Pilot request", str(exc))
@@ -15189,6 +15194,8 @@ class MissionPlanner(tk.Tk):
 def main() -> int:
     app_diag.ensure_started()
     app_diag.checkpoint("main_enter")
+    # Before any window exists, or the taskbar keeps the pythonw icon.
+    app_icon.claim_taskbar_identity()
     try:
         app = MissionPlanner()
     except Exception as exc:  # noqa: BLE001
@@ -15197,6 +15204,7 @@ def main() -> int:
         try:
             root = tk.Tk()
             root.withdraw()
+            app_icon.apply_window_icon(root)
             messagebox.showerror("PitBoss ATC", f"Could not start:\n\n{exc}")
             root.destroy()
         except Exception:

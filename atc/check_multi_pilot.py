@@ -1975,6 +1975,168 @@ def test_voice_tanker_chat_updates_flow_state() -> list[str]:
     return fails
 
 
+def _ship(uid: str, callsign: str, **extra: object) -> dict:
+    unit = {
+        "type": "air",
+        "id": uid,
+        "name": callsign,
+        "unitCallsign": callsign,
+        "groupName": "VIPER 1",
+        "objectName": "F-16C_50",
+        "lat": 37.2,
+        "lon": -115.7,
+    }
+    unit.update(extra)
+    return unit
+
+
+def test_flight_match_prefers_caller_then_lead() -> list[str]:
+    """
+    Alpha check was reading the last jet in the flight.
+
+    A 4-ship all matches 'VIPER 1'. Dash-4 sits first in the snapshot, which
+    is the order LoGetWorldObjects often yields, and used to win the tie.
+    """
+    fails: list[str] = []
+    # Trail first, lead last — the old stable sort returned dash-4.
+    units = [
+        _ship("40", "Viper 1-4", lat=37.40),
+        _ship("30", "Viper 1-3", lat=37.30),
+        _ship("20", "Viper 1-2", lat=37.20),
+        _ship("10", "Viper 1-1", lat=37.10),
+    ]
+    lead = atc_phrase.match_caoc_unit_for_flight(units, callsign="VIPER 1", config={})
+    if not lead or str(lead.get("id")) != "10":
+        fails.append(f"untagged flight should be the lead, got {lead}")
+    seat2 = atc_phrase.match_caoc_unit_for_flight(
+        units, callsign="VIPER 1", config={"opus_seat": 2}
+    )
+    if not seat2 or str(seat2.get("id")) != "20":
+        fails.append(f"seat 2 should be dash-2, got {seat2}")
+    packed = [
+        _ship("44", "VIPER 14"),
+        _ship("43", "VIPER 13"),
+        _ship("42", "VIPER 12"),
+        _ship("41", "VIPER 11"),
+    ]
+    packed_lead = atc_phrase.match_caoc_unit_for_flight(
+        packed, callsign="VIPER 1", config={}
+    )
+    if not packed_lead or str(packed_lead.get("id")) != "41":
+        fails.append(f"packed callsign should be VIPER 11, got {packed_lead}")
+    # No per-ship label: DCS lead still has the lowest unit id.
+    unlabeled = [
+        _ship("400", "trail", unitCallsign="", name="trail", lat=37.4),
+        _ship("300", "three", unitCallsign="", name="three", lat=37.3),
+        _ship("200", "two", unitCallsign="", name="two", lat=37.2),
+        _ship("100", "lead", unitCallsign="", name="lead", lat=37.1),
+    ]
+    by_id = atc_phrase.match_caoc_unit_for_flight(
+        unlabeled, callsign="VIPER 1", config={}
+    )
+    if not by_id or str(by_id.get("id")) != "100":
+        fails.append(f"unlabeled flight should follow lowest id, got {by_id}")
+    named = atc_phrase.match_caoc_unit_for_flight(
+        units,
+        callsign="VIPER 1",
+        config={"opus_user_name": "Sterling"},
+    )
+    # No seat and no unique pilot — still the lead, not dash-4.
+    if not named or str(named.get("id")) != "10":
+        fails.append(f"unknown caller should stay the lead, got {named}")
+    units[0]["pilotName"] = "Sterling"
+    caller = atc_phrase.match_caoc_unit_for_flight(
+        units, callsign="VIPER 1", config={"opus_user_name": "Sterling"}
+    )
+    if not caller or str(caller.get("id")) != "40":
+        fails.append(f"unique pilot name should be that jet, got {caller}")
+    # Seat still beats a wingman's name when the caller is dash-2.
+    seated = atc_phrase.match_caoc_unit_for_flight(
+        units,
+        callsign="VIPER 1",
+        config={"opus_user_name": "Sterling", "opus_seat": 2},
+    )
+    if not seated or str(seated.get("id")) != "20":
+        fails.append(f"seat should beat another ship's pilot name, got {seated}")
+    strict = atc_phrase.match_caoc_unit_for_flight(
+        units, callsign="VIPER 1", config={}, allow_lead=False
+    )
+    if strict is not None:
+        fails.append(f"requestor match without a seat should not guess lead, got {strict}")
+    return fails
+
+
+def test_dope_and_rangeback_use_requestor() -> list[str]:
+    """
+    Dash-4 asks. Dash-2 is closer to the group, and the client fix is the lead.
+    Bogey dope and rangeback still answer from dash-4.
+    """
+    import voice_actions
+
+    fails: list[str] = []
+    bandit = (37.0, -115.0)
+    lead = (37.50, -115.0)
+    dash2 = (37.10, -115.0)
+    dash4 = (37.80, -115.0)
+    radar = {
+        "units": [
+            _ship("40", "Viper 1-4", lat=dash4[0], lon=dash4[1], coalition="blue", affiliation="FRIENDLY"),
+            _ship("20", "Viper 1-2", lat=dash2[0], lon=dash2[1], coalition="blue", affiliation="FRIENDLY"),
+            _ship("10", "Viper 1-1", lat=lead[0], lon=lead[1], coalition="blue", affiliation="FRIENDLY"),
+            {
+                "id": "bandit",
+                "type": "air",
+                "name": "Ivan 11",
+                "objectName": "MiG-29S",
+                "coalition": "red",
+                "affiliation": "UNKNOWN",
+                "lat": bandit[0],
+                "lon": bandit[1],
+                "altMeters": 8000,
+                "headingDeg": 180,
+            },
+        ]
+    }
+    cfg = {
+        "opus_seat": 4,
+        "picture_max_range_nm": 200,
+        atc_phrase.OWNSHIP_SEAT_BOUND_KEY: True,
+        atc_phrase.OWNSHIP_SEAT_LL_KEY: [lead[0], lead[1]],
+    }
+    orig_fetch = atc_phrase.fetch_caoc_radar
+    orig_qnh = atc_phrase.metar_altimeter_inhg
+    atc_phrase.fetch_caoc_radar = lambda *_a, **_k: radar  # type: ignore[method-assign]
+    atc_phrase.metar_altimeter_inhg = lambda *_a, **_k: None  # type: ignore[method-assign]
+    try:
+        dope, _g = voice_actions.build_bogey_dope_reply(
+            cfg, AIRPORTS["nellis"], "VIPER 1", agency="Bandsaw"
+        )
+        back, _g2 = voice_actions.build_rangeback_reply(
+            cfg, AIRPORTS["nellis"], "VIPER 1", agency="Bandsaw"
+        )
+    finally:
+        atc_phrase.fetch_caoc_radar = orig_fetch  # type: ignore[method-assign]
+        atc_phrase.metar_altimeter_inhg = orig_qnh  # type: ignore[method-assign]
+    far = atc_phrase.speak_natural_number(
+        max(0, int(round(atc_phrase._haversine_nm(dash4[0], dash4[1], bandit[0], bandit[1]))))
+    )
+    near = atc_phrase.speak_natural_number(
+        max(0, int(round(atc_phrase._haversine_nm(dash2[0], dash2[1], bandit[0], bandit[1]))))
+    )
+    lead_say = atc_phrase.speak_natural_number(
+        max(0, int(round(atc_phrase._haversine_nm(lead[0], lead[1], bandit[0], bandit[1]))))
+    )
+    # Bearing "one six eight" contains the close ship's range word, so match
+    # the range clause itself.
+    if f", {far}," not in dope.casefold():
+        fails.append(f"bogey dope should be dash-4 ({far}), got {dope}")
+    if f"range {far}" not in back.casefold() or f"range {near}" in back.casefold():
+        fails.append(f"rangeback should be dash-4 ({far}), not dash-2 ({near}), got {back}")
+    if lead_say == far:
+        fails.append("test geometry collapsed lead and dash-4")
+    return fails
+
+
 def test_wild6_ownship_and_shared_cursor() -> list[str]:
     fails: list[str] = []
     if not atc_phrase.same_flight_callsign("WILD 6", "WILD 61"):
@@ -2316,6 +2478,8 @@ def main() -> int:
         test_client_auto_play_from_watch,
         test_client_tanker_chat_gap,
         test_voice_tanker_chat_updates_flow_state,
+        test_flight_match_prefers_caller_then_lead,
+        test_dope_and_rangeback_use_requestor,
         test_wild6_ownship_and_shared_cursor,
         test_seat_position_beats_host_feed,
         test_client_sends_its_own_fix,

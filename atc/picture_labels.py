@@ -981,8 +981,11 @@ def needs_commit_cue(group: FightGroup | None = None, **kwargs: Any) -> bool:
     if group is not None:
         aff_raw = aff_raw if aff_raw is not None else group.affiliation
         decl = decl if decl is not None else group.declaration
-    aff = normalize_opus_affiliation(aff_raw)
     spoken = normalize_declaration(decl) if decl is not None else ""
+    # A friendly or neutral call is not a commit, even if the raw token lags.
+    if spoken in ("friendly", "neutral"):
+        return False
+    aff = normalize_opus_affiliation(aff_raw)
     return aff == "hostile" or spoken == "hostile"
 
 
@@ -1006,7 +1009,7 @@ def recommend_cue(groups: list[FightGroup] | None) -> str:
 
 
 def needs_vid_cue(group: FightGroup | None = None, **kwargs: Any) -> bool:
-    """UNKNOWN / undeclared TI only — not known bandit or hostile."""
+    """UNKNOWN / undeclared TI only — not known bandit, hostile, or friendly."""
     aff_raw = kwargs.get("affiliation")
     ti = bool(kwargs.get("ti_training"))
     decl = kwargs.get("declaration")
@@ -1014,12 +1017,16 @@ def needs_vid_cue(group: FightGroup | None = None, **kwargs: Any) -> bool:
         aff_raw = aff_raw if aff_raw is not None else group.affiliation
         ti = ti or bool(group.ti_training)
         decl = decl if decl is not None else group.declaration
+    spoken = normalize_declaration(decl) if decl is not None else ""
+    # Spoken friendly wins over a stale UNKNOWN token. Do not recommend
+    # an intercept for a group already called friendly.
+    if spoken in ("friendly", "neutral", "bandit", "hostile"):
+        return False
     aff = normalize_opus_affiliation(aff_raw)
     if aff in ("hostile", "bandit", "friendly"):
         return False
     if aff in ("bogey", "bogey spades"):
         return True
-    spoken = normalize_declaration(decl) if decl is not None else ""
     return ti and spoken in ("bogey", "bogey spades", "")
 
 

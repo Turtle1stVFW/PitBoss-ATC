@@ -2751,8 +2751,11 @@ def assign_approach_plan(
                 position=sticky_pos,
             )
         # Stale plan after a wind shift (e.g. still on 03 with 081/07) — re-pick
-        # the runway side unless the pilot/Setup pinned a runway.
-        if plan and not requested_runway(mission=mission, state=state):
+        # the runway side unless the pilot pinned this runway for the approach.
+        # A departure-only request (ordnance off 03L) does not pin recovery.
+        if plan and not requested_runway_applies(
+            recovering=True, mission=mission, state=state
+        ):
             instrument = normalize_recovery_key(plan.get("pattern")) == "instrument"
             wind_rwy = pick_recovery_runway(
                 airport, weather, instrument=instrument, catalog=catalog
@@ -2878,8 +2881,9 @@ def assign_approach_plan(
     rwy = pick_recovery_runway(
         airport, weather, instrument=instrument, catalog=catalog
     )
-    # Honor pilot runway request if set
-    req = requested_runway(mission=mission, state=state)
+    # Approach-phase runway request only. A departure request (03L with
+    # ordnance) must not drag the recovery off the wind runway.
+    req = requested_runway_applies(recovering=True, mission=mission, state=state)
     if req:
         rwy = align_runway_to_airport(airport, req, instrument=instrument)
 
@@ -4941,6 +4945,7 @@ _SORTIE_STATE_CACHE_KEYS = (
     "hold_active",
     "vectors_active",
     "requested_runway",
+    "requested_runway_scope",
     "active_takeoff_mode",
     "pending_takeoff_offer",
     "takeoff_offer_rolled",
@@ -5770,18 +5775,54 @@ def readback_template_for_step(
     return tmpl
 
 
+def _runway_request_pair(
+    mission: dict[str, Any] | None = None,
+    state: dict[str, Any] | None = None,
+) -> tuple[str | None, str]:
+    """(runway, scope) from state, then mission. Scope is departure|approach|''."""
+    for src in (state, mission):
+        if not src:
+            continue
+        n = normalize_runway(src.get("requested_runway"))
+        if not n:
+            continue
+        scope = str(src.get("requested_runway_scope") or "").strip().lower()
+        if scope not in ("departure", "approach"):
+            scope = ""
+        return n, scope
+    return None, ""
+
+
 def requested_runway(
     mission: dict[str, Any] | None = None,
     state: dict[str, Any] | None = None,
 ) -> str | None:
     """Pilot-requested runway override (Fly / mission), if any."""
-    for src in (state, mission):
-        if not src:
-            continue
-        n = normalize_runway(src.get("requested_runway"))
-        if n:
-            return n
-    return None
+    runway, _scope = _runway_request_pair(mission, state)
+    return runway
+
+
+def requested_runway_applies(
+    *,
+    recovering: bool,
+    mission: dict[str, Any] | None = None,
+    state: dict[str, Any] | None = None,
+) -> str | None:
+    """
+    Runway request that applies to this part of the sortie.
+
+    A departure request (opposite direction for ordnance) is for takeoff only.
+    Recovery goes back to the wind runway unless they ask again on approach.
+    An unscoped leftover is treated the same way — it does not pin the landing.
+    """
+    runway, scope = _runway_request_pair(mission, state)
+    if not runway:
+        return None
+    if recovering:
+        return runway if scope == "approach" else None
+    if scope == "approach":
+        return None
+    return runway
 
 
 def set_requested_runway(
@@ -5789,16 +5830,25 @@ def set_requested_runway(
     *,
     mission: dict[str, Any] | None = None,
     state: dict[str, Any] | None = None,
+    scope: str | None = None,
 ) -> str | None:
     """Stick a pilot-requested runway (or clear when blank)."""
     n = normalize_runway(runway)
+    scope_key = str(scope or "").strip().lower()
+    if scope_key not in ("departure", "approach"):
+        scope_key = ""
     for src in (mission, state):
         if src is None:
             continue
         if n:
             src["requested_runway"] = n
+            if scope_key:
+                src["requested_runway_scope"] = scope_key
+            else:
+                src.pop("requested_runway_scope", None)
         else:
             src.pop("requested_runway", None)
+            src.pop("requested_runway_scope", None)
     return n
 
 
@@ -6051,6 +6101,7 @@ def apply_pilot_request(
     weather: Weather | None = None,
     opus: OpusFlightContext | None = None,
     config: dict[str, Any] | None = None,
+    phase: str | None = None,
 ) -> dict[str, Any]:
     """
     Apply a pilot request to mission/state.
@@ -6193,7 +6244,14 @@ def apply_pilot_request(
         }
     req_rwy = parse_runway_request_key(key)
     if req_rwy:
-        set_requested_runway(req_rwy, mission=mission, state=state)
+        # Departure asks (ordnance / opposite direction) do not follow into
+        # recovery. Asking again on approach does.
+        scope = (
+            "approach"
+            if str(phase or "").strip().lower() == "approach"
+            else "departure"
+        )
+        set_requested_runway(req_rwy, mission=mission, state=state, scope=scope)
         return {
             "key": key,
             "takeoff_mode": resolve_active_takeoff_mode(mission, state),
@@ -10253,12 +10311,172 @@ def _pilot_name_match_score(want: str, unit: dict[str, Any]) -> int:
     return best
 
 
+def _caoc_label_core(raw: str) -> str:
+    """Callsign text with the IFF tail and slot suffix removed."""
+    text = str(raw or "").strip()
+    text = re.sub(r"\s*[@#]IFF:.*$", "", text, flags=re.I).strip()
+    if "|" in text:
+        text = text.split("|")[-1].strip()
+    if "#" in text:
+        text = text.split("#", 1)[0].strip()
+    return text
+
+
+def _ship_from_flight_label(label: str, flight: str) -> int | None:
+    """
+    Formation seat on one label.
+
+    'Viper 1-4' and 'VIPER 14' are dash-4 of flight Viper 1. A bare
+    'Viper 1' is the flight, not a seat.
+    """
+    label = str(label or "").strip()
+    flight = clean_flight_callsign(flight)
+    if not label or not flight:
+        return None
+    base, seat = parse_element_callsign(label)
+    if seat is not None and 1 <= seat <= 9 and same_flight_callsign(flight, base):
+        return int(seat)
+    if not same_flight_callsign(flight, label):
+        return None
+    _flight_name, flight_num = flight_designator(flight)
+    _label_name, label_num = flight_designator(label)
+    if (
+        not flight_num
+        or not label_num
+        or label_num == flight_num
+        or not label_num.startswith(flight_num)
+        or len(label_num) != len(flight_num) + 1
+    ):
+        return None
+    try:
+        ship = int(label_num[-1])
+    except ValueError:
+        return None
+    return ship if 1 <= ship <= 9 else None
+
+
+def caoc_unit_ship_number(unit: dict[str, Any], flight_callsign: str) -> int | None:
+    """
+    Dash number for one track, when a label carries it.
+
+    Unit name and callsign are per ship. The group name is the whole flight
+    ('Viper 1'), so it is not a seat.
+    """
+    flight = clean_flight_callsign(flight_callsign)
+    if not flight or not isinstance(unit, dict):
+        return None
+    for key in ("unitName", "name", "unitCallsign", "flightLabel"):
+        ship = _ship_from_flight_label(
+            _caoc_label_core(str(unit.get(key) or "")), flight
+        )
+        if ship is not None:
+            return ship
+    return None
+
+
+def _caoc_unit_id_num(unit: dict[str, Any]) -> int:
+    """Numeric DCS id. The group lead is created first, so it has the lowest id."""
+    raw = str(unit.get("id") or unit.get("unitId") or unit.get("unit_id") or "").strip()
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return 10**12
+
+
+def _caoc_unit_matches_flight(
+    unit: dict[str, Any],
+    flight: str,
+    fid: Any,
+) -> bool:
+    """True when this track is a ship of the flight we are matching."""
+    ufid = unit.get("opusFlightId")
+    if fid is not None and ufid not in (None, ""):
+        try:
+            return int(ufid) == int(fid)
+        except (TypeError, ValueError):
+            return False
+    if not flight:
+        return False
+    for key in ("flightLabel", "unitCallsign", "groupName", "unitName", "name"):
+        lab = _caoc_label_core(str(unit.get(key) or ""))
+        if lab and same_flight_callsign(flight, lab):
+            return True
+    return False
+
+
+def _requester_seat(
+    opus: OpusFlightContext | None,
+    config: dict[str, Any],
+) -> int | None:
+    """Seat that asked, from this client / bound session. Not a synthetic default."""
+    raw = config.get("opus_seat")
+    if raw in (None, ""):
+        if opus is not None and int(getattr(opus, "flight_id", 0) or 0) > 0:
+            raw = getattr(opus, "seat", None)
+        else:
+            raw = None
+    try:
+        seat = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return seat if seat > 0 else None
+
+
+def _formation_pick_key(unit: dict[str, Any], flight: str) -> tuple[int, int, int]:
+    """
+    Lead before trail when several ships tie.
+
+    A known dash-2+ loses to an unlabeled track: the unlabeled one is often
+    the lead, and its lower DCS id is the remaining clue. A labeled dash-4
+    must not win just because it was last in the radar list.
+    """
+    ship = caoc_unit_ship_number(unit, flight) if flight else None
+    uid = _caoc_unit_id_num(unit)
+    if ship == 1:
+        return (0, 0, uid)
+    if ship is None:
+        return (1, 0, uid)
+    return (2, ship, uid)
+
+
+def _pick_flight_track(
+    members: list[dict[str, Any]],
+    flight: str,
+    seat: int | None,
+    pilot: str,
+    *,
+    allow_lead: bool = True,
+) -> dict[str, Any] | None:
+    """
+    One ship out of a flight.
+
+    The jet that asked (its seat, or a unique pilot-name hit) wins. Otherwise
+    the flight lead — never whichever wingman happened to be last in the feed.
+    Bogey dope and rangeback pass allow_lead=False so a missing seat does not
+    silently answer from lead.
+    """
+    if seat is not None and flight:
+        seated = [u for u in members if caoc_unit_ship_number(u, flight) == seat]
+        if seated:
+            return min(seated, key=_caoc_unit_id_num)
+    if pilot:
+        named = [u for u in members if _pilot_name_match_score(pilot, u) >= 80]
+        if len(named) == 1:
+            return named[0]
+        if len(named) > 1:
+            members = named
+    if not allow_lead:
+        return None
+    return min(members, key=lambda u: _formation_pick_key(u, flight))
+
+
 def match_caoc_unit_for_flight(
     units: list[dict[str, Any]],
     *,
     callsign: str | None = None,
     opus: OpusFlightContext | None = None,
     config: dict[str, Any] | None = None,
+    allow_lead: bool = True,
 ) -> dict[str, Any] | None:
     """
     Pick the CAOC radar unit for this flight (air only).
@@ -10267,6 +10485,10 @@ def match_caoc_unit_for_flight(
     DCS often puts the player name in `name` with `pilotName` empty — treat that
     as a pilot hit. A bare "has squawk" bonus must never win by itself (that is
     how tanker / AWACS tracks used to beat the jet on the ramp).
+
+    Several ships share the flight callsign. The seat that asked is the fix;
+    with no seat, it is the lead. List order used to hand alpha check the
+    trail (dash-4) whenever that jet was first in the snapshot.
     """
     config = config or {}
     air = caoc_air_units(units)
@@ -10343,6 +10565,21 @@ def match_caoc_unit_for_flight(
     if not scored:
         return None
     scored.sort(key=lambda it: it[0], reverse=True)
+    members = [
+        u for _score, u in scored if _caoc_unit_matches_flight(u, cs, fid)
+    ]
+    if len(members) >= 2:
+        picked = _pick_flight_track(
+            members,
+            cs,
+            _requester_seat(opus, config),
+            pilot,
+            allow_lead=allow_lead,
+        )
+        if picked is not None:
+            return picked
+        if not allow_lead:
+            return None
     return scored[0][1]
 
 
@@ -12513,6 +12750,27 @@ def uses_instrument_runway(
     return ch == "approach"
 
 
+_RECOVERY_RUNWAY_TEMPLATES = frozenset(
+    {
+        "approach_check_in",
+        "cleared_approach",
+        "approach_procedure",
+        "approach_iaf",
+        "right_break",
+        "clear_land",
+        "go_around",
+        "bj_range_exit",
+    }
+)
+
+
+def _is_recovery_runway_pick(step: dict[str, Any] | None, template: str) -> bool:
+    """Arrival phrases use the wind runway. A departure request does not follow them."""
+    if template in _RECOVERY_RUNWAY_TEMPLATES:
+        return True
+    return str((step or {}).get("phase") or "").lower() == "approach"
+
+
 def pick_departure_runway(
     airport: dict[str, Any],
     weather: Weather,
@@ -12527,7 +12785,8 @@ def pick_departure_runway(
     """
     Runway selection order:
     1. Per-step runway on the mission step (if set) — honored as-is
-    2. Pilot-requested runway (Fly) — honored as-is
+    2. Pilot-requested runway for this phase — a departure request stays on
+       departure; only an approach-phase request pins the recovery runway
     3. Manual runway_override from Setup — honored as-is
     4. 11-250: wind component > 10 kt → most aligned; else day calm-wind 21,
        or 2200L–0800L split (dep 03 / arr 21) from the CAOC mission clock
@@ -12546,7 +12805,11 @@ def pick_departure_runway(
         if step_rwy:
             print(f"Runway (step): {step_rwy}")
             return step_rwy
-    req = requested_runway(mission=mission, state=state)
+    tmpl = str(template or (step or {}).get("template") or "").strip()
+    recovering = _is_recovery_runway_pick(step, tmpl)
+    req = requested_runway_applies(
+        recovering=recovering, mission=mission, state=state
+    )
     if req:
         print(f"Runway (pilot request): {req}")
         return req
@@ -12559,18 +12822,8 @@ def pick_departure_runway(
     instrument = uses_instrument_runway(
         step=step, mission=mission, state=state, template=template
     )
-    tmpl = str(template or (step or {}).get("template") or "").strip()
     # Recovery / approach phrases prefer the 21s unless wind requires 03.
-    if tmpl in {
-        "approach_check_in",
-        "cleared_approach",
-        "approach_procedure",
-        "approach_iaf",
-        "right_break",
-        "clear_land",
-        "go_around",
-        "bj_range_exit",
-    } or str((step or {}).get("phase") or "").lower() == "approach":
+    if recovering:
         # Refresh stale Approach plans when winds no longer favor that end.
         plan = assign_approach_plan(
             airport,

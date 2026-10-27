@@ -407,10 +407,12 @@ class FlowEngine:
         if is_base_flow_path(path):
             atc_phrase.set_requested_runway(None, mission=self.mission, state=self.state)
             return
-        req = atc_phrase.normalize_runway(
-            (self.mission or {}).get("requested_runway")
+        mission = self.mission or {}
+        req = atc_phrase.normalize_runway(mission.get("requested_runway"))
+        scope = str(mission.get("requested_runway_scope") or "").strip().lower()
+        atc_phrase.set_requested_runway(
+            req, mission=self.mission, state=self.state, scope=scope or None
         )
-        atc_phrase.set_requested_runway(req, mission=self.mission, state=self.state)
 
     def save_state(self) -> None:
         # Drop legacy direction from state if present

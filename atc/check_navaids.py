@@ -429,6 +429,13 @@ def intents() -> int:
          "control_east", "flight", "request_point_vectors"),
         ("Nellis Control, Dagger 1, request vectors to arco",
          "control_east", "flight", "request_point_vectors"),
+        # "to" dropped, comma in its place — still the waypoint, not ARCO tanker.
+        ("Nellis control, Viper 1, request vectors, Arco.",
+         "control_east", "flight", "request_point_vectors"),
+        ("Nellis Control, Dagger 1, request vectors Arco",
+         "control_east", "flight", "request_point_vectors"),
+        ("Nellis Control, Dagger 1, request vector, RCO",
+         "control_east", "flight", "request_point_vectors"),
         ("Blackjack, Dagger 1, request bearing to Mormon Mesa",
          "blackjack", "flight", "request_point_vectors"),
         ("Nellis Control, Dagger 1, how far to Beatty",
@@ -481,6 +488,33 @@ def intents() -> int:
     point = (ev.match.slots or {}).get("nav_point") or {}
     if point.get("id") != "STRYK":
         bad = _fail(bad, f"vector slot should carry STRYK, got {point}")
+    ev = voice_intent.evaluate(
+        "Nellis control, Viper 1, request vectors, Arco.",
+        channel="control_east",
+        phase="flight",
+        callsign="Viper 1",
+    )
+    point = (ev.match.slots or {}).get("nav_point") if ev.match else None
+    if not ev.match or ev.match.intent != "request_point_vectors":
+        bad = _fail(bad, f"vectors, Arco should be the fix, got {ev.describe()}")
+    elif not isinstance(point, dict) or str(point.get("id") or "").upper() != "ARCOE":
+        bad = _fail(bad, f"vectors, Arco should resolve ARCOE, got {point}")
+    bare = voice_intent.evaluate(
+        "Nellis Control, Viper 1, request ARCO.",
+        channel="control_east",
+        phase="flight",
+        callsign="Viper 1",
+    )
+    if not bare.match or bare.match.intent == "request_tanker":
+        bad = _fail(bad, f"bare request ARCO must not be a tanker, got {bare.describe()}")
+    still = voice_intent.evaluate(
+        "Nellis Control, Viper 1, request tanker.",
+        channel="control_east",
+        phase="flight",
+        callsign="Viper 1",
+    )
+    if not still.match or still.match.intent != "request_tanker":
+        bad = _fail(bad, f"request tanker should still be the tanker, got {still.describe()}")
     if not bad:
         print("intents — elevator, point vectors and divert gated by agency")
     return bad

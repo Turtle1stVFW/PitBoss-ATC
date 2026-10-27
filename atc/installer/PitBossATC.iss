@@ -16,6 +16,10 @@ SetupLogging=yes
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
+SetupIconFile=..\PitBossATC.ico
+UninstallDisplayIcon={app}\atc\PitBossATC.ico
+WizardImageFile=wizard-large.png
+WizardSmallImageFile=..\PitBossATC.png
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -35,9 +39,9 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 Source: "{#Staging}\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
 
 [Icons]
-Name: "{group}\PitBoss ATC"; Filename: "{app}\atc\Open-Flight-Flow.cmd"; WorkingDir: "{app}\atc"
-Name: "{group}\PitBoss ATC (Host)"; Filename: "{app}\atc\Start-ATC-Host.cmd"; WorkingDir: "{app}\atc"
-Name: "{autodesktop}\PitBoss ATC"; Filename: "{app}\atc\Open-Flight-Flow.cmd"; WorkingDir: "{app}\atc"; Tasks: desktopicon
+Name: "{group}\PitBoss ATC"; Filename: "{app}\atc\Open-Flight-Flow.cmd"; WorkingDir: "{app}\atc"; IconFilename: "{app}\atc\PitBossATC.ico"; AppUserModelID: "PitBossATC.FlightFlow"
+Name: "{group}\PitBoss ATC (Host)"; Filename: "{app}\atc\Start-ATC-Host.cmd"; WorkingDir: "{app}\atc"; IconFilename: "{app}\atc\PitBossATC.ico"; AppUserModelID: "PitBossATC.FlightFlow"
+Name: "{autodesktop}\PitBoss ATC"; Filename: "{app}\atc\Open-Flight-Flow.cmd"; WorkingDir: "{app}\atc"; Tasks: desktopicon; IconFilename: "{app}\atc\PitBossATC.ico"; AppUserModelID: "PitBossATC.FlightFlow"
 Name: "{group}\Uninstall PitBoss ATC"; Filename: "{uninstallexe}"
 
 [Run]

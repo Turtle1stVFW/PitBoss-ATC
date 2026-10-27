@@ -343,7 +343,7 @@ Calls it understands:
 | "Blackjack / Bandsaw, declare Elvis 056 67" | **Query only** — current affiliation (`Fleece 1, Bandsaw, bogey spades.`). Never writes CAOC |
 | "Bandsaw, ID single group, MiG-29, bandit" / "ID north group Fulcrum hostile" / "ID lead group hostile" | After picture: ID by **picture label** or Elvis. Aircraft type is optional and is read back when you say it (MiG-29, Fulcrum, F-16, …). No ROE word → **bandit**; say **hostile** when ROE allows |
 | "Bandsaw, checking in" / picture / bogey dope / declare | Optional C2 on Bandsaw |
-| "Bandsaw, request rangeback" | Range to the group for the whole flight (closest, or closest and trail). "Out" does not ask |
+| "Bandsaw, request rangeback" | Range from the jet that asked to the group. "Out" does not ask |
 | "Bandsaw, checking out / switch Blackjack" | Leave Bandsaw → contact Blackjack (not check-in) |
 | "Blackjack, request Bandsaw" | Push to Bandsaw (optional; you can also self-tune) |
 | "Joshua, checking in" | Optional R-2508 agency (built into Nellis Default). No picture/declare unless you check **C2 services** on that step |

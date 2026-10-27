@@ -179,12 +179,11 @@ CASES = [
     ("Approach, Fleece 1, with you", "approach", "approach", True, "inbound_recovery"),
     ("Approach, Fleece 1, inbound for recovery", "approach", "approach", True, "inbound_recovery"),
     ("Approach, Fleece 1, request ARCOE recovery", "approach", "approach", True, "request_approach"),
-    # ARCOE recovery. Whisper hears "RCO" or drops the E ("ARCO"). "ARCO" is
-    # also a tanker callsign — the recovery word keeps it off the boom.
+    # ARCO / RCO are the ARCOE fix. A tanker call has to say tanker.
     ("Nellis Control, Fleece 1, request RCO recovery", "control_east", "flight", True, "request_approach"),
     ("Nellis controlled, Fleece 1, request RCO recovery", "control_east", "flight", True, "request_approach"),
     ("Nellis Control, Fleece 1, request ARCO recovery", "control_east", "flight", True, "request_approach"),
-    ("Nellis Control, Fleece 1, request ARCO", "control_east", "flight", True, "request_tanker"),
+    ("Nellis Control, Fleece 1, request ARCO", "control_east", "flight", True, "request_approach"),
     ("Nellis Control, Fleece 1, request tanker", "control_east", "flight", True, "request_tanker"),
     ("Approach, Fleece 1, request tactical overhead", "approach", "approach", True, "request_approach"),
     ("Approach, Fleece 1, request overhead", "approach", "approach", True, "request_approach"),
@@ -1258,14 +1257,15 @@ def extras() -> int:
         print("night §4.1.4 window edges — 2200L dep 03, 0800L dep 21")
 
     # Reset runway to winds clears sticky request + refreshes Approach plan.
+    # An approach-phase request still pins the landing runway.
     st_reset: dict = {}
     atc_phrase.assign_approach_plan(nellis, strong_north, state=st_reset, force=True)
-    atc_phrase.set_requested_runway("21R", state=st_reset)
+    atc_phrase.set_requested_runway("21R", state=st_reset, scope="approach")
     atc_phrase.assign_approach_plan(
         nellis, strong_north, state=st_reset, force=True, recovery="tactical_overhead"
     )
     if not str((st_reset.get("approach_plan") or {}).get("runway") or "").startswith("21"):
-        print(f"  FAIL sticky request should force 21: {st_reset.get('approach_plan')}")
+        print(f"  FAIL approach request should force 21: {st_reset.get('approach_plan')}")
         bad += 1
     cfg_reset = {"runway_override": "21L"}
     rwy_reset = atc_phrase.reset_runway_to_winds(
@@ -1279,6 +1279,57 @@ def extras() -> int:
         bad += 1
     else:
         print(f"approach reset to winds — RWY {rwy_reset}")
+
+    # Opposite-direction departure (ordnance off 03L) must not pin recovery.
+    light_south = atc_phrase.Weather(210, 8, 29.92, "", visibility_sm=10)
+    st_dep: dict = {
+        "approach_assigned": True,
+        "approach_plan": {
+            "pattern": "tactical_overhead",
+            "runway": "03L",
+            "vfr_recovery": "MINTT",
+            "vfr_recovery_say": "Mintt",
+        },
+        "active_recovery": "tactical_overhead",
+    }
+    atc_phrase.set_requested_runway("03L", state=st_dep, scope="departure")
+    rwy_taxi = atc_phrase.pick_departure_runway(
+        nellis, light_south, None, state=st_dep, template="taxi"
+    )
+    if str(rwy_taxi) != "03L":
+        print(f"  FAIL departure request should keep 03L for taxi: {rwy_taxi}")
+        bad += 1
+    rwy_rec = atc_phrase.pick_departure_runway(
+        nellis,
+        light_south,
+        None,
+        state=st_dep,
+        step={"phase": "approach", "template": "approach_check_in"},
+        template="approach_check_in",
+    )
+    if not str(rwy_rec).startswith("21"):
+        print(f"  FAIL recovery should leave departure 03L and use 21: {rwy_rec}")
+        bad += 1
+    elif str((st_dep.get("approach_plan") or {}).get("runway") or "").startswith("03"):
+        print(f"  FAIL stale 03 approach plan should refresh to 21: {st_dep.get('approach_plan')}")
+        bad += 1
+    else:
+        print(f"departure 03L does not pin recovery — RWY {rwy_rec}")
+    st_app: dict = {}
+    applied = atc_phrase.apply_pilot_request(
+        "request_runway_03L", state=st_app, phase="approach"
+    )
+    if applied.get("runway") != "03L" or st_app.get("requested_runway_scope") != "approach":
+        print(f"  FAIL approach request scope: {applied} {st_app}")
+        bad += 1
+    plan_pin = atc_phrase.assign_approach_plan(
+        nellis, light_south, state=st_app, force=True, recovery="tactical_overhead"
+    )
+    if not str(plan_pin.get("runway") or "").startswith("03"):
+        print(f"  FAIL approach request should pin 03: {plan_pin}")
+        bad += 1
+    else:
+        print(f"approach request pins landing — RWY {plan_pin.get('runway')}")
 
     tips_app = voice_intent.suggestions(
         phase="approach",
@@ -1599,7 +1650,7 @@ def extras() -> int:
             bad += 1
         else:
             print(f"approach voice ARCOE on Control — {said}")
-    arco_tanker = voice_intent.evaluate(
+    arco_fix = voice_intent.evaluate(
         "Nellis Control, Viper one, request ARCO.",
         channel="control_east",
         phase="flight",
@@ -1608,14 +1659,15 @@ def extras() -> int:
         tuned_channel="control_east",
     )
     if (
-        not arco_tanker.fired
-        or arco_tanker.match is None
-        or arco_tanker.match.intent != "request_tanker"
+        not arco_fix.fired
+        or arco_fix.match is None
+        or arco_fix.match.intent == "request_tanker"
+        or (arco_fix.match.slots or {}).get("vfr_recovery") != "ARCOE"
     ):
-        print(f"  FAIL bare ARCO is still the tanker: {arco_tanker.describe()}")
+        print(f"  FAIL bare ARCO must be the fix, not a tanker: {arco_fix.describe()}")
         bad += 1
     else:
-        print("approach voice — bare request ARCO stays the tanker")
+        print("approach voice — request ARCO is the ARCOE fix")
     bj = voice_intent.evaluate(
         "Blackjack, Viper 1, request Nellis Control.",
         channel="blackjack",

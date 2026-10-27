@@ -326,6 +326,15 @@ def _fuzzy_budget(token: str) -> int:
     return 0 if len(token) < 5 else (1 if len(token) < 8 else 2)
 
 
+# Spoken misses for the ARCOE waypoint. Too short to fuzzy-match "ARCOE".
+_ARCOE_FIX_ALIASES: dict[str, str] = {
+    "ARCO": "ARCOE",
+    "RCO": "ARCOE",
+    "OURCO": "ARCOE",
+    "ARECO": "ARCOE",
+}
+
+
 def resolve_point(
     text: str,
     *,
@@ -346,6 +355,10 @@ def resolve_point(
     phrases = [" ".join(words[:n]) for n in range(len(words), 0, -1)] or [str(text or "")]
     tokens = [_norm_token(p) for p in phrases]
     tokens = [t for t in dict.fromkeys(tokens) if len(t) >= 2]
+    # ARCO / RCO are Whisper for the ARCOE fix, not a separate point.
+    # "arco" is shorter than the fuzzy budget, so it never reached ARCOE.
+    tokens = [_ARCOE_FIX_ALIASES.get(t, t) for t in tokens]
+    tokens = list(dict.fromkeys(tokens))
     if not tokens:
         return None
 

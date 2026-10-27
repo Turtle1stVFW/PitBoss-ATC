@@ -835,8 +835,13 @@ def _execute_intent_body(
         runway = match.slots.get("runway")
         if not runway:
             return {"action": "none", "detail": "no runway heard"}
+        phase = _pilot_request_phase(engine)
         current = (
-            atc_phrase.requested_runway(mission=engine.mission, state=engine.state)
+            atc_phrase.requested_runway_applies(
+                recovering=phase == "approach",
+                mission=engine.mission,
+                state=engine.state,
+            )
             or str((engine.state or {}).get("runway") or "").strip()
         )
         same = voice_intent._normalize_runway_token(runway) == voice_intent._normalize_runway_token(
@@ -846,7 +851,10 @@ def _execute_intent_body(
         if same and engine.state.get("awaiting_readback"):
             return _acknowledge(engine, match)
         atc_phrase.apply_pilot_request(
-            f"request_runway_{runway}", mission=engine.mission, state=engine.state
+            f"request_runway_{runway}",
+            mission=engine.mission,
+            state=engine.state,
+            phase=phase,
         )
         engine.save_state()
         # Same call with taxi, or a runway change during/after taxi instructions
@@ -1538,6 +1546,21 @@ def _should_reissue_taxi(engine: Any, match: voice_intent.Match) -> bool:
     return str(step.get("template") or "") in ("taxi", "monitor_tower")
 
 
+def _pilot_request_phase(engine: Any) -> str:
+    """Mission phase for a runway request: departure stays off the recovery."""
+    step: dict[str, Any] = {}
+    if hasattr(engine, "current_step"):
+        try:
+            step = engine.current_step() or {}
+        except Exception:
+            step = {}
+    return atc_phrase.resolve_pilot_request_phase(
+        phase=str(step.get("phase") or ""),
+        channel=str(step.get("channel") or ""),
+        template=str(step.get("template") or ""),
+    )
+
+
 def _apply_runway_if_heard(
     engine: Any, match: voice_intent.Match, airport: dict[str, Any]
 ) -> str | None:
@@ -1547,7 +1570,10 @@ def _apply_runway_if_heard(
     if not runway:
         return None
     atc_phrase.apply_pilot_request(
-        f"request_runway_{runway}", mission=engine.mission, state=engine.state
+        f"request_runway_{runway}",
+        mission=engine.mission,
+        state=engine.state,
+        phase=_pilot_request_phase(engine),
     )
     engine.save_state()
     return runway

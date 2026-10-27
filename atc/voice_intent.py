@@ -625,7 +625,8 @@ _AGENCY_TERMS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "can ops",
         "and ops",
     )),
-    ("tanker", ("texaco", "shell", "arco", "esso", "tanker", "boom")),
+    # ARCO is the ARCOE fix. A tanker call is "tanker" / Texaco / Shell.
+    ("tanker", ("texaco", "shell", "esso", "tanker", "boom")),
     ("other", ()),
 )
 
@@ -927,6 +928,7 @@ _POINT_LEADS: tuple[str, ...] = (
     "vectors to",
     "vector to",
     "vectors for",
+    "vector for",
     "range and bearing to",
     "bearing to",
     "heading to",
@@ -934,6 +936,11 @@ _POINT_LEADS: tuple[str, ...] = (
     "steer for",
     "how far to",
     "distance to",
+    # "request vectors, Arco" — Whisper drops "to" and leaves a comma.
+    # Longer leads above must stay first so "vectors to" is not read as
+    # a point named "to".
+    "vectors",
+    "vector",
 )
 
 # Words that end a point name rather than being part of one. The divert terms
@@ -973,7 +980,18 @@ _POINT_STOP: frozenset[str] = frozenset(
         "with",
     }
 )
-_POINT_ARTICLES: frozenset[str] = frozenset({"a", "an", "the"})
+# "to" / "for" only when a short lead ("vectors") left them behind.
+_POINT_FILLERS: frozenset[str] = frozenset({"a", "an", "the", "to", "for"})
+# Whisper forms of the ARCOE fix. "Arco" is never a tanker callsign.
+_ARCOE_POINT_ALIASES: dict[str, str] = {
+    "arco": "arcoe",
+    "arcoe": "arcoe",
+    "rco": "arcoe",
+    "our co": "arcoe",
+    "ourco": "arcoe",
+    "are co": "arcoe",
+    "areco": "arcoe",
+}
 _POINT_MAX_WORDS = 4
 
 
@@ -990,7 +1008,7 @@ def extract_nav_point(text: str) -> str | None:
             continue
         words: list[str] = []
         for tok in match.group(1).split():
-            if not words and tok in _POINT_ARTICLES:
+            if not words and tok in _POINT_FILLERS:
                 continue
             if tok in _POINT_STOP or tok.isdigit():
                 break
@@ -998,17 +1016,22 @@ def extract_nav_point(text: str) -> str | None:
             if len(words) >= _POINT_MAX_WORDS:
                 break
         if words:
-            return " ".join(words)
+            phrase = " ".join(words)
+            compact = "".join(words)
+            alias = _ARCOE_POINT_ALIASES.get(phrase) or _ARCOE_POINT_ALIASES.get(
+                compact
+            )
+            return alias or phrase
     return None
 
 
 def vectors_name_a_fix_not_a_tanker(text: str) -> bool:
     """
-    'Vectors to Arcoe' is the waypoint, not the ARCO tanker callsign.
+    'Request vectors, Arco' is the ARCOE waypoint, not the ARCO tanker.
 
-    Whisper often drops the trailing E ('arco'). That token is also a tanker
-    name, and a one-edit fuzzy hit used to score request_tanker ahead of the
-    fix. An explicit tanker / Texaco call still wins.
+    Whisper drops 'to' ('vectors, Arco') and the trailing E ('arco' / 'rco').
+    Those are the ARCOE fix. An explicit tanker / Texaco call still wins,
+    including 'vectors to the tanker'.
     """
     if _group_hit(
         text,
@@ -1018,11 +1041,16 @@ def vectors_name_a_fix_not_a_tanker(text: str) -> bool:
         return False
     phrase = extract_nav_point(text)
     if phrase:
-        token = "".join(phrase.split())
-        if token in {"arco", "arcoe", "rco"}:
-            return True
         if _resolved_nav_point(text) is not None:
             return True
+        if phrase in _ARCOE_POINT_ALIASES or phrase == "arcoe":
+            return True
+    # "vectors" and an Arcoe miss in the same call, even if the name
+    # did not sit directly on the lead.
+    if _group_hit(text, ("vectors", "vector"), fuzzy=False) and _group_hit(
+        text, tuple(_ARCOE_POINT_ALIASES), fuzzy=False
+    ):
+        return True
     return bool(_group_hit(text, ("arcoe", "waypoint"), fuzzy=False))
 
 
@@ -1030,10 +1058,9 @@ def recovery_names_a_fix_not_a_tanker(text: str) -> bool:
     """
     'Request RCO recovery' is the ARCOE recovery, not the ARCO tanker.
 
-    Whisper hears ARCOE as 'rco', or drops the trailing E ('arco'). 'arco' is
-    also a tanker callsign, and one edit from 'rco' scores request_tanker on
-    Nellis Control. An explicit tanker / Texaco call still wins. Bare
-    'request arco' stays the tanker.
+    Whisper hears ARCOE as 'rco', or drops the trailing E ('arco'). Saying
+    Arco is the fix, never a tanker request. An explicit tanker / Texaco
+    call still wins.
     """
     if _group_hit(
         text,
@@ -1218,7 +1245,7 @@ INTENTS: tuple[Intent, ...] = (
         phases=("flight",),
         weight=1.25,
         example="bogey dope",
-        does="BRAA to the closest hostile",
+        does="BRAA from the jet that asked to the closest hostile",
     ),
     Intent(
         "request_rangeback",
@@ -1227,7 +1254,7 @@ INTENTS: tuple[Intent, ...] = (
         phases=("flight",),
         weight=1.3,
         example="request rangeback",
-        does="range to the group for the flight — closest, or closest and trail",
+        does="range from the jet that asked to the group",
         veto=(
             "picture",
             "pitcher",
@@ -1387,7 +1414,6 @@ INTENTS: tuple[Intent, ...] = (
                 "tanker",
                 "texaco",
                 "shell",
-                "arco",
                 "esso",
                 "air refuel",
                 "air refueling",
@@ -2130,6 +2156,7 @@ INTENTS: tuple[Intent, ...] = (
                 "torye",
                 "acton",
                 "arcoe",
+                "arco",
                 "rco",
                 "our co",
                 "mintt",
@@ -2403,6 +2430,9 @@ INTENTS: tuple[Intent, ...] = (
                 "steer for",
                 "how far to",
                 "distance to",
+                # After the longer leads. "request vectors, Arco" has no "to".
+                "vectors",
+                "vector",
             ),
         ),
         kind="action",
@@ -4233,8 +4263,9 @@ def _score_intents(
         # shape before it can score as request_winds on every agency.
         if intent.id == "request_winds" and looks_like_radio_check_not_winds(text):
             continue
-        # "request vectors to arcoe" and "request RCO recovery" fuzzy-match
-        # tanker callsign "arco". The recovery / fix is not a tanker ask.
+        # "Arco" is the ARCOE fix. Only an explicit tanker / Texaco call is
+        # request_tanker. These guards cover a vectors or recovery call that
+        # also happens to sit next to a tanker word.
         if intent.id == "request_tanker" and (
             vectors_name_a_fix_not_a_tanker(text)
             or recovery_names_a_fix_not_a_tanker(text)

@@ -148,22 +148,33 @@ def _ownship(
     opus: Any,
     config: dict[str, Any],
     callsign: str | None = None,
+    anchor: str = "flight",
 ) -> tuple[dict[str, Any] | None, tuple[float, float] | None]:
     """
-    Fighter position for picture / declare.
+    Fighter position for picture / declare, or for the jet that asked.
 
-    A bound client seat (the fix the flying PC sent the host) wins. Otherwise
-    use the matched CAOC unit's lat/lon. Other tracks are still read when the
-    unit match fails, as long as this position exists.
+    ``flight`` — bound client fix, else the matched unit (flight lead when
+    the caller is not a specific ship). Picture and declare.
+
+    ``requestor`` — bogey dope and rangeback. The seat or pilot that asked
+    wins, including over a client fix that landed on another ship in the
+    flight. No lead stand-in. The bound fix is only the fallback when that
+    ship is not on the radar picture.
     """
     hostile_side = _hostile_coalition(airport)
     own = atc_phrase.match_caoc_unit_for_flight(
-        units, callsign=callsign, opus=opus, config=config
+        units,
+        callsign=callsign,
+        opus=opus,
+        config=config,
+        allow_lead=anchor != "requestor",
     )
     if own and str(own.get("coalition") or "").lower() == hostile_side:
         own = None
     own_ll: tuple[float, float] | None = None
-    if atc_phrase.ownship_seat_bound(config):
+    if anchor == "requestor" and own is not None:
+        own_ll = atc_phrase.caoc_unit_latlon(own)
+    if own_ll is None and atc_phrase.ownship_seat_bound(config):
         own_ll = atc_phrase.seat_ownship_latlon(config)
     if own_ll is None and own is not None:
         own_ll = atc_phrase.caoc_unit_latlon(own)
@@ -304,6 +315,7 @@ def collect_hostile_groups(
     state: dict[str, Any] | None = None,
     upgrade_hostile: bool = False,
     callsign: str | None = None,
+    anchor: str = "flight",
 ) -> tuple[list[pl.FightGroup], dict[str, Any] | None, tuple[float, float] | None]:
     """
     Hostile air groups from the live CAOC feed, nearest first.
@@ -324,7 +336,12 @@ def collect_hostile_groups(
     max_nm = picture_max_range_nm(config)
     hostile_side = _hostile_coalition(airport)
     own, own_ll = _ownship(
-        units, airport, opus=opus, config=config, callsign=callsign
+        units,
+        airport,
+        opus=opus,
+        config=config,
+        callsign=callsign,
+        anchor=anchor,
     )
     if own_ll is None:
         return [], own, None
@@ -1157,10 +1174,15 @@ def build_bogey_dope_reply(
     opus: Any = None,
     state: dict[str, Any] | None = None,
 ) -> tuple[str, list[pl.FightGroup]]:
-    """Ch V §11 — magnetic BRAA relative to ownship on closest hostile group."""
+    """Ch V §11 — magnetic BRAA from the jet that asked to the closest group."""
     cs = atc_phrase.speak_callsign(callsign)
     groups, _own, own_ll = collect_hostile_groups(
-        config, airport, opus=opus, state=state, callsign=callsign
+        config,
+        airport,
+        opus=opus,
+        state=state,
+        callsign=callsign,
+        anchor="requestor",
     )
     if own_ll is None:
         return f"{cs}, {agency}, unable bogey dope, no ownship track.", []
@@ -1301,27 +1323,23 @@ def build_rangeback_reply(
     state: dict[str, Any] | None = None,
 ) -> tuple[str, list[pl.FightGroup]]:
     """
-    Range from the flight back to the nearest hostile group.
+    Range from the jet that asked back to the nearest hostile group.
 
-    Requested — saying \"out\" does not fire this. Uses every tracked ship in
-    the flight, then speaks one range or closest/trail when they are split.
+    Requested — saying \"out\" does not fire this. One number, from that
+    ship, not the flight's closest or trail.
     """
     cs = atc_phrase.speak_callsign(
         atc_phrase.flight_callsign_base(callsign) or callsign
     )
-    groups, own, own_ll = collect_hostile_groups(
-        config, airport, opus=opus, state=state, callsign=callsign
-    )
-    radar = atc_phrase.fetch_caoc_radar(config) or {}
-    units = list(radar.get("units") or [])
-    ships = flight_member_latlons(
-        units,
+    groups, _own, own_ll = collect_hostile_groups(
+        config,
         airport,
-        own=own,
-        own_ll=own_ll,
-        callsign=callsign,
         opus=opus,
+        state=state,
+        callsign=callsign,
+        anchor="requestor",
     )
+    ships = [own_ll] if own_ll is not None else []
     if not ships:
         return f"{cs}, {agency}, unable rangeback, no ownship track.", []
     if not groups:
@@ -1394,8 +1412,9 @@ def build_declare_reply(
             return f"{cs}, {agency}, unable, say again.", []
         return f"{cs}, {agency}, clean.", []
     decl = str(g.declaration or "bogey").strip() or "bogey"
-    text = f"{cs}, {agency}, {decl}."
-    return _with_vid_cue(text, [g]), [g]
+    # Affiliation only. Picture and bogey dope carry the intercept / commit
+    # recommendation; a declare does not, including on friendlies.
+    return f"{cs}, {agency}, {decl}.", [g]
 
 
 _VID_AFFILIATION_PATTERNS: tuple[tuple[str, str], ...] = (

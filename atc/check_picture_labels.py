@@ -545,6 +545,18 @@ def main() -> int:
     else:
         print("OK unknown gets intercept for VID; hostile gets commit; bandit gets neither")
 
+    friendly_stale = _g(18, 270, heading=90, feet=20000, bearing=30, range_nm=25)
+    friendly_stale.declaration = "friendly"
+    friendly_stale.affiliation = "UNKNOWN"
+    if pl.needs_vid_cue(friendly_stale) or pl.needs_commit_cue(friendly_stale) or pl.recommend_cue([friendly_stale]):
+        print(
+            f"FAIL friendly must not recommend intercept: "
+            f"vid={pl.needs_vid_cue(friendly_stale)} cue={pl.recommend_cue([friendly_stale])!r}"
+        )
+        bad += 1
+    else:
+        print("OK friendly declare does not recommend intercept")
+
     ti_unit = {
         "affiliation": "UNKNOWN",
         "tiTraining": True,
